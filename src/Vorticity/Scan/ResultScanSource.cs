@@ -25,6 +25,12 @@ internal abstract class ResultQuery
 #pragma warning disable VSTHRD200
     /// <summary>The result's batches; the query runs as they are asked for.</summary>
     internal abstract IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The result's batches as a step of the question whose memory is <paramref name="memory"/>, a scan of the result that
+    /// sorts it: a query that reads its source's rows reads them under it, so that the question counts one memory.
+    /// </summary>
+    internal virtual IAsyncEnumerator<RecordBatch> Batches(Aggregating.QueryMemory? memory, CancellationToken cancellationToken) => Batches(cancellationToken);
 #pragma warning restore VSTHRD200
 
     /// <summary>The plan of the query's scan.</summary>
@@ -81,5 +87,5 @@ internal sealed class ResultScanSource : StreamScanSource
 
     /// <summary>The result's batches, every column of every row: the query delivers them as it runs.</summary>
     private protected override IAsyncEnumerator<RecordBatch> Stream(ScanSpec spec, int[]? columns, ScanCounters metrics, CancellationToken cancellationToken) =>
-        _query.Batches(cancellationToken);
+        _query.Batches(spec.Memory, cancellationToken);
 }

@@ -25,8 +25,8 @@ internal sealed class HashedRunSink : IRunSink
     private readonly int _shift;
     private readonly List<KeySegment> _segments = [];
     private readonly List<PendingPayload> _payloads = [];
-    private uint[] _gaps = [];
-    private uint[] _blocks = [];
+    private Buffers.Block<uint> _gaps;
+    private Buffers.Block<uint> _blocks;
     private int _count;
     private long _entries;
 
@@ -83,15 +83,17 @@ internal sealed class HashedRunSink : IRunSink
         if (_count + blocks.Length > _gaps.Length)
         {
             int size = Math.Max(_count + blocks.Length, _gaps.Length * 2);
-            _gaps = Grown(_gaps, _count, size);
-            _blocks = Grown(_blocks, _count, size);
+            Buffers.Blocks.Grow(ref _gaps, size);
+            Buffers.Blocks.Grow(ref _blocks, size);
         }
 
+        Span<uint> gaps = _gaps;
+        Span<uint> lists = _blocks;
         for (int i = 0; i < blocks.Length; i++)
         {
-            _gaps[_count] = _gap;
+            gaps[_count] = _gap;
             _gap = 0;
-            _blocks[_count] = checked(blocks[i] - (uint)_firstBlock);
+            lists[_count] = checked(blocks[i] - (uint)_firstBlock);
             _count++;
         }
 
@@ -125,10 +127,10 @@ internal sealed class HashedRunSink : IRunSink
         }
         else
         {
-            ArrayShelf.Retained.Give(_gaps);
-            ArrayShelf.Retained.Give(_blocks);
-            _gaps = [];
-            _blocks = [];
+            Buffers.Blocks.Return(_gaps);
+            Buffers.Blocks.Return(_blocks);
+            _gaps = default;
+            _blocks = default;
         }
 
         if (_entries != _declared)
@@ -141,26 +143,26 @@ internal sealed class HashedRunSink : IRunSink
     }
 
     /// <summary>
-    /// Opens a segment, its arrays from the process's shelf at the one length every segment takes: the shared pool kept a
-    /// few arrays of a length a core, and a file's segments, all held until the writer lays them, came new each file.
+    /// Opens a segment, its blocks from the pool at the one length every segment takes, which a file's segments, all held
+    /// until the writer lays them, find again from one file to the next.
     /// </summary>
     private void Open()
     {
         int capacity = Math.Min(_segmentEntries, 1 << 16) + 64;
-        _gaps = ArrayShelf.Retained.Take<uint>(capacity, zeroed: false);
-        _blocks = ArrayShelf.Retained.Take<uint>(capacity, zeroed: false);
+        _gaps = Buffers.Blocks.Rent<uint>(capacity);
+        _blocks = Buffers.Blocks.Rent<uint>(capacity);
         _count = 0;
     }
 
-    /// <summary>Hands the open segment's arrays to its payloads, its bounds the first and last hash.</summary>
+    /// <summary>Hands the open segment's blocks to its payloads, its bounds the first and last hash.</summary>
     private void Cut()
     {
         int count = _count;
         _segments.Add(new KeySegment((ulong)count, count == 0 ? [] : Key(_first), count == 0 ? [] : Key(_last)));
-        _payloads.Add(PendingPayload.ShelvedU32(_gaps, count, compress: true));
-        _payloads.Add(PendingPayload.ShelvedU32(_blocks, count, compress: true));
-        _gaps = [];
-        _blocks = [];
+        _payloads.Add(PendingPayload.RentedU32(_gaps, count, compress: true));
+        _payloads.Add(PendingPayload.RentedU32(_blocks, count, compress: true));
+        _gaps = default;
+        _blocks = default;
         _count = 0;
     }
 
@@ -169,13 +171,5 @@ internal sealed class HashedRunSink : IRunSink
         byte[] key = new byte[sizeof(ulong)];
         BinaryPrimitives.WriteUInt64LittleEndian(key, hash);
         return key;
-    }
-
-    private static uint[] Grown(uint[] shelved, int count, int size)
-    {
-        uint[] grown = ArrayShelf.Retained.Take<uint>(size, zeroed: false);
-        shelved.AsSpan(0, count).CopyTo(grown);
-        ArrayShelf.Retained.Give(shelved);
-        return grown;
     }
 }

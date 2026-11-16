@@ -12,6 +12,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.File;
@@ -33,7 +34,7 @@ public sealed class ScanContextPoolTests
         // column, more than the context's eight slots: each must still be checked and counted once.
         Decoders.EnsureRegistered();
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
-        ScanContext context = ScanContexts.Shared.Rent(file);
+        ScanContext context = ScanContexts.Shared.Rent(file, TestAccount.Shared);
         try
         {
             uint? outer = context.BeginNodeCheckScope(7);
@@ -72,7 +73,7 @@ public sealed class ScanContextPoolTests
             ScanContexts.Shared.Return(context);
         }
 
-        ScanContext again = ScanContexts.Shared.Rent(file);
+        ScanContext again = ScanContexts.Shared.Rent(file, TestAccount.Shared);
         try
         {
             if (ReferenceEquals(again, context))
@@ -96,7 +97,7 @@ public sealed class ScanContextPoolTests
         await using VortexFile second = await VortexFile.OpenAsync(
             Corpus.Path("encodings/runend"), CancellationToken.None);
 
-        ScanContext context = ScanContexts.Shared.Rent(first);
+        ScanContext context = ScanContexts.Shared.Rent(first, TestAccount.Shared);
 
         // A dtype the scan derived, which a batch its caller owns may hold.
         DTypeArena types = context.Types;
@@ -112,10 +113,14 @@ public sealed class ScanContextPoolTests
         context.MarkNodeChecked(key);
         context.EndNodeCheckScope(outer);
         Assert.True(context.IsNodeChecked(key));
-        context.ExchangeSelection([1, 2, 3], 3);
+        Block<int> selection = Blocks.Allocate<int>(3);
+        selection[0] = 1;
+        selection[1] = 2;
+        selection[2] = 3;
+        context.ExchangeSelection(selection, 3);
 
         ScanContexts.Shared.Return(context);
-        ScanContext again = ScanContexts.Shared.Rent(second);
+        ScanContext again = ScanContexts.Shared.Rent(second, TestAccount.Shared);
         try
         {
             // The pool is the process's, so another test may have taken this context in between;
@@ -157,11 +162,11 @@ public sealed class ScanContextPoolTests
         Decoders.EnsureRegistered();
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
 
-        ScanContext context = ScanContexts.Shared.Rent(file);
+        ScanContext context = ScanContexts.Shared.Rent(file, TestAccount.Shared);
         DTypeArena types = context.Types;
         types.InternName("a name, which no batch holds"u8);
         ScanContexts.Shared.Return(context);
-        ScanContext again = ScanContexts.Shared.Rent(file);
+        ScanContext again = ScanContexts.Shared.Rent(file, TestAccount.Shared);
         try
         {
             // No dtype came out of the arena, so nothing a caller owns can hold one of its nodes.
@@ -187,7 +192,7 @@ public sealed class ScanContextPoolTests
         List<ScanContext> taken = [];
         for (int i = 0; i < 5; i++)
         {
-            taken.Add(pool.Rent(file));
+            taken.Add(pool.Rent(file, TestAccount.Shared));
         }
 
         Assert.Equal(5, pool.MostLent);
@@ -200,7 +205,7 @@ public sealed class ScanContextPoolTests
         List<ScanContext> again = [];
         for (int i = 0; i < 5; i++)
         {
-            again.Add(pool.Rent(file));
+            again.Add(pool.Rent(file, TestAccount.Shared));
             Assert.Contains(again[i], taken);
         }
 
@@ -213,7 +218,7 @@ public sealed class ScanContextPoolTests
         taken.Clear();
         for (int i = 0; i < 12; i++)
         {
-            taken.Add(pool.Rent(file));
+            taken.Add(pool.Rent(file, TestAccount.Shared));
         }
 
         Assert.Equal(8, pool.MostLent);
@@ -225,13 +230,13 @@ public sealed class ScanContextPoolTests
         Assert.Equal(8, pool.Count);
 
         // Let go, it forgets the takings of before, and keeps its floor.
-        pool.TrimIdle(1_000, everything: true);
+        pool.LetGoUnused(everything: true);
         Assert.Equal(0, pool.Count);
         Assert.Equal(0, pool.MostLent);
         taken.Clear();
         for (int i = 0; i < 3; i++)
         {
-            taken.Add(pool.Rent(file));
+            taken.Add(pool.Rent(file, TestAccount.Shared));
         }
 
         foreach (ScanContext context in taken)
@@ -246,7 +251,7 @@ public sealed class ScanContextPoolTests
         taken.Clear();
         for (int i = 0; i < 6; i++)
         {
-            taken.Add(bounded.Rent(file));
+            taken.Add(bounded.Rent(file, TestAccount.Shared));
         }
 
         foreach (ScanContext context in taken)
@@ -258,25 +263,31 @@ public sealed class ScanContextPoolTests
     }
 
     [Fact]
-    public async Task APoolNoScanTookFromOverAMinuteLetsItsContextsGo()
+    public async Task APoolLetsGoOfTheContextsNoScanTookSinceTheSweepBefore()
     {
         Decoders.EnsureRegistered();
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
         ScanContexts pool = new ScanContexts(4);
-        pool.Return(pool.Rent(file));
-        Assert.Equal(1, pool.Count);
+        ScanContext first = pool.Rent(file, TestAccount.Shared);
+        ScanContext second = pool.Rent(file, TestAccount.Shared);
+        pool.Return(first);
+        pool.Return(second);
+        Assert.Equal(2, pool.Count);
 
-        // Taken since the sweep before, so idle from this one on.
-        pool.TrimIdle(1_000, everything: false);
+        // Kept since the start, which counts from this sweep: nothing goes.
+        pool.LetGoUnused(everything: false);
+        Assert.Equal(2, pool.Count);
+
+        // One taken and given back: the other sat kept through, and goes.
+        pool.Return(pool.Rent(file, TestAccount.Shared));
+        pool.LetGoUnused(everything: false);
         Assert.Equal(1, pool.Count);
-        pool.TrimIdle(1_000 + ScanContexts.IdleMilliseconds - 1, everything: false);
-        Assert.Equal(1, pool.Count);
-        pool.TrimIdle(1_000 + ScanContexts.IdleMilliseconds, everything: false);
+        pool.LetGoUnused(everything: false);
         Assert.Equal(0, pool.Count);
 
         // A high memory load lets them go at once, taken or not.
-        pool.Return(pool.Rent(file));
-        pool.TrimIdle(1_000, everything: true);
+        pool.Return(pool.Rent(file, TestAccount.Shared));
+        pool.LetGoUnused(everything: true);
         Assert.Equal(0, pool.Count);
     }
 
@@ -288,14 +299,14 @@ public sealed class ScanContextPoolTests
         ScanContexts pool = new ScanContexts(4);
         VortexReadOptions first = new() { MaxDecompressedBytes = 1 << 20 };
         VortexReadOptions second = new() { MaxDecompressedBytes = 2 << 20 };
-        ScanContext context = pool.RentDetached(first);
+        ScanContext context = pool.RentDetached(first, TestAccount.Shared);
         Assert.False(context.HasFile);
         Assert.Same(first, context.Options);
         context.Canonical.AddNull(context.Types.Primitive(PType.I32, Nullability.Nullable), 4);
         pool.Return(context);
         Assert.Equal(1, pool.Count);
 
-        ScanContext again = pool.RentDetached(second);
+        ScanContext again = pool.RentDetached(second, TestAccount.Shared);
         Assert.Same(context, again);
         Assert.False(again.HasFile);
         Assert.Same(second, again.Options);
@@ -312,11 +323,11 @@ public sealed class ScanContextPoolTests
     {
         VortexReadOptions options = new();
         ScanContexts fresh = new ScanContexts(4);
-        ScanContext other = fresh.RentDetached(options);
+        ScanContext other = fresh.RentDetached(options, TestAccount.Shared);
         DTypeArena first = other.Types;
         DType derived = first.Primitive(PType.I64, Nullability.NonNullable);
         fresh.Return(other);
-        ScanContext next = fresh.RentDetached(options);
+        ScanContext next = fresh.RentDetached(options, TestAccount.Shared);
         Assert.Same(other, next);
         Assert.Same(first, next.Types);
         Assert.Equal(PType.I64, derived.PType);

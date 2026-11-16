@@ -36,7 +36,7 @@ internal readonly record struct WrittenObject(ObjectEntry Entry, ReadOnlyMemory<
 /// not declare <see cref="ObjectStoreCapabilities.CreatesConditionally"/>, a handle reads, and every
 /// write throws <see cref="NotSupportedException"/> before it writes anything.
 /// </remarks>
-public sealed class VortexDataset : IAsyncDisposable
+public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
 {
     /// <summary>The bytes of the uid that ends every tree key.</summary>
     internal const int UidBytes = 16;
@@ -64,11 +64,60 @@ public sealed class VortexDataset : IAsyncDisposable
         _store = store;
         _options = options;
         _objects = new ObjectCache(
-            store, options.MaxOpenObjects, options.Session, options.MaxOpenObjectBytes,
+            store, options.MaxOpenObjects, options.Session, options.OpenObjectFloorBytes,
             ObjectCache.WholeBytesUnder(options.CostProfile ?? store.CostProfile));
-        _pageCache = new PageCache(options.PageCacheBytes);
-        Predicates = new PredicatePages(options.PredicatePageBytes);
+        _pageCache = PageCache.Kept(options.PageFloorBytes);
+        Predicates = options.KeepsPredicatePages ? PredicatePages.Kept() : new PredicatePages(0);
         _snapshot = new DatasetSnapshot(commit, PagesOf(version, commit), _objects, knownAt, Costs);
+        Buffers.HeldMemory.Register(this);
+    }
+
+    /// <inheritdoc/>
+    string Buffers.IHeldMemory.Holder => "datasets";
+
+    /// <summary>
+    /// The bytes the handle's caches hold now, kept for its next questions: its open objects, its pages, its synopses, its
+    /// partitions' indexes and their entries, its predicates' pages, its memos and its sealed store's trailers.
+    /// </summary>
+    long Buffers.IHeldMemory.HeldBytes =>
+        _objects.HeldBytes + _pageCache.Size + _synopses.Held + PartitionIndexes.Bytes + Snapshot.HeldBytes + Predicates.Held
+        + _subtreeEnds.Held + _indexEntries.Held + (_store is SealedObjectStore sealedStore ? sealedStore.HeldBytes : 0);
+
+    /// <summary>Lets go of up to <paramref name="bytes"/> of its idle open objects, of its pages or of its memos, above their floors.</summary>
+    long Buffers.IHeldMemory.GiveBack(Buffers.KeptKind kind, long bytes) => bytes <= 0 ? 0 : kind switch
+    {
+        Buffers.KeptKind.Objects => _objects.LetGo(bytes, stale: false),
+        Buffers.KeptKind.Pages => _pageCache.LetGo(bytes, stale: false),
+        Buffers.KeptKind.Memos => LetGoMemos(bytes, stale: false),
+        _ => 0,
+    };
+
+    /// <summary>At a turn of the registry's slow timer, lets go of what no question used since the turn before, above the floors.</summary>
+    void Buffers.IHeldMemory.LetGoUnused(bool collection)
+    {
+        if (!collection)
+        {
+            _objects.LetGo(long.MaxValue, stale: true);
+            _pageCache.LetGo(long.MaxValue, stale: true);
+            LetGoMemos(long.MaxValue, stale: true);
+        }
+    }
+
+    /// <summary>
+    /// Lets go of up to <paramref name="bytes"/> of what the handle's memos hold above their floors, those its questions
+    /// reach first last: its filters' pages, its index entries, its subtrees' ends, its partitions' entries and indexes,
+    /// its sealed store's trailers, then its synopses. Only what no question used since the timer's turn before when
+    /// <paramref name="stale"/>.
+    /// </summary>
+    private long LetGoMemos(long bytes, bool stale)
+    {
+        long given = Predicates.LetGo(bytes, stale);
+        given += _indexEntries.LetGo(Math.Max(0, bytes - given), stale);
+        given += _subtreeEnds.LetGo(Math.Max(0, bytes - given), stale);
+        given += Snapshot.LetGo(Math.Max(0, bytes - given), stale);
+        given += PartitionIndexes.LetGo(Math.Max(0, bytes - given), stale);
+        given += _store is SealedObjectStore sealedStore ? sealedStore.LetGo(Math.Max(0, bytes - given), stale) : 0;
+        return given + _synopses.LetGo(Math.Max(0, bytes - given), stale);
     }
 
     /// <summary>The version this handle reads; it moves only when this handle commits or refreshes.</summary>
@@ -119,6 +168,12 @@ public sealed class VortexDataset : IAsyncDisposable
     /// </summary>
     public Exception? LastInlineCompactionFailure => Volatile.Read(ref _inlineFailure);
 
+    /// <summary>
+    /// The arrays the last lookup of an identifier kept its objects in (<see cref="DatasetScanBuilder.LookupArrays"/>), for
+    /// the next; null while a lookup holds them, when one beside it makes its own. The handle outlives its lookups.
+    /// </summary>
+    internal DatasetScanBuilder.LookupArrays? KeptLookupArrays;
+
     /// <summary>The dataset's schema as the engine holds it.</summary>
     internal DType DType => Snapshot.Schema.DType;
 
@@ -137,7 +192,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>How many of its open objects a read holds: none once every read has given its objects back.</summary>
     internal int LeasedObjects => _objects.Leased;
 
-    /// <summary>What the objects open between scans weigh, as <see cref="DatasetOptions.MaxOpenObjectBytes"/> bounds them.</summary>
+    /// <summary>What the objects open between scans weigh, given back above <see cref="DatasetOptions.OpenObjectFloorBytes"/> when the process asks.</summary>
     internal long OpenObjectBytes => _objects.HeldBytes;
 
     /// <summary>
@@ -154,6 +209,208 @@ public sealed class VortexDataset : IAsyncDisposable
         if (bytes > 0)
         {
             Volatile.Write(ref _decodedRowBytes, bytes);
+        }
+    }
+
+    /// <summary>
+    /// What an input of the last job this handle ran to its end held at most, the blocks of its inputs over their count, at
+    /// the rows of a batch it read them in (<see cref="JobBatchRows"/>); 0 before any job measured it.
+    /// </summary>
+    internal long InputJobBytes => Volatile.Read(ref _inputJobBytes);
+
+    /// <summary>The rows of an input's batch in that job: what <see cref="InputJobBytes"/> was measured at.</summary>
+    internal int JobBatchRows => Volatile.Read(ref _jobBatchRows);
+
+    /// <summary>What the writer of that job held at most, the blocks of its objects' writers and sinks; 0 before any job.</summary>
+    internal long WriterJobBytes => Volatile.Read(ref _writerJobBytes);
+
+    /// <summary>
+    /// The most inputs a job of the handle takes after one was refused its blocks: half those of the refused one, until a job
+    /// runs to its end and measures what an input holds; 0 for none.
+    /// </summary>
+    internal int JobWidthCap => Volatile.Read(ref _jobWidthCap);
+
+    /// <summary>
+    /// The most rows an input's batch holds in a job of the handle after one was refused its blocks, and the most inputs it
+    /// holds open at once: half the rows and as many inputs as the refused one, until a job runs to its end; 0 for none.
+    /// Each refusal narrows the next job, by its inputs, its batches or both, until one fits or none can be narrower.
+    /// </summary>
+    internal (int BatchRows, int Open) JobSizingCap => (Volatile.Read(ref _jobBatchCap), Volatile.Read(ref _jobOpenCap));
+
+    private long _inputJobBytes;
+    private long _writerJobBytes;
+    private int _jobBatchRows;
+    private int _jobWidthCap;
+    private int _jobBatchCap;
+    private int _jobOpenCap;
+
+    /// <summary>
+    /// The bytes a second the last job of this handle that ran to its end read and wrote, its inputs' bytes over its time:
+    /// what the next plan bounds a job's bytes by, so that it commits within its share of the retention window; 0 before any.
+    /// </summary>
+    internal double JobBytesPerSecond => Volatile.Read(ref _jobBytesPerSecond);
+
+    private double _jobBytesPerSecond;
+
+    /// <summary>Keeps what a job that ran to its end did: <paramref name="bytes"/> of inputs in <paramref name="elapsed"/>.</summary>
+    internal void LearnJobRate(long bytes, TimeSpan elapsed)
+    {
+        if (bytes > 0 && elapsed > TimeSpan.Zero)
+        {
+            Volatile.Write(ref _jobBytesPerSecond, bytes / elapsed.TotalSeconds);
+        }
+    }
+
+    /// <summary>The data objects this handle's compactions replaced, which it deletes once no retained version reads them.</summary>
+    internal RetiredObjects Retired { get; } = new RetiredObjects();
+
+    // The partitions, by their row-encoded value in hexadecimal, whose consolidation a piece took no row of: consolidated in one
+    // piece from then on, rather than cut again where nothing lies.
+    private readonly HashSet<string> _whole = new HashSet<string>(StringComparer.Ordinal);
+
+    /// <summary>Whether the consolidations of <paramref name="partition"/> run in one piece, a piece having taken nothing there.</summary>
+    internal bool ConsolidatesWhole(string partition)
+    {
+        lock (_whole)
+        {
+            return _whole.Contains(partition);
+        }
+    }
+
+    /// <summary>Has the consolidations of <paramref name="partition"/> run in one piece from now on.</summary>
+    internal void ConsolidateWhole(string partition)
+    {
+        lock (_whole)
+        {
+            _whole.Add(partition);
+        }
+    }
+
+    /// <summary>
+    /// Notes the objects <paramref name="keys"/>, which the commit of <paramref name="version"/>, known at
+    /// <paramref name="at"/>, took out of the dataset; nothing on a store under a retention lock, whose deletes the vacuum
+    /// waits for.
+    /// </summary>
+    internal void NoteRetired(ulong version, DateTimeOffset at, string[] keys)
+    {
+        if (!_options.LockedStore)
+        {
+            Retired.Note(version, at, keys);
+        }
+    }
+
+    /// <summary>
+    /// Deletes the objects this handle's compactions replaced that no retained version reads any more
+    /// (<see cref="RetiredObjects"/>): what a vacuum would delete of them, without listing the store or walking a tree.
+    /// </summary>
+    /// <returns>How many objects were deleted.</returns>
+    internal ValueTask<int> DeleteRetiredAsync(CancellationToken cancellationToken) =>
+        Retired.DeleteDueAsync(_store, Version, Snapshot.Header.Retention, _options.TimeProvider.GetUtcNow(), cancellationToken);
+
+    /// <summary>
+    /// Deletes objects a job wrote that no version names: its outputs, when its commit applied nothing. Best effort: one
+    /// left is the vacuum's.
+    /// </summary>
+    internal async ValueTask DeleteUnnamedAsync(IReadOnlyList<string> keys, CancellationToken cancellationToken)
+    {
+        if (keys.Count == 0 || _options.LockedStore)
+        {
+            return;
+        }
+
+        try
+        {
+            await _store.DeleteAsync(keys, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception failure) when (failure is not OperationCanceledException)
+        {
+            // The vacuum takes them, as it took every output of a job lost before.
+        }
+    }
+
+    /// <summary>
+    /// Keeps what a job that ran to its end measured: <paramref name="inputBytes"/> an input held at most, at batches of
+    /// <paramref name="batchRows"/> rows, and <paramref name="writerBytes"/> its writer. A job is no longer capped, its width,
+    /// its batches and its inputs open at once, once a job of <paramref name="width"/> inputs of level 0, as wide as the cap
+    /// at least, ran to its end.
+    /// </summary>
+    /// <remarks>
+    /// A narrower job that ran proves nothing of the width a refusal capped: lifted by it, the next plan took the width again,
+    /// was refused again, and a backlog under 2 GiB ran 13 jobs, one refused in two, in 86 s (2026-11-16). Kept, the merges
+    /// after a refusal stay narrower, 17 jobs in 56 s, which read and write what 6 jobs did. Lifting the caps on batches and
+    /// inputs open at once on any job had the merges refused one in two again, 96 s.
+    /// </remarks>
+    internal void LearnJobCosts(long inputBytes, int batchRows, long writerBytes, int width)
+    {
+        if (inputBytes > 0)
+        {
+            Volatile.Write(ref _inputJobBytes, inputBytes);
+            Volatile.Write(ref _jobBatchRows, Math.Max(batchRows, 1));
+        }
+
+        if (writerBytes > 0)
+        {
+            Volatile.Write(ref _writerJobBytes, writerBytes);
+        }
+
+        if (width >= Volatile.Read(ref _jobWidthCap))
+        {
+            Volatile.Write(ref _jobWidthCap, 0);
+            Volatile.Write(ref _jobBatchCap, 0);
+            Volatile.Write(ref _jobOpenCap, 0);
+        }
+    }
+
+    /// <summary>
+    /// Keeps what an input measured before the handle's first job held, <paramref name="inputBytes"/> at batches of
+    /// <paramref name="batchRows"/> rows, as a job's would be kept; the caps a refusal set stay, no job having run since.
+    /// </summary>
+    internal void LearnInputCost(long inputBytes, int batchRows)
+    {
+        if (inputBytes > 0)
+        {
+            Volatile.Write(ref _inputJobBytes, inputBytes);
+            Volatile.Write(ref _jobBatchRows, Math.Max(batchRows, 1));
+        }
+    }
+
+    /// <summary>
+    /// A job was given up before it read anything, its first input's measure fitting <paramref name="inputs"/> of them in
+    /// the jobs' budget: the next takes that many at most, below the fan-out if need be, as one refused would.
+    /// </summary>
+    internal void CapJobWidth(int inputs) => Volatile.Write(ref _jobWidthCap, Math.Max(1, inputs));
+
+    /// <summary>
+    /// A job of <paramref name="inputs"/> inputs was refused its blocks: the next takes half as many, until one runs to its end.
+    /// What its inputs and its writer held when refused, <paramref name="inputBytes"/> and <paramref name="writerBytes"/>, is
+    /// less than they needed, and is kept as what they need at least: an input's share of it, at the rows of its batch, when
+    /// it holds more a row than the handle knew (<paramref name="sizing"/>, the batches' rows and the inputs open at once).
+    /// Kept without the rows of its batch, it was read as held by a batch of one row: 4.3 MB a row for a job of 300 inputs
+    /// refused under 1 344 MiB, and the next took the fan-out, 8, where half, 150, held (2026-11-15).
+    /// </summary>
+    internal void NarrowJobs(int inputs, long inputBytes, (int BatchRows, int Open) sizing, long writerBytes)
+    {
+        Volatile.Write(ref _jobWidthCap, Math.Max(1, inputs / 2));
+        if (sizing is { BatchRows: > 0, Open: > 0 })
+        {
+            // The next job's batches half as long, and no more of its inputs open at once: what a job of as many inputs, a
+            // consolidation with no merge due before it, narrows by.
+            Volatile.Write(ref _jobBatchCap, Math.Max(DatasetCompactor.LeastBatchRows, sizing.BatchRows / 2));
+            Volatile.Write(ref _jobOpenCap, sizing.Open);
+
+            long perInput = inputBytes / sizing.Open;
+            long perRow = (perInput - DatasetCompactor.InputFloorBytes) / sizing.BatchRows;
+            long known = InputJobBytes > 0 ? (InputJobBytes - DatasetCompactor.InputFloorBytes) / Math.Max(JobBatchRows, 1) : 0;
+            if (perRow > known)
+            {
+                Volatile.Write(ref _inputJobBytes, perInput);
+                Volatile.Write(ref _jobBatchRows, sizing.BatchRows);
+            }
+        }
+
+        if (writerBytes > WriterJobBytes)
+        {
+            Volatile.Write(ref _writerJobBytes, writerBytes);
         }
     }
 
@@ -931,15 +1188,17 @@ public sealed class VortexDataset : IAsyncDisposable
         DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool contents = false, bool synopses = false,
         IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
         IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1, PartitionPostings? postings = null,
-        bool countsPaths = false)
+        bool countsPaths = false, QueryMemoryBudget? budget = null)
     {
         RequireConditionalCreation(_store);
         DateTimeOffset started = _options.TimeProvider.GetUtcNow();
         long generation = KeyGeneration;
         Guid identity = Guid.NewGuid();
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
+
+        // A job's object holds its blocks under the job's writer's budget, which never passes the jobs' (JobMemory).
         ObjectSegmentSink sink = new ObjectSegmentSink(
-            _store, key, _options.MaxObjectBytes, _options.Session.Options.MemoryPool, _options.StreamedObjectBytes, byteBound);
+            _store, key, budget ?? QueryMemoryBudget.JobsOf(_options.Session), _options.MaxObjectBytes, _options.StreamedObjectBytes, byteBound);
 
         VortexWriteOptions write = _options.Write.WithIdentity(identity) with
         {
@@ -968,6 +1227,9 @@ public sealed class VortexDataset : IAsyncDisposable
 
             // Such an object, which a job writes in its key's order, in blocks, keeps each column's statistics over them.
             Granulated = contents && synopses,
+
+            // A job's writer gathers its columns within its share of the jobs' budget, writing a chunk early past it.
+            GatheredBytesCeiling = budget is null ? 0 : DatasetCompactor.GatherCeiling(this),
         };
 
         // The variant columns a job shreds, each in long chunks of its own; an append shreds the declared paths when its
@@ -1038,7 +1300,8 @@ public sealed class VortexDataset : IAsyncDisposable
         write = write with { HashedUnitBytes = HashedUnitBytes };
 
         // The session's degree and its lanes, which every writer of the session shares.
-        return new ObjectOutput(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session), started, generation);
+        Buffers.WorkAccount? account = budget is null ? null : new Buffers.WorkAccount(budget, "writer");
+        return new ObjectOutput(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session, account), started, generation);
     }
 
     /// <summary>
@@ -2004,13 +2267,75 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the rewrite and the commit.</param>
     /// <returns>What the compaction did, or null when nothing was due.</returns>
     /// <exception cref="DatasetIntegrityException">A guard found that the compaction would lose rows; nothing was committed.</exception>
+    /// <exception cref="VortexMemoryException">A job of the fewest inputs it may take needs more than the jobs' budget holds.</exception>
     public async ValueTask<CompactionResult?> CompactAsync(
         CompactionOptions? options = null, CancellationToken cancellationToken = default)
     {
         CompactionPlan plan = await PlanCompactionAsync(options, cancellationToken).ConfigureAwait(false);
-        return plan.Job is { } job
-            ? await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false)
-            : null;
+        if (plan.Job is { } job)
+        {
+            return await RunWithinBudgetAsync(job, async token => (await PlanCompactionAsync(options, token).ConfigureAwait(false)).Job, cancellationToken).ConfigureAwait(false);
+        }
+
+        // Nothing due: what the handle's jobs replaced and no retained version reads any more goes now.
+        await DeleteRetiredAsync(cancellationToken).ConfigureAwait(false);
+        return null;
+    }
+
+    /// <summary>
+    /// Runs <paramref name="job"/>; when the jobs' budget refuses its blocks, plans again by <paramref name="replan"/>, which
+    /// narrows the next job since (<see cref="NarrowJobs"/>), and runs that job, until one runs to its end or a refusal
+    /// narrowed nothing (<see cref="Narrowed"/>). Null when the plan after a refusal has nothing due.
+    /// </summary>
+    /// <exception cref="VortexMemoryException">A job refused narrowed nothing of the one refused before it: it needs more than the budget holds.</exception>
+    internal async ValueTask<CompactionResult?> RunWithinBudgetAsync(
+        CompactionJob job, Func<CancellationToken, ValueTask<CompactionJob?>> replan, CancellationToken cancellationToken)
+    {
+        JobTooWideException? refused = null;
+        while (true)
+        {
+            try
+            {
+                return await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false);
+            }
+            catch (JobTooWideException tooWide)
+            {
+                Narrowed(refused, tooWide);
+                refused = tooWide;
+                if (await replan(cancellationToken).ConfigureAwait(false) is not { } next)
+                {
+                    return null;
+                }
+
+                job = next;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether the job refused, <paramref name="now"/>, narrowed something of the one of its kind refused <paramref name="before"/>
+    /// it: fewer inputs, shorter batches, or fewer inputs open at once; or <paramref name="before"/> was given up on a price
+    /// alone, before it read anything. A throw otherwise, which says what the job held and what the budget holds: every
+    /// refusal narrows the next job (<see cref="NarrowJobs"/>), so one that narrowed nothing has nothing left to narrow. The
+    /// rule was fewer inputs alone, and a consolidation refused with no merge due before it, as many inputs again however
+    /// short its batches, failed at its second refusal (2026-11-15).
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The job narrowed nothing of the one before it.</exception>
+    internal static void Narrowed(JobTooWideException? before, JobTooWideException now)
+    {
+        if (before is null || before.Job.Trigger != now.Job.Trigger || before.Priced
+            || now.Job.Inputs.Count < before.Job.Inputs.Count
+            || (now.Sizing.BatchRows > 0 && now.Sizing.BatchRows < before.Sizing.BatchRows)
+            || (now.Sizing.Open > 0 && now.Sizing.Open < before.Sizing.Open))
+        {
+            return;
+        }
+
+        throw new VortexMemoryException(
+            string.Create(
+                CultureInfo.InvariantCulture,
+                $"A compaction of {now.Job.Inputs.Count} objects, at its fewest inputs and shortest batches, needs more than the jobs' budget of {now.Budget:N0} bytes: its blocks held {now.Held:N0} when one was refused. Give the process more memory, or the session a larger JobMemoryBudget."),
+            now);
     }
 
     /// <summary>
@@ -2022,9 +2347,11 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <param name="cancellationToken">Cancels the rewrites and the commits.</param>
     /// <returns>What each consolidation did, a partition each; empty when the dataset is not tiered with a key, or none is due.</returns>
     /// <exception cref="DatasetIntegrityException">A guard found that a consolidation would lose rows; nothing was committed for it.</exception>
+    /// <exception cref="VortexMemoryException">A job of the fewest inputs it may take needs more than the jobs' budget holds.</exception>
     public async ValueTask<IReadOnlyList<CompactionResult>> ConsolidateAsync(CancellationToken cancellationToken = default)
     {
         List<CompactionResult> results = [];
+        JobTooWideException? refused = null;
         while (true)
         {
             // A partition whose level 0 the jobs' budget does not hold at once is merged by size class first, a pass at a
@@ -2052,22 +2379,42 @@ public sealed class VortexDataset : IAsyncDisposable
                 }
             }
 
-            if (merges.Count == 0)
+            // A job the jobs' budget refuses sends the loop back to its plan, which takes fewer inputs since: a consolidation
+            // then no longer fits, and its partition is merged by size class first.
+            try
             {
-                foreach (CompactionJob job in plan.Jobs)
+                if (merges.Count == 0)
                 {
-                    if (job.Trigger == CompactionTrigger.Consolidation)
+                    // A consolidation too large for one commit ran its first piece: the loop plans the next, until none is left.
+                    bool pieces = false;
+                    foreach (CompactionJob job in plan.Jobs)
                     {
-                        results.Add(await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false));
+                        if (job.Trigger == CompactionTrigger.Consolidation)
+                        {
+                            CompactionResult result = await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false);
+                            results.Add(result);
+                            pieces |= result.Piece && result.Outcome == OperationOutcome.Applied;
+                        }
                     }
+
+                    if (!pieces)
+                    {
+                        return results;
+                    }
+
+                    continue;
                 }
 
-                return results;
+                foreach (CompactionJob merge in merges)
+                {
+                    results.Add(await DatasetCompactor.RunAsync(this, merge, cancellationToken).ConfigureAwait(false));
+                }
             }
-
-            foreach (CompactionJob merge in merges)
+            catch (JobTooWideException tooWide)
             {
-                results.Add(await DatasetCompactor.RunAsync(this, merge, cancellationToken).ConfigureAwait(false));
+                // Refused again with nothing narrower: the budget does not hold the least this job takes.
+                Narrowed(refused, tooWide);
+                refused = tooWide;
             }
         }
     }
@@ -2185,6 +2532,7 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <returns>A task that completes when every object is closed.</returns>
     public async ValueTask DisposeAsync()
     {
+        Buffers.HeldMemory.Unregister(this);
         await LevelZero.DisposeAsync().ConfigureAwait(false);
         await _objects.DisposeAsync().ConfigureAwait(false);
         if (_store is SealedObjectStore sealedStore)
@@ -2383,6 +2731,10 @@ public sealed class VortexDataset : IAsyncDisposable
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
             // Cancelled by the caller, whose commit stands.
+        }
+        catch (JobTooWideException)
+        {
+            // Too wide for the jobs' budget: not a failure, the next commit plans a narrower merge by what this one learned.
         }
         catch (Exception failed) when (failed is not OutOfMemoryException)
         {
@@ -3235,11 +3587,15 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>The synopses this handle read, its objects' column sheets, counts and sketches, by object and region (<see cref="ReadSynopsesAsync"/>).</summary>
     private readonly SynopsisMemo _synopses = new SynopsisMemo();
 
-    /// <summary>The bytes the indexes of the partitions this handle read may hold, their directories, last bytes and pages (<see cref="PartitionIndexes"/>).</summary>
-    internal const long PartitionIndexBytes = 64L << 20;
+    /// <summary>
+    /// The bytes of the indexes of the partitions this handle read, their directories, last bytes and pages, that it keeps
+    /// whatever the registry of kept memory asks (<see cref="PartitionIndexes"/>): with the handle's other floors, what forty
+    /// handles read was all kept after two turns of the slow timer (2026-11-16).
+    /// </summary>
+    internal const long PartitionIndexFloorBytes = 4L << 20;
 
     /// <summary>The indexes of the partitions this handle read, kept for the questions after (<see cref="PartitionIndexCache"/>).</summary>
-    internal PartitionIndexCache PartitionIndexes { get; } = new PartitionIndexCache(PartitionIndexBytes);
+    internal PartitionIndexCache PartitionIndexes { get; } = PartitionIndexCache.Kept(PartitionIndexFloorBytes);
 
     /// <summary>The granules where the filters this handle evaluated on its objects' rows kept a row (<see cref="PredicatePages"/>).</summary>
     internal PredicatePages Predicates { get; }
@@ -4293,7 +4649,7 @@ public sealed class VortexDataset : IAsyncDisposable
         {
             if (!streamed)
             {
-                SourceReader held = new SourceReader(draft.Sink.Content(), ownsSource: true, _options.Session.Options.EnginePool);
+                SourceReader held = new SourceReader(draft.Sink.Content(), ownsSource: true);
                 (summaries, prefix, last) = await DescribeAsync(held, firstRow, draft, cancellationToken).ConfigureAwait(false);
             }
             else
@@ -4302,7 +4658,7 @@ public sealed class VortexDataset : IAsyncDisposable
 
                 // A streamed object's tail, which the sink kept: its statistics are read out of it, with no request, unless
                 // its description reads before it, a key's bounds read from its rows.
-                if (draft.Sink.Tail(_options.Session.Options.EnginePool) is { } kept)
+                if (draft.Sink.Tail() is { } kept)
                 {
                     try
                     {
@@ -4456,16 +4812,18 @@ public sealed class VortexDataset : IAsyncDisposable
     /// <summary>The bytes a subtree's end is counted at in <see cref="_subtreeEnds"/>: its page's reference, its value and a slot.</summary>
     private const int SubtreeEndBytes = 96;
 
-    // The end of each subtree a keyless partitioned dataset's appends found (SubtreeEndAsync), by its page: a megabyte's worth.
-    private readonly ClockMemo<PageReference, long> _subtreeEnds = new ClockMemo<PageReference, long>(1L << 20);
+    // The end of each subtree a keyless partitioned dataset's appends found (SubtreeEndAsync), by its page; 256 KiB kept
+    // whatever the registry of kept memory asks, some 2 700 subtrees at SubtreeEndBytes each.
+    private readonly ClockMemo<PageReference, long> _subtreeEnds = ClockMemo<PageReference, long>.Kept(256L << 10);
 
     /// <summary>
     /// The entries of objects' index directories a lookup read, parsed, by object and region, which do not change: each
     /// locating index's entry of every object a lookup reached was read and parsed at every question, 15 % of what a search
-    /// of one identifier allocated. Within 4 MiB, an entry weighed twice its bytes.
+    /// of one identifier allocated. An entry weighs twice its bytes; 1 MiB of them kept whatever the registry of kept
+    /// memory asks.
     /// </summary>
     private readonly ClockMemo<(UInt128 Uid, ulong Offset), Indexes.IndexEntry> _indexEntries =
-        new ClockMemo<(UInt128 Uid, ulong Offset), Indexes.IndexEntry>(4L << 20);
+        ClockMemo<(UInt128 Uid, ulong Offset), Indexes.IndexEntry>.Kept(1L << 20);
 
     /// <summary>What an entry kept weighs besides its bytes: the record, its lists and the memo's slot.</summary>
     private const long IndexEntryBytes = 256;

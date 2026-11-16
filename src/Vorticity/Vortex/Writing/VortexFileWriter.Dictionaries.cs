@@ -185,7 +185,7 @@ public sealed partial class VortexFileWriter
         }
 
         // An arena of its own: the scratch one may hold the batch whose rows the column's first chunk takes.
-        CanonicalArena arena = _dictionaryArena ??= new CanonicalArena(64, Session.Options.EnginePool);
+        CanonicalArena arena = _dictionaryArena ??= new CanonicalArena(64, Account);
         try
         {
             using ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(
@@ -223,7 +223,7 @@ public sealed partial class VortexFileWriter
         {
             if (dictionaries[field] is { } dictionary && segments[field] >= 0)
             {
-                SegmentSpec spec = _segments[segments[field]];
+                SegmentSpec spec = Segments[segments[field]];
                 placed[field] = new ColumnDictionary(
                     spec.Offset, spec.Length, spec.AlignmentExponent, dictionary.Count, dictionary.CodesPType, Ordered: true);
             }

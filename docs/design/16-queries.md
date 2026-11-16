@@ -1147,8 +1147,7 @@ when free), once its pending batches pass α times its groups and 16 384 entries
 the degree, between 1 and 8. A lane whose cache misses more than half its rows over four capacities'
 worth of them sends its rows straight into batches for the next thirty-two. At the end every part
 applies what is pending, its sub-tables split ahead, and the sub-tables are the result, read as one.
-The arrays of its sub-tables and slabs come from a shelf of the query and go back to the process's
-shelf, kept within a budget and swept after garbage collections.
+The arrays of its sub-tables and slabs are blocks of the library's pool, rented under the core's account in the query's memory, which counts each one as it comes and keeps what the sub-tables give back reserved until every part is applied; they go back to the pool, which keeps one locked stack per size class. After each collection of the oldest generation, and at each turn of a slow timer, every class lets go of the blocks no rent took since the time before; when the machine's memory load is high, or a reservation the process's budget refuses needs the room, everything above the classes' floors goes.
 
 On the bench the core holds two to three times less memory than the tables of fourteen lanes, and at
 fourteen lanes takes ×0.69 of the time at a million random keys, ×0.46 at ten million, and ×0.64 on
@@ -1184,15 +1183,9 @@ numbered by an `int`, and the tables double, so an open table holds at most 2²�
 
 #### The governor
 
-A query's memory is reserved from a budget: the process's by default, or a `QueryMemoryBudget` the
-host creates and gives to the sessions that share it, whose ceiling bounds their queries together. A
-query reserves in its budget, and the budget in the process's, whatever the sum of the ceilings the
-host sets. The process's ceiling is its limit (the managed heap's,
-`GC.GetGCMemoryInfo().TotalAvailableMemoryBytes`, and in a container three quarters of the
-container's, which also counts the engine's native memory), minus an eighth for the garbage
-collector, minus the rest of the process: what its heap held beyond the queries' tables at the last
-full collection, what the collector kept committed beyond its heap, and what the queries released
-since. A limit of 4 GB is not 4 GB for the queries.
+A query's memory is reserved from a budget: the process's by default, or a `QueryMemoryBudget` the host creates and gives to the sessions that share it, whose ceiling bounds their queries together. A query reserves in its budget, and the budget in the process's, whatever the sum of the ceilings the host sets. The process's ceiling is its limit (the managed heap's, `GC.GetGCMemoryInfo().TotalAvailableMemoryBytes`, minus an eighth for the garbage collector, and in a container seven eighths of the container's when that is less, read again as the process runs, the engine's blocks being managed and counted by the heap; a limit the host sets, `VortexMemory.SetLimit` or the `VORTICITY_MEMORY_LIMIT` variable, is taken as a container's of that size would be, the collector's heap held to three quarters of it as the runtime holds it in a container), minus the rest of the process: what its heap held beyond the work's blocks at the last full collection, what the collector kept committed beyond its heap, and what the work released since; in a container, what the container measures beyond the reservations and the memory kept, when that is more. A limit of 4 GB is not 4 GB for the queries.
+
+The rest is read from a collection once it is done. A background collection is counted from its start, and the collector tells the memory of the one before until it ends: read then, the rest dropped what the work had let go and taken back since, and the collection, marked read, was never read once done. The heap a collection read is taken less the fewest bytes the work measured since the reading before, never more than it measured when the collector ran: less what it measured when the budget read it, 145 MiB of heap and 227 measured by then, the rest was read as none. Between two collections the budget follows the pool: a block the work takes back from what the pool keeps, parked or free in a slab alive, is the work's and no more the rest's, a block it gives back for the pool to keep is the rest's again, and the room of a slab made for a rent is the rest's as the slab is made. A thread that finds a collection asked by another waits for it, as every thread that allocates does, and reserves against what it left: reserved against what lived at the last full collection, as if the collection would take everything the heap grew by since, eight queries under a heap held to 512 MiB reserved 276 MiB beside 235 MiB the collection found live, and the heap ran out. A block is reserved before the pool allocates it, so that a block the budget refuses never reaches the heap. The jobs' budget is half the limit by default, and each block a job rents asks the process too, which weighs it against the rest of its memory as it weighs a question's ([the memory of a job](15-compaction.md#the-memory-of-a-job)); past its share, a writer's block is bounded by the process's own ceiling, a sixteenth past it at most.
 
 A query reserves where its memory grows, at the moment it does: each array of a lane's tables before
 it is allocated (a doubling holding the old arrays next to the new ones for the copy, and no more),
@@ -1214,10 +1207,16 @@ them, the lanes read one split fewer ahead at a time, down to none, before they 
 them back when the pass ends. A mapping reads in place, its reads being views of it, so nothing more
 is admitted. What the queries release stays in the heap until a collection, so when that memory,
 or what the collector keeps committed beyond its heap, stands between a reservation and the ceiling, a
-collection that gives it back comes first; before it, the pool gives back the native blocks it keeps
-for the next rents, which a container's limit counts. The background jobs reserve in a budget of their
-own, `JobMemoryBudget`, half the process's limit by default and reserved in the process's budget too:
-the queries have the rest ([memory of a job](15-compaction.md#the-memory-of-a-job)). A query that is refused fails with a
+collection that gives it back comes first, and before it the memory kept lets go of what it holds
+above its floors, in a fixed order: the pool's blocks kept for the next rents, then the segments a
+cache keeps, then the objects a dataset keeps open, then its pages, for that collection to take.
+Reservations that come within an eighth of the ceiling have it let go of that much before they need
+it, once a collection at most. The background jobs reserve in `JobMemoryBudget`, by default their share of the process's limit, each block asking the process too, one registry for the queries and the jobs; a host that wants them held to another gives the session a budget of its own, reserved in the process's budget too ([memory of a job](15-compaction.md#the-memory-of-a-job)).
+In a container, the rest of the process is measured: what the container uses, less the file pages the
+kernel reclaims first, past what the budget and the memory kept account for, read again every second
+with the container's limit, whose margin is an eighth. Under a limit the host set, outside a container,
+it is the process's resident memory that is read, the same way. Otherwise, it is what the collector
+reports after its full collections. A query that is refused fails with a
 `VortexMemoryException` naming the operator, its groups and its bytes, with everything it held given
 back.
 
@@ -1288,8 +1287,8 @@ half the groups merged into it came new to it, the lanes' keys being apart, the 
 runs.
 
 At the end every table goes to the scratch, and the result comes back part by part, as a merge in
-parts delivers it. A part is a stretch of every run's sections, merged into a table that grows from a
-shelf of its own under the budget, built into batches and let go, with as few parts as keep one within
+parts delivers it. A part is a stretch of every run's sections, merged into a table that grows from an
+account of its own under the budget, built into batches and let go, with as few parts as keep one within
 half the room the budget leaves, and as many built ahead as that half holds (none when one part takes
 it all). A distinct count over the whole scan spills its set alone, by the top byte of its values'
 hash, its parts counted from sets sized by their sections. A `Distinct` on a key the core cannot take
@@ -1333,7 +1332,7 @@ the parts' batches, each batch holding at most one part's groups. On 10⁷ keys,
 quarter sooner at one lane and a third sooner at fourteen, where the whole result takes 0.58 of the
 time, its batches built on every lane. The lanes' tables merged in parts ([the merge](#the-merge)) are
 delivered the same way, each part built by whoever merged it. A part keeps what its table held of the
-query's memory until the reader is done with its batches, which the session's pool holds outside any
+query's memory until the reader is done with its batches, which the library's pool holds outside any
 query's count. At fourteen lanes, with its batches no longer built on the reader's thread alone once
 the merge is done, a million keys took 0.83 of the time and four aggregates 0.68.
 

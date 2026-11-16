@@ -2,6 +2,7 @@ using System;
 using System.Buffers;
 using ManagedCompressions.Zstd;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Indexes;
@@ -16,9 +17,9 @@ internal static class ZstdRegion
     /// <exception cref="InvalidOperationException">The body did not compress into the bound zstd gives it.</exception>
     internal static byte[] Encode(ulong version, ReadOnlySpan<byte> body)
     {
-        // The frame compressed into a rented array at zstd's bound, then the region made once at its length: a region of
+        // The frame compressed into a rented block at zstd's bound, then the region made once at its length: a region of
         // each shredded key of each object of a consolidation made both new.
-        byte[] frame = Aggregating.WorkArrays.Rent<byte>(ZstdCompressor.GetMaxCompressedLength(body.Length));
+        Block<byte> frame = Blocks.Rent<byte>(ZstdCompressor.GetMaxCompressedLength(body.Length));
         try
         {
             ZstdCompressor encoder = Writing.ZstdEncoders.Rent();
@@ -43,7 +44,7 @@ internal static class ZstdRegion
         }
         finally
         {
-            Aggregating.WorkArrays.Return(frame);
+            Blocks.Return(frame);
         }
     }
 
@@ -53,30 +54,28 @@ internal static class ZstdRegion
     /// </summary>
     internal static byte[]? Decode(ReadOnlySpan<byte> bytes, ulong version)
     {
-        if (Rent(bytes, version, out int length) is not { } rented)
+        if (Rent(bytes, version) is not { } rented)
         {
             return null;
         }
 
         try
         {
-            return rented.AsSpan(0, length).ToArray();
+            return rented.AsSpan().ToArray();
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 
     /// <summary>
-    /// The body of region <paramref name="bytes"/>, its first <paramref name="length"/> bytes of an array of the shared pool,
-    /// which the caller gives back; null when the region is at another version than <paramref name="version"/>, claims a
-    /// body longer than zstd's most expansion of its frame (<see cref="ZstdDecoders.MostExpansion"/>), which no frame
-    /// decodes to, or does not decode.
+    /// The body of region <paramref name="bytes"/> in a block of the pool, which the caller gives back; null when the region
+    /// is at another version than <paramref name="version"/>, claims a body longer than zstd's most expansion of its frame
+    /// (<see cref="ZstdDecoders.MostExpansion"/>), which no frame decodes to, or does not decode.
     /// </summary>
-    internal static byte[]? Rent(ReadOnlySpan<byte> bytes, ulong version, out int length)
+    internal static Block<byte>? Rent(ReadOnlySpan<byte> bytes, ulong version)
     {
-        length = 0;
         try
         {
             ProtoReader header = new ProtoReader(bytes);
@@ -93,13 +92,13 @@ internal static class ZstdRegion
             }
 
             int size = (int)declared;
-            byte[] body = ArrayPool<byte>.Shared.Rent(Math.Max(size, 1));
+            Block<byte> body = Blocks.Rent<byte>(size);
             ZstdDecompressor decoder = ZstdDecoders.Rent();
             try
             {
-                if (decoder.Decompress(frame, body.AsSpan(0, size), out _, out int produced) != OperationStatus.Done || produced != size)
+                if (decoder.Decompress(frame, body, out _, out int produced) != OperationStatus.Done || produced != size)
                 {
-                    ArrayPool<byte>.Shared.Return(body);
+                    Blocks.Return(body);
                     return null;
                 }
             }
@@ -108,7 +107,6 @@ internal static class ZstdRegion
                 ZstdDecoders.Return(decoder);
             }
 
-            length = size;
             return body;
         }
         catch (VortexFormatException)

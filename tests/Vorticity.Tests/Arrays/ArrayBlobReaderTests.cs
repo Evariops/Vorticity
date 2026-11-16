@@ -204,7 +204,7 @@ public sealed class ArrayBlobReaderTests
         byte[] blob = BlobBuilder.Build(root, []);
 
         ArrayNodeArena arena = new ArrayNodeArena();
-        using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf(blob, 64);
+        using BlockOwner owner = BlockOwner.CopyOf(blob, 64);
         ArrayBlobReader.Load(arena, owner.Buffer, [ArrayEncodingId.Unknown]);
 
         Assert.Equal(ArrayEncodingId.Unknown, arena.Root.Encoding);
@@ -299,7 +299,7 @@ public sealed class ArrayBlobReaderTests
         byte[] blob = BlobBuilder.Build(root, buffers);
 
         ArrayNodeArena arena = new ArrayNodeArena();
-        using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf(blob, 64);
+        using BlockOwner owner = BlockOwner.CopyOf(blob, 64);
 
         // Warm up so every backing array has reached its final size.
         for (int i = 0; i < 4; i++)
@@ -325,14 +325,14 @@ public sealed class ArrayBlobReaderTests
         ArrayNodeArena arena = new ArrayNodeArena();
 
         byte[] bad = BlobBuilder.Build(BlobBuilder.Chain(200), []);
-        using (PinnedArraySegmentOwner badOwner = PinnedArraySegmentOwner.CopyOf(bad, 64))
+        using (BlockOwner badOwner = BlockOwner.CopyOf(bad, 64))
         {
             Assert.Throws<VortexFormatException>(
                 () => ArrayBlobReader.Load(arena, badOwner.Buffer, Encodings));
         }
 
         byte[] good = BlobBuilder.Build(new ForgedNode(0), []);
-        using PinnedArraySegmentOwner goodOwner = PinnedArraySegmentOwner.CopyOf(good, 64);
+        using BlockOwner goodOwner = BlockOwner.CopyOf(good, 64);
         ArrayBlobReader.Load(arena, goodOwner.Buffer, Encodings);
 
         Assert.Equal(1, arena.NodeCount);
@@ -401,7 +401,7 @@ public sealed class ArrayBlobReaderTests
 
         byte[] region = [7, 8, 9, 10];
         ArrayNodeArena arena = new ArrayNodeArena();
-        using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf(region, 64);
+        using BlockOwner owner = BlockOwner.CopyOf(region, 64);
         ArrayBlobReader.Load(arena, flatBuffer, owner.Buffer, Encodings);
 
         Assert.Equal(1, arena.NodeCount);
@@ -413,7 +413,7 @@ public sealed class ArrayBlobReaderTests
     public void TheInlinedVariantRejectsATreeShorterThanARootOffset()
     {
         ArrayNodeArena arena = new ArrayNodeArena();
-        using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf(new byte[16], 64);
+        using BlockOwner owner = BlockOwner.CopyOf(new byte[16], 64);
         Assert.Throws<VortexFormatException>(
             () => ArrayBlobReader.Load(arena, new byte[3], owner.Buffer, Encodings));
     }
@@ -422,7 +422,7 @@ public sealed class ArrayBlobReaderTests
     public void LoadRejectsANullArena()
     {
         byte[] blob = BlobBuilder.Build(new ForgedNode(0), []);
-        using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf(blob, 64);
+        using BlockOwner owner = BlockOwner.CopyOf(blob, 64);
         Assert.Throws<ArgumentNullException>(
             () => ArrayBlobReader.Load(null!, owner.Buffer, Encodings));
     }
@@ -441,8 +441,8 @@ public sealed class ArrayBlobReaderTests
         }
 
         ArrayNodeArena arena = new ArrayNodeArena();
-        using PinnedArraySegmentOwner owner =
-            PinnedArraySegmentOwner.CopyOf(blobs.Leaves[0].Segment, 64);
+        using BlockOwner owner =
+            BlockOwner.CopyOf(blobs.Leaves[0].Segment, 64);
         ArrayBlobReader.Load(arena, owner.Buffer, encodings);
 
         ArrayNode root = arena.Root;
@@ -481,7 +481,7 @@ public sealed class ArrayBlobReaderTests
     private static ArrayNodeArena Load(byte[] blob)
     {
         ArrayNodeArena arena = new ArrayNodeArena();
-        using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf(blob, 64);
+        using BlockOwner owner = BlockOwner.CopyOf(blob, 64);
         ArrayBlobReader.Load(arena, owner.Buffer, Encodings);
         return arena;
     }

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Vorticity.Aggregating;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
@@ -855,7 +856,7 @@ internal sealed class StateRows : StateTable
 {
     private ColumnCounts _counts = null!;
     private ColumnSketches? _sketches;
-    private int[] _entries = [];
+    private Block<int> _entries;
     private int _count;
 
     // Each measure, its place among the counts', and its first word among an entry's.
@@ -886,10 +887,10 @@ internal sealed class StateRows : StateTable
     /// <summary>The value each key's column holds over the object held next, which the answer sets.</summary>
     internal Span<byte[]?> Constants => _constants;
 
-    /// <summary>Room for <paramref name="entries"/> entries of the counts held next, rented, which the answer fills.</summary>
+    /// <summary>Room for <paramref name="entries"/> entries of the counts held next, a block of the pool, which the answer fills.</summary>
     internal Span<int> Entries(int entries)
     {
-        Pooled.Grow(ref _entries, entries);
+        Blocks.Ensure(ref _entries, entries);
         return _entries.AsSpan(0, entries);
     }
 
@@ -913,11 +914,11 @@ internal sealed class StateRows : StateTable
         }
     }
 
-    /// <summary>Gives the entries' array back: no row is read after.</summary>
+    /// <summary>Gives the entries' block back: no row is read after.</summary>
     internal void Release()
     {
-        Pooled.Return(_entries);
-        (_entries, _count, _counts, _sketches) = ([], 0, null!, null);
+        Blocks.Return(_entries);
+        (_entries, _count, _counts, _sketches) = (default, 0, null!, null);
         _constants.AsSpan().Clear();
     }
 

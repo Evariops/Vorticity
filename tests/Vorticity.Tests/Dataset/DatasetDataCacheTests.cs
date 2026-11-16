@@ -53,7 +53,7 @@ public sealed partial class DatasetDataCacheTests
                 // The reader's own segment reaches the cache while it waits for the other lane's.
                 DateTime until = DateTime.UtcNow.AddSeconds(10);
                 Vorticity.Buffers.SegmentOwner? kept = null;
-                while (!cache.TryReadData(uid, ownSegment, out kept) && DateTime.UtcNow < until)
+                while (!cache.TryReadData(uid, ownSegment, TestAccount.Shared, out kept) && DateTime.UtcNow < until)
                 {
                     await Task.Delay(10, Ct);
                 }

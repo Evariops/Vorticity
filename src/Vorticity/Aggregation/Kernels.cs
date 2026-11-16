@@ -1,8 +1,12 @@
 using System;
+using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+using Vorticity.Buffers;
 
 namespace Vorticity.Aggregating;
 
@@ -680,7 +684,7 @@ internal static class RowMasks
     }
 
     /// <summary>The rows both masks hold: one of them when the other is every row, their conjunction in <paramref name="scratch"/> otherwise.</summary>
-    internal static ReadOnlySpan<ulong> And(ReadOnlySpan<ulong> left, ReadOnlySpan<ulong> right, int rows, ref ulong[] scratch)
+    internal static ReadOnlySpan<ulong> And(ReadOnlySpan<ulong> left, ReadOnlySpan<ulong> right, int rows, ref ScratchBlock<ulong> scratch)
     {
         if (left.IsEmpty)
         {
@@ -711,7 +715,7 @@ internal static class RowMasks
     /// other word of the scratch leaves zero, and <see cref="Unclip"/> clears them again once the
     /// selection is read. A range costs its own words, not its block's.
     /// </summary>
-    internal static Selection Window(ReadOnlySpan<ulong> mask, int rows, int start, int end, ref ulong[] scratch)
+    internal static Selection Window(ReadOnlySpan<ulong> mask, int rows, int start, int end, ref ScratchBlock<ulong> scratch)
     {
         int words = (rows + 63) >> 6;
         Scratch.Grow(ref scratch, words);
@@ -749,7 +753,7 @@ internal static class RowMasks
     }
 
     /// <summary>Gives back the words <see cref="Window"/> wrote for [<paramref name="start"/>, <paramref name="end"/>), cleared, as it found them.</summary>
-    internal static void Unclip(ulong[] scratch, int start, int end)
+    internal static void Unclip(ScratchBlock<ulong> scratch, int start, int end)
     {
         if (end > start)
         {
@@ -761,27 +765,28 @@ internal static class RowMasks
 
 /// <summary>
 /// Buffers a slot keeps from one batch to the next, grown and never shrunk, so a batch allocates nothing
-/// once warm; taken from the process's shelf, a power of two long, and the one they replace given back
-/// to it, so that the next query's grow into the arrays this one's left.
+/// once warm: blocks of the pool, a power of two long, the one they replace given back to it, so that the
+/// next query's grow into the bytes this one's left.
 /// </summary>
 internal static class Scratch
 {
-    /// <summary>Makes <paramref name="array"/> hold at least <paramref name="length"/> elements; a grown array starts empty, its old content is not copied.</summary>
-    internal static void Grow<T>(ref T[] array, int length)
+    /// <summary>Makes <paramref name="block"/> hold at least <paramref name="length"/> elements; a grown block starts zeroed, its old content is not copied.</summary>
+    internal static void Grow<T>(ref ScratchBlock<T> block, int length)
+        where T : unmanaged
     {
-        if (array.Length < length)
+        if (block.Length < length)
         {
-            T[] old = array;
-            array = ArrayShelf.Retained.Take<T>(Capacity(length, array.Length), zeroed: true);
-            ArrayShelf.Retained.Give(old);
+            Blocks.ReturnBytes(block.Bytes);
+            block = ScratchBlock<T>.Rent(Capacity(length, block.Length));
         }
     }
 
-    /// <summary>Gives <paramref name="array"/> back to the process's shelf, its owner done with it, and leaves it empty.</summary>
-    internal static void Return<T>(ref T[] array)
+    /// <summary>Gives <paramref name="block"/> back to the pool, its owner done with it, and leaves it empty.</summary>
+    internal static void Return<T>(ref ScratchBlock<T> block)
+        where T : unmanaged
     {
-        ArrayShelf.Retained.Give(array);
-        array = [];
+        Blocks.ReturnBytes(block.Bytes);
+        block = default;
     }
 
     /// <summary>
@@ -795,4 +800,192 @@ internal static class Scratch
         long wanted = Math.Max(needed, 2L * current);
         return wanted > 1L << 30 ? Array.MaxLength : (int)BitOperations.RoundUpToPowerOf2((uint)wanted);
     }
+}
+
+/// <summary>
+/// A block of the pool a holder keeps as scratch from one batch to the next, held as its bytes alone: a field of 8 bytes
+/// where a <see cref="Block{T}"/> takes 16, on the slots, keys and masks a query makes for every lane and every sub-table
+/// of its core, by the thousand. Its length is every element its bytes hold, as a scratch's is its capacity.
+/// </summary>
+/// <typeparam name="T">The element type.</typeparam>
+[DebuggerDisplay("ScratchBlock<{typeof(T).Name,nq}>[{Length}]")]
+internal readonly struct ScratchBlock<T>
+    where T : unmanaged
+{
+    private readonly byte[]? _bytes;
+
+    private ScratchBlock(byte[]? bytes) => _bytes = bytes;
+
+    /// <summary>A block of <paramref name="length"/> elements at least, from the pool, every byte zeroed.</summary>
+    internal static ScratchBlock<T> Rent(int length)
+    {
+        byte[]? bytes = Blocks.Rent<byte>(checked(length * Unsafe.SizeOf<T>())).Bytes;
+        bytes?.AsSpan().Clear();
+        return new ScratchBlock<T>(bytes);
+    }
+
+    /// <summary>
+    /// The scratch over <paramref name="block"/>'s bytes, which the block holds whole, its length all they hold: a block of a
+    /// power of two of elements of a power of two of bytes, from the pool's smallest class up.
+    /// </summary>
+    internal static ScratchBlock<T> Whole(Block<T> block)
+    {
+        Debug.Assert(block.IsDefault || block.Length == block.Capacity, "The block holds its bytes whole.");
+        return new ScratchBlock<T>(block.Bytes);
+    }
+
+    /// <summary>Every element the bytes hold.</summary>
+    public int Length => _bytes is null ? 0 : _bytes.Length / Unsafe.SizeOf<T>();
+
+    /// <summary>Whether the scratch holds no bytes: never grown, or given back.</summary>
+    internal bool IsDefault => _bytes is null;
+
+    /// <summary>The bytes, which the pool takes back.</summary>
+    internal byte[]? Bytes => _bytes;
+
+    /// <summary>The scratch as a block of <see cref="Length"/> elements.</summary>
+    internal Block<T> Block => Block<T>.Over(_bytes, Length);
+
+    /// <summary>Element <paramref name="index"/>.</summary>
+    /// <exception cref="IndexOutOfRangeException"><paramref name="index"/> lies past <see cref="Length"/>.</exception>
+    public ref T this[int index]
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        get
+        {
+            byte[]? bytes = _bytes;
+            if (bytes is null || ((ulong)(uint)index + 1) * (ulong)Unsafe.SizeOf<T>() > (ulong)bytes.Length)
+            {
+                ThrowIndex();
+            }
+
+            return ref Unsafe.Add(ref Unsafe.As<byte, T>(ref MemoryMarshal.GetArrayDataReference(bytes!)), (nint)(uint)index);
+        }
+    }
+
+    /// <summary>Every element, as a span.</summary>
+    public Span<T> AsSpan() => _bytes is null ? default : MemoryMarshal.Cast<byte, T>(_bytes.AsSpan(0, Length * Unsafe.SizeOf<T>()));
+
+    /// <summary>The elements from <paramref name="start"/> on, as a span.</summary>
+    public Span<T> AsSpan(int start) => AsSpan()[start..];
+
+    /// <summary><paramref name="length"/> elements from <paramref name="start"/>, as a span.</summary>
+    public Span<T> AsSpan(int start, int length) => AsSpan().Slice(start, length);
+
+    /// <summary>A reference to element 0; for a vector load from a computed offset.</summary>
+    /// <exception cref="NullReferenceException">The scratch holds no bytes.</exception>
+    public ref T GetReference() => ref Unsafe.As<byte, T>(ref MemoryMarshal.GetArrayDataReference(_bytes!));
+
+    /// <summary>Zeroes every element.</summary>
+    public void Clear() => _bytes?.AsSpan().Clear();
+
+    public static implicit operator Span<T>(ScratchBlock<T> block) => block.AsSpan();
+
+    public static implicit operator ReadOnlySpan<T>(ScratchBlock<T> block) => block.AsSpan();
+
+    public static implicit operator Block<T>(ScratchBlock<T> block) => block.Block;
+
+    [DoesNotReturn]
+    private static void ThrowIndex() => throw new IndexOutOfRangeException();
+}
+
+/// <summary>
+/// Values of <typeparamref name="T"/> a holder keeps from one call to the next, grown and never shrunk, for a type that
+/// may hold references: the bytes of a block of the pool when it holds none, an array of the holder's own when it does,
+/// or when a record reads the values as an array, which no block can be. One field, the bytes or the array.
+/// </summary>
+/// <typeparam name="T">The values' type.</typeparam>
+internal struct ValueScratch<T>
+{
+    private Array? _held;
+
+    /// <summary>Every value the scratch has room for, as many as it was grown to at least.</summary>
+    internal readonly Span<T> Values
+    {
+        get
+        {
+            Array? held = _held;
+            if (held is null)
+            {
+                return default;
+            }
+
+            if (Owns(held))
+            {
+                return Unsafe.As<T[]>(held);
+            }
+
+            byte[] bytes = Unsafe.As<byte[]>(held);
+            return MemoryMarshal.CreateSpan(ref Unsafe.As<byte, T>(ref MemoryMarshal.GetArrayDataReference(bytes)), bytes.Length / Unsafe.SizeOf<T>());
+        }
+    }
+
+    /// <summary>The values as the array of the holder's own they lie in, for a record that reads them so: the scratch grown <c>owned</c>.</summary>
+    internal readonly T[] Owned => (T[])_held!;
+
+    /// <summary>
+    /// Room for <paramref name="length"/> values at least, reserved under <paramref name="memory"/> for
+    /// <paramref name="what"/> when given; what the scratch held let go first, the new values zeroed. An array of the
+    /// holder's own when <paramref name="owned"/>, for a record that reads the values as one.
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The query's budget does not grant the room.</exception>
+    internal void Grow(int length, bool owned = false, QueryMemory? memory = null, string what = "")
+    {
+        int held = Values.Length;
+        if (length <= held)
+        {
+            return;
+        }
+
+        Return(memory);
+        int capacity = Scratch.Capacity(length, held);
+        long bytes = (long)capacity * Unsafe.SizeOf<T>();
+        if (owned || RuntimeHelpers.IsReferenceOrContainsReferences<T>())
+        {
+            if (memory is not null && bytes >= Blocks.LeastCounted)
+            {
+                if (!memory.TryGrow(bytes))
+                {
+                    throw memory.Exceeded(what, -1, bytes);
+                }
+
+                memory.Measure(bytes);
+            }
+
+            _held = new T[capacity];
+            return;
+        }
+
+        byte[] rented = Blocks.Rent<byte>(memory, checked((int)bytes), what).Bytes!;
+        rented.AsSpan().Clear();
+        _held = rented;
+    }
+
+    /// <summary>Lets the values go, the pool's bytes given back, and what was reserved under <paramref name="memory"/> with them.</summary>
+    internal void Return(QueryMemory? memory = null)
+    {
+        Array? held = _held;
+        _held = null;
+        if (held is null)
+        {
+            return;
+        }
+
+        if (Owns(held) && typeof(T) != typeof(byte))
+        {
+            long bytes = (long)held.Length * Unsafe.SizeOf<T>();
+            if (memory is not null && bytes >= Blocks.LeastCounted)
+            {
+                memory.Shrink(bytes);
+                memory.Measure(-bytes);
+            }
+
+            return;
+        }
+
+        Blocks.Return(memory, Block<byte>.Over(Unsafe.As<byte[]>(held), held.Length));
+    }
+
+    /// <summary>Whether <paramref name="held"/> is an array of the values' own type: always for a type that holds references; for one that holds none, an array grown owned.</summary>
+    private static bool Owns(Array held) => RuntimeHelpers.IsReferenceOrContainsReferences<T>() || held.GetType() == typeof(T[]);
 }

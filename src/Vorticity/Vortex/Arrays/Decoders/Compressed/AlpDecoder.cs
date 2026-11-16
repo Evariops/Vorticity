@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -168,7 +167,7 @@ internal sealed class AlpDecoder : ArrayDecoder
         ArrayDecodeContext context, in ArrayNode node, DType encodedType, int length, in Scaling scaling,
         ReadOnlySpan<Expressions.FilterLiteral> members, int width, ref Compute.PredicateBits bits)
     {
-        Int128[] rented = ArrayPool<Int128>.Shared.Rent(Math.Max(1, members.Length * MostIntegersAMember));
+        Block<Int128> rented = Blocks.Rent<Int128>(members.Length * MostIntegersAMember);
         try
         {
             int count = 0;
@@ -215,7 +214,7 @@ internal sealed class AlpDecoder : ArrayDecoder
         }
         finally
         {
-            ArrayPool<Int128>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 

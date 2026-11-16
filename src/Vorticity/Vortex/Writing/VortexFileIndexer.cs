@@ -238,13 +238,16 @@ public static class VortexFileIndexer
                 // The tail is written into the scratch from its start, while its offsets count from
                 // the end of the file it goes behind: of its plaintext, for a sealed one. The scratch
                 // of a sealed file holds the sealed epoch, so no plaintext reaches it.
+                // The pass is a job: the tail's segments, its indexes' and its blobs' blocks count under the session's jobs'
+                // budget until it ends.
+                using WorkAccount account = VortexFileWriter.AccountFor(file.Session);
                 FilePipeWriter tail = new FilePipeWriter(
                     System.IO.File.OpenHandle(scratch, FileMode.CreateNew, FileAccess.Write, FileShare.None, FileOptions.Asynchronous),
                     0,
-                    file.Session.Options.MemoryPool);
+                    new AccountMemoryPool(account));
                 ISegmentSink sink = sealedLayout is null
                     ? new PipeSegmentSink(tail, file.FileLength)
-                    : new Sealing.SealingSegmentSink(tail, sealedLayout, ct => session.Keys!.UnwrapAsync(sealedLayout.Descriptor, ct));
+                    : new Sealing.SealingSegmentSink(tail, sealedLayout, ct => session.Keys!.UnwrapAsync(sealedLayout.Descriptor, ct)) { Account = account };
                 try
                 {
                     EncodingDictionary encodings = new EncodingDictionary(ComponentKind.Array, options?.TargetEdition ?? EditionRegistry.Newest);
@@ -260,7 +263,7 @@ public static class VortexFileIndexer
                         : null;
                     using IndexWriter indexes = await BuildAsync(
                         file, sink, policy, options, encodings, previous?.Entries ?? [], file.FileLength,
-                        new RowRange(0, file.RowCount), sealedLayout is not null, cancellationToken).ConfigureAwait(false);
+                        new RowRange(0, file.RowCount), sealedLayout is not null, account, cancellationToken).ConfigureAwait(false);
                     reports = [.. indexes.Reports];
                     await WriteTailAsync(file, sink, indexes, encodings, options?.Identity, cancellationToken).ConfigureAwait(false);
                     await sink.FinishAsync(cancellationToken).ConfigureAwait(false);
@@ -318,7 +321,7 @@ public static class VortexFileIndexer
     {
         const int ChunkBytes = 1 << 20;
         long length = RandomAccess.GetLength(source);
-        byte[] chunk = ArrayPool<byte>.Shared.Rent((int)Math.Min(ChunkBytes, Math.Max(length, 1)));
+        Buffers.Block<byte> chunk = Buffers.Blocks.Rent<byte>((int)Math.Min(ChunkBytes, Math.Max(length, 1)));
         try
         {
             for (long done = 0; done < length;)
@@ -336,7 +339,7 @@ public static class VortexFileIndexer
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(chunk);
+            Buffers.Blocks.Return(chunk);
         }
     }
 
@@ -420,8 +423,9 @@ public static class VortexFileIndexer
         // Sealed as a file the session writes is, as it is written: its plaintext is never whole in memory.
         System.IO.Pipelines.PipeWriter pipe = System.IO.Pipelines.PipeWriter.Create(
             bytes, new System.IO.Pipelines.StreamPipeWriterOptions(leaveOpen: true));
+        // Released in the finally below whatever happens: the process's account.
         Sealing.SealingSegmentSink sealing = new Sealing.SealingSegmentSink(
-            pipe, Sealing.SealParameters.ForFile(), file.Session.Keys!.FileKeyAsync);
+            pipe, Sealing.SealParameters.ForFile(), file.Session.Keys!.FileKeyAsync) { Account = QueryMemoryBudget.Process.Account };
         try
         {
             IReadOnlyList<IndexWriteReport> reports = await WriteContainerAsync(
@@ -443,8 +447,11 @@ public static class VortexFileIndexer
         await sink.WriteAsync(IndexContainer.Magic.ToArray(), cancellationToken).ConfigureAwait(false);
         EncodingDictionary encodings = new EncodingDictionary(
             ComponentKind.Array, options?.TargetEdition ?? EditionRegistry.Newest);
+
+        // The container is a job: its indexes' and its blobs' blocks count under the session's jobs' budget until it ends.
+        using WorkAccount account = VortexFileWriter.AccountFor(file.Session);
         using IndexWriter indexes = await BuildAsync(
-            file, sink, policy, options, encodings, [], 0, rows, sealScratch, cancellationToken).ConfigureAwait(false);
+            file, sink, policy, options, encodings, [], 0, rows, sealScratch, account, cancellationToken).ConfigureAwait(false);
         FragmentBinding binding = new FragmentBinding(file.FileLength, file.StoredIdentity, token, hash, [.. encodings.Ids]);
         long offset = sink.Position;
         byte[] directory = indexes.Directory(file.RowCount, binding)!;
@@ -463,7 +470,7 @@ public static class VortexFileIndexer
     private static async ValueTask<IndexWriter> BuildAsync(
         VortexFile file, ISegmentSink sink, WritePolicy policy, VortexWriteOptions? options,
         EncodingDictionary encodings, IReadOnlyList<IndexEntry> previous, long previousEof, RowRange range,
-        bool sealScratch, CancellationToken cancellationToken)
+        bool sealScratch, WorkAccount account, CancellationToken cancellationToken)
     {
         DType schema = file.DType;
         if (schema.IsDefault || schema.Kind != DTypeKind.Struct)
@@ -523,7 +530,7 @@ public static class VortexFileIndexer
         }
 
         IndexWriter indexes = new IndexWriter(
-            policy, schema, isTabular: true, fields,
+            account, policy, schema, isTabular: true, fields,
             options?.IndexBudgetPerMille ?? VortexWriteOptions.Default.IndexBudgetPerMille, blockRows, options?.KeyEncoder,
             options?.ScratchDirectory, options?.ScratchMemoryBytes ?? IndexWriter.DefaultScratchMemoryBytes,
             options?.WideRowsAbove ?? uint.MaxValue, sealScratch || file.SealedLayout is not null || file.Session.Seals,
@@ -534,7 +541,7 @@ public static class VortexFileIndexer
         };
 
         // Every payload blob of the pass is assembled in the same workspace, one after the other.
-        using ArrayBlobWriter.Workspace blobs = new ArrayBlobWriter.Workspace();
+        using ArrayBlobWriter.Workspace blobs = new ArrayBlobWriter.Workspace { Account = account };
         try
         {
             indexes.Preserve(previous, previousEof);

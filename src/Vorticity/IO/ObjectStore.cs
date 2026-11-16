@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.IO;
 using System.IO.Pipelines;
 using System.Threading;
 using System.Threading.Tasks;
@@ -75,6 +76,64 @@ public interface IObjectStore : IAsyncDisposable
         catch (ObjectNotFoundException)
         {
             return null;
+        }
+    }
+
+    /// <summary>
+    /// Copies <paramref name="length"/> bytes of an object, from <paramref name="offset"/>, to <paramref name="destination"/>
+    /// as they arrive: what a dataset's compaction does to bring its inputs to its local scratch. A store that streams an
+    /// answer copies in one request, a body cut short asked again from where it stopped; the default reads a block of
+    /// 4 MiB at a time (<see cref="ReadAsync"/>), a request each.
+    /// </summary>
+    /// <param name="key">The object's key.</param>
+    /// <param name="offset">The first byte.</param>
+    /// <param name="length">The bytes to copy, the object's at most past the offset.</param>
+    /// <param name="destination">Where the bytes go, written in their order from its current position.</param>
+    /// <param name="ifToken">The token the object must still have, or null for any.</param>
+    /// <param name="cancellationToken">Cancels the copy.</param>
+    /// <returns>The bytes copied: fewer than <paramref name="length"/> only when the object ends before.</returns>
+    /// <exception cref="ObjectNotFoundException">No object has that key.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The offset is past the object's end.</exception>
+    /// <exception cref="VortexFormatException">The object's token is not <paramref name="ifToken"/>: it changed under the copy.</exception>
+    async ValueTask<long> CopyToAsync(string key, long offset, long length, Stream destination, string? ifToken, CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(destination);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        if (length == 0)
+        {
+            return 0;
+        }
+
+        // Every read after the first bound to the token of the first: the copy is of one object, never of two.
+        byte[] block = VortexBytePool.Instance.Rent((int)Math.Min(4L << 20, length));
+        try
+        {
+            long copied = 0;
+            string? token = ifToken;
+            while (copied < length)
+            {
+                Memory<byte> into = block.AsMemory(0, (int)Math.Min(block.Length, length - copied));
+                ObjectRead read = await ReadAsync(key, offset + copied, into, token, cancellationToken).ConfigureAwait(false);
+                token ??= read.Token;
+                if (read.BytesRead <= 0)
+                {
+                    break;
+                }
+
+                await destination.WriteAsync(into[..read.BytesRead], cancellationToken).ConfigureAwait(false);
+                copied += read.BytesRead;
+                if (offset + copied >= read.ObjectLength)
+                {
+                    break;
+                }
+            }
+
+            return copied;
+        }
+        finally
+        {
+            VortexBytePool.Instance.Return(block);
         }
     }
 

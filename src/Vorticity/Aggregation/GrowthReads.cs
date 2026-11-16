@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Scanning;
 using Vorticity.Types;
@@ -45,13 +46,21 @@ internal static class GrowthReads
         }
 
         int count = outcome.Keys?.Count ?? 1;
-        int[] all = new int[count];
-        for (int g = 0; g < count; g++)
+        Block<int> all = Blocks.Rent<int>(count);
+        try
         {
-            all[g] = g;
+            for (int g = 0; g < count; g++)
+            {
+                all[g] = g;
+            }
+
+            await SettleAsync(outcome, source, spec, metrics, new BlockSlice<int>(all, 0, count), cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            Blocks.Return(all);
         }
 
-        await SettleAsync(outcome, source, spec, metrics, all, cancellationToken).ConfigureAwait(false);
         outcome.RunsSettled = true;
     }
 
@@ -63,7 +72,7 @@ internal static class GrowthReads
     /// <param name="groups">The groups.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
     internal static async ValueTask SettleAsync(
-        AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanCounters metrics, ReadOnlyMemory<int> groups, CancellationToken cancellationToken)
+        AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanCounters metrics, BlockSlice<int> groups, CancellationToken cancellationToken)
     {
         AggregationPlan plan = outcome.Plan;
         if (!plan.Ordered || outcome.RunsSettled)
@@ -83,7 +92,7 @@ internal static class GrowthReads
     }
 
     private static async ValueTask SettleEachAsync(
-        AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanCounters metrics, ReadOnlyMemory<int> groups, CancellationToken cancellationToken)
+        AggregationOutcome outcome, ScanSource source, ScanSpec spec, ScanCounters metrics, BlockSlice<int> groups, CancellationToken cancellationToken)
     {
         AggregationPlan plan = outcome.Plan;
         for (int a = 0; a < plan.Aggregates.Length; a++)
@@ -275,10 +284,10 @@ internal static class GrowthReads
         private readonly GroupKeys? _keys = reading.Plan.Grouped ? reading.Plan.CreateKeys(sorted: false) : null;
         private readonly GroupRanges _keyRanges = new GroupRanges();
         private readonly int[] _nodes = new int[reading.Columns.Length];
-        private int[] _rowGroups = [];
+        private ScratchBlock<int> _rowGroups;
         private int[] _status = [];
-        private int[] _taken = [];
-        private int[] _targets = [];
+        private ScratchBlock<int> _taken;
+        private ScratchBlock<int> _targets;
         private long _number;
 
         /// <summary>The points the lane gathered.</summary>

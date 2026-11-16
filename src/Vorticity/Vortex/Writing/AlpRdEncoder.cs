@@ -1,12 +1,11 @@
 using System;
-using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
-using Vorticity.Aggregating;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Types;
@@ -58,14 +57,14 @@ internal sealed class AlpRdPlan
     private const int Overhead = 512;
 
     private DictionaryPatterns _dictionary;
-    private ushort[] _codes;
-    private byte[] _right;
-    private int[] _exceptionRows;
-    private byte[] _exceptionValues;
+    private Block<ushort> _codes;
+    private Block<byte> _right;
+    private Block<int> _exceptionRows;
+    private Block<byte> _exceptionValues;
 
     private AlpRdPlan(
         in DictionaryPatterns dictionary, int dictionaryLength, int rightBitWidth, int rows, int width,
-        ushort[] codes, byte[] right, int[] exceptionRows, byte[] exceptionValues, int exceptions,
+        Block<ushort> codes, Block<byte> right, Block<int> exceptionRows, Block<byte> exceptionValues, int exceptions,
         long encodedSize)
     {
         _dictionary = dictionary;
@@ -104,10 +103,10 @@ internal sealed class AlpRdPlan
     internal int Width { get; }
 
     /// <summary>The dictionary code of each row's high bits; 0 at a null and at an exception.</summary>
-    internal ReadOnlySpan<ushort> Codes => _codes.Length == 0 ? [] : _codes.AsSpan(0, Rows);
+    internal ReadOnlySpan<ushort> Codes => _codes;
 
     /// <summary>Each row's low bits, little-endian at <see cref="Width"/>.</summary>
-    internal ReadOnlySpan<byte> Right => _right.Length == 0 ? [] : _right.AsSpan(0, Rows * Width);
+    internal ReadOnlySpan<byte> Right => _right;
 
     /// <summary>The rows whose high bits are not in the dictionary, ascending.</summary>
     internal ReadOnlySpan<int> ExceptionRows => _exceptionRows.AsSpan(0, ExceptionCount);
@@ -224,50 +223,32 @@ internal sealed class AlpRdPlan
     /// </summary>
     internal void ReleaseParts()
     {
-        ushort[] codes = _codes;
-        byte[] right = _right;
-        _codes = [];
-        _right = [];
-        if (codes.Length > 0)
-        {
-            WorkArrays.Return(codes);
-        }
-
-        if (right.Length > 0)
-        {
-            WorkArrays.Return(right);
-        }
+        Blocks.Return(_codes);
+        Blocks.Return(_right);
+        _codes = default;
+        _right = default;
     }
 
     /// <summary>
-    /// The exceptions' high bits, little-endian u16, and the bytes of the rental that hold them.
+    /// The exceptions' high bits, little-endian u16, and the bytes of the block that hold them.
     /// They pass to the caller: the plan forgets them, and <see cref="Release"/> no longer hands them back.
     /// </summary>
-    internal (byte[] Values, int Length) TakeExceptionValues()
+    internal (Block<byte> Values, int Length) TakeExceptionValues()
     {
-        byte[] values = _exceptionValues;
-        _exceptionValues = [];
-        return (values, values.Length == 0 ? 0 : ExceptionCount * sizeof(ushort));
+        Block<byte> values = _exceptionValues;
+        _exceptionValues = default;
+        return (values, values.Length);
     }
 
-    /// <summary>Hands back every rental the plan still holds. Safe twice.</summary>
+    /// <summary>Hands back every block the plan still holds. Safe twice.</summary>
     internal void Release()
     {
         ReleaseParts();
-        int[] rows = _exceptionRows;
-        byte[] values = _exceptionValues;
-        _exceptionRows = [];
-        _exceptionValues = [];
+        Blocks.Return(_exceptionRows);
+        Blocks.Return(_exceptionValues);
+        _exceptionRows = default;
+        _exceptionValues = default;
         ExceptionCount = 0;
-        if (rows.Length > 0)
-        {
-            WorkArrays.Return(rows);
-        }
-
-        if (values.Length > 0)
-        {
-            WorkArrays.Return(values);
-        }
     }
 
     private static AlpRdPlan? Build<TBits>(CanonicalArena arena, CanonicalNode node, long plain, in Cut cut)
@@ -281,16 +262,16 @@ internal sealed class AlpRdPlan
         int dictionaryLength = cut.Length;
         int rightBitWidth = cut.RightBitWidth;
 
-        ushort[] codes = WorkArrays.Rent<ushort>(rows);
-        byte[] right = WorkArrays.Rent<byte>(rows * width);
-        int[] exceptionRows = WorkArrays.Rent<int>(Math.Max(rows / 64, 16));
-        ushort[] exceptionPatterns = WorkArrays.Rent<ushort>(exceptionRows.Length);
+        Block<ushort> codes = Blocks.Rent<ushort>(rows);
+        Block<byte> right = Blocks.Rent<byte>(rows * width);
+        Block<int> exceptionRows = Blocks.Rent<int>(Math.Max(rows / 64, 16));
+        Block<ushort> exceptionPatterns = Blocks.Rent<ushort>(exceptionRows.Length);
         bool kept = false;
         try
         {
             int exceptions = Split(
-                values, mask, rightBitWidth, dictionary, dictionaryLength, codes.AsSpan(0, rows),
-                MemoryMarshal.Cast<byte, TBits>(right.AsSpan(0, rows * width)),
+                values, mask, rightBitWidth, dictionary, dictionaryLength, codes,
+                MemoryMarshal.Cast<byte, TBits>(right.AsSpan()),
                 ref exceptionRows, ref exceptionPatterns);
 
             // Both parts are packed a whole block at a time, as the writer packs them.
@@ -306,11 +287,11 @@ internal sealed class AlpRdPlan
                 return null;
             }
 
-            // The exceptions are copied out of their growing rentals into rentals of their own
-            // size, so that a plan holds what it has until it is written; their high bits go out
-            // as the little-endian u16 the patch values are.
-            int[] keptRows = exceptions == 0 ? [] : WorkArrays.Rent<int>(exceptions);
-            byte[] keptValues = exceptions == 0 ? [] : WorkArrays.Rent<byte>(exceptions * sizeof(ushort));
+            // The exceptions are copied out of their growing blocks into blocks of their own size,
+            // so that a plan holds what it has until it is written; their high bits go out as the
+            // little-endian u16 the patch values are.
+            Block<int> keptRows = Blocks.Rent<int>(exceptions);
+            Block<byte> keptValues = Blocks.Rent<byte>(exceptions * sizeof(ushort));
             exceptionRows.AsSpan(0, exceptions).CopyTo(keptRows);
             MemoryMarshal.AsBytes(exceptionPatterns.AsSpan(0, exceptions)).CopyTo(keptValues);
             if (!BitConverter.IsLittleEndian)
@@ -326,12 +307,12 @@ internal sealed class AlpRdPlan
         }
         finally
         {
-            WorkArrays.Return(exceptionRows);
-            WorkArrays.Return(exceptionPatterns);
+            Blocks.Return(exceptionRows);
+            Blocks.Return(exceptionPatterns);
             if (!kept)
             {
-                WorkArrays.Return(codes);
-                WorkArrays.Return(right);
+                Blocks.Return(codes);
+                Blocks.Return(right);
             }
         }
     }
@@ -353,7 +334,7 @@ internal sealed class AlpRdPlan
     private static int Split<TBits>(
         ReadOnlySpan<TBits> values, ValidityMask mask, int rightBitWidth,
         in DictionaryPatterns dictionary, int dictionaryLength, Span<ushort> codes, Span<TBits> right,
-        ref int[] exceptionRows, ref ushort[] exceptionPatterns)
+        ref Block<int> exceptionRows, ref Block<ushort> exceptionPatterns)
         where TBits : unmanaged, IBinaryInteger<TBits>, IUnsignedNumber<TBits>
     {
         TBits rightMask = (TBits.One << rightBitWidth) - TBits.One;
@@ -416,7 +397,7 @@ internal sealed class AlpRdPlan
     private static int SplitLanes<TBits>(
         ReadOnlySpan<TBits> values, ValidityMask mask, int rightBitWidth,
         in DictionaryPatterns dictionary, int dictionaryLength, Span<ushort> codes, Span<TBits> right,
-        ref int[] exceptionRows, ref ushort[] exceptionPatterns, ref int exceptions)
+        ref Block<int> exceptionRows, ref Block<ushort> exceptionPatterns, ref int exceptions)
         where TBits : unmanaged, IBinaryInteger<TBits>, IUnsignedNumber<TBits>
     {
         int lanes = Vector512<TBits>.Count;
@@ -483,14 +464,10 @@ internal sealed class AlpRdPlan
         return row;
     }
 
-    /// <summary>Doubles a rental, keeping its first <paramref name="used"/> entries.</summary>
-    private static void Grow<T>(ref T[] rental, int used)
-    {
-        T[] grown = WorkArrays.Rent<T>(rental.Length * 2);
-        rental.AsSpan(0, used).CopyTo(grown);
-        WorkArrays.Return(rental);
-        rental = grown;
-    }
+    /// <summary>Doubles a block, keeping its entries.</summary>
+    private static void Grow<T>(ref Block<T> rental, int used)
+        where T : unmanaged =>
+        Blocks.Grow(ref rental, Math.Max(rental.Length * 2, used + 1));
 
     /// <summary>
     /// The reference's search: the leading sixteen bits of a sample, counted per pattern, and every
@@ -501,9 +478,9 @@ internal sealed class AlpRdPlan
         where TBits : unmanaged, IBinaryInteger<TBits>, IUnsignedNumber<TBits>
     {
         int bits = Unsafe.SizeOf<TBits>() * 8;
-        ushort[] sample = WorkArrays.Rent<ushort>(Math.Min(rows, MaxSample));
-        ushort[] groupPatterns = WorkArrays.Rent<ushort>(Math.Min(rows, MaxSample));
-        uint[] groupCounts = WorkArrays.Rent<uint>(Math.Min(rows, MaxSample));
+        Block<ushort> sample = Blocks.Rent<ushort>(Math.Min(rows, MaxSample));
+        Block<ushort> groupPatterns = Blocks.Rent<ushort>(Math.Min(rows, MaxSample));
+        Block<uint> groupCounts = Blocks.Rent<uint>(Math.Min(rows, MaxSample));
         try
         {
             int count = Sample(values, mask, rows, bits, sample);
@@ -545,9 +522,9 @@ internal sealed class AlpRdPlan
         }
         finally
         {
-            WorkArrays.Return(sample);
-            WorkArrays.Return(groupPatterns);
-            WorkArrays.Return(groupCounts);
+            Blocks.Return(sample);
+            Blocks.Return(groupPatterns);
+            Blocks.Return(groupCounts);
         }
     }
 

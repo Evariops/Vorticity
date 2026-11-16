@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -211,10 +212,12 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
     private readonly ColumnShape _shape;
 
     // Each group's value: the page and the offset its bytes start at, and its length, -1 for none.
-    private long[] _at = [];
-    private int[] _lengths = [];
+    private Block<long> _at;
+    private Block<int> _lengths;
     private int _groups;
 
+    // The pages, each the bytes of a block rented its whole class long; the list of them, which holds references, the
+    // slot's own.
     private byte[][] _pages = [];
     private int _pageCount;
     private int _fill = -1;
@@ -234,26 +237,22 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
     private MaskCache _rows;
     private CodeSet _distinct;
 
-    // The shelf the slot's arrays and pages grow from, under the query's memory.
-    private ArrayShelf? _shelf;
+    // The account the slot's blocks and pages are rented under, the query's memory's.
+    private TableArrays _account = TableArrays.Uncounted;
 
-    internal override void Govern(ArrayShelf shelf) => _shelf = shelf;
+    internal override void Govern(TableArrays account) => _account = account;
 
-    /// <summary>The pages, the array listing them, and where each group's value lies, back to the shelf.</summary>
+    /// <summary>The pages, the array listing them, and where each group's value lies, back to the account.</summary>
     internal override void Release()
     {
-        if (_shelf is { } shelf)
+        for (int p = 0; p < _pageCount; p++)
         {
-            for (int p = 0; p < _pageCount; p++)
-            {
-                shelf.Give(_pages[p]);
-            }
-
-            shelf.Give(_pages);
-            shelf.Give(_at);
-            shelf.Give(_lengths);
+            GivePage(_pages[p]);
         }
 
+        _account.Disown(_pages);
+        _account.Return(_at);
+        _account.Return(_lengths);
         _pages = [];
         _pageCount = 0;
         _fill = -1;
@@ -261,8 +260,8 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
         _fillBytes = 0;
         _paged = 0;
         _held = 0;
-        _at = [];
-        _lengths = [];
+        _at = default;
+        _lengths = default;
         _groups = 0;
         _rows.Release();
         _distinct.Release();
@@ -292,8 +291,8 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
         if (groups > _at.Length)
         {
             int grown = Scratch.Capacity(groups, _at.Length);
-            ArrayShelf.Resize(_shelf, ref _at, grown);
-            ArrayShelf.Resize(_shelf, ref _lengths, grown);
+            TableArrays.Resize(_account, ref _at, grown);
+            TableArrays.Resize(_account, ref _lengths, grown);
         }
 
         _lengths.AsSpan(_groups, Math.Max(0, groups - _groups)).Fill(-1);
@@ -553,27 +552,32 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
             }
         }
 
-        // The old pages, and the array that listed them, go back to the shelf.
+        // The old pages go back to the account, and the array that listed them to the collector.
         for (int p = 0; p < held; p++)
         {
-            _shelf?.Give(pages[p]);
+            GivePage(pages[p]);
         }
 
-        _shelf?.Give(pages);
+        _account.Disown(pages);
     }
 
     private int AddPage(int bytes)
     {
         if (_pageCount == _pages.Length)
         {
-            ArrayShelf.Resize(_shelf, ref _pages, Math.Max(4, _pageCount * 2));
+            TableArrays.ResizeOwned(_account, ref _pages, Math.Max(4, _pageCount * 2));
         }
 
-        _pages[_pageCount] = _shelf is null ? GC.AllocateUninitializedArray<byte>(bytes) : _shelf.Take<byte>(bytes, zeroed: false);
-        _paged += bytes;
+        // Its whole class, so that the page's length is all its bytes and what the account counts of it.
+        byte[] page = _account.Rent<byte>((int)Blocks.BytesFor<byte>(bytes), zeroed: false).Bytes!;
+        _pages[_pageCount] = page;
+        _paged += page.Length;
         MostPages = Math.Max(MostPages, _pageCount + 1);
         return _pageCount++;
     }
+
+    /// <summary>A page of the slot's given back to its account.</summary>
+    private void GivePage(byte[] page) => _account.Return(Block<byte>.Over(page, page.Length));
 
     /// <summary>The bytes a value of <paramref name="length"/> takes in a page: whole words, so that a value a little longer still fits.</summary>
     private static int RoomOf(int length) => (length + 7) & ~7;
@@ -592,41 +596,38 @@ internal sealed class BytesExtremeSlot<TResult> : AggregateSlot<TResult>, IBytes
 internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
 {
     private ByteKeyTable _seen = new ByteKeyTable();
-    private long[] _counts = [];
+    private Block<long> _counts;
     private int _groups;
-    private byte[] _key = new byte[64];
+    private ScratchBlock<byte> _key;
     private MaskCache _rows;
     private CodeSet _distinct;
 
     // Each pair chained to the pair its group met before, by their numbers in the table plus one, and
     // each group's last pair: a group's pairs read without another's.
-    private int[] _next = [];
-    private int[] _first = [];
+    private Block<int> _next;
+    private Block<int> _first;
 
-    // The shelf the table, the counts and the chains grow from, under the query's memory.
-    private ArrayShelf? _shelf;
+    // The account the table, the counts and the chains grow under, the query's memory's.
+    private TableArrays _account = TableArrays.Uncounted;
 
-    /// <summary>The shelf the slot grows from, set as it is made, before any pair: its table made again on it.</summary>
-    internal override void Govern(ArrayShelf shelf)
+    /// <summary>The account the slot grows from, set as it is made, before any pair: its table made again on it.</summary>
+    internal override void Govern(TableArrays account)
     {
-        _shelf = shelf;
-        _seen = new ByteKeyTable(shelf);
+        _account = account;
+        _seen = new ByteKeyTable(account);
     }
 
-    /// <summary>The table of pairs, the counts and the chains, back to the shelf.</summary>
+    /// <summary>The table of pairs, the counts and the chains, back to the account.</summary>
     internal override void Release()
     {
         _seen.Release();
-        if (_shelf is { } shelf)
-        {
-            shelf.Give(_counts);
-            shelf.Give(_next);
-            shelf.Give(_first);
-        }
-
-        _counts = [];
-        _next = [];
-        _first = [];
+        Scratch.Return(ref _key);
+        _account.Return(_counts);
+        _account.Return(_next);
+        _account.Return(_first);
+        _counts = default;
+        _next = default;
+        _first = default;
         _groups = 0;
         _rows.Release();
         _distinct.Release();
@@ -636,12 +637,12 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
     {
         if (groups > _counts.Length)
         {
-            ArrayShelf.Resize(_shelf, ref _counts, Scratch.Capacity(groups, _counts.Length));
+            TableArrays.Resize(_account, ref _counts, Scratch.Capacity(groups, _counts.Length));
         }
 
         if (groups > _first.Length)
         {
-            ArrayShelf.Resize(_shelf, ref _first, Scratch.Capacity(groups, _first.Length));
+            TableArrays.Resize(_account, ref _first, Scratch.Capacity(groups, _first.Length));
         }
 
         _groups = Math.Max(_groups, groups);
@@ -676,7 +677,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
             return;
         }
 
-        int[] next = source._next;
+        Block<int> next = source._next;
         for (int i = 0; i < from.Length; i++)
         {
             int group = from[i];
@@ -760,7 +761,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
 
     internal override void PassDone(bool last)
     {
-        Array.Clear(_first);
+        _first.Clear();
         if (!last)
         {
             _seen.Clear();
@@ -768,9 +769,9 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
         }
 
         _seen.Release();
-        _seen = new ByteKeyTable(_shelf);
-        _shelf?.Give(_next);
-        _next = [];
+        _seen = new ByteKeyTable(_account);
+        _account.Return(_next);
+        _next = default;
     }
 
     public long Pairs => _seen.Count;
@@ -799,17 +800,18 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
         if (byGroup)
         {
             EnsureGroups(groups);
-            Array.Clear(_counts, 0, groups);
+            _counts.AsSpan(0, groups).Clear();
         }
 
-        long[] owned = _counts;
+        Block<long> owned = _counts;
         await SideBySide.RunAsync(
             parts,
             part =>
             {
                 ByteKeyTable distinct = new ByteKeyTable();
-                byte[] key = new byte[64];
-                long[] count = byGroup ? owned : new long[groups];
+                ScratchBlock<byte> key = default;
+                long[]? own = byGroup ? null : new long[groups];
+                Span<long> count = own is not null ? own : owned.AsSpan();
                 for (int p = 0; p < all.Length; p++)
                 {
                     (int[] placed, int[] starts) = cuts[p];
@@ -830,14 +832,21 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
                     }
                 }
 
+                Scratch.Return(ref key);
+
                 // The part's table, held until its pairs are counted.
                 long bytes = distinct.Footprint;
+                distinct.Release();
                 if (memory is not null && !memory.TryGrow(bytes))
                 {
                     throw memory.Exceeded("merge of a distinct count", groups, bytes);
                 }
 
-                counts[part] = count;
+                if (own is not null)
+                {
+                    counts[part] = own;
+                }
+
                 memory?.Shrink(bytes);
                 memory?.Discard(bytes);
             },
@@ -847,7 +856,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
         if (!byGroup)
         {
             EnsureGroups(groups);
-            Array.Clear(_counts);
+            _counts.Clear();
             foreach (long[] count in counts)
             {
                 for (int group = 0; group < groups; group++)
@@ -858,7 +867,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
         }
 
         _seen.Clear();
-        Array.Clear(_first);
+        _first.Clear();
     }
 
     /// <summary>
@@ -917,7 +926,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
         }
 
         _seen.Clear();
-        Array.Clear(_first);
+        _first.Clear();
         for (int i = 0; i < groups.Length; i++)
         {
             _counts[i] = _counts[groups[i]];
@@ -954,7 +963,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
         {
             if (number >= _next.Length)
             {
-                ArrayShelf.Resize(_shelf, ref _next, Scratch.Capacity(number + 1, _next.Length));
+                TableArrays.Resize(_account, ref _next, Scratch.Capacity(number + 1, _next.Length));
             }
 
             _next[number] = _first[group];

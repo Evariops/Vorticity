@@ -381,7 +381,7 @@ List<DayLines> days = await logs.Scan<Logged>()
 both as one: 10-01 480 lines of 1 retention, 10-02 480 lines of 1 retention, 10-03 1440 lines of 2 retentions
 ```
 
-The debug lines of the first two days are expired, so those days hold the info lines alone, and the third holds both. The distinct count is exact over both datasets, which no sum of each dataset's own count would give. The same holds for a quantile, a filtered aggregate, a chosen row (`First`, `MaxBy`) and the best groups of an order (`OrderByDescending(…).Take(k)`): the set runs one question, under one session's lanes and memory, and folds the groups of every dataset in the same tables.
+The debug lines of the first two days are expired, so those days hold the info lines alone, and the third holds both. The distinct count is exact over both datasets, which no sum of each dataset's own count would give. The same holds for a quantile, a filtered aggregate, a chosen row (`First`, `MaxBy`) and the best groups of an order (`OrderByDescending(…).Take(k)`): the set runs one question, under one session's lanes and memory, and folds the groups of every dataset in the same tables. Whatever the question, a scan of the rows, their order, a window or an aggregation, it is one question of the session's `MemoryBudget`, whose memory every dataset of the set reserves in.
 
 Each dataset is read as it would be alone. Its objects are pruned by its own summaries and its own sort key, and each object is answered by the cheapest path its own plan proves: its counts, its granules' statistics, its rollups or its rows. A dataset whose summaries refute the filter is asked for no data. The requests a question makes are those each dataset would be asked for the same question, and the datasets are asked side by side where the question does not read them in turn. `ExplainAsync` lists the units of every dataset, and its cost is their sum.
 
@@ -453,17 +453,23 @@ library's meter, under `vortex.synopsis_cache.*`.
 ### What a handle keeps in memory
 
 A handle keeps the data objects its questions opened, so that the next question over them parses no
-footer again, and the tree pages it read, so that a refresh asks the store only for the pages that
-changed. Both are bounded per handle, least recently used first out:
+footer again, the tree pages it read, so that a refresh asks the store only for the pages that
+changed, and what it parsed: synopses, partitions' indexes, filters' pages, index entries. None of
+these has a budget of its own. They hold what the handle's questions read, and the process takes back
+what they hold above a floor, least recently used first, when its work needs the room or once nothing
+read it for a while: what many handles keep follows what their questions read, not how many handles
+are open. Two floors are options:
 
-| Option | Default | What it bounds |
+| Option | Default | What it keeps whatever the process asks |
 |---|---|---|
-| `MaxOpenObjectBytes` | 64 MiB | the objects kept open: the tail each open read, and its footer as questions parse it, counted at six bytes a byte of footer (measured at five to seven) |
-| `MaxOpenObjects` | 4 096 | the same objects, by count |
-| `PageCacheBytes` | 32 MiB | the tree pages kept from one version to the next |
+| `OpenObjectFloorBytes` | 8 MiB | the objects kept open: the tail each open read, and its footer as questions parse it, counted at six bytes a byte of footer (measured at five to seven) |
+| `PageFloorBytes` | 4 MiB | the tree pages kept from one version to the next |
 
-Up to version 0.11 a handle kept 32 objects open, a few hundred kilobytes: a process that holds many
-handles open at once now keeps up to 96 MiB for each, and sets lower bounds where that is too much.
+`MaxOpenObjects`, 4 096 by default, still bounds the objects kept open by count. Forty handles over
+sets of five datasets each kept 41 MiB in all at rest, about a mebibyte a handle, all within their
+floors: the questions asked after the process had let go of everything above them made no request to
+the store, where the first round made 160. Up to version 0.12 the two options were ceilings,
+`MaxOpenObjectBytes` and `PageCacheBytes`, which a process holding many handles had to lower.
 
 ## Versions
 

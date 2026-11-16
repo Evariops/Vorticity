@@ -11,7 +11,7 @@ using Vorticity.Types;
 namespace Vorticity.Writing;
 
 /// <summary>
-/// One column of a builder: its rows in native buffers rented from the session's pool, laid out in
+/// One column of a builder: its rows in blocks of the pool counted for the builder's work, laid out in
 /// the canonical form the engine reads, so that a batch over them references the buffers rather
 /// than copying them.
 /// </summary>
@@ -25,22 +25,22 @@ internal abstract unsafe class ColumnStore
 {
     private static readonly DType BitmapType = new DTypeArena().Bool(Nullability.NonNullable);
 
-    private NativeSegmentOwner? _validityOwner;
+    private BlockOwner? _validityOwner;
     private byte* _validity;
     private int _validityBytes;
     private int _known;
     private bool _nulls;
 
-    protected ColumnStore(DType dtype, AlignedBufferPool pool)
-        : this(dtype, VortexTypes.FromDType(dtype), pool)
+    protected ColumnStore(DType dtype, MemoryAccount account)
+        : this(dtype, VortexTypes.FromDType(dtype), account)
     {
     }
 
-    protected ColumnStore(DType dtype, VortexType type, AlignedBufferPool pool)
+    protected ColumnStore(DType dtype, VortexType type, MemoryAccount account)
     {
         DType = dtype;
         Type = type;
-        Pool = pool;
+        Account = account;
     }
 
     /// <summary>The engine's dtype of the nodes this store builds.</summary>
@@ -51,7 +51,8 @@ internal abstract unsafe class ColumnStore
 
     internal bool IsNullable => Type.IsNullable;
 
-    protected AlignedBufferPool Pool { get; }
+    /// <summary>Whom the store's blocks are counted for: the work that builds its rows.</summary>
+    protected MemoryAccount Account { get; }
 
     /// <summary>Rows appended, committed or not; a struct counts its fields' rows instead.</summary>
     internal int Count;
@@ -233,7 +234,7 @@ internal abstract unsafe class ColumnStore
     {
         if (_validityOwner is not null)
         {
-            Pool.Return(_validityOwner);
+            _validityOwner.Release();
             _validityOwner = null;
         }
 
@@ -251,15 +252,15 @@ internal abstract unsafe class ColumnStore
             return;
         }
 
-        Grow(Pool, ref _validityOwner, ref _validity, ref _validityBytes, (_known + 7) >> 3, bytes);
+        Grow(Account, ref _validityOwner, ref _validity, ref _validityBytes, (_known + 7) >> 3, bytes);
     }
 
     /// <summary>
     /// Replaces a buffer with one of at least <paramref name="needed"/> bytes, keeping the first
-    /// <paramref name="used"/>, and gives the old one back to the pool.
+    /// <paramref name="used"/>, rented under <paramref name="account"/>, and gives the old one back to the pool.
     /// </summary>
     protected static void Grow(
-        AlignedBufferPool pool, ref NativeSegmentOwner? owner, ref byte* data, ref int capacity, long used, long needed)
+        MemoryAccount account, ref BlockOwner? owner, ref byte* data, ref int capacity, long used, long needed)
     {
         const long Ceiling = int.MaxValue - 4096;
         if (needed > Ceiling)
@@ -270,24 +271,20 @@ internal abstract unsafe class ColumnStore
         long doubled = Math.Max(4096L, (long)capacity * 2);
         long size = Math.Max(needed, doubled);
         size = size <= 1L << 30 ? (long)BitOperations.RoundUpToPowerOf2((ulong)size) : Math.Min(size, Ceiling);
-        NativeSegmentOwner next = pool.Rent((int)size, VortexLimits.MaxAlignment);
+        BlockOwner next = account.Rent((int)size, VortexLimits.MaxAlignment);
         byte* target = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(next.WritableSpan));
         if (used > 0)
         {
             Buffer.MemoryCopy(data, target, size, used);
         }
 
-        if (owner is not null)
-        {
-            pool.Return(owner);
-        }
-
+        owner?.Release();
         owner = next;
         data = target;
         capacity = (int)size;
     }
 
     /// <summary>A view of the first <paramref name="length"/> bytes of a buffer, empty when there is none.</summary>
-    protected static VortexBuffer View(NativeSegmentOwner? owner, int length) =>
+    protected static VortexBuffer View(BlockOwner? owner, int length) =>
         owner is null || length == 0 ? VortexBuffer.Empty : owner.Buffer.Slice(0, length);
 }

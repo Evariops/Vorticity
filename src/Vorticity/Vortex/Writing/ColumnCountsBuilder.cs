@@ -396,6 +396,9 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     private const int OtherValues = -2;
 
     private readonly ColumnSheetBuilder _sheet;
+
+    // Whom the distinct columns' registers are counted for: the writer the counts are built for.
+    private readonly MemoryAccount _account;
     private readonly CountsPlan _plan;
     private readonly int _limit;
     private readonly int _self;
@@ -411,21 +414,21 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     private bool _settled;
     private bool _dropped;
 
-    // The entries: each one's value's number, NullValue or OtherValues, and its record of words. Like every working array
-    // of the counts, from the process's shelf, given back as they grow and when the counts drop or are disposed.
+    // The entries: each one's value's number, NullValue or OtherValues, and its record of words. Like every working block
+    // of the counts, from the pool, given back as they grow and when the counts drop or are disposed.
     private int _entries;
-    private int[] _entryValue = [];
-    private long[] _words = [];
+    private Block<int> _entryValue;
+    private Block<long> _words;
 
     // The entry of each value's number, -1 for none; and the entries of the nulls and of the values left out, -1 for none.
-    private int[] _entryOf = [];
+    private Block<int> _entryOf;
     private int _nullEntry = -1;
     private int _otherEntry = -1;
     private bool[]? _leftOut;
 
     // Each row's entry, as where its record starts and as its number.
-    private int[] _rowEntries = [];
-    private int[] _rowIndexes = [];
+    private Block<int> _rowEntries;
+    private Block<int> _rowIndexes;
 
     // For each measure the records hold, the quantile sketches of the entries, each made at its entry's first value, encoded
     // at the end; null once they would pass SketchBudget.
@@ -436,19 +439,21 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     // block of the shared pool, those of an entry no row reached left at zero (a rank is 1 at least): none for a column
     // whose counts went, and the whole null once the column holds more than AttachLimit values.
     private readonly int _field;
-    private int[] _batchEntries = [];
-    private NativeSegmentOwner?[]? _distinct;
+    private Block<int> _batchEntries;
+    private BlockOwner?[]? _distinct;
 
     /// <param name="sheet">The column's sheet, fed first, which numbers its rows' values.</param>
     /// <param name="plan">What the file's counts share.</param>
     /// <param name="field">The column.</param>
+    /// <param name="account">Whom the distinct columns' registers are counted for: the writer's or the indexer's work.</param>
     /// <param name="entryLimit">The entries kept at most, <see cref="EntryLimit"/> unless a test asks for fewer.</param>
-    internal ColumnCountsBuilder(ColumnSheetBuilder sheet, CountsPlan plan, int field, int entryLimit = EntryLimit)
+    internal ColumnCountsBuilder(ColumnSheetBuilder sheet, CountsPlan plan, int field, MemoryAccount account, int entryLimit = EntryLimit)
     {
+        _account = account;
         _sheet = sheet;
         _plan = plan;
         _field = field;
-        _distinct = new NativeSegmentOwner?[plan.Wide.Count];
+        _distinct = new BlockOwner?[plan.Wide.Count];
 
         _self = plan.MeasureOf(field);
         _number = _self >= 0;
@@ -508,7 +513,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         int[] oldAt = _at;
         int[] oldMeasures = _measures;
         int oldStride = _stride;
-        long[] old = _words;
+        Block<long> old = _words;
         if (_sketches is { } sketches)
         {
             int[] from = Array.ConvertAll(live, m => Array.IndexOf(oldMeasures, m));
@@ -525,7 +530,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
         (_measures, _kinds, _at, _stride) = Layout(live);
         _entryLimit = Math.Min(_limit, Math.Max(1_024, WordLimit / _stride));
-        _words = _entryValue.Length == 0 ? [] : ArrayShelf.Retained.Take<long>(_entryValue.Length * _stride, zeroed: false);
+        _words = Blocks.Rent<long>(_account, _entryValue.Length * _stride);
         for (int e = 0; e < _entries; e++)
         {
             _words[e * _stride] = old[e * oldStride];
@@ -541,7 +546,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             }
         }
 
-        ArrayShelf.Retained.Give(old);
+        Blocks.Return(_account, old);
     }
 
     internal override void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
@@ -561,6 +566,28 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             return;
         }
 
+        // What Finish refuses already, the values only growing: a number of more values than a few is carried by the other
+        // columns' counts and counted by none (Settle), and a column of more values than the object's rows can give
+        // RepeatShare each keeps no counts. Their entries would grow for nothing, until the first check: 4 to 8 MiB a column
+        // in a job of 100 000 rows of identifiers, which the writer's account, once it counted them, refused under a jobs'
+        // budget of 8 MiB (2026-11-16).
+        if (_number && _sheet.Distinct > FewValues)
+        {
+            Settle();
+            if (!_dropped)
+            {
+                Drop();
+            }
+
+            return;
+        }
+
+        if (_plan.RowBound > 0 && (long)_sheet.Distinct * RepeatShare > _plan.RowBound)
+        {
+            Drop();
+            return;
+        }
+
         // The measures these rows fold: those the plan still carries, the column itself aside.
         Relayout();
 
@@ -568,21 +595,19 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         // words are reached from its entry with no slice of them.
         if (_rowEntries.Length < count)
         {
-            int length = ArrayShelf.Grown(count, _rowEntries.Length);
-            ArrayShelf.Retained.Give(_rowEntries);
-            ArrayShelf.Retained.Give(_rowIndexes);
-            _rowEntries = ArrayShelf.Retained.Take<int>(length, zeroed: false);
-            _rowIndexes = ArrayShelf.Retained.Take<int>(length, zeroed: false);
+            int length = Blocks.Grown(count, _rowEntries.Length);
+            Blocks.Ensure(_account, ref _rowEntries, length);
+            Blocks.Ensure(_account, ref _rowIndexes, length);
         }
 
         Span<int> entries = _rowEntries.AsSpan(0, count);
         Span<int> indexes = _rowIndexes.AsSpan(0, count);
         if (_distinct is not null && _batchEntries.Length < start + count)
         {
-            ArrayShelf.Resize(ArrayShelf.Retained, ref _batchEntries, ArrayShelf.Grown(start + count, _batchEntries.Length));
+            Blocks.Resize(_account, ref _batchEntries, Blocks.Grown(start + count, _batchEntries.Length));
         }
 
-        int[] map = _entryOf;
+        Span<int> map = _entryOf;
         for (int i = 0; i < count; i++)
         {
             int id = ids[i];
@@ -601,7 +626,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             }
         }
 
-        ref long words = ref MemoryMarshal.GetArrayDataReference(_words);
+        ref long words = ref _words.GetReference();
         foreach (int at in entries)
         {
             Unsafe.Add(ref words, at)++;
@@ -667,7 +692,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         get
         {
             long bytes = 0;
-            foreach (NativeSegmentOwner? block in _distinct ?? [])
+            foreach (BlockOwner? block in _distinct ?? [])
             {
                 bytes += block?.Length ?? 0;
             }
@@ -714,7 +739,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
                 continue;
             }
 
-            Span<byte> registers = Registers(ref distinct[w], _entries);
+            Span<byte> registers = Registers(ref distinct[w], _entries, _account);
             for (int row = 0; row < rows; row++)
             {
                 ulong hash = hashes[row];
@@ -734,18 +759,18 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     /// twice over when they pass it, the registers past those it held zeroed: a column's registers were an array an entry,
     /// a sixth of what a consolidation allocated, and its block goes back to the pool for the next object's.
     /// </summary>
-    private static Span<byte> Registers(ref NativeSegmentOwner? block, int entries)
+    private static Span<byte> Registers(ref BlockOwner? block, int entries, MemoryAccount account)
     {
         int bytes = checked(entries * ColumnSheet.Registers);
         if (block is null || block.Length < bytes)
         {
             int held = block?.Length ?? 0;
-            NativeSegmentOwner grown = AlignedBufferPool.Shared.Rent(Math.Max(bytes, Math.Max(16 * ColumnSheet.Registers, 2 * held)), 64);
+            BlockOwner grown = account.Rent(Math.Max(bytes, Math.Max(16 * ColumnSheet.Registers, 2 * held)), 64);
             Span<byte> into = grown.WritableSpan;
             if (block is not null)
             {
                 block.WritableSpan.CopyTo(into);
-                AlignedBufferPool.Shared.Return(block);
+                block.Release();
             }
 
             into[held..].Clear();
@@ -756,11 +781,11 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     }
 
     /// <summary>Gives a column's registers back to the pool.</summary>
-    private static void Release(ref NativeSegmentOwner? block)
+    private static void Release(ref BlockOwner? block)
     {
         if (block is not null)
         {
-            AlignedBufferPool.Shared.Return(block);
+            block.Release();
             block = null;
         }
     }
@@ -788,27 +813,27 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         base.Dispose();
     }
 
-    /// <summary>Gives the entries' arrays and the rows' back to the process's shelf, and keeps none: the counts hold no entry.</summary>
+    /// <summary>Gives the entries' blocks and the rows' back to the pool, and keeps none: the counts hold no entry.</summary>
     private void ReleaseEntries()
     {
-        foreach (int[] held in (ReadOnlySpan<int[]>)[_entryValue, _entryOf, _rowEntries, _rowIndexes, _batchEntries])
-        {
-            ArrayShelf.Retained.Give(held);
-        }
-
-        ArrayShelf.Retained.Give(_words);
+        Blocks.Return(_account, _entryValue);
+        Blocks.Return(_account, _entryOf);
+        Blocks.Return(_account, _rowEntries);
+        Blocks.Return(_account, _rowIndexes);
+        Blocks.Return(_account, _batchEntries);
+        Blocks.Return(_account, _words);
         _entries = 0;
-        _entryValue = [];
-        _words = [];
-        _entryOf = [];
-        _rowEntries = [];
-        _rowIndexes = [];
-        _batchEntries = [];
+        _entryValue = default;
+        _words = default;
+        _entryOf = default;
+        _rowEntries = default;
+        _rowIndexes = default;
+        _batchEntries = default;
         _nullEntry = -1;
         _otherEntry = -1;
     }
 
-    /// <summary>Gives every measure's sketches back, their arrays to the process's shelf, and keeps none.</summary>
+    /// <summary>Gives every measure's sketches back, their arrays to the pool, and keeps none.</summary>
     private void ReleaseSketches()
     {
         if (_sketches is { } sketches)
@@ -1017,7 +1042,31 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     /// column keeps none, the fields of the measures their records carry, and whether a budget left values out; null for a
     /// column that keeps no counts.
     /// </summary>
+    /// <exception cref="VortexMemoryException">The writer's account refuses what the counts are ordered in.</exception>
     internal (byte[] Counts, byte[]? Sketches, int[] Measures, bool LeavesOut)? Finish()
+    {
+        // The arrays the counts are ordered in, some 24 bytes a value and an entry, counted in the writer's account while
+        // they live.
+        long ordering = (Math.Max((long)_sheet.Distinct, _entries) * FinishBytesPerValue) + ((long)_entries * sizeof(int));
+        if (!_account.TryTake(ordering))
+        {
+            throw _account.Refused(ordering);
+        }
+
+        try
+        {
+            return FinishCore();
+        }
+        finally
+        {
+            _account.Give(ordering);
+        }
+    }
+
+    /// <summary>The bytes <see cref="Finish"/> orders a value in: its number, its key's reference, its group and its start.</summary>
+    private const int FinishBytesPerValue = 24;
+
+    private (byte[] Counts, byte[]? Sketches, int[] Measures, bool LeavesOut)? FinishCore()
     {
         long valid = _sheet.Rows - _sheet.Nulls;
         int distinct = _sheet.Distinct;
@@ -1102,7 +1151,7 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             int at = 1;
             for (int a = 0; registers is not null && a < attached.Count; a++)
             {
-                NativeSegmentOwner? held = _distinct![attached[a]];
+                BlockOwner? held = _distinct![attached[a]];
                 ReadOnlySpan<byte> ranks = held is not null && (long)(entry + 1) * ColumnSheet.Registers <= held.Length
                     ? held.WritableSpan.Slice(entry * ColumnSheet.Registers, ColumnSheet.Registers)
                     : default;
@@ -1217,15 +1266,15 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             return _nullEntry >= 0 ? _nullEntry : _nullEntry = NewEntry(NullValue);
         }
 
-        int[] map = _entryOf;
-        if (id >= map.Length)
+        if (id >= _entryOf.Length)
         {
             // Room for every value the sheet has numbered, fed the batch first.
-            int held = map.Length;
-            ArrayShelf.Resize(ArrayShelf.Retained, ref _entryOf, ArrayShelf.Grown(Math.Max(id + 1, _sheet.Numbered), held));
-            map = _entryOf;
-            map.AsSpan(held).Fill(-1);
+            int held = _entryOf.Length;
+            Blocks.Grow(_account, ref _entryOf, Blocks.Grown(Math.Max(id + 1, _sheet.Numbered), held));
+            _entryOf.AsSpan(held).Fill(-1);
         }
+
+        Span<int> map = _entryOf;
 
         if (map[id] >= 0)
         {
@@ -1249,9 +1298,9 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         {
             // Room at once for an entry of every value the sheet has numbered, fed the batch first, and for the nulls' and
             // the values left out's, as far as the entries kept go: the records grew by doubling, copied each time.
-            int size = ArrayShelf.Grown(Math.Min(_sheet.Numbered + 2, _entryLimit + 2), entry);
-            ArrayShelf.Resize(ArrayShelf.Retained, ref _entryValue, size);
-            ArrayShelf.Resize(ArrayShelf.Retained, ref _words, size * _stride);
+            int size = Blocks.Grown(Math.Min(_sheet.Numbered + 2, _entryLimit + 2), entry);
+            Blocks.Resize(_account, ref _entryValue, size);
+            Blocks.Resize(_account, ref _words, size * _stride);
         }
 
         _entryValue[entry] = value;
@@ -1365,13 +1414,26 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         ReleaseRegisters();
 
         int total = _entries;
-        int[] values = _entryValue;
-        long[] words = _words;
+        Block<int> values = _entryValue;
+        Block<long> words = _words;
 
-        // The entry each entry moves onto, for its sketches to follow once the entries have moved.
-        int[] to = ArrayShelf.Retained.Take<int>(Math.Max(total, 1), zeroed: false);
-        _entryValue = ArrayShelf.Retained.Take<int>(values.Length, zeroed: false);
-        _words = ArrayShelf.Retained.Take<long>(words.Length, zeroed: false);
+        // The entry each entry moves onto, for its sketches to follow once the entries have moved. Each block counted in the
+        // writer's account, and those rented given back when the account refuses the next.
+        Block<int> to = Blocks.Rent<int>(_account, Math.Max(total, 1));
+        Block<int> entryValue = default;
+        try
+        {
+            entryValue = Blocks.Rent<int>(_account, values.Length);
+            _words = Blocks.Rent<long>(_account, words.Length);
+        }
+        catch (VortexMemoryException)
+        {
+            Blocks.Return(_account, entryValue);
+            Blocks.Return(_account, to);
+            throw;
+        }
+
+        _entryValue = entryValue;
         _entries = 0;
         _entryOf.AsSpan().Fill(-1);
         _nullEntry = -1;
@@ -1406,9 +1468,9 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
             sketches.Remap(to.AsSpan(0, total));
         }
 
-        ArrayShelf.Retained.Give(to);
-        ArrayShelf.Retained.Give(values);
-        ArrayShelf.Retained.Give(words);
+        Blocks.Return(_account, to);
+        Blocks.Return(_account, values);
+        Blocks.Return(_account, words);
     }
 
     private void Drop()

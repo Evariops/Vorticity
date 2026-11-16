@@ -24,7 +24,7 @@ public sealed class ZstdFramesTests
         // Eight blocks a column: a nullable column with a block of nulls, a text column, a dense one written as it lies, and
         // noise no frame beats the plain form on.
         Columns columns = Build(8 * BlockRows);
-        using ArrayBlobWriter.Workspace workspace = new ArrayBlobWriter.Workspace { FrameRows = BlockRows };
+        using ArrayBlobWriter.Workspace workspace = new ArrayBlobWriter.Workspace { FrameRows = BlockRows, Account = TestAccount.Shared };
         int[] frameCounts = new int[columns.Nodes.Length];
         for (int column = 0; column < columns.Nodes.Length; column++)
         {
@@ -48,7 +48,7 @@ public sealed class ZstdFramesTests
         Columns columns = Build(8 * BlockRows);
         int[] nodes = [.. columns.Nodes, SplitHeap(columns.Arena, columns.Nodes[1])];
         long[] plain = [.. columns.Plain, columns.Plain[1]];
-        using ArrayBlobWriter.Workspace workspace = new ArrayBlobWriter.Workspace { FrameRows = BlockRows };
+        using ArrayBlobWriter.Workspace workspace = new ArrayBlobWriter.Workspace { FrameRows = BlockRows, Account = TestAccount.Shared };
         int taken = 0;
         for (int column = 0; column < nodes.Length; column++)
         {
@@ -94,7 +94,7 @@ public sealed class ZstdFramesTests
         // A trial on other values than the column's notes nothing, and the next chunk is not compressed ahead; nor is a
         // column too small to be worth handing out.
         Columns columns = Build(8 * BlockRows);
-        using ArrayBlobWriter.Workspace workspace = new ArrayBlobWriter.Workspace { FrameRows = BlockRows };
+        using ArrayBlobWriter.Workspace workspace = new ArrayBlobWriter.Workspace { FrameRows = BlockRows, Account = TestAccount.Shared };
         ZstdPlan.Ahead ahead = new ZstdPlan.Ahead();
         workspace.Ahead = ahead;
         ahead.Plan(columns.Arena, columns.Nodes[0], BlockRows, 0, lanes: 1);

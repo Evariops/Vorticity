@@ -5,9 +5,9 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
 using ManagedCompressions.Zstd;
-using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
+using Vorticity.Buffers;
 using Vorticity.Types;
 
 namespace Vorticity.Writing;
@@ -37,7 +37,7 @@ internal readonly partial struct ZstdPlan
     /// <param name="views">Whether the values are text, whose stream a plan refuses past what an array holds.</param>
     private static ZstdPlan? Assemble(Ahead ahead, long canonicalSize, int numerator, int denominator, bool views)
     {
-        int blocks = ahead.Blocks;
+        int blocks = ahead.BlockCount;
         long streamBytes = 0;
         long produced = 0;
         int values = 0;
@@ -57,8 +57,8 @@ internal readonly partial struct ZstdPlan
             return null;
         }
 
-        byte[] destination = WorkArrays.Rent<byte>(checked((int)produced));
-        int[] frames = WorkArrays.Rent<int>(blocks * FrameFields);
+        Block<byte> destination = Blocks.Rent<byte>(checked((int)produced));
+        Block<int> frames = Blocks.Rent<int>(blocks * FrameFields);
         int at = 0;
         int frameCount = 0;
         for (int block = 0; block < blocks; block++)
@@ -70,7 +70,7 @@ internal readonly partial struct ZstdPlan
                 continue;
             }
 
-            ahead.Room(block).AsSpan(0, written).CopyTo(destination.AsSpan(at));
+            ahead.Room(block)[..written].CopyTo(destination.AsSpan(at));
             at += written;
             frames[frameCount * FrameFields] = at;
             frames[(frameCount * FrameFields) + 1] = bytes;
@@ -80,8 +80,8 @@ internal readonly partial struct ZstdPlan
 
         if (at * (long)denominator >= canonicalSize * (long)numerator)
         {
-            WorkArrays.Return(destination);
-            WorkArrays.Return(frames);
+            Blocks.Return(destination);
+            Blocks.Return(frames);
             return null;
         }
 
@@ -119,7 +119,7 @@ internal readonly partial struct ZstdPlan
         private const int Fields = 3;
 
         private int[] _slots = [];
-        private byte[]?[] _rooms = [];
+        private Block<byte>[] _rooms = [];
         private nint[] _heaps = [];
 
         private CanonicalArena? _arena;
@@ -153,7 +153,7 @@ internal readonly partial struct ZstdPlan
         internal bool Taken { get; set; }
 
         /// <summary>The blocks of the chunk, a frame each.</summary>
-        internal int Blocks { get; private set; }
+        internal int BlockCount { get; private set; }
 
         /// <summary>The items the frames are cut into.</summary>
         internal int Items { get; private set; }
@@ -223,20 +223,20 @@ internal readonly partial struct ZstdPlan
                 _heaps[i] = Address(values.GetDataBuffer(i).Span);
             }
 
-            Blocks = Blocks(_rows, _frameRows);
+            BlockCount = FrameBlocks(_rows, _frameRows);
             _planned = true;
-            if (!wanted || lanes <= 1 || Blocks <= 1)
+            if (!wanted || lanes <= 1 || BlockCount <= 1)
             {
                 return 0;
             }
 
-            if (_rooms.Length < Blocks)
+            if (_rooms.Length < BlockCount)
             {
-                _slots = new int[Blocks * Fields];
-                _rooms = new byte[]?[Blocks];
+                _slots = new int[BlockCount * Fields];
+                _rooms = new Block<byte>[BlockCount];
             }
 
-            Items = Math.Min(Blocks, Math.Min(lanes, MaxItems));
+            Items = Math.Min(BlockCount, Math.Min(lanes, MaxItems));
             Ready = true;
             return Items;
         }
@@ -287,7 +287,7 @@ internal readonly partial struct ZstdPlan
         /// </summary>
         internal void Note(long streamBytes, int blocks) => _reached |= streamBytes >= AheadBytes && blocks > 1;
 
-        /// <summary>Compresses the frames of item <paramref name="item"/>, a run of <see cref="Blocks"/> cut in <see cref="Items"/>, on the calling thread.</summary>
+        /// <summary>Compresses the frames of item <paramref name="item"/>, a run of <see cref="BlockCount"/> cut in <see cref="Items"/>, on the calling thread.</summary>
         internal void Run(int item)
         {
             Debug.Assert(Ready && (uint)item < (uint)Items, "An item of frames planned ahead.");
@@ -295,8 +295,8 @@ internal readonly partial struct ZstdPlan
             CanonicalArena arena = _arena!;
             CanonicalNode node = arena.GetNode(_node);
             ValidityReader valid = ValidityReader.Of(arena, node.Validity);
-            int first = (int)((long)item * Blocks / Items);
-            int end = (int)((long)(item + 1) * Blocks / Items);
+            int first = (int)((long)item * BlockCount / Items);
+            int end = (int)((long)(item + 1) * BlockCount / Items);
             ZstdCompressor encoder = ZstdEncoders.Rent(_level);
             try
             {
@@ -329,7 +329,7 @@ internal readonly partial struct ZstdPlan
         }
 
         /// <summary>The room frame <paramref name="block"/> was compressed into; a block without values has none.</summary>
-        internal byte[] Room(int block) => _rooms[block]!;
+        internal ReadOnlySpan<byte> Room(int block) => _rooms[block];
 
         /// <summary>
         /// Gives the rooms back once the column is written, and forgets the planned values, keeping only whether their
@@ -339,13 +339,10 @@ internal readonly partial struct ZstdPlan
         {
             if (Ready)
             {
-                for (int block = 0; block < Blocks; block++)
+                for (int block = 0; block < BlockCount; block++)
                 {
-                    if (_rooms[block] is { } room)
-                    {
-                        _rooms[block] = null;
-                        WorkArrays.Return(room);
-                    }
+                    Blocks.Return(_rooms[block]);
+                    _rooms[block] = default;
                 }
             }
 
@@ -377,7 +374,7 @@ internal readonly partial struct ZstdPlan
                 return;
             }
 
-            byte[] stream = WorkArrays.Rent<byte>(((to - from) * width) + CompactSlack);
+            Block<byte> stream = Blocks.Rent<byte>(((to - from) * width) + CompactSlack);
             try
             {
                 int count = width switch
@@ -392,7 +389,7 @@ internal readonly partial struct ZstdPlan
             }
             finally
             {
-                WorkArrays.Return(stream);
+                Blocks.Return(stream);
             }
         }
 
@@ -423,7 +420,7 @@ internal readonly partial struct ZstdPlan
                 return;
             }
 
-            byte[] stream = WorkArrays.Rent<byte>((int)bytes + StreamSlack);
+            Block<byte> stream = Blocks.Rent<byte>((int)bytes + StreamSlack);
             try
             {
                 ViewValues strings = new ViewValues(node);
@@ -436,7 +433,7 @@ internal readonly partial struct ZstdPlan
             }
             finally
             {
-                WorkArrays.Return(stream);
+                Blocks.Return(stream);
             }
         }
 
@@ -452,10 +449,9 @@ internal readonly partial struct ZstdPlan
                 return;
             }
 
-            int room = ZstdCompressor.GetMaxCompressedLength(stream.Length);
-            byte[] into = WorkArrays.Rent<byte>(room);
+            Block<byte> into = Blocks.Rent<byte>(ZstdCompressor.GetMaxCompressedLength(stream.Length));
             _rooms[block] = into;
-            _slots[at + 2] = encoder.Compress(stream, into.AsSpan(0, room), out _, out int written) == OperationStatus.Done
+            _slots[at + 2] = encoder.Compress(stream, into, out _, out int written) == OperationStatus.Done
                 ? written
                 : -1;
         }

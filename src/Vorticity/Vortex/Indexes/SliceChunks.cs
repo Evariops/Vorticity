@@ -391,12 +391,12 @@ internal sealed class SliceChunks
     }
 
     /// <summary>
-    /// The chunks a column's region <paramref name="bytes"/> holds, in an array rented from the shared pool, which its
-    /// caller gives back; their count, or -1 when they do not decode, nothing rented then.
+    /// The chunks a column's region <paramref name="bytes"/> holds, in a block of the pool, which its caller gives back;
+    /// their count, or -1 when they do not decode, nothing rented then.
     /// </summary>
-    internal static int ColumnInto(ReadOnlySpan<byte> bytes, out ChunkSpan[] chunks)
+    internal static int ColumnInto(ReadOnlySpan<byte> bytes, out Buffers.Block<ChunkSpan> chunks)
     {
-        chunks = [];
+        chunks = default;
 
         // A paged column's whole region, as a reader with no table of contents reads it.
         if (!bytes.IsEmpty && bytes[0] == PagedVersion)
@@ -406,8 +406,8 @@ internal sealed class SliceChunks
                 return -1;
             }
 
-            chunks = System.Buffers.ArrayPool<ChunkSpan>.Shared.Rent(Math.Max(paged.Length, 1));
-            paged.CopyTo(chunks, 0);
+            chunks = Buffers.Blocks.Rent<ChunkSpan>(Math.Max(paged.Length, 1));
+            paged.CopyTo(chunks);
             return paged.Length;
         }
 
@@ -425,7 +425,7 @@ internal sealed class SliceChunks
                 return -1;
             }
 
-            ChunkSpan[] rented = System.Buffers.ArrayPool<ChunkSpan>.Shared.Rent(Math.Max((int)count, 1));
+            Buffers.Block<ChunkSpan> rented = Buffers.Blocks.Rent<ChunkSpan>(Math.Max((int)count, 1));
             try
             {
                 long row = 0;
@@ -441,13 +441,13 @@ internal sealed class SliceChunks
 
                 if (!reader.End)
                 {
-                    System.Buffers.ArrayPool<ChunkSpan>.Shared.Return(rented);
+                    Buffers.Blocks.Return(rented);
                     return -1;
                 }
             }
             catch
             {
-                System.Buffers.ArrayPool<ChunkSpan>.Shared.Return(rented);
+                Buffers.Blocks.Return(rented);
                 throw;
             }
 

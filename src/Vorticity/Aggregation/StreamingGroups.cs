@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Types;
@@ -36,10 +37,10 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
     private ScanSpec? _pass;
     private AggregationPartition? _partition;
     private AggregationOutcome? _outcome;
-    private int[] _closed = [];
+    private ScratchBlock<int> _closed;
     private int _closedCount;
     private int _closedNext;
-    private int[] _open = [];
+    private ScratchBlock<int> _open;
     private int _openCount;
     private bool _keepPending;
     private bool _drained;
@@ -269,7 +270,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                     overdrawn = range.AbsorbPast(open, ref _numbers);
                     _partition = range;
                     _outcome?.LetChosen();
-                    _outcome = new AggregationOutcome(_query.Plan, range.Slots, range.Keys, []) { Memory = _memory };
+                    _outcome = new AggregationOutcome(_query.Plan, range.Slots, range.Keys, default) { Memory = _memory };
                     open.LetGo();
                 }
                 else
@@ -369,7 +370,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         AggregationHost host = _query.Host;
         host.Begin();
         _begun = true;
-        _memory = new QueryMemory(host.Source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+        _memory = QueryMemory.Start(host.Source.Session);
         _started = Stopwatch.GetTimestamp();
         _query.PeakGroups = 0;
         _query.Plan.LastGroups = 0;
@@ -420,7 +421,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
             pass = settling.Pass(pass);
         }
 
-        _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, []) { Memory = _memory };
+        _outcome = new AggregationOutcome(plan, _partition.Slots, _partition.Keys, default) { Memory = _memory };
         int degree = pass.Options.DegreeOfParallelism > 0 ? pass.Options.DegreeOfParallelism : host.Source.Session.Options.MaxDegreeOfParallelism;
         RowRange[]? ranges = descending ? null : AggregationEngine.StreamingRanges(host.Source, pass, degree);
 
@@ -553,7 +554,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         int count = Through(0, reader, _closedCount);
         if (chosen && count > 0)
         {
-            await ChosenFetch.FetchAsync(_outcome!, _query.Host.Source, _pass!, _query.Host.Counters, _closed.AsMemory(0, count), _cancellationToken)
+            await ChosenFetch.FetchAsync(_outcome!, _query.Host.Source, _pass!, _query.Host.Counters, new BlockSlice<int>(_closed, 0, count), _cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -576,7 +577,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                 {
                     // The filter's columns, store and evaluator, kept from one closed batch to the next.
                     _filters ??= new GroupSelection.GroupFilterRun?[operators.Length];
-                    GroupSelection.GroupFilterRun run = _filters[o] ??= new GroupSelection.GroupFilterRun(_query, filter);
+                    GroupSelection.GroupFilterRun run = _filters[o] ??= new GroupSelection.GroupFilterRun(_query, filter, _memory);
                     count = run.Keep(_outcome!, _closed, count, _cancellationToken);
                     break;
                 }
@@ -589,7 +590,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                     // An order that starts with the streaming component: the groups closed together
                     // hold every group of their values of it, so sorting them is sorting the result.
                     // Descending, the batches come greatest first, and the groups of one ascend.
-                    (int[] sorted, int sortedCount) = GroupSelection.Order(_query, _outcome!, order, _closed, count, long.MaxValue, _cancellationToken);
+                    (Block<int> sorted, int sortedCount) = GroupSelection.Order(_query, _outcome!, order, _closed, count, long.MaxValue, _cancellationToken);
                     sorted.AsSpan(0, sortedCount).CopyTo(_closed);
                     GroupSelection.GiveBack(sorted);
                     _memory?.LetGo((long)sortedCount * sizeof(int));
@@ -678,8 +679,9 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         }
 
         VortexSessionOptions options = _query.Session.Options;
-        _store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(_query.Schema, new DTypeArena()), options.EnginePool, options.Extensions);
-        _arena = new CanonicalArena(64, options.EnginePool);
+        MemoryAccount account = QueryMemory.AccountOf(_memory);
+        _store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(_query.Schema, new DTypeArena()), account, options.Extensions);
+        _arena = new CanonicalArena(64, account);
         return _store;
     }
 
@@ -700,6 +702,12 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
 
             _filters = null;
         }
+
+        Scratch.Return(ref _closed);
+        Scratch.Return(ref _open);
+        _closedCount = 0;
+        _closedNext = 0;
+        _openCount = 0;
         if (_begun && !_ended)
         {
             _ended = true;

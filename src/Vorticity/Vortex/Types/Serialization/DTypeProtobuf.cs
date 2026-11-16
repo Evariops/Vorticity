@@ -1,7 +1,7 @@
 using System;
-using System.Buffers;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using Vorticity.Buffers;
 using Vorticity.Serialization.Protobuf;
 
 namespace Vorticity.Types.Serialization;
@@ -285,7 +285,7 @@ internal static class DTypeProtobuf
     {
         ProtoReader reader = new ProtoReader(body);
         ProtoScratchList<int> names = default;
-        ProtoScratchList<DType> fields = default;
+        ProtoScratchList<int> fields = default;
         try
         {
             bool nullable = false;
@@ -302,7 +302,7 @@ internal static class DTypeProtobuf
 
                     case StructDTypes:
                         RequireWire("Struct.dtypes", wire, ProtoWireType.LengthDelimited);
-                        fields.Add(ReadNested(ref reader, arena, depth));
+                        fields.Add(ReadNested(ref reader, arena, depth).NodeIndex);
                         break;
 
                     case StructNullable:
@@ -316,9 +316,9 @@ internal static class DTypeProtobuf
                 }
             }
 
-            // A names/dtypes length mismatch is reachable from a file, so DTypeArena.Struct
+            // A names/dtypes length mismatch is reachable from a file, so DTypeArena.StructOfNodes
             // reports it as VortexFormatException rather than as an argument error.
-            return arena.Struct(names.Span, fields.Span, ToNullability(nullable));
+            return arena.StructOfNodes(names.Span, fields.Span, ToNullability(nullable));
         }
         finally
         {
@@ -464,7 +464,7 @@ internal static class DTypeProtobuf
     {
         ProtoReader reader = new ProtoReader(body);
         ProtoScratchList<int> names = default;
-        ProtoScratchList<DType> fields = default;
+        ProtoScratchList<int> fields = default;
         ProtoScratchList<byte> typeIds = default;
         try
         {
@@ -480,7 +480,7 @@ internal static class DTypeProtobuf
 
                     case UnionDTypes:
                         RequireWire("Union.dtypes", wire, ProtoWireType.LengthDelimited);
-                        fields.Add(ReadNested(ref reader, arena, depth));
+                        fields.Add(ReadNested(ref reader, arena, depth).NodeIndex);
                         break;
 
                     case UnionTypeIds:
@@ -498,7 +498,7 @@ internal static class DTypeProtobuf
                 }
             }
 
-            return arena.Union(names.Span, fields.Span, typeIds.Span, ToNullability(nullable));
+            return arena.UnionOfNodes(names.Span, fields.Span, typeIds.Span, ToNullability(nullable));
         }
         finally
         {
@@ -900,70 +900,55 @@ internal static class DTypeProtobuf
 }
 
 /// <summary>
-/// A stack-only, pooled accumulator for a repeated field whose length is unknown until the field
-/// ends. Nothing is rented until the first element arrives, so a leaf dtype touches no pool.
+/// A stack-only accumulator for a repeated field whose length is unknown until the field ends, in a
+/// block of the pool. Nothing is rented until the first element arrives, so a leaf dtype touches no pool.
 /// </summary>
 /// <remarks>
-/// Shared by <see cref="DTypeProtobuf"/> (struct and union fields) and
-/// <see cref="ScalarProtobuf"/> (list elements). Dispose it in a <c>finally</c>: it is a
-/// <c>ref struct</c> and cannot be a <c>using</c> subject in every position the codecs need.
+/// Shared by <see cref="DTypeProtobuf"/> (struct and union fields, as their nodes in the arena) and
+/// <see cref="ScalarProtobuf"/> (list elements, as their nodes in the store). Dispose it in a
+/// <c>finally</c>: it is a <c>ref struct</c> and cannot be a <c>using</c> subject in every position
+/// the codecs need.
 /// </remarks>
 internal ref struct ProtoScratchList<T>
+    where T : unmanaged
 {
     private const int InitialCapacity = 8;
 
-    private T[]? _array;
+    private Block<T> _block;
     private int _count;
 
     /// <summary>The elements, in insertion order. Valid until the next <see cref="Add"/> or <see cref="Dispose"/>.</summary>
-    internal readonly ReadOnlySpan<T> Span => _array is null ? default : new ReadOnlySpan<T>(_array, 0, _count);
+    internal readonly ReadOnlySpan<T> Span => _block.AsSpan(0, _count);
 
-    /// <summary>Appends one element, renting or growing the pooled backing array as needed.</summary>
+    /// <summary>Appends one element, renting or growing the block as needed.</summary>
     internal void Add(T item)
     {
-        T[]? array = _array;
-        if (array is null)
+        if (_count == _block.Length)
         {
-            array = ArrayPool<T>.Shared.Rent(InitialCapacity);
-            _array = array;
-        }
-        else if (_count == array.Length)
-        {
-            array = Grow();
+            Grow();
         }
 
-        array[_count++] = item;
+        _block[_count++] = item;
     }
 
-    /// <summary>Returns the pooled array. Safe to call more than once.</summary>
+    /// <summary>Gives the block back. Safe to call more than once.</summary>
     internal void Dispose()
     {
-        T[]? array = _array;
-        _array = null;
+        Blocks.Return(_block);
+        _block = default;
         _count = 0;
-        if (array is not null)
-        {
-            // Clearing matters for DType and ScalarValue: both hold an arena reference that would
-            // otherwise stay rooted by the pool for as long as the bucket lives.
-            ArrayPool<T>.Shared.Return(array, RuntimeHelpers.IsReferenceOrContainsReferences<T>());
-        }
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private T[] Grow()
+    private void Grow()
     {
-        T[] previous = _array!;
-        long doubled = (long)previous.Length * 2;
+        long doubled = Math.Max(InitialCapacity, (long)_block.Length * 2);
         if (doubled > Array.MaxLength)
         {
             ThrowTooManyElements();
         }
 
-        T[] next = ArrayPool<T>.Shared.Rent((int)doubled);
-        Array.Copy(previous, next, _count);
-        ArrayPool<T>.Shared.Return(previous, RuntimeHelpers.IsReferenceOrContainsReferences<T>());
-        _array = next;
-        return next;
+        Blocks.Grow(ref _block, (int)doubled);
     }
 
     [DoesNotReturn]

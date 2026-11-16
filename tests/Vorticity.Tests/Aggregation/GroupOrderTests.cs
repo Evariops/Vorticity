@@ -5,6 +5,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
+using Vorticity.Buffers;
 using Xunit;
 
 namespace Vorticity.Tests.Aggregation;
@@ -186,17 +187,19 @@ public sealed partial class GroupOrderTests
         }
     }
 
+    /// <remarks>
+    /// In chunks of 2 048 groups, where the engine's are 65 536, over 9 375 names where there were 300 000: four chunks a
+    /// top-k of a hundred at four lanes, as before, and one at one lane. Fourteen lanes ranked the same four chunks as four.
+    /// </remarks>
     [Theory]
     [InlineData(1)]
     [InlineData(4)]
-    [InlineData(14)]
     public async Task ATopKOfManyGroupsRanksItsChunksAtOnceTiesIncluded(int degree)
     {
-        // 300 000 names seen one to four times: past two chunks of 65 536 groups, each chunk's first k
-        // ranked on a task of its own, then theirs. The k-th group ties
-        // with tens of thousands, which the key ranks: the same groups, in the same order, as one
-        // ranking of them all.
-        Draw[] rows = Draws(300_000);
+        // Names seen one to four times: past two chunks of groups, each chunk's first k ranked on a task
+        // of its own, then theirs. The k-th group ties with thousands, which the key ranks: the same
+        // groups, in the same order, as one ranking of them all.
+        Draw[] rows = Draws(9_375);
         string path = await WriteAsync(rows);
         try
         {
@@ -206,18 +209,24 @@ public sealed partial class GroupOrderTests
                 .OrderByDescending(g => g.Count()).ThenBy(g => g.Average(r => r.Value), Floats).ThenBy(g => g.Key, StringComparer.Ordinal).Select(g => g.Key)];
             await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
-            Aggregation<string> names = file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).Take(100).Select(g => g.Key);
+            Aggregation<string> names = Chunked(file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).Take(100).Select(g => g.Key));
             Assert.Equal(byName.Take(100), await names.ToListAsync(Ct));
             Assert.Equal(degree > 1, names.Plan.LastTopChunks > 1);
-            Assert.Equal(byName.Skip(30).Take(70), await file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).Skip(30).Take(70).Select(g => g.Key).ToListAsync(Ct));
-            Assert.Equal(byId.Take(1_000), await file.Scan<Draw>().GroupBy(r => r.Id).OrderBy(g => g.Count()).Take(1_000).Select(g => g.Key).ToListAsync(Ct));
+            Assert.Equal(byName.Skip(30).Take(70), await Chunked(file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).Skip(30).Take(70).Select(g => g.Key)).ToListAsync(Ct));
+            Assert.Equal(byId.Take(100), await Chunked(file.Scan<Draw>().GroupBy(r => r.Id).OrderBy(g => g.Count()).Take(100).Select(g => g.Key)).ToListAsync(Ct));
             Assert.Equal(
                 byCountThenMean.Take(100),
-                await file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).ThenBy(g => g.Average(r => r.Value)).Take(100).Select(g => g.Key).ToListAsync(Ct));
+                await Chunked(file.Scan<Draw>().GroupBy(r => r.Name).OrderByDescending(g => g.Count()).ThenBy(g => g.Average(r => r.Value)).Take(100).Select(g => g.Key)).ToListAsync(Ct));
         }
         finally
         {
             System.IO.File.Delete(path);
+        }
+
+        static Aggregation<T> Chunked<T>(Aggregation<T> query)
+        {
+            query.Plan.TopChunkGroups = 2_048;
+            return query;
         }
     }
 
@@ -285,18 +294,38 @@ public sealed partial class GroupOrderTests
             values[i] = i * 7_919L % Count;
         }
 
-        int[] positions = [.. Enumerable.Range(0, Count)];
+        Block<int> positions = Positions(Count);
         using (QueryMemory tight = new QueryMemory(new QueryMemoryBudget(64 << 10)))
         {
-            Assert.False(GroupSort.TrySortByKeys(positions, Count, [ValuesOrder.Over<long>([.. values], Count, false, null)], tight, ct));
-            Assert.Equal(Enumerable.Range(0, Count), positions);
+            Assert.False(GroupSort.TrySortByKeys(positions, Count, [ValuesOrder.Over<long>(Copied(values), Count, false, null)], tight, ct));
+            Assert.Equal(Enumerable.Range(0, Count), positions.AsSpan().ToArray());
             Assert.Equal(0, tight.Held);
         }
 
         using QueryMemory ample = new QueryMemory(new QueryMemoryBudget(64 << 20));
-        Assert.True(GroupSort.TrySortByKeys(positions, Count, [ValuesOrder.Over<long>([.. values], Count, false, null)], ample, ct));
-        Assert.Equal(Enumerable.Range(0, Count).OrderBy(i => values[i]), positions);
+        Assert.True(GroupSort.TrySortByKeys(positions, Count, [ValuesOrder.Over<long>(Copied(values), Count, false, null)], ample, ct));
+        Assert.Equal(Enumerable.Range(0, Count).OrderBy(i => values[i]), positions.AsSpan().ToArray());
         Assert.Equal(0, ample.Held);
+    }
+
+    /// <summary>The positions 0 to <paramref name="count"/> less one, in a block of their own.</summary>
+    private static Block<int> Positions(int count)
+    {
+        Block<int> positions = Blocks.Allocate<int>(count);
+        for (int i = 0; i < count; i++)
+        {
+            positions[i] = i;
+        }
+
+        return positions;
+    }
+
+    /// <summary><paramref name="values"/> copied into a block of their own, which an order of keys takes.</summary>
+    private static Block<long> Copied(long[] values)
+    {
+        Block<long> copy = Blocks.Allocate<long>(values.Length);
+        values.CopyTo(copy.AsSpan());
+        return copy;
     }
 
     [Fact]
@@ -371,7 +400,7 @@ public sealed partial class GroupOrderTests
         {
             Comparer<T> expected = descending ? Comparer<T>.Create((a, b) => a is null || b is null ? ascending.Compare(a, b) : ascending.Compare(b, a)) : ascending;
             int[] ranked = [.. Enumerable.Range(0, values.Length).OrderBy(i => values[i], expected)];
-            long[] keys = ValuesOrder.Rent<T>(memory: null, values.Length);
+            Block<long> keys = ValuesOrder.Rent<T>(memory: null, values.Length);
             values.CopyTo(ValuesOrder.Values<T>(keys, values.Length));
             ColumnOrder order = ValuesOrder.Over<T>(keys, values.Length, descending, memory: null);
             try
@@ -381,8 +410,9 @@ public sealed partial class GroupOrderTests
                 Assert.Equal(ranked, sorted);
                 for (int keep = 1; keep < values.Length; keep++)
                 {
-                    int[] positions = [.. Enumerable.Range(0, values.Length)];
-                    (int before, int tied) = order.TopTied(positions, values.Length, keep, memory: null, Ct);
+                    Block<int> held = Positions(values.Length);
+                    (int before, int tied) = order.TopTied(held, values.Length, keep, memory: null, Ct);
+                    int[] positions = held.AsSpan().ToArray();
                     T last = values[ranked[keep - 1]];
                     Assert.Equal(values.Count(v => expected.Compare(v, last) < 0), before);
                     Assert.Equal(values.Count(v => expected.Compare(v, last) == 0), tied);

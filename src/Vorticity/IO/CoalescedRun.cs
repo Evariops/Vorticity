@@ -8,7 +8,7 @@ namespace Vorticity.IO;
 /// <remarks>
 /// <para>
 /// <see cref="Start"/> is <b>always</b> a multiple of <see cref="VortexLimits.MaxAlignment"/>
-/// (64). That is the whole point of the type. A native buffer allocated for the run places the
+/// (64). That is the whole point of the type. A block taken for the run places the
 /// segment at file offset <c>o</c> at memory offset <c>o - Start</c>; if <c>Start</c> is a
 /// multiple of 64 and <c>o</c> is a multiple of <c>2^k</c> with <c>k ≤ 6</c> — which the writer
 /// guarantees and <see cref="VortexLimits.MaxAlignmentExponent"/> enforces — then

@@ -1,7 +1,7 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Types;
 
 namespace Vorticity.Writing;
@@ -26,9 +26,13 @@ internal sealed class ColumnWriter
     /// rather than a running total because a block closes when its last row is ingested while its
     /// chunk is emitted when enough rows are pending, so a running accumulator would mix the next
     /// chunk's blocks into this one's. An entry is nulled and its buffer returned once the chunk is
-    /// written, leaving one buffer per block in transit.
+    /// written, leaving one histogram per block in transit. Each entry is the block's slot in
+    /// <see cref="_slots"/>, or <see cref="WidthSlots.None"/>.
     /// </summary>
-    private readonly AppendList<int[]?> _widths = new AppendList<int[]?>();
+    private readonly AppendList<int> _widths = new AppendList<int>();
+
+    /// <summary>The histograms of the blocks in transit, the open one's included.</summary>
+    private WidthSlots _slots;
 
     /// <summary>
     /// The row-aligned children, created on the first
@@ -40,7 +44,8 @@ internal sealed class ColumnWriter
 
     private BlockStats _open;
 
-    private int[]? _openWidths;
+    /// <summary>The open block's slot in <see cref="_slots"/>, or <see cref="WidthSlots.None"/>.</summary>
+    private int _openWidths = WidthSlots.None;
 
     /// <summary>
     /// The chunk's running distinct table, created on the first range of a comparable column and
@@ -183,7 +188,7 @@ internal sealed class ColumnWriter
         CanonicalNode node = arena.GetNode(nodeIndex);
         if (statistics)
         {
-            if (_openWidths is null && _widthsLive
+            if (_openWidths == WidthSlots.None && _widthsLive
                 && node.Kind == CanonicalKind.Primitive && node.PType.IsInteger())
             {
                 // Rented on the first integer range of the block and not before, so that a schema of
@@ -191,12 +196,10 @@ internal sealed class ColumnWriter
                 // remembered plan: an integer column whose plan is never a bit-packing would
                 // otherwise pay a leading-zero count and two increments per row for a candidate
                 // nobody prices.
-                _openWidths = ArrayPool<int>.Shared.Rent(BitPackWidths.Length);
-                _openWidths.AsSpan(0, BitPackWidths.Length).Clear();
+                _openWidths = _slots.Take();
             }
 
-            Span<int> widths =
-                _openWidths is null ? default : _openWidths.AsSpan(0, BitPackWidths.Length);
+            Span<int> widths = _slots[_openWidths];
             BlockStatsPass.Accumulate(arena, nodeIndex, start, count, ref _open, _previous, widths);
         }
 
@@ -356,7 +359,7 @@ internal sealed class ColumnWriter
 
         for (int i = 0; i < count; i++)
         {
-            if (_widths[first + i] is null)
+            if (_widths[first + i] == WidthSlots.None)
             {
                 return false;
             }
@@ -365,7 +368,7 @@ internal sealed class ColumnWriter
         destination.Clear();
         for (int i = 0; i < count; i++)
         {
-            ReadOnlySpan<int> block = _widths[first + i].AsSpan(0, BitPackWidths.Length);
+            ReadOnlySpan<int> block = _slots[_widths[first + i]];
             for (int w = 0; w < BitPackWidths.Length; w++)
             {
                 destination[w] += block[w];
@@ -377,18 +380,15 @@ internal sealed class ColumnWriter
 
     /// <summary>
     /// Gives back the per-block scratch of a chunk that has been written, all the way down. The
-    /// entries are nulled rather than removed so that a block's index stays its index.
+    /// entries are emptied rather than removed so that a block's index stays its index.
     /// </summary>
     internal void ReleaseChunk(int first, int count)
     {
         for (int i = first; i < first + count && i < _widths.Count; i++)
         {
-            ref int[]? widths = ref _widths.At(i);
-            if (widths is not null)
-            {
-                ArrayPool<int>.Shared.Return(widths);
-                widths = null;
-            }
+            ref int slot = ref _widths.At(i);
+            _slots.Free(slot);
+            slot = WidthSlots.None;
         }
 
         // The table forgets the chunk here and the tail comes back through `Reprobe`: an emitted
@@ -413,21 +413,8 @@ internal sealed class ColumnWriter
     /// </summary>
     internal void Release()
     {
-        for (int i = 0; i < _widths.Count; i++)
-        {
-            ref int[]? widths = ref _widths.At(i);
-            if (widths is not null)
-            {
-                ArrayPool<int>.Shared.Return(widths);
-                widths = null;
-            }
-        }
-
-        if (_openWidths is not null)
-        {
-            ArrayPool<int>.Shared.Return(_openWidths);
-            _openWidths = null;
-        }
+        _slots.Release();
+        _openWidths = WidthSlots.None;
 
         _closed.Release();
         _widths.Release();
@@ -612,13 +599,11 @@ internal sealed class ColumnWriter
         // the open block has no widths yet. Counting them here makes the block whole and lets the
         // chunk it opens read its histograms. Only when the carry is the whole block: a count over
         // part of it would be a wrong histogram rather than a missing one.
-        if (_widthsLive && _openWidths is null && _open.IsPresent && count == _open.Rows
+        if (_widthsLive && _openWidths == WidthSlots.None && _open.IsPresent && count == _open.Rows
             && node.Kind == CanonicalKind.Primitive && node.PType.IsInteger())
         {
-            _openWidths = ArrayPool<int>.Shared.Rent(BitPackWidths.Length);
-            Span<int> widths = _openWidths.AsSpan(0, BitPackWidths.Length);
-            widths.Clear();
-            BlockStatsPass.Widths(arena, nodeIndex, start, count, widths);
+            _openWidths = _slots.Take();
+            BlockStatsPass.Widths(arena, nodeIndex, start, count, _slots[_openWidths]);
             _open.WidthsBroken = false;
         }
 
@@ -708,16 +693,16 @@ internal sealed class ColumnWriter
 
         // A block whose widths are partial is stored as absent rather than as a wrong count, so the
         // chooser measures the column itself.
-        if (_open.WidthsBroken && _openWidths is not null)
+        if (_open.WidthsBroken)
         {
-            ArrayPool<int>.Shared.Return(_openWidths);
-            _openWidths = null;
+            _slots.Free(_openWidths);
+            _openWidths = WidthSlots.None;
         }
 
         _closed.Add(_open);
         _widths.Add(_openWidths);
         _open = default;
-        _openWidths = null;
+        _openWidths = WidthSlots.None;
 
         ColumnWriter[]? children = _children;
         if (children is null)
@@ -748,7 +733,7 @@ internal sealed class ColumnWriter
         for (int i = 0; i < blocks.Count; i++)
         {
             _closed.Add(blocks[i]);
-            _widths.Add(null);
+            _widths.Add(WidthSlots.None);
             _tableAtClose.Add((-1, 0));
             _stringZones?.Seed(strings?[i]);
         }

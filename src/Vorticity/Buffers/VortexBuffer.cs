@@ -7,8 +7,8 @@ namespace Vorticity.Buffers;
 
 /// <summary>
 /// A non-owning, aligned view over a contiguous run of bytes. It is the single shape the reader
-/// works in, whatever the bytes came from: memory-mapped pages, aligned native memory, or a
-/// pinned managed array.
+/// works in, whatever the bytes came from: memory-mapped pages, a pooled block, a pinned managed
+/// array, or memory the caller holds.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -78,8 +78,8 @@ internal readonly unsafe struct VortexBuffer
 
     /// <summary>
     /// Wraps an already-pinned span. Pins nothing: the caller guarantees
-    /// <paramref name="pinned"/> is fixed (pinned object heap, <c>fixed</c>, native memory, or a
-    /// memory-mapped view) for the whole lifetime of the returned buffer.
+    /// <paramref name="pinned"/> is fixed (pinned object heap, <c>fixed</c>, a caller's pinned
+    /// lease, or a memory-mapped view) for the whole lifetime of the returned buffer.
     /// </summary>
     /// <param name="pinned">The pinned bytes.</param>
     /// <param name="alignmentExponent">Declared alignment exponent, in

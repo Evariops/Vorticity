@@ -125,7 +125,7 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
     {
         for (bool waited = false; ; waited = true)
         {
-            if (_cache.TryReadData(_uid, segment, out SegmentOwner cached))
+            if (_cache.TryReadData(_uid, segment, MemoryAccount.Kept, out SegmentOwner cached))
             {
                 return cached;
             }
@@ -194,8 +194,8 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
         return data;
     }
 
-    private bool TryRead(IndexSegment region, bool data, out SegmentOwner owner) =>
-        data ? _cache.TryReadData(_uid, region, out owner) : _cache.TryRead(_uid, region, out owner);
+    private bool TryRead(IndexSegment region, bool data, MemoryAccount account, out SegmentOwner owner) =>
+        data ? _cache.TryReadData(_uid, region, account, out owner) : _cache.TryRead(_uid, region, out owner);
 
     private bool TryBeginRead(IndexSegment region, bool data, out TaskCompletionSource? mine, out Task? theirs) =>
         data ? _cache.TryBeginReadData(_uid, region, out mine, out theirs) : _cache.TryBeginRead(_uid, region, out mine, out theirs);
@@ -243,7 +243,7 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
                     _cache.Asked?.Invoke(_uid, region);
                 }
 
-                if (TryRead(region, data, out SegmentOwner cached))
+                if (TryRead(region, data, requests.Account, out SegmentOwner cached))
                 {
                     requests.SetResult(slot, cached);
                     requests.NoteCacheHit();
@@ -347,7 +347,7 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
             others[i] = waited[i].Theirs;
         }
 
-        using SegmentRequestSet own = new SegmentRequestSet();
+        using SegmentRequestSet own = new SegmentRequestSet { Account = requests.Account };
         List<(int Slot, int Own)> placed = [];
         for (int slot = 0; slot < requests.Count; slot++)
         {
@@ -371,11 +371,11 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
         Release(mine, own, placed);
         await Task.WhenAll(others).WaitAsync(cancellationToken).ConfigureAwait(false);
 
-        using SegmentRequestSet late = new SegmentRequestSet();
+        using SegmentRequestSet late = new SegmentRequestSet { Account = requests.Account };
         List<(int Slot, int Late)> missed = [];
         foreach ((int slot, IndexSegment region, bool data, _) in waited)
         {
-            if (TryRead(region, data, out SegmentOwner cached))
+            if (TryRead(region, data, requests.Account, out SegmentOwner cached))
             {
                 requests.SetResult(slot, cached);
                 requests.NoteCacheHit();

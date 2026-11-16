@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs what CI's runner for the tests that run alone runs: the classes of Vorticity.Tests that carry
-# the trait Category=RunsAlone, in three processes side by side. Such a class reads what its whole
+# the trait Category=RunsAlone, which a plain `dotnet test` leaves out unless -p:Measure=true, in
+# three processes side by side. Such a class reads what its whole
 # process does (allocations, peaks, finalizers, a shared pool), so it needs a process to itself, not a
 # machine: what another process does moves none of it. GroupSpillTests takes half of their time, so
 # its methods go to two processes, the methods that share an expected answer or a peak kept together,
@@ -43,7 +44,9 @@ done
 
 # The three start at once and would each build the same project: the build comes first, once.
 if $build; then
-  dotnet build "$root/tests/Vorticity.Tests" -c Release
+  # -p:Measure=true at the build too: it keeps the runtime's tiers, under which the ceilings were set,
+  # which the build of a plain run turns off.
+  dotnet build "$root/tests/Vorticity.Tests" -c Release -p:Measure=true
   set -- --no-build "$@"
 fi
 
@@ -55,7 +58,7 @@ run() {
   if $report; then
     named=(--report-xunit-xml-filename "runs-alone-$name.xunit.xml")
   fi
-  dotnet test --project "$root/tests/Vorticity.Tests" -c Release "$@" ${named[@]+"${named[@]}"} 2>&1 |
+  dotnet test --project "$root/tests/Vorticity.Tests" -c Release -p:Measure=true "$@" ${named[@]+"${named[@]}"} 2>&1 |
     awk -v prefix="[$name] " '{ print prefix $0; fflush() }'
 }
 

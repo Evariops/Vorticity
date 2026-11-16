@@ -24,7 +24,7 @@ public sealed class GranuleStatsDecodeTests
         const int Rows = 8_192;
         byte[] bytes = Encode(Granules, Listed, Rows);
 
-        // Once first, so that the shelf the decode borrows from holds its arrays.
+        // Once first, so that the pool the decode borrows from holds its blocks.
         Assert.NotNull(GranuleStats.From(bytes));
         long before = GC.GetAllocatedBytesForCurrentThread();
         GranuleStats stats = GranuleStats.From(bytes)!;

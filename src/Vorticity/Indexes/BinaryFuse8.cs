@@ -1,6 +1,6 @@
 using System;
 using System.Buffers.Binary;
-using Vorticity.Aggregating;
+using Vorticity.Buffers;
 
 namespace Vorticity.Indexes;
 
@@ -82,34 +82,34 @@ internal sealed class BinaryFuse8
         }
 
         uint block = 1u << blockBits;
-        ulong[] orderArray = WorkArrays.Rent<ulong>(size + 1);
-        uint[] aloneArray = WorkArrays.Rent<uint>((int)arrayLength);
-        byte[] countsArray = WorkArrays.Rent<byte>((int)arrayLength);
-        byte[] foundArray = WorkArrays.Rent<byte>(size);
-        ulong[] xorsArray = WorkArrays.Rent<ulong>((int)arrayLength);
-        uint[] startsArray = WorkArrays.Rent<uint>((int)block);
+        Block<ulong> orderBlock = Blocks.Rent<ulong>(size + 1);
+        Block<uint> aloneBlock = Blocks.Rent<uint>((int)arrayLength);
+        Block<byte> countsBlock = Blocks.Rent<byte>((int)arrayLength);
+        Block<byte> foundBlock = Blocks.Rent<byte>(size);
+        Block<ulong> xorsBlock = Blocks.Rent<ulong>((int)arrayLength);
+        Block<uint> startsBlock = Blocks.Rent<uint>((int)block);
         try
         {
-            return Place(keys, filter, fingerprints, seed, counter, blockBits, arrayLength, orderArray, aloneArray, countsArray, foundArray, xorsArray, startsArray);
+            return Place(keys, filter, fingerprints, seed, counter, blockBits, arrayLength, orderBlock, aloneBlock, countsBlock, foundBlock, xorsBlock, startsBlock);
         }
         finally
         {
-            WorkArrays.Return(orderArray);
-            WorkArrays.Return(aloneArray);
-            WorkArrays.Return(countsArray);
-            WorkArrays.Return(foundArray);
-            WorkArrays.Return(xorsArray);
-            WorkArrays.Return(startsArray);
+            Blocks.Return(orderBlock);
+            Blocks.Return(aloneBlock);
+            Blocks.Return(countsBlock);
+            Blocks.Return(foundBlock);
+            Blocks.Return(xorsBlock);
+            Blocks.Return(startsBlock);
         }
     }
 
     /// <summary>
-    /// The keys placed by <see cref="Build"/>, a seed after another, in its working arrays, rented and so longer than the
+    /// The keys placed by <see cref="Build"/>, a seed after another, in its working blocks, rented at the
     /// <paramref name="arrayLength"/> slots and the keys they serve; null when no seed places them.
     /// </summary>
     private static BinaryFuse8? Place(
         ReadOnlySpan<ulong> keys, BinaryFuse8 filter, byte[] fingerprints, ulong seed, ulong counter, int blockBits, uint arrayLength,
-        ulong[] order, uint[] alone, byte[] counts, byte[] found, ulong[] xors, uint[] starts)
+        Block<ulong> order, Block<uint> alone, Block<byte> counts, Block<byte> found, Block<ulong> xors, Block<uint> starts)
     {
         int size = keys.Length;
         uint block = 1u << blockBits;
@@ -122,9 +122,9 @@ internal sealed class BinaryFuse8
                 return null;
             }
 
-            Array.Clear(order, 0, size + 1);
-            Array.Clear(counts, 0, (int)arrayLength);
-            Array.Clear(xors, 0, (int)arrayLength);
+            order.Clear();
+            counts.Clear();
+            xors.Clear();
             order[size] = 1;
             for (uint i = 0; i < block; i++)
             {

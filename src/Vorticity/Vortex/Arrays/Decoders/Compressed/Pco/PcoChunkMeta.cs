@@ -1,7 +1,7 @@
 using System;
-using System.Buffers;
 
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed.Pco;
@@ -180,7 +180,7 @@ internal sealed class PcoChunkMeta
 
     private readonly long[] _conv1Weights = new long[MaxConv1Order];
 
-    private ulong[]? _dictionary;
+    private Block<ulong> _dictionary;
 
     /// <summary>pco format major version.</summary>
     internal int FormatMajor { get; private set; }
@@ -428,12 +428,9 @@ internal sealed class PcoChunkMeta
     /// <summary>Gives back the rented dictionary, if any; the metadata reads as empty until refilled.</summary>
     internal void Release()
     {
-        if (_dictionary is { } dictionary)
-        {
-            _dictionary = null;
-            DictionaryLength = 0;
-            ArrayPool<ulong>.Shared.Return(dictionary);
-        }
+        Blocks.Return(_dictionary);
+        _dictionary = default;
+        DictionaryLength = 0;
     }
 
     private int StateCount(bool primary)
@@ -469,7 +466,7 @@ internal sealed class PcoChunkMeta
                 $"A pco dictionary declares {length} entries, more than its {reader.BitsRemaining} bits hold.");
         }
 
-        ulong[] dictionary = ArrayPool<ulong>.Shared.Rent(Math.Max(length, 1));
+        Block<ulong> dictionary = Blocks.Rent<ulong>(length);
         for (int i = 0; i < length; i++)
         {
             dictionary[i] = number.FromLatentOrdered(reader.ReadUInt(number.LatentBits));

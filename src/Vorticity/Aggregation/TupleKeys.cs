@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Writing;
 
@@ -290,8 +291,8 @@ internal sealed class TupleKeys : GroupKeys
 
     private readonly TupleLayout _layout;
     private readonly FixedKeys<KeyTuple> _tuples;
-    private KeyTuple[] _block = [];
-    private TextWord[] _words = [];
+    private ScratchBlock<KeyTuple> _block;
+    private ScratchBlock<TextWord> _words;
 
     internal TupleKeys(TupleLayout layout, FixedKeys<KeyTuple> tuples)
     {
@@ -300,9 +301,9 @@ internal sealed class TupleKeys : GroupKeys
         Count = tuples.Count;
     }
 
-    /// <summary>The keys of a plan's columns as tuples, their arrays from <paramref name="shelf"/>.</summary>
-    internal TupleKeys(TupleLayout layout, int probeAhead, ArrayShelf? shelf)
-        : this(layout, new FixedKeys<KeyTuple>(TupleShape(layout), sorted: false, probeAhead: probeAhead, shelf: shelf))
+    /// <summary>The keys of a plan's columns as tuples, their arrays from <paramref name="account"/>.</summary>
+    internal TupleKeys(TupleLayout layout, int probeAhead, TableArrays? account)
+        : this(layout, new FixedKeys<KeyTuple>(TupleShape(layout), sorted: false, probeAhead: probeAhead, account: account))
     {
     }
 
@@ -314,7 +315,7 @@ internal sealed class TupleKeys : GroupKeys
 
     private TupleKeys Wrap(GroupKeys tuples) => new TupleKeys(_layout, (FixedKeys<KeyTuple>)tuples);
 
-    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         Scratch.Grow(ref _block, Math.Min(rows, Chunk));
         for (int start = 0; start < rows; start += Chunk)
@@ -427,7 +428,7 @@ internal sealed class TupleKeys : GroupKeys
         where T : unmanaged
     {
         // A primitive column is read where it lies: no scratch.
-        T[] none = [];
+        ScratchBlock<T> none = default;
         ReadOnlySpan<T> values = FixedReader.Values(arena, node, StorageKind.Primitive, ref none, out ReadOnlySpan<ulong> validity)[start..end];
         if (validity.IsEmpty)
         {
@@ -505,13 +506,13 @@ internal sealed class TupleKeys : GroupKeys
 
     internal override GroupKeys Fresh() => Wrap(_tuples.Fresh());
 
-    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => Wrap(_tuples.ForPart(shelf));
+    internal override GroupKeys ForPart(TableArrays? account = null) => Wrap(_tuples.ForPart(account));
 
-    internal override GroupKeys ForTable(ArrayShelf shelf) => Wrap(_tuples.ForTable(shelf));
+    internal override GroupKeys ForTable(TableArrays account) => Wrap(_tuples.ForTable(account));
 
-    internal override GroupKeys ForSpill(ArrayShelf? shelf) => Wrap(_tuples.ForSpill(shelf));
+    internal override GroupKeys ForSpill(TableArrays? account) => Wrap(_tuples.ForSpill(account));
 
-    internal override GroupKeys? Appending(ArrayShelf? shelf) => _tuples.Appending(shelf) is { } appending ? Wrap(appending) : null;
+    internal override GroupKeys? Appending(TableArrays? account) => _tuples.Appending(account) is { } appending ? Wrap(appending) : null;
 
     internal override long Footprint => _tuples.Footprint + ((long)_block.Length * TupleLayout.Bytes) + ((long)_words.Length * TupleLayout.WordBytes);
 

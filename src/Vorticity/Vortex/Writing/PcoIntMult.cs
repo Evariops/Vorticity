@@ -1,6 +1,6 @@
 using System;
-using System.Buffers;
 using System.Numerics;
+using Vorticity.Buffers;
 
 namespace Vorticity.Writing;
 
@@ -60,10 +60,11 @@ internal static class PcoIntMult
     internal static ulong ChooseBase(ReadOnlySpan<ulong> sample)
     {
         int triples = sample.Length / 3;
-        ulong[] gcds = ArrayPool<ulong>.Shared.Rent(Math.Max(triples, 1));
-        ulong[] primaries = ArrayPool<ulong>.Shared.Rent(Math.Max(sample.Length, 1));
+        Block<ulong> gcdBlock = Blocks.Rent<ulong>(triples);
+        Block<ulong> primaries = Blocks.Rent<ulong>(sample.Length);
         try
         {
+            Span<ulong> gcds = gcdBlock;
             int found = 0;
             for (int t = 0; t < triples; t++)
             {
@@ -76,7 +77,7 @@ internal static class PcoIntMult
 
             // The most prominent divisor: counted by sorting rather than hashing, the best score
             // kept, a tie to the larger divisor.
-            Span<ulong> sorted = gcds.AsSpan(0, found);
+            Span<ulong> sorted = gcds[..found];
             sorted.Sort();
             ulong candidate = 0;
             double best = double.NegativeInfinity;
@@ -102,7 +103,7 @@ internal static class PcoIntMult
                 return 0;
             }
 
-            Span<ulong> quotients = primaries.AsSpan(0, sample.Length);
+            Span<ulong> quotients = primaries;
             for (int i = 0; i < sample.Length; i++)
             {
                 quotients[i] = sample[i] / candidate;
@@ -112,8 +113,8 @@ internal static class PcoIntMult
         }
         finally
         {
-            ArrayPool<ulong>.Shared.Return(primaries);
-            ArrayPool<ulong>.Shared.Return(gcds);
+            Blocks.Return(primaries);
+            Blocks.Return(gcdBlock);
         }
     }
 

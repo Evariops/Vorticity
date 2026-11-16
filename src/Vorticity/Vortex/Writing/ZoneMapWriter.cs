@@ -30,19 +30,25 @@ internal static class ZoneMapWriter
         /// <summary>The scratch completions share; null while one holds it.</summary>
         private static Scratch? Cached;
 
-        internal CanonicalArena Arena { get; } = new CanonicalArena();
+        internal CanonicalArena Arena { get; } = new CanonicalArena(64, MemoryAccount.Kept);
 
         internal DTypeArena Types { get; } = new DTypeArena();
 
         internal AggregateSpecList Specs { get; } = new AggregateSpecList();
 
-        /// <summary>The shared scratch, or a new one when another completion holds it.</summary>
-        internal static Scratch Take() => Interlocked.Exchange(ref Cached, null) ?? new Scratch();
+        /// <summary>The shared scratch, or a new one when another completion holds it, its arena counted for <paramref name="account"/>.</summary>
+        internal static Scratch Take(MemoryAccount account)
+        {
+            Scratch scratch = Interlocked.Exchange(ref Cached, null) ?? new Scratch();
+            scratch.Arena.Account = account;
+            return scratch;
+        }
 
         /// <summary>Keeps the scratch, emptied, for the next completion.</summary>
         internal void Give()
         {
             Arena.Reset();
+            Arena.Account = MemoryAccount.Kept;
             Types.Clear();
             Specs.Clear();
             Volatile.Write(ref Cached, this);

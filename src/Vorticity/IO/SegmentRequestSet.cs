@@ -61,6 +61,12 @@ internal sealed class SegmentRequestSet : IDisposable
     private int _cacheHits;
     private bool _populated;
 
+    /// <summary>
+    /// Whom the blocks a reader fills for the set are counted for: the scan whose batch asks, set as the scan takes the
+    /// context the set belongs to; the memory a file keeps for a set no scan names, an open's or an index's.
+    /// </summary>
+    internal MemoryAccount Account { get; set; } = MemoryAccount.Kept;
+
     /// <summary>Creates an empty set.</summary>
     /// <param name="initialCapacity">Slots to preallocate. Must be positive.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="initialCapacity"/> is not positive.</exception>
@@ -78,6 +84,14 @@ internal sealed class SegmentRequestSet : IDisposable
 
     /// <summary>How many distinct segments are registered.</summary>
     public int Count => _count;
+
+    /// <summary>
+    /// What the set keeps between its batches for the readers and the scans that go through it: made at the first read or
+    /// claim that needs it, one field of the set for both, so that a set made for one read is no larger for them.
+    /// </summary>
+    internal SegmentReadArrays ReadArrays => _readArrays ??= new SegmentReadArrays();
+
+    private SegmentReadArrays? _readArrays;
 
     /// <summary>True once a <see cref="ISegmentReader.ReadManyAsync"/> over this set completed.</summary>
     public bool IsPopulated => _populated;

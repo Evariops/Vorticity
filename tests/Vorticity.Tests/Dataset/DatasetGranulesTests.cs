@@ -25,9 +25,15 @@ public sealed partial class DatasetGranulesTests
     /// granules, which cover its rows once, each of the writer's block rows but the last; the rows of those of one source
     /// are the ones its table of contents counts.
     /// </summary>
+    /// <remarks>
+    /// In blocks of 512 rows, a sixteenth of the default's, and the runs and the appends a sixteenth too: a run of the large
+    /// sources still spans more than two granules. The objects are sized for about as many as before, a dozen of some 230
+    /// granules, nine in ten of one source.
+    /// </remarks>
     [Fact]
     public async Task EveryGranuleHoldsABlockOfRowsAndThoseOfOneSourceAreCounted()
     {
+        const int BlockRows = 512;
         Random random = new Random(0xB10C);
         List<Event> rows = [];
         for (int source = 0; source < 60; source++)
@@ -35,8 +41,8 @@ public sealed partial class DatasetGranulesTests
             int runs = (source % 3) switch
             {
                 0 => random.Next(1, 40),
-                1 => random.Next(500, 6_000),
-                _ => random.Next(20_000, 150_000),
+                1 => random.Next(31, 375),
+                _ => random.Next(1_250, 9_375),
             };
 
             for (int i = 0; i < runs; i++)
@@ -54,15 +60,16 @@ public sealed partial class DatasetGranulesTests
             {
                 SortKey = [LayoutValue.Column(nameof(Event.Source)), LayoutValue.Column(nameof(Event.At))],
                 IndexedPrefix = 1,
-                ObjectBytes = 2 << 20,
+                ObjectBytes = 76 << 10,
             },
+            Write = new VortexWriteOptions { BlockRows = BlockRows },
             ContentsObjectBytes = 1,
             SheetObjectBytes = 0,
         }, Ct);
-        for (int from = 0; from < rows.Count; from += 100_000)
+        for (int from = 0; from < rows.Count; from += 6_250)
         {
             await using ObjectDraft draft = dataset.StartObject();
-            await draft.Writer.WriteAsync<Event>(rows.Skip(from).Take(100_000).ToArray(), Ct);
+            await draft.Writer.WriteAsync<Event>(rows.Skip(from).Take(6_250).ToArray(), Ct);
             await dataset.AppendAsync(draft, Ct);
         }
 
@@ -70,7 +77,7 @@ public sealed partial class DatasetGranulesTests
         {
         }
 
-        int blockRows = new VortexWriteOptions().BlockRows;
+        int blockRows = BlockRows;
         int objects = 0;
         int granules = 0;
         int single = 0;

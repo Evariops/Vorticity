@@ -1,11 +1,11 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Indexes;
 using Vorticity.Layouts;
@@ -73,6 +73,10 @@ public sealed class DatasetWriter
 
     // What the stores hold of the session's memory budget.
     private QueryMemory? _memory;
+
+    // The account its partitions' stores and its arenas are counted in, under the session's jobs' budget, the process's
+    // without one; closed when the writer is released, and by the collector for one never completed nor abandoned.
+    private readonly WorkAccount _account;
     private long _reserved;
 
     private long _rows;
@@ -81,6 +85,7 @@ public sealed class DatasetWriter
     internal DatasetWriter(VortexDataset dataset, DatasetSchema schema, IReadOnlyDictionary<string, VariantShredding>? shredded)
     {
         _dataset = dataset;
+        _account = new WorkAccount(QueryMemoryBudget.JobsOf(dataset.Session), "dataset writer");
         _schema = schema;
         _shredded = shredded;
         _bufferBytes = dataset.Options.AppendBufferBytes;
@@ -205,28 +210,80 @@ public sealed class DatasetWriter
 
         ThrowIfDone();
         int block = _dataset.Options.Write.BlockRows;
-        TRecord[] buffer = ArrayPool<TRecord>.Shared.Rent(block);
+        ColumnsBuilder<TRecord> builder = Builder<TRecord>();
+
+        // The rows go to the builder a few hundred at a time and are taken a block at a time, as a block's worth of rows
+        // written at once would be, as the file writer's stream does. The stream's own staging array is small: a record
+        // may hold references, which no block of bytes can.
+        TRecord[] staged = new TRecord[Math.Min(block, StreamedRows)];
+        int count = 0;
+        int appended = 0;
+        int start = builder.Store.Rows;
         try
         {
-            int count = 0;
             await foreach (TRecord row in rows.WithCancellation(cancellationToken).ConfigureAwait(false))
             {
-                buffer[count++] = row;
-                if (count == block)
+                staged[count++] = row;
+                if (count < staged.Length && appended + count < block)
                 {
-                    await WriteAsync<TRecord>(buffer.AsSpan(0, count), cancellationToken).ConfigureAwait(false);
-                    count = 0;
+                    continue;
                 }
+
+                Append(builder, staged.AsSpan(0, count));
+                appended += count;
+                count = 0;
+                if (appended < block)
+                {
+                    continue;
+                }
+
+                cancellationToken.ThrowIfCancellationRequested();
+                appended = 0;
+                await AcceptAsync(cancellationToken).ConfigureAwait(false);
+                start = builder.Store.Rows;
             }
 
             if (count > 0)
             {
-                await WriteAsync<TRecord>(buffer.AsSpan(0, count), cancellationToken).ConfigureAwait(false);
+                Append(builder, staged.AsSpan(0, count));
+                appended += count;
+            }
+
+            if (appended > 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                appended = 0;
+                await AcceptAsync(cancellationToken).ConfigureAwait(false);
             }
         }
-        finally
+        catch
         {
-            ArrayPool<TRecord>.Shared.Return(buffer, RuntimeHelpers.IsReferenceOrContainsReferences<TRecord>());
+            // The rows of a block not taken leave the builder, as a block never written would have.
+            if (appended > 0)
+            {
+                builder.Store.Truncate(start);
+            }
+
+            throw;
+        }
+    }
+
+    /// <summary>The rows a stream gathers before it appends them to the builder, a column at a time.</summary>
+    private const int StreamedRows = 256;
+
+    /// <summary>Appends <paramref name="rows"/> to <paramref name="builder"/>, whose rows are as they were when it throws.</summary>
+    private static void Append<TRecord>(ColumnsBuilder<TRecord> builder, ReadOnlySpan<TRecord> rows)
+        where TRecord : IVortexRecord<TRecord>
+    {
+        int before = builder.Store.Rows;
+        try
+        {
+            TRecord.WriteRows(builder, rows);
+        }
+        catch
+        {
+            builder.Store.Truncate(before);
+            throw;
         }
     }
 
@@ -563,15 +620,16 @@ public sealed class DatasetWriter
             return;
         }
 
-        int[] order = WorkArrays.Rent<int>(rows);
+        Block<int> rented = Blocks.Rent<int>(rows);
         try
         {
+            Span<int> order = rented;
             for (int i = 0; i < rows; i++)
             {
                 order[i] = i;
             }
 
-            partitions.SortStable(order.AsSpan(0, rows));
+            partitions.SortStable(order);
             for (int at = 0, end; at < rows; at = end)
             {
                 end = at + 1;
@@ -581,13 +639,13 @@ public sealed class DatasetWriter
                 }
 
                 Part part = PartOf(partitions.Row(order[at]));
-                StoreRows.Append(part.Store, arena, CanonicalFilter.Apply(arena, root, order.AsSpan(at, end - at)));
+                StoreRows.Append(part.Store, arena, CanonicalFilter.Apply(arena, root, order.Slice(at, end - at)));
                 part.Store.Commit();
             }
         }
         finally
         {
-            WorkArrays.Return(order);
+            Blocks.Return(rented);
         }
     }
 
@@ -660,7 +718,7 @@ public sealed class DatasetWriter
             return true;
         }
 
-        _memory ??= new QueryMemory(_dataset.Session.Options.JobMemoryBudget ?? QueryMemoryBudget.Jobs);
+        _memory ??= new QueryMemory(QueryMemoryBudget.JobsOf(_dataset.Session));
         long more = (bytes - _reserved + QueryMemory.Chunk - 1) / QueryMemory.Chunk * QueryMemory.Chunk;
         if (!_memory.TryGrow(more))
         {
@@ -686,7 +744,7 @@ public sealed class DatasetWriter
 
         CanonicalArena arena = Arena();
         RowKeys? keys = null;
-        int[]? order = null;
+        Block<int> order = default;
         ObjectOutput? output = null;
         try
         {
@@ -703,13 +761,14 @@ public sealed class DatasetWriter
                     all.Dispose();
                 }
 
-                order = WorkArrays.Rent<int>(rows);
+                order = Blocks.Rent<int>(rows);
+                Span<int> places = order;
                 for (int i = 0; i < rows; i++)
                 {
-                    order[i] = i;
+                    places[i] = i;
                 }
 
-                keys.SortStable(order.AsSpan(0, rows));
+                keys.SortStable(places);
             }
 
             output = _dataset.StartObjectUnder(
@@ -730,13 +789,13 @@ public sealed class DatasetWriter
                     int count = Math.Min(batchRows, rows - start);
                     arena.ResetKeepingBlocks();
                     root = store.Build(arena, rows);
-                    int node = order is null
+                    int node = order.Bytes is null
                         ? (count == rows ? root : CanonicalSlice.SliceAcross(arena, arena, root, start, count))
                         : CanonicalFilter.Apply(arena, root, order.AsSpan(start, count));
                     batch = RecordBatch.Over(arena, node, 0, batch);
                     if (sorted is not null)
                     {
-                        sorted.Take(new OrderedRows(keys!, order!, start), 0, count, writer.BlockRows);
+                        sorted.Take(new OrderedRows(keys!, order, start), 0, count, writer.BlockRows);
                     }
 
                     await writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
@@ -756,7 +815,7 @@ public sealed class DatasetWriter
             // when the dataset has no key (FinishAsync).
             ObjectOutput completed = output;
             output = null;
-            completed.Keys = keys is null ? null : (keys.Row(order![0]).ToArray(), keys.Row(order[rows - 1]).ToArray());
+            completed.Keys = keys is null ? null : (keys.Row(order[0]).ToArray(), keys.Row(order[rows - 1]).ToArray());
             completed.Partition = keys is null && _partition is not null ? part.Partition : null;
             if (await _dataset.CompleteAsync(completed, 0, cancellationToken).ConfigureAwait(false) is { } written)
             {
@@ -772,10 +831,7 @@ public sealed class DatasetWriter
             }
 
             keys?.Dispose();
-            if (order is not null)
-            {
-                WorkArrays.Return(order);
-            }
+            Blocks.Return(order);
 
             arena.ResetKeepingBlocks();
         }
@@ -841,12 +897,12 @@ public sealed class DatasetWriter
     private StructStore NewStore()
     {
         VortexSessionOptions options = _dataset.Session.Options;
-        return ColumnStores.Root(_schema.DType, options.EnginePool, options.Extensions);
+        return ColumnStores.Root(_schema.DType, _account, options.Extensions);
     }
 
-    private CanonicalArena Arena() => _arena ??= new CanonicalArena(64, _dataset.Session.Options.EnginePool);
+    private CanonicalArena Arena() => _arena ??= new CanonicalArena(64, _account);
 
-    private CanonicalArena Scratch() => _scratch ??= new CanonicalArena(64, _dataset.Session.Options.EnginePool);
+    private CanonicalArena Scratch() => _scratch ??= new CanonicalArena(64, _account);
 
     private void ThrowIfDone() => ObjectDisposedException.ThrowIf(_done, this);
 
@@ -873,6 +929,7 @@ public sealed class DatasetWriter
         _memory?.Dispose();
         _memory = null;
         _reserved = 0;
+        _account.Dispose();
     }
 
     /// <summary>One partition's rows: its value, row-encoded, empty for the one partition, and the store that holds them.</summary>

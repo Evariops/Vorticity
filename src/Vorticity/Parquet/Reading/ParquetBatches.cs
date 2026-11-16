@@ -56,6 +56,10 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     private readonly int _batchRows;
     private readonly ScanContext _context;
 
+    // Whom the scan's blocks are counted for: its question's account, or its own, which it closes as it is disposed.
+    private readonly MemoryAccount _account;
+    private readonly WorkAccount? _ownAccount;
+
     /// <summary>Every column the scan reads: a flat field's own, and those under a nested field.</summary>
     private readonly ColumnChunkReader[] _readers;
 
@@ -187,6 +191,20 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _cancellationToken = cancellationToken;
         _abandon = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         _batchRows = RowsOf(spec);
+
+        // The question's account when the scan serves one; else one of the scan's own, closed as it is disposed.
+        if (spec.Account is { } given)
+        {
+            _account = given;
+        }
+        else
+        {
+            _ownAccount = new WorkAccount(QueryMemoryBudget.Of(file.Session), "Parquet scan");
+            _account = _ownAccount;
+        }
+
+        _indexes.Account = _account;
+        _offsets.Account = _account;
         ParquetSchema schema = file.Compiled;
         int[] fields = columns ?? Every(schema.Fields.Length);
         VortexField[] read = new VortexField[fields.Length];
@@ -200,8 +218,8 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _struct = VortexTypes.ToDType(VortexSchema.Create(read), types);
         DType validity = types.Bool(Nullability.NonNullable);
         long cap = file.Options.MaxDecompressedBytes;
-        AlignedBufferPool pool = file.Session.Options.EnginePool;
-        _context = new ScanContext([], new VortexReadOptions { MaxDecompressedBytes = cap });
+        MemoryAccount pool = _account;
+        _context = new ScanContext([], new VortexReadOptions { MaxDecompressedBytes = cap }) { Account = _account };
         List<ColumnChunkReader> readers = [];
         _nested = new NestedFieldReader?[fields.Length];
         _flat = new int[fields.Length];
@@ -256,13 +274,15 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         _chunkStarts = new long[_readers.Length];
         _group = new GroupRead(schema.Columns.Length, _readers.Length);
         _spare = new GroupRead(schema.Columns.Length, _readers.Length);
+        _group.Chunks.Account = _account;
+        _spare.Chunks.Account = _account;
         _readsAhead = !file.Reader.ReadsInPlace && spec.Take is null;
         _nodes = new int[fields.Length];
         _pruning = FilterColumns.For(file, spec);
         _bloom = _pruning is not null && spec.Options.UseIndexes && BloomPruning.Asks(spec.Filter!);
 
         // A group chosen while another is decoded decodes its dictionaries apart from the batch's arena.
-        _dictionaries = DictionaryPruning.For(_pruning, _readsAhead ? null : _context);
+        _dictionaries = DictionaryPruning.For(_pruning, _account, _readsAhead ? null : _context);
     }
 
     public RecordBatch Current => _current ?? throw new InvalidOperationException("The stream has no current batch.");
@@ -473,6 +493,9 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         }
 
         _abandon.Dispose();
+
+        // Last: what the scan's blocks still hold goes back to its budget; a batch the caller keeps is the caller's.
+        _ownAccount?.Dispose();
     }
 
     /// <summary>
@@ -520,7 +543,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
                 readers[i] = _readers[_flat[i]];
             }
 
-            _pipeline = new FieldPipeline(readers, _context.Options, PipelineLanes(_degree), _lanes);
+            _pipeline = new FieldPipeline(readers, _context.Options, PipelineLanes(_degree), _lanes, _account);
         }
 
         _pipeline.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_steps));
@@ -542,7 +565,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         ScanContext[] contexts = new ScanContext[_nodes.Length];
         for (int i = 0; i < contexts.Length; i++)
         {
-            contexts[i] = DetachedContexts.Shared.RentDetached(_context.Options);
+            contexts[i] = DetachedContexts.Shared.RentDetached(_context.Options, _account);
         }
 
         return contexts;
@@ -913,7 +936,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     {
         while (_windowReads.Count < window)
         {
-            _windowReads.Add(new SegmentRequestSet());
+            _windowReads.Add(new SegmentRequestSet { Account = _account });
         }
 
         return _windowReads[window - 1];

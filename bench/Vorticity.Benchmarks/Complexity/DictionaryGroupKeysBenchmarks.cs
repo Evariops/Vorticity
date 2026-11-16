@@ -59,7 +59,7 @@ public class DictionaryGroupKeysBenchmarks
     private RetainingArena _batch = null!;
     private int _dictionary;
     private ulong[] _selection = [];
-    private int[] _rowGroups = [];
+    private Block<int> _rowGroups;
     private GroupRanges _ranges = null!;
     private GroupKeys _keys = null!;
 
@@ -86,7 +86,7 @@ public class DictionaryGroupKeysBenchmarks
 
         _selection = new ulong[BatchRows / 64];
         _selection.AsSpan().Fill(ulong.MaxValue);
-        _rowGroups = new int[BatchRows];
+        _rowGroups = Blocks.Allocate<int>(BatchRows);
         _ranges = new GroupRanges();
         VortexType type = text ? VortexType.Utf8 : VortexType.Int64;
         ColumnShape shape = new ColumnShape(new ColumnSym(Expr.Field("k"), type, null, null, -1, []));

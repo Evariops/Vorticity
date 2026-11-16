@@ -1,7 +1,7 @@
 using System;
-using System.Buffers;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Writing;
 
@@ -32,21 +32,21 @@ internal static class FileIdentity
     /// <param name="pinned">The identity the write options name, if any.</param>
     /// <param name="cancellationToken">Cancels the write.</param>
     /// <remarks>
-    /// The buffer is rented rather than allocated, so that writing a file stays within its
-    /// allocation budget, and returning it at once is safe because <see cref="ISegmentSink"/> has
+    /// The buffer is a block of the pool rather than allocated, so that writing a file stays within its
+    /// allocation budget, and giving it back at once is safe because <see cref="ISegmentSink"/> has
     /// consumed the bytes by the time its call completes.
     /// </remarks>
     internal static async ValueTask WriteAsync(ISegmentSink sink, Guid? pinned, CancellationToken cancellationToken)
     {
-        byte[] bytes = ArrayPool<byte>.Shared.Rent(Length);
+        Block<byte> bytes = Blocks.Rent<byte>(Length);
         try
         {
-            (pinned ?? Guid.NewGuid()).TryWriteBytes(bytes);
-            await sink.WriteAsync(bytes.AsMemory(0, Length), cancellationToken).ConfigureAwait(false);
+            (pinned ?? Guid.NewGuid()).TryWriteBytes(bytes.AsSpan());
+            await sink.WriteAsync(bytes.AsMemory(), cancellationToken).ConfigureAwait(false);
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(bytes);
+            Blocks.Return(bytes);
         }
     }
 

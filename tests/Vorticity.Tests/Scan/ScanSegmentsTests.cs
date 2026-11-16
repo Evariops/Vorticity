@@ -21,7 +21,7 @@ public sealed class ScanSegmentsTests
     [Fact]
     public void ABatchTakesWhatTheScanHoldsAndClaimsTheRestThroughReleases()
     {
-        NativeSegmentOwner block = NativeSegmentOwner.Allocate((int)SegmentBytes, 64);
+        BlockOwner block = BlockOwner.Allocate((int)SegmentBytes, 64);
         using (ScanSegments held = new ScanSegments(lanes: 1))
         {
             using SegmentRequestSet requests = new SegmentRequestSet();
@@ -93,7 +93,7 @@ public sealed class ScanSegmentsTests
     private sealed class Waiter : SegmentWaiter;
 
     /// <summary>Registers, claims, reads and publishes one batch; returns how many segments the set served.</summary>
-    private static int Batch(ScanSegments held, SegmentRequestSet requests, NativeSegmentOwner block, long batch, int first, int count)
+    private static int Batch(ScanSegments held, SegmentRequestSet requests, BlockOwner block, long batch, int first, int count)
     {
         for (int i = first; i < first + count; i++)
         {

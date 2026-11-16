@@ -194,6 +194,76 @@ public sealed class S3ReadTests
     }
 
     [Fact]
+    public async Task ACopyIsOneRequestOfItsRange()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using S3Emulator emulator = new S3Emulator();
+        emulator.Seed(Bucket, "f", Encoding.ASCII.GetBytes("0123456789"));
+        await using S3ObjectStore store = Store(emulator);
+
+        using System.IO.MemoryStream copy = new System.IO.MemoryStream();
+        Assert.Equal(5, await store.CopyToAsync("f", 2, 5, copy, null, ct));
+        Assert.Equal("23456", Encoding.ASCII.GetString(copy.ToArray()));
+        Assert.Equal(["GET /f bytes=2-6"], emulator.Log);
+
+        // Past the object's end the copy is shorter; at its end it is refused, as a read is.
+        using System.IO.MemoryStream tail = new System.IO.MemoryStream();
+        Assert.Equal(4, await store.CopyToAsync("f", 6, 100, tail, null, ct));
+        Assert.Equal("6789", Encoding.ASCII.GetString(tail.ToArray()));
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(async () => await store.CopyToAsync("f", 10, 1, tail, null, ct));
+        await Assert.ThrowsAsync<ObjectNotFoundException>(async () => await store.CopyToAsync("none", 0, 1, tail, null, ct));
+    }
+
+    [Fact]
+    public async Task ACopyCutShortAsksForWhatIsLeftOfTheSameObject()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using S3Emulator emulator = new S3Emulator();
+        byte[] content = Encoding.ASCII.GetBytes("0123456789");
+        emulator.Seed(Bucket, "f", content);
+        string etag = emulator.ETagOf(Bucket, "f");
+        List<string?> matched = [];
+        emulator.Intercept = (request, index) =>
+        {
+            matched.Add(IfMatch(request));
+            return index == 0 ? Short(content, 4, etag: etag) : null;
+        };
+        await using S3ObjectStore store = Store(emulator);
+
+        using System.IO.MemoryStream copy = new System.IO.MemoryStream();
+        Assert.Equal(10, await store.CopyToAsync("f", 0, 10, copy, null, ct));
+        Assert.Equal(content, copy.ToArray());
+        Assert.Equal(["GET /f bytes=0-9", "GET /f bytes=4-9"], emulator.Log);
+        Assert.Equal([null, etag], matched);
+    }
+
+    [Fact]
+    public async Task ACopyCutShortOfAnObjectReplacedSinceIsRefused()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using S3Emulator emulator = new S3Emulator();
+        byte[] content = Encoding.ASCII.GetBytes("0123456789");
+        emulator.Seed(Bucket, "f", content);
+        string etag = emulator.ETagOf(Bucket, "f");
+        emulator.Intercept = (request, index) =>
+        {
+            if (index > 0)
+            {
+                return null;
+            }
+
+            emulator.Seed(Bucket, "f", Encoding.ASCII.GetBytes("abcdefghij"));
+            return Short(content, 4, etag: etag);
+        };
+        await using S3ObjectStore store = Store(emulator);
+
+        using System.IO.MemoryStream copy = new System.IO.MemoryStream();
+        VortexFormatException changed = await Assert.ThrowsAsync<VortexFormatException>(async () => await store.CopyToAsync("f", 0, 10, copy, null, ct));
+        Assert.Contains("changed under this reader", changed.Message, StringComparison.Ordinal);
+        Assert.Equal("0123", Encoding.ASCII.GetString(copy.ToArray()));
+    }
+
+    [Fact]
     public async Task AStalledBodyIsAbandonedAndRetried()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
@@ -412,11 +482,15 @@ public sealed class S3ReadTests
     private static (int, long) Pick(ObjectRead read) => (read.BytesRead, read.ObjectLength);
 
     /// <summary>A partial answer that announces the whole content and sends <paramref name="sent"/> bytes of it.</summary>
-    private static HttpResponseMessage Short(byte[] content, int sent, bool stall = false)
+    private static HttpResponseMessage Short(byte[] content, int sent, bool stall = false, string etag = "\"short\"")
     {
         HttpResponseMessage response = new HttpResponseMessage(HttpStatusCode.PartialContent) { Content = new FaultyContent(content, sent, stall) };
         response.Content.Headers.TryAddWithoutValidation("Content-Range", $"bytes 0-{content.Length - 1}/{content.Length}");
-        response.Headers.TryAddWithoutValidation("ETag", "\"short\"");
+        response.Headers.TryAddWithoutValidation("ETag", etag);
         return response;
     }
+
+    /// <summary>The If-Match a request carries, or null.</summary>
+    internal static string? IfMatch(HttpRequestMessage request, string header = "If-Match") =>
+        request.Headers.TryGetValues(header, out IEnumerable<string>? values) ? values.First() : null;
 }

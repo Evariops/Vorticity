@@ -140,13 +140,13 @@ public sealed class ForgedKeyTests
     }
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_slotCode")]
-    private static extern ref int[] SlotCodes(DistinctTable table);
+    private static extern ref Block<int> SlotCodes(DistinctTable table);
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_mask")]
     private static extern ref int TableMask(DistinctTable table);
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_slots")]
-    private static extern ref ulong[] SetSlots(HashSet64 set);
+    private static extern ref Block<ulong> SetSlots(HashSet64 set);
 
     [UnsafeAccessor(UnsafeAccessorKind.Field, Name = "_mask")]
     private static extern ref int SetMask(HashSet64 set);

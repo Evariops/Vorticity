@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -8,13 +9,13 @@ using Xunit;
 
 namespace Vorticity.Tests.Buffers;
 
-public sealed class AlignedBufferPoolTests
+public sealed class BlockPoolTests
 {
     /// <summary>
     /// The block's base address. Pointer identity is the only honest proof that the pool reused a
     /// block rather than quietly allocating a fresh one that happens to look the same.
     /// </summary>
-    internal static unsafe nint AddressOf(NativeSegmentOwner owner)
+    internal static unsafe nint AddressOf(BlockOwner owner)
     {
         fixed (byte* pointer = owner.Buffer.Span)
         {
@@ -25,17 +26,17 @@ public sealed class AlignedBufferPoolTests
     [Fact]
     public void Rent_return_rent_hands_back_the_very_same_block()
     {
-        AlignedBufferPool pool = new AlignedBufferPool(maxPerBucket: 4);
+        BlockPool pool = new BlockPool(maxPerBucket: 4);
         try
         {
-            NativeSegmentOwner first = pool.Rent(1000, 64);
+            BlockOwner first = pool.Rent(TestAccount.Shared, 1000, 64);
             nint address = AddressOf(first);
             Assert.NotEqual(0, address);
 
             pool.Return(first);
             Assert.Equal(1, pool.ParkedCount(1000));
 
-            NativeSegmentOwner second = pool.Rent(1000, 64);
+            BlockOwner second = pool.Rent(TestAccount.Shared, 1000, 64);
 
             Assert.Same(first, second);
             Assert.Equal(address, AddressOf(second));
@@ -53,13 +54,13 @@ public sealed class AlignedBufferPoolTests
     [Fact]
     public void A_recycled_block_comes_back_with_a_live_reference_count()
     {
-        AlignedBufferPool pool = new AlignedBufferPool();
+        BlockPool pool = new BlockPool();
         try
         {
-            NativeSegmentOwner first = pool.Rent(64, 64);
+            BlockOwner first = pool.Rent(TestAccount.Shared, 64, 64);
             pool.Return(first);
 
-            NativeSegmentOwner second = pool.Rent(64, 64);
+            BlockOwner second = pool.Rent(TestAccount.Shared, 64, 64);
             Assert.Same(first, second);
             Assert.Equal(1, second.RefCount);
 
@@ -83,14 +84,14 @@ public sealed class AlignedBufferPoolTests
         // The other side of "rented memory is not zeroed": here it is observable rather than
         // merely unpromised. A caller that reads a block before filling it reads the last scan's
         // segment, and no assertion anywhere may come to depend on finding a zero.
-        AlignedBufferPool pool = new AlignedBufferPool();
+        BlockPool pool = new BlockPool();
         try
         {
-            NativeSegmentOwner first = pool.Rent(64, 64);
+            BlockOwner first = pool.Rent(TestAccount.Shared, 64, 64);
             first.WritableSpan.Fill(0xA7);
             pool.Return(first);
 
-            NativeSegmentOwner second = pool.Rent(64, 64);
+            BlockOwner second = pool.Rent(TestAccount.Shared, 64, 64);
             Assert.Same(first, second);
             Assert.Equal(0xA7, second.Buffer.Span[0]);
             Assert.Equal(0xA7, second.Buffer.Span[63]);
@@ -106,16 +107,16 @@ public sealed class AlignedBufferPoolTests
     [Fact]
     public void Sizes_in_the_same_class_share_a_block()
     {
-        AlignedBufferPool pool = new AlignedBufferPool();
+        BlockPool pool = new BlockPool();
         try
         {
             // Everything at or below 4 KiB is one size class, so a 4096-byte read and a 1-byte
             // read are interchangeable.
-            NativeSegmentOwner big = pool.Rent(4096, 64);
+            BlockOwner big = pool.Rent(TestAccount.Shared, 4096, 64);
             nint address = AddressOf(big);
             pool.Return(big);
 
-            NativeSegmentOwner small = pool.Rent(1, 8);
+            BlockOwner small = pool.Rent(TestAccount.Shared, 1, 8);
 
             Assert.Equal(address, AddressOf(small));
             Assert.Equal(1, small.Length);
@@ -132,15 +133,15 @@ public sealed class AlignedBufferPoolTests
     [Fact]
     public void Different_size_classes_do_not_share()
     {
-        AlignedBufferPool pool = new AlignedBufferPool();
+        BlockPool pool = new BlockPool();
         try
         {
-            NativeSegmentOwner small = pool.Rent(4096, 64);
+            BlockOwner small = pool.Rent(TestAccount.Shared, 4096, 64);
             pool.Return(small);
 
             // 4097 rounds to 8192: a different bucket, so the parked 4 KiB block is not eligible
             // and must not be handed out with a length beyond its capacity.
-            NativeSegmentOwner large = pool.Rent(4097, 64);
+            BlockOwner large = pool.Rent(TestAccount.Shared, 4097, 64);
 
             Assert.NotSame(small, large);
             Assert.Equal(8192, large.Capacity);
@@ -168,10 +169,10 @@ public sealed class AlignedBufferPoolTests
         // The pool allocates at the 64-byte cap whatever the caller
         // asked for, which is what makes blocks interchangeable across size classes and what
         // makes coalesced reads preserve each segment's own alignment.
-        AlignedBufferPool pool = new AlignedBufferPool();
+        BlockPool pool = new BlockPool();
         try
         {
-            NativeSegmentOwner owner = pool.Rent(500, alignment);
+            BlockOwner owner = pool.Rent(TestAccount.Shared, 500, alignment);
 
             Assert.Equal(VortexLimits.MaxAlignment, owner.Buffer.Alignment);
             Assert.True(owner.Buffer.IsAligned);
@@ -188,10 +189,10 @@ public sealed class AlignedBufferPoolTests
     [Fact]
     public void Requests_above_the_ceiling_bypass_the_pool()
     {
-        AlignedBufferPool pool = new AlignedBufferPool(maxPooledLength: 4096, maxPerBucket: 4);
+        BlockPool pool = new BlockPool(maxPooledLength: 4096, maxPerBucket: 4);
         try
         {
-            NativeSegmentOwner huge = pool.Rent(1_000_000, 64);
+            BlockOwner huge = pool.Rent(TestAccount.Shared, 1_000_000, 64);
 
             Assert.Equal(-1, huge.BucketIndex);
             Assert.Equal(1_000_000, huge.Length);
@@ -212,12 +213,12 @@ public sealed class AlignedBufferPoolTests
     [Fact]
     public void A_full_bucket_frees_the_surplus_instead_of_growing()
     {
-        AlignedBufferPool pool = new AlignedBufferPool(maxPerBucket: 2);
+        BlockPool pool = new BlockPool(maxPerBucket: 2);
         try
         {
-            NativeSegmentOwner a = pool.Rent(1000, 64);
-            NativeSegmentOwner b = pool.Rent(1000, 64);
-            NativeSegmentOwner c = pool.Rent(1000, 64);
+            BlockOwner a = pool.Rent(TestAccount.Shared, 1000, 64);
+            BlockOwner b = pool.Rent(TestAccount.Shared, 1000, 64);
+            BlockOwner c = pool.Rent(TestAccount.Shared, 1000, 64);
 
             nint addressA = AddressOf(a);
             nint addressB = AddressOf(b);
@@ -231,8 +232,8 @@ public sealed class AlignedBufferPoolTests
             Assert.Equal(2, pool.ParkedCount(1000));
 
             // Exactly the two parked blocks come back; c's memory was released.
-            NativeSegmentOwner first = pool.Rent(1000, 64);
-            NativeSegmentOwner second = pool.Rent(1000, 64);
+            BlockOwner first = pool.Rent(TestAccount.Shared, 1000, 64);
+            BlockOwner second = pool.Rent(TestAccount.Shared, 1000, 64);
             HashSet<nint> recycled = [AddressOf(first), AddressOf(second)];
 
             Assert.Equal(2, recycled.Count);
@@ -251,10 +252,10 @@ public sealed class AlignedBufferPoolTests
     [Fact]
     public void A_retained_block_is_not_recycled_until_the_last_reference_goes()
     {
-        AlignedBufferPool pool = new AlignedBufferPool();
+        BlockPool pool = new BlockPool();
         try
         {
-            NativeSegmentOwner owner = pool.Rent(2048, 64);
+            BlockOwner owner = pool.Rent(TestAccount.Shared, 2048, 64);
             nint address = AddressOf(owner);
 
             owner.Retain();
@@ -268,7 +269,7 @@ public sealed class AlignedBufferPoolTests
             owner.Release();
             Assert.Equal(1, pool.ParkedCount(2048));
 
-            NativeSegmentOwner recycled = pool.Rent(2048, 64);
+            BlockOwner recycled = pool.Rent(TestAccount.Shared, 2048, 64);
             Assert.Equal(address, AddressOf(recycled));
             pool.Return(recycled);
         }
@@ -281,10 +282,10 @@ public sealed class AlignedBufferPoolTests
     [Fact]
     public void Releasing_to_zero_recycles_without_an_explicit_Return()
     {
-        AlignedBufferPool pool = new AlignedBufferPool();
+        BlockPool pool = new BlockPool();
         try
         {
-            NativeSegmentOwner owner = pool.Rent(1024, 64);
+            BlockOwner owner = pool.Rent(TestAccount.Shared, 1024, 64);
             nint address = AddressOf(owner);
 
             // This is the RecordBatch path: the batch releases every buffer it borrowed on
@@ -293,7 +294,7 @@ public sealed class AlignedBufferPoolTests
 
             Assert.Equal(1, pool.ParkedCount(1024));
 
-            NativeSegmentOwner recycled = pool.Rent(1024, 64);
+            BlockOwner recycled = pool.Rent(TestAccount.Shared, 1024, 64);
             Assert.Equal(address, AddressOf(recycled));
             pool.Return(recycled);
         }
@@ -306,10 +307,10 @@ public sealed class AlignedBufferPoolTests
     [Fact]
     public void Returning_the_same_block_twice_throws()
     {
-        AlignedBufferPool pool = new AlignedBufferPool();
+        BlockPool pool = new BlockPool();
         try
         {
-            NativeSegmentOwner owner = pool.Rent(1024, 64);
+            BlockOwner owner = pool.Rent(TestAccount.Shared, 1024, 64);
             pool.Return(owner);
 
             Assert.Throws<ObjectDisposedException>(() => pool.Return(owner));
@@ -322,17 +323,17 @@ public sealed class AlignedBufferPoolTests
 
     [Fact]
     public void Return_rejects_null() =>
-        Assert.Throws<ArgumentNullException>(() => AlignedBufferPool.Shared.Return(null!));
+        Assert.Throws<ArgumentNullException>(() => MemoryAccount.Pool.Return(null!));
 
     [Fact]
     public void Return_rejects_a_block_this_pool_does_not_own()
     {
-        AlignedBufferPool mine = new AlignedBufferPool();
-        AlignedBufferPool theirs = new AlignedBufferPool();
+        BlockPool mine = new BlockPool();
+        BlockPool theirs = new BlockPool();
         try
         {
-            NativeSegmentOwner foreign = theirs.Rent(1024, 64);
-            using NativeSegmentOwner unpooled = NativeSegmentOwner.Allocate(1024, 64);
+            BlockOwner foreign = theirs.Rent(TestAccount.Shared, 1024, 64);
+            using BlockOwner unpooled = BlockOwner.Allocate(1024, 64);
 
             Assert.Throws<ArgumentException>(() => mine.Return(foreign));
             Assert.Throws<ArgumentException>(() => mine.Return(unpooled));
@@ -355,10 +356,10 @@ public sealed class AlignedBufferPoolTests
     [InlineData(1024, -64)]
     public void Rent_validates_its_arguments(int length, int alignment)
     {
-        AlignedBufferPool pool = new AlignedBufferPool();
+        BlockPool pool = new BlockPool();
         try
         {
-            Assert.Throws<VortexFormatException>(() => pool.Rent(length, alignment));
+            Assert.Throws<VortexFormatException>(() => pool.Rent(TestAccount.Shared, length, alignment));
         }
         finally
         {
@@ -369,10 +370,10 @@ public sealed class AlignedBufferPoolTests
     [Fact]
     public void A_zero_length_rent_is_legal()
     {
-        AlignedBufferPool pool = new AlignedBufferPool();
+        BlockPool pool = new BlockPool();
         try
         {
-            NativeSegmentOwner owner = pool.Rent(0, 64);
+            BlockOwner owner = pool.Rent(TestAccount.Shared, 0, 64);
 
             Assert.True(owner.Buffer.IsEmpty);
             Assert.Equal(4096, owner.Capacity);
@@ -394,17 +395,17 @@ public sealed class AlignedBufferPoolTests
     [InlineData((1 << 30) + 1)]
     [InlineData(int.MaxValue)]
     public void The_constructor_rejects_an_impossible_ceiling(int maxPooledLength) =>
-        Assert.Throws<ArgumentOutOfRangeException>(() => new AlignedBufferPool(maxPooledLength));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new BlockPool(maxPooledLength));
 
     [Fact]
     public void The_constructor_rejects_a_negative_bucket_size() =>
         Assert.Throws<ArgumentOutOfRangeException>(
-            () => new AlignedBufferPool(maxPerBucket: -1));
+            () => new BlockPool(maxPerBucket: -1));
 
     [Fact]
     public void The_ceiling_rounds_up_to_a_power_of_two()
     {
-        AlignedBufferPool pool = new AlignedBufferPool(maxPooledLength: 5000);
+        BlockPool pool = new BlockPool(maxPooledLength: 5000);
 
         Assert.Equal(8192, pool.MaxPooledLength);
         Assert.Equal(8, pool.MaxPerBucket);
@@ -413,9 +414,9 @@ public sealed class AlignedBufferPoolTests
     [Fact]
     public void A_zero_sized_bucket_disables_retention()
     {
-        AlignedBufferPool pool = new AlignedBufferPool(maxPerBucket: 0);
+        BlockPool pool = new BlockPool(maxPerBucket: 0);
 
-        NativeSegmentOwner owner = pool.Rent(1024, 64);
+        BlockOwner owner = pool.Rent(TestAccount.Shared, 1024, 64);
         pool.Return(owner);
 
         Assert.Equal(0, pool.ParkedCount(1024));
@@ -425,15 +426,15 @@ public sealed class AlignedBufferPoolTests
     [Fact]
     public void Trim_releases_every_parked_block()
     {
-        AlignedBufferPool pool = new AlignedBufferPool(maxPerBucket: 4);
+        BlockPool pool = new BlockPool(maxPerBucket: 4);
 
         // Rent both before returning either: returning one and immediately renting again would
         // simply pop the block back out and park a single block twice.
-        NativeSegmentOwner a = pool.Rent(1000, 64);
-        NativeSegmentOwner b = pool.Rent(1000, 64);
+        BlockOwner a = pool.Rent(TestAccount.Shared, 1000, 64);
+        BlockOwner b = pool.Rent(TestAccount.Shared, 1000, 64);
         pool.Return(a);
         pool.Return(b);
-        pool.Return(pool.Rent(100_000, 64));
+        pool.Return(pool.Rent(TestAccount.Shared, 100_000, 64));
         Assert.Equal(2, pool.ParkedCount(1000));
         Assert.Equal(1, pool.ParkedCount(100_000));
 
@@ -443,7 +444,7 @@ public sealed class AlignedBufferPoolTests
         Assert.Equal(0, pool.ParkedCount(100_000));
 
         // Still usable afterwards.
-        NativeSegmentOwner owner = pool.Rent(1000, 64);
+        BlockOwner owner = pool.Rent(TestAccount.Shared, 1000, 64);
         Assert.Equal(1000, owner.Length);
         pool.Return(owner);
         pool.Trim();
@@ -452,10 +453,10 @@ public sealed class AlignedBufferPoolTests
     [Fact]
     public void Trim_leaves_rented_blocks_alone()
     {
-        AlignedBufferPool pool = new AlignedBufferPool();
+        BlockPool pool = new BlockPool();
         try
         {
-            NativeSegmentOwner live = pool.Rent(1024, 64);
+            BlockOwner live = pool.Rent(TestAccount.Shared, 1024, 64);
             live.WritableSpan.Fill(0x7E);
 
             pool.Trim();
@@ -469,28 +470,35 @@ public sealed class AlignedBufferPoolTests
         }
     }
 
+    /// <summary>
+    /// Asked what it did not use, a pool that keeps all lets go, in each class, of the blocks that sat parked since it was
+    /// last asked, the fewest it held in between: a block taken and given back between two askings stays. A class keeps
+    /// its floor, 256 KiB of blocks, however long they sat.
+    /// </summary>
     [Fact]
-    public void A_sweep_frees_a_class_no_rent_asked_for_over_a_minute_and_keeps_one_in_use()
+    public void Letting_go_of_what_was_unused_frees_the_blocks_parked_since_the_time_before_above_the_floor()
     {
-        AlignedBufferPool pool = new AlignedBufferPool(maxPerBucket: 4);
+        const int megabyte = 1024 * 1024;
+        BlockPool pool = BlockPool.KeepingAll(8 * megabyte);
         try
         {
-            pool.Return(pool.Rent(4096, 64));
-            pool.Return(pool.Rent(65_536, 64));
-            pool.TrimIdle(now: 1_000, everything: false);
-            Assert.Equal(1, pool.ParkedCount(4096));
-            Assert.Equal(1, pool.ParkedCount(65_536));
+            ReturnAll(pool, RentAll(pool, megabyte, 3));
+            ReturnAll(pool, RentAll(pool, 4096, 100));
+            Assert.Equal(3, pool.ParkedCount(megabyte));
 
-            pool.Return(pool.Rent(4096, 64));
-            pool.TrimIdle(now: 60_999, everything: false);
-            Assert.Equal(1, pool.ParkedCount(65_536));
+            // Parked since the start, which counts from here: nothing goes.
+            pool.LetGoUnused(collection: true);
+            Assert.Equal(3, pool.ParkedCount(megabyte));
 
-            pool.TrimIdle(now: 61_000, everything: false);
-            Assert.Equal(1, pool.ParkedCount(4096));
-            Assert.Equal(0, pool.ParkedCount(65_536));
+            // One taken and given back: the two others sat parked through.
+            pool.Return(pool.Rent(TestAccount.Shared, megabyte, 64));
+            pool.LetGoUnused(collection: true);
+            Assert.Equal(1, pool.ParkedCount(megabyte));
+            Assert.Equal(BlockPool.FloorBytesPerClass / 4096, pool.ParkedCount(4096));
 
-            pool.TrimIdle(now: 120_999, everything: false);
-            Assert.Equal(0, pool.ParkedCount(4096));
+            pool.LetGoUnused(collection: false);
+            Assert.Equal(0, pool.ParkedCount(megabyte));
+            Assert.Equal(BlockPool.FloorBytesPerClass / 4096, pool.ParkedCount(4096));
         }
         finally
         {
@@ -498,47 +506,52 @@ public sealed class AlignedBufferPoolTests
         }
     }
 
+    /// <summary>
+    /// Asked by the registry, a pool that keeps all gives back what it parks above its floors, the blocks of an array of
+    /// their own first, whose bytes reach the collector at once, up to the bytes asked; of another kind, nothing. It says
+    /// given what leaves the heap: a piece of a slab that stays, only free in it, is no byte given. A pool made with a count
+    /// per class keeps it.
+    /// </summary>
     [Fact]
-    public void A_sweep_under_memory_pressure_frees_every_parked_block()
+    public void Giving_back_frees_the_blocks_of_an_array_of_their_own_first_above_the_floors()
     {
-        AlignedBufferPool pool = new AlignedBufferPool(maxPerBucket: 4);
+        const int megabyte = 1024 * 1024;
+        BlockPool pool = BlockPool.KeepingAll(32 * megabyte);
+        BlockPool counted = new BlockPool(maxPerBucket: 4);
         try
         {
-            pool.Return(pool.Rent(4096, 64));
-            pool.TrimIdle(now: 0, everything: true);
-            Assert.Equal(0, pool.ParkedCount(4096));
+            // Past the slabs' largest piece, 16 MiB: an array of its own, of the class of 32 MiB.
+            ReturnAll(pool, RentAll(pool, 20 * megabyte, 1));
+            ReturnAll(pool, RentAll(pool, 4096, 100));
+            ReturnAll(counted, RentAll(counted, megabyte, 4));
 
-            // Still usable afterwards.
-            pool.Return(pool.Rent(4096, 64));
-            Assert.Equal(1, pool.ParkedCount(4096));
+            Assert.Equal(0, pool.GiveBack(KeptKind.Segments, long.MaxValue));
+            Assert.Equal(32 * megabyte, pool.GiveBack(KeptKind.Blocks, 1));
+            Assert.Equal(0, pool.ParkedCount(20 * megabyte));
+            Assert.Equal(100, pool.ParkedCount(4096));
+
+            // The pages go back into their slabs, which other blocks of the process may keep: nothing or whole slabs given.
+            int floor = BlockPool.FloorBytesPerClass / 4096;
+            Assert.Equal(0, pool.GiveBack(KeptKind.Blocks, long.MaxValue) % Slabs.SlabBytes);
+            Assert.Equal(floor, pool.ParkedCount(4096));
+
+            Assert.Equal(0, counted.GiveBack(KeptKind.Blocks, long.MaxValue));
+            counted.LetGoUnused(collection: true);
+            counted.LetGoUnused(collection: true);
+            Assert.Equal(4, counted.ParkedCount(megabyte));
         }
         finally
         {
             pool.Trim();
+            counted.Trim();
         }
     }
 
+    /// <summary>The registry holds its holders weakly: a pool nothing else references goes with its blocks.</summary>
     [Fact]
-    public void The_pools_the_library_rents_from_are_swept_by_a_full_collection()
+    public void A_pool_nothing_else_holds_is_collected()
     {
-        AlignedBufferPool pool = new AlignedBufferPool(maxRetainedBytes: 1 << 20).Swept();
-        AlignedMemoryPool session = new AlignedMemoryPool();
-        StrongBox<int> sweeps = AlignedBufferPool.WatchSweeps(pool);
-        StrongBox<int> shared = AlignedBufferPool.WatchSweeps(AlignedMemoryPool.Shared.Inner);
-        StrongBox<int> sessions = AlignedBufferPool.WatchSweeps(session.Inner);
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-        GC.WaitForPendingFinalizers();
-        Assert.True(Volatile.Read(ref sweeps.Value) > 0, "a pool made swept");
-        Assert.True(Volatile.Read(ref shared.Value) > 0, "the shared pool");
-        Assert.True(Volatile.Read(ref sessions.Value) > 0, "a session's pool");
-        GC.KeepAlive(pool);
-        GC.KeepAlive(session);
-    }
-
-    [Fact]
-    public void A_swept_pool_nothing_else_holds_is_collected()
-    {
-        WeakReference pool = SweptPool();
+        WeakReference pool = UnheldPool();
         for (int i = 0; i < 3 && pool.IsAlive; i++)
         {
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
@@ -549,60 +562,12 @@ public sealed class AlignedBufferPoolTests
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private static WeakReference SweptPool() => new WeakReference(new AlignedBufferPool(maxRetainedBytes: 1 << 20).Swept());
-
-    [Fact]
-    public void A_lease_takes_back_the_pressure_it_declared_disposed_or_dropped()
-    {
-        AlignedMemoryPool pool = new AlignedMemoryPool();
-        StrongBox<long> declared = AlignedMemoryPool.WatchPressure(pool);
-
-        pool.Rent(4096).Dispose();
-        Assert.Equal(0, Volatile.Read(ref declared.Value));
-
-        DropALease(pool);
-        for (int i = 0; i < 3 && Volatile.Read(ref declared.Value) != 0; i++)
-        {
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-            GC.WaitForPendingFinalizers();
-        }
-
-        Assert.Equal(0, Volatile.Read(ref declared.Value));
-        GC.KeepAlive(pool);
-    }
-
-    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
-    private static void DropALease(AlignedMemoryPool pool) => _ = pool.Rent(4096);
-
-    [Fact]
-    public void A_pool_bounded_in_bytes_keeps_what_is_given_back_in_any_class_up_to_its_budget()
-    {
-        const int megabyte = 1024 * 1024;
-        AlignedBufferPool large = new AlignedBufferPool(maxRetainedBytes: 16L * megabyte);
-        AlignedBufferPool small = new AlignedBufferPool(maxRetainedBytes: megabyte);
-        try
-        {
-            ReturnAll(large, RentAll(large, 4 * megabyte, 2));
-            Assert.Equal(2, large.ParkedCount(4 * megabyte));
-
-            // The two blocks above hold half the budget: eight blocks of a megabyte fill the rest.
-            ReturnAll(large, RentAll(large, megabyte, 12));
-            Assert.Equal(8, large.ParkedCount(megabyte));
-
-            ReturnAll(small, RentAll(small, 4096, 100));
-            Assert.Equal(100, small.ParkedCount(4096));
-        }
-        finally
-        {
-            large.Trim();
-            small.Trim();
-        }
-    }
+    private static WeakReference UnheldPool() => new WeakReference(BlockPool.KeepingAll(1 << 20));
 
     [Fact]
     public void Concurrent_renters_never_receive_the_same_block()
     {
-        AlignedBufferPool pool = new AlignedBufferPool(maxPerBucket: 4);
+        BlockPool pool = new BlockPool(maxPerBucket: 4);
         try
         {
             // If two threads were ever handed the same block, the fill/verify below would see a
@@ -612,7 +577,7 @@ public sealed class AlignedBufferPoolTests
                 for (int i = 0; i < 32; i++)
                 {
                     int length = 512 << (i & 3);
-                    NativeSegmentOwner owner = pool.Rent(length, 64);
+                    BlockOwner owner = pool.Rent(TestAccount.Shared, length, 64);
                     byte stamp = (byte)(worker + 1);
 
                     Span<byte> writable = owner.WritableSpan;
@@ -631,13 +596,13 @@ public sealed class AlignedBufferPoolTests
     }
 
     [Fact]
-    public void A_graded_class_keeps_as_many_blocks_as_were_rented_at_once()
+    public void A_pool_that_keeps_all_keeps_as_many_blocks_as_were_rented_at_once()
     {
-        AlignedBufferPool pool = AlignedBufferPool.Graded(8 * 1024 * 1024, 8, demandBudget: 64L * 1024 * 1024);
+        BlockPool pool = BlockPool.KeepingAll(8 * 1024 * 1024);
         const int block = 128 * 1024;
         try
         {
-            NativeSegmentOwner[] held = RentAll(pool, block, 40);
+            BlockOwner[] held = RentAll(pool, block, 40);
             ReturnAll(pool, held);
             Assert.Equal(40, pool.ParkedCount(block));
 
@@ -645,7 +610,7 @@ public sealed class AlignedBufferPoolTests
             long before = GC.GetAllocatedBytesForCurrentThread();
             for (int i = 0; i < held.Length; i++)
             {
-                held[i] = pool.Rent(block, 64);
+                held[i] = pool.Rent(TestAccount.Shared, block, 64);
             }
 
             long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
@@ -659,44 +624,44 @@ public sealed class AlignedBufferPoolTests
     }
 
     [Fact]
-    public void A_graded_pool_keeps_one_outsized_block_for_the_next_read_it_fits()
+    public void A_pool_that_keeps_all_keeps_one_outsized_block_for_the_next_read_it_fits()
     {
-        AlignedBufferPool pool = AlignedBufferPool.Graded(64 * 1024, 8, demandBudget: 1L << 20);
+        BlockPool pool = BlockPool.KeepingAll(64 * 1024);
         try
         {
             // Past the classes, the block a read gets parks in the pool's one slot once given back.
-            NativeSegmentOwner first = pool.Rent(1_000_000, 64);
+            BlockOwner first = pool.Rent(TestAccount.Shared, 1_000_000, 64);
             Assert.Equal(1_000_000, first.Capacity);
             pool.Return(first);
             Assert.True(pool.KeepsOutsized);
 
             // A shorter outsized read takes it, as long as it asked; a second block given back while
             // the slot holds one is freed.
-            NativeSegmentOwner again = pool.Rent(900_000, 64);
+            BlockOwner again = pool.Rent(TestAccount.Shared, 900_000, 64);
             Assert.Equal(900_000, again.Length);
             Assert.Equal(1_000_000, again.Capacity);
             Assert.False(pool.KeepsOutsized);
-            NativeSegmentOwner other = pool.Rent(500_000, 64);
+            BlockOwner other = pool.Rent(TestAccount.Shared, 500_000, 64);
             Assert.Equal(500_000, other.Capacity);
             pool.Return(again);
             pool.Return(other);
             Assert.True(pool.KeepsOutsized);
 
             // A longer read frees the block kept and gets one of its own length.
-            NativeSegmentOwner longer = pool.Rent(2_000_000, 64);
+            BlockOwner longer = pool.Rent(TestAccount.Shared, 2_000_000, 64);
             Assert.Equal(2_000_000, longer.Capacity);
             Assert.False(pool.KeepsOutsized);
             pool.Return(longer);
             Assert.True(pool.KeepsOutsized);
 
-            // A sweep frees it once no outsized read has asked for a minute, or at once under a high
-            // memory load.
-            pool.TrimIdle(Environment.TickCount64, everything: false);
+            // Letting go of what was unused frees it once no outsized read asked since the time before, and the
+            // registry's asking first of all.
+            pool.LetGoUnused(collection: true);
             Assert.True(pool.KeepsOutsized);
-            pool.TrimIdle(Environment.TickCount64 + 60_000, everything: false);
+            pool.LetGoUnused(collection: true);
             Assert.False(pool.KeepsOutsized);
-            pool.Return(pool.Rent(1_000_000, 64));
-            pool.TrimIdle(Environment.TickCount64, everything: true);
+            pool.Return(pool.Rent(TestAccount.Shared, 1_000_000, 64));
+            Assert.Equal(1_000_000, pool.GiveBack(KeptKind.Blocks, 1));
             Assert.False(pool.KeepsOutsized);
         }
         finally
@@ -706,38 +671,9 @@ public sealed class AlignedBufferPoolTests
     }
 
     [Fact]
-    public void A_graded_class_widens_within_the_pools_budget_and_its_own_ceiling()
+    public void A_pool_that_keeps_all_parks_no_more_than_was_rented_at_once()
     {
-        const int block = 128 * 1024;
-
-        // A budget of 2 MiB parks sixteen of these, the eight of the floor among them.
-        AlignedBufferPool tight = AlignedBufferPool.Graded(8 * 1024 * 1024, 8, demandBudget: 2L * 1024 * 1024);
-
-        // 4 MiB blocks keep their class's ceiling at most, 64 MiB a processor and 64 MiB at least: sixteen blocks a
-        // processor, the blocks past it given back freed.
-        AlignedBufferPool wide = AlignedBufferPool.Graded(8 * 1024 * 1024, 8, demandBudget: 1L << 40);
-        const int big = 4 * 1024 * 1024;
-        int ceiling = (int)(wide.ClassCeilingBytes(big) / big);
-        Assert.Equal(16 * Environment.ProcessorCount, ceiling);
-        try
-        {
-            ReturnAll(tight, RentAll(tight, block, 40));
-            Assert.Equal(16, tight.ParkedCount(block));
-
-            ReturnAll(wide, RentAll(wide, big, ceiling + 4));
-            Assert.Equal(ceiling, wide.ParkedCount(big));
-        }
-        finally
-        {
-            tight.Trim();
-            wide.Trim();
-        }
-    }
-
-    [Fact]
-    public void A_graded_class_parks_no_more_than_was_rented_at_once()
-    {
-        AlignedBufferPool pool = AlignedBufferPool.Graded(8 * 1024 * 1024, 8, demandBudget: 64L * 1024 * 1024);
+        BlockPool pool = BlockPool.KeepingAll(8 * 1024 * 1024);
         const int block = 128 * 1024;
         try
         {
@@ -748,7 +684,7 @@ public sealed class AlignedBufferPoolTests
             // Rented one at a time, the class never has more than one out, and one is all it holds.
             for (int i = 0; i < 20; i++)
             {
-                pool.Return(pool.Rent(block, 64));
+                pool.Return(pool.Rent(TestAccount.Shared, block, 64));
             }
 
             Assert.Equal(1, pool.ParkedCount(block));
@@ -761,20 +697,20 @@ public sealed class AlignedBufferPoolTests
         }
     }
 
-    private static NativeSegmentOwner[] RentAll(AlignedBufferPool pool, int length, int count)
+    private static BlockOwner[] RentAll(BlockPool pool, int length, int count)
     {
-        NativeSegmentOwner[] owners = new NativeSegmentOwner[count];
+        BlockOwner[] owners = new BlockOwner[count];
         for (int i = 0; i < count; i++)
         {
-            owners[i] = pool.Rent(length, 64);
+            owners[i] = pool.Rent(TestAccount.Shared, length, 64);
         }
 
         return owners;
     }
 
-    private static void ReturnAll(AlignedBufferPool pool, NativeSegmentOwner[] owners)
+    private static void ReturnAll(BlockPool pool, BlockOwner[] owners)
     {
-        foreach (NativeSegmentOwner owner in owners)
+        foreach (BlockOwner owner in owners)
         {
             pool.Return(owner);
         }
@@ -782,7 +718,7 @@ public sealed class AlignedBufferPoolTests
 }
 
 /// <summary>
-/// The tests that rent from <see cref="AlignedBufferPool.Shared"/> and read back what it parks.
+/// The tests that rent from <see cref="MemoryAccount.Pool"/> and read back what it parks.
 /// </summary>
 /// <remarks>
 /// The pool is the process's, and every test runs beside the others: a neighbour that rents or gives
@@ -805,58 +741,149 @@ public sealed class SharedPoolTests
     /// of the blocks the class holds: what the tests run earlier left parked would decide what these
     /// read, and xunit orders the collections differently from one run to the next.
     /// </summary>
-    public SharedPoolTests() => AlignedBufferPool.Shared.Trim();
+    public SharedPoolTests() => MemoryAccount.Pool.Trim();
 
     [Fact]
     public void The_shared_pool_rents_and_recycles()
     {
-        NativeSegmentOwner first = AlignedBufferPool.Shared.Rent(64 * 1024, 64);
-        nint address = AlignedBufferPoolTests.AddressOf(first);
-        AlignedBufferPool.Shared.Return(first);
+        BlockOwner first = MemoryAccount.Pool.Rent(TestAccount.Shared, 64 * 1024, 64);
+        nint address = BlockPoolTests.AddressOf(first);
+        MemoryAccount.Pool.Return(first);
 
-        NativeSegmentOwner second = AlignedBufferPool.Shared.Rent(64 * 1024, 64);
-        Assert.Equal(address, AlignedBufferPoolTests.AddressOf(second));
-        AlignedBufferPool.Shared.Return(second);
-    }
-
-    [Fact]
-    public void The_shared_pool_parks_chunk_sized_blocks_up_to_their_class_ceiling()
-    {
-        const int large = 32 * 1024 * 1024;
-        Assert.True(AlignedBufferPool.Shared.MaxPooledLength >= large);
-
-        // A class of blocks past 8 MiB keeps 16 MiB of them a processor, 64 MiB at least: two of these on four processors.
-        int ceiling = (int)(AlignedBufferPool.Shared.ClassCeilingBytes(large) / large);
-        Assert.Equal(Math.Max(2, Environment.ProcessorCount / 2), ceiling);
-        NativeSegmentOwner[] rented = new NativeSegmentOwner[ceiling + 1];
-        for (int i = 0; i < rented.Length; i++)
-        {
-            rented[i] = AlignedBufferPool.Shared.Rent(large, 64);
-        }
-
-        int before = AlignedBufferPool.Shared.ParkedCount(large);
-        foreach (NativeSegmentOwner owner in rented)
-        {
-            AlignedBufferPool.Shared.Return(owner);
-        }
-
-        // The ceiling's blocks are the budget; a return past it is freed rather than parked.
-        Assert.Equal(Math.Min(ceiling, before + rented.Length), AlignedBufferPool.Shared.ParkedCount(large));
+        BlockOwner second = MemoryAccount.Pool.Rent(TestAccount.Shared, 64 * 1024, 64);
+        Assert.Equal(address, BlockPoolTests.AddressOf(second));
+        MemoryAccount.Pool.Return(second);
     }
 
     /// <summary>
-    /// A reservation a process's budget refuses first takes back the blocks the pool keeps parked for the next rents: native
-    /// memory, which a container's limit counts, and the room of the queries is what that limit leaves.
+    /// The process's pool parks every block given back, however large its class, with no count or budget of its own: it
+    /// never holds more than was rented at once, and the registry takes back what it keeps above its floors.
+    /// </summary>
+    [Fact]
+    public void The_shared_pool_parks_every_chunk_sized_block_given_back()
+    {
+        const int large = 32 * 1024 * 1024;
+        Assert.True(MemoryAccount.Pool.MaxPooledLength >= large);
+        Assert.Equal(long.MaxValue, MemoryAccount.Pool.ClassCeilingBytes(large));
+        BlockOwner[] rented = [MemoryAccount.Pool.Rent(TestAccount.Shared, large, 64), MemoryAccount.Pool.Rent(TestAccount.Shared, large, 64)];
+        foreach (BlockOwner owner in rented)
+        {
+            MemoryAccount.Pool.Return(owner);
+        }
+
+        Assert.Equal(2, MemoryAccount.Pool.ParkedCount(large));
+        Assert.Equal(2L * large, MemoryAccount.Pool.GiveBack(KeptKind.Blocks, 2L * large));
+        Assert.Equal(0, MemoryAccount.Pool.ParkedCount(large));
+    }
+
+    /// <summary>
+    /// Asked for a byte, the pool gives back a whole slab, every block it keeps there, rather than one block wherever it lies:
+    /// a slab's blocks let go while another of its pieces stays give nothing to the collector. Pieces of 8 MiB, three a slab:
+    /// rented until one is cut from a slab made for it, no older slab holding one, then two more, which fill it.
+    /// </summary>
+    [Fact]
+    public void The_shared_pool_gives_a_slab_back_whole()
+    {
+        const int piece = 8 * 1024 * 1024;
+        long made = Slabs.Slab.Made;
+        List<BlockOwner> taken = [];
+        while (taken.Count < 256 && (taken.Count == 0 || taken[^1].Slab!.Id <= made))
+        {
+            taken.Add(MemoryAccount.Pool.Rent(TestAccount.Shared, piece, 64));
+        }
+
+        taken.Add(MemoryAccount.Pool.Rent(TestAccount.Shared, piece, 64));
+        taken.Add(MemoryAccount.Pool.Rent(TestAccount.Shared, piece, 64));
+        BlockOwner[] rented = [.. taken];
+        Slabs.Slab[] alone = [.. rented.Select(owner => owner.Slab!).Distinct().Where(slab => slab.TakenPages == OnSlab(rented, slab) * (piece >> Slabs.PageShift))];
+        foreach (BlockOwner owner in rented)
+        {
+            MemoryAccount.Pool.Return(owner);
+        }
+
+        Assert.NotEmpty(alone);
+        long given = MemoryAccount.Pool.GiveBack(KeptKind.Blocks, 1);
+
+        Slabs.Slab gone = Assert.Single(alone, slab => !Slabs.IsAlive(slab));
+        Assert.Equal(Slabs.SlabBytes, given);
+        Assert.Equal(rented.Length - OnSlab(rented, gone), MemoryAccount.Pool.ParkedCount(piece));
+        MemoryAccount.Pool.Trim();
+    }
+
+    private static int OnSlab(BlockOwner[] owners, Slabs.Slab slab) => owners.Count(owner => owner.Slab == slab);
+
+    /// <summary>
+    /// A reservation a process's budget refuses first has the registry take back the memory kept above its floors, the
+    /// blocks the pool parks for the next rents first: memory a container's limit counts, and the room of the queries is
+    /// what that limit leaves.
     /// </summary>
     [Fact]
     public void The_shared_pool_gives_back_what_it_parks_when_a_process_budget_refuses()
     {
-        NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(64 * 1024, 64);
-        AlignedBufferPool.Shared.Return(block);
-        Assert.True(AlignedBufferPool.Shared.ParkedBytes > 0);
+        const int megabyte = 1024 * 1024;
+        BlockOwner block = MemoryAccount.Pool.Rent(TestAccount.Shared, megabyte, 64);
+        MemoryAccount.Pool.Return(block);
+        Assert.Equal(1, MemoryAccount.Pool.ParkedCount(megabyte));
 
         QueryMemoryBudget process = new QueryMemoryBudget(1 << 20, process: null);
         Assert.False(process.TryReserve(1L << 40));
-        Assert.Equal(0, AlignedBufferPool.Shared.ParkedBytes);
+        Assert.Equal(0, MemoryAccount.Pool.ParkedCount(megabyte));
+    }
+
+    /// <summary>
+    /// The registry asks the memory kept back kind after kind, the blocks before the objects a dataset keeps open; once a
+    /// kind past the blocks gave something, the blocks are asked again, since a cache's blocks go back to the pool.
+    /// </summary>
+    [Fact]
+    public void The_registry_gives_back_in_the_order_of_the_kinds()
+    {
+        Blocks.Trim();
+        List<string> asked = [];
+        Kept objects = new Kept(KeptKind.Objects, 100, "objects", asked);
+        Kept blocks = new Kept(KeptKind.Blocks, 100, "blocks", asked);
+        HeldMemory.Register(objects);
+        HeldMemory.Register(blocks);
+        try
+        {
+            long given = HeldMemory.GiveBack(150);
+
+            // What the process's own holders gave back, nothing after the trims, would only leave less to ask.
+            Assert.True(given >= 150, $"{given} bytes given back");
+            Assert.Equal(0, blocks.Held);
+            Assert.True(objects.Held >= 50, $"{objects.Held} bytes of objects kept");
+            Assert.Equal(["blocks", "objects", "blocks"], asked);
+        }
+        finally
+        {
+            HeldMemory.Unregister(objects);
+            HeldMemory.Unregister(blocks);
+        }
+    }
+
+    /// <summary>A holder of one kind, which gives back what it is asked of it, and notes each asking.</summary>
+    private sealed class Kept(KeptKind kind, long held, string name, List<string> asked) : IHeldMemory
+    {
+        internal long Held { get; private set; } = held;
+
+        public string Holder => "test";
+
+        public long HeldBytes => Held;
+
+        public long GiveBack(KeptKind of, long bytes)
+        {
+            if (of != kind)
+            {
+                return 0;
+            }
+
+            asked.Add(name);
+            long given = Math.Min(bytes, Held);
+            Held -= given;
+            return given;
+        }
+
+        public void LetGoUnused(bool collection)
+        {
+        }
     }
 }

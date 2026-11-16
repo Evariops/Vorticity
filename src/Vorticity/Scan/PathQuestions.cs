@@ -105,9 +105,10 @@ internal static class PathQuestions
         PathsReads reads = new PathsReads();
         if (!spec.MatchesNothing)
         {
-            using QueryMemory memory = new QueryMemory(source.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+            // Where the question starts: its memory goes down with the spec to the sources that read it.
+            using QueryMemory memory = QueryMemory.Start(source.Session);
             PathsQuestion question = new PathsQuestion(asked, exact, memory);
-            await source.Rows.PathsAsync(spec, question, counters, cancellationToken).ConfigureAwait(false);
+            await source.Rows.PathsAsync(spec.Under(memory), question, counters, cancellationToken).ConfigureAwait(false);
             reads = question.Reads;
         }
 

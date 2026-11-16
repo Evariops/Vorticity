@@ -28,7 +28,7 @@ A partition holds at most `MergeFanout − 1` objects of each size class while i
 
 - With one writer per dataset, let it merge: `DatasetOptions.InlineCompactionBytes` bounds what a commit merges before it returns, and its appends and merges then follow one another on one handle, with no race between them.
 - With several writers, run one compaction loop per dataset in a process of its own (`RunCompactionAsync`), and leave inline compaction off on the writers.
-- Give the loop's handle a page cache that holds the leaves of level 0 it merges (`DatasetOptions.PageCacheBytes`, 32 MiB by default). With 8 MiB, a consolidation of 3,305 small objects could not commit beside two appends a second.
+- Let the loop's handle keep the leaves of level 0 it merges. A handle keeps every page it reads until the process needs the room, above `DatasetOptions.PageFloorBytes` (4 MiB by default): raise the floor if the process often asks pages back, since with a page cache bounded at 8 MiB a consolidation of 3,305 small objects could not commit beside two appends a second.
 - In a process that also expires rows and vacuums, run the merges first. A level 0 left behind is what every commit and every question pays for, while an expiry or a vacuum that waits only keeps bytes at rest a little longer.
 - Hold no lock of your own around these jobs. Each one commits through the dataset's chain, which decides between them, so a merge runs safely beside a vacuum, and the merges of several datasets side by side.
 
@@ -130,6 +130,16 @@ The grain of the partition sets the largest job: its duration, its memory, and w
 
 A job holds what the session's jobs' budget gives it (`VortexSessionOptions.JobMemoryBudget`). It prices an open input at 128 KiB at least, plus three times what its batch weighs decoded, and its writer at the rows the job writes at most. A merge of 3,305 small objects reserves about 500 MB. A partition whose level 0 does not fit the budget at once is merged by size class first, a pass at a time. Give a maintenance process a budget a few times the largest partition's level 0 in open inputs.
 
+An append holds what its rows weigh in the writer's columns, which grow by doubling. Measured with the backlog bench (`--micro backlog --build-only`), metric records whose every append spans 20 000 series, the process holding its own rows too:
+
+| Append | Under 1 GiB | Under 2 GiB | Under 4 GiB |
+|---|---|---|---|
+| 300 appends of 30 000 rows | 228 MiB resident, 72 MiB of blocks | 229 MiB, 72 MiB | 229 MiB, 72 MiB |
+| 30 appends of 324 000 rows | refused: a block of 64 MiB past the limit | 1 152 MiB, 720 MiB | 1 816 MiB, 720 MiB |
+| the same while 8 scans read the dataset | refused | 1 253 MiB, 975 MiB | 1 949 MiB, 1 043 MiB |
+
+Appends of a few tens of thousands of rows, a flush of a few seconds, hold in a quarter of a gibibyte whatever the limit. An append of hundreds of thousands of rows needs a limit of 2 GiB: its columns end in blocks of 32 to 64 MiB, each an array of its own, which a process held to 1 GiB, the caller's rows beside them, cannot take. The append's budget refuses the block before it is allocated: the append throws `VortexMemoryException` and commits nothing. Under a larger limit the process holds more, since the collector runs less often.
+
 ## Readers
 
 A merge never takes away what a reader holds: a reader holds a version, and every object it names stays until the vacuum, a retention window after it was replaced. What costs a reader is a level 0 that fell behind.
@@ -137,7 +147,7 @@ A merge never takes away what a reader holds: a reader holds a version, and ever
 - A question opens the small objects of level 0 it reads side by side, as many at once as the session reads at once (`VortexSessionOptions.MaxConcurrentReads`, 128 by default). On 1,712 small objects at 20 ms a request, a count of one service takes about 0.4 s.
 - An object a question cannot rule out costs it one request and all its bytes: 41.6 MB for that count, at every question, until the merges catch up.
 - A question that reads the rows of an object of 320 KiB at most opens it whole, in one request. A larger object costs it two at least, its tail and then its data. On 24 objects of 75 to 164 KB, the rows of one service took 24 requests where they took 48, for 8 to 16 % fewer bytes.
-- A handle keeps the objects it opened (`DatasetOptions.MaxOpenObjectBytes`, 64 MiB by default), about 81 KB for a small object, so 830 of them by default, and an object opened whole at its bytes. A question that reads more of them than that finds none open the next time.
+- A handle keeps the objects it opened, about 81 KB for a small object and an object opened whole at its bytes, up to `DatasetOptions.MaxOpenObjects` (4 096 by default), and above `DatasetOptions.OpenObjectFloorBytes` (8 MiB by default) until the process needs the room. A question that reads more of them than the handle kept finds the rest closed the next time.
 - Keep readers' handles open and refresh them rather than open a new one per question. A commit carries only the pages it wrote, so a handle opened cold reads, one request per level, the pages of the tree its question passes through that the last commit did not write. An open handle keeps them from one version to the next and reads them once.
 - Watch the lag: `CompactionPlan.Partitions` gives it by partition, without opening an object. Past a few hundred small objects in a partition, its readers pay for it.
 

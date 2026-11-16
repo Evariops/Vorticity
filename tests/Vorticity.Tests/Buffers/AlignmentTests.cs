@@ -125,7 +125,7 @@ public sealed class AlignmentTests
     [Fact]
     public unsafe void IsAligned_reads_the_real_address()
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(256, 64);
+        using BlockOwner owner = BlockOwner.Allocate(256, 64);
         fixed (byte* origin = owner.WritableSpan)
         {
             Assert.True(Alignment.IsAligned(origin, 64));

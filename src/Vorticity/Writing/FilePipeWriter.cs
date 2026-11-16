@@ -44,6 +44,9 @@ internal class FilePipeWriter : PipeWriter
     private long _unflushed;
     private bool _completed;
 
+    /// <summary>The pool the pipe rents the segments it fills from: the writer's account's.</summary>
+    internal MemoryPool<byte> Pool => _pool;
+
     /// <summary>Writes from <paramref name="offset"/> on, which is also the length an abandon truncates back to.</summary>
     internal FilePipeWriter(SafeFileHandle handle, long offset, MemoryPool<byte> pool)
     {

@@ -22,7 +22,7 @@ public sealed class NativeTypeSurfaceTests
         AllTypes[] rows = MatrixRows.Shared(Shape.Spread);
         (string path, _) = await TypeEncodingMatrixTests.WrittenAsync(Shape.Spread, EncodingHint.Auto);
         await using VortexFile file = await VortexFile.OpenAsync(path, ct);
-        AllTypes probe = rows[4_321];
+        AllTypes probe = rows[2_321];
 
         Assert.Equal(rows.Count(r => r.I128 > probe.I128), await file.Scan<AllTypes>().Where(r => r.I128 > probe.I128).CountAsync(ct));
         Assert.Equal(rows.Count(r => r.U128 == probe.U128), await file.Scan<AllTypes>().Where(r => r.U128 == probe.U128).CountAsync(ct));

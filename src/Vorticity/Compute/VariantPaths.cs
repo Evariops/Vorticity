@@ -431,8 +431,8 @@ internal sealed class VariantFieldExpr : FieldExpr
 
         int[] head = reads.Heads;
         head.AsSpan().Fill(-1);
-        Note[] notes = WorkArrays.Rent<Note>(Math.Max(rows, 16));
-        int[] keyOfId = WorkArrays.Rent<int>(64);
+        Block<Note> notes = Blocks.Rent<Note>(Math.Max(rows, 16));
+        Block<int> keyOfId = Blocks.Rent<int>(64);
         int noted = 0;
         try
         {
@@ -453,8 +453,8 @@ internal sealed class VariantFieldExpr : FieldExpr
                     ids = dictionary.Count;
                     if (ids > keyOfId.Length)
                     {
-                        WorkArrays.Return(keyOfId);
-                        keyOfId = WorkArrays.Rent<int>(ids);
+                        Blocks.Return(keyOfId);
+                        keyOfId = Blocks.Rent<int>(ids);
                     }
 
                     for (int id = 0; id < ids; id++)
@@ -489,10 +489,7 @@ internal sealed class VariantFieldExpr : FieldExpr
 
                     if (noted == notes.Length)
                     {
-                        Note[] grown = WorkArrays.Rent<Note>(notes.Length * 2);
-                        notes.AsSpan(0, noted).CopyTo(grown);
-                        WorkArrays.Return(notes);
-                        notes = grown;
+                        Blocks.Grow(ref notes, notes.Length * 2);
                     }
 
                     int offset = (int)Unsafe.ByteOffset(ref MemoryMarshal.GetReference(rowValue), ref MemoryMarshal.GetReference(field));
@@ -516,8 +513,8 @@ internal sealed class VariantFieldExpr : FieldExpr
         }
         finally
         {
-            WorkArrays.Return(notes);
-            WorkArrays.Return(keyOfId);
+            Blocks.Return(notes);
+            Blocks.Return(keyOfId);
         }
     }
 

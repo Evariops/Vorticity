@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Editions;
 using Vorticity.Writing;
 
@@ -694,8 +695,8 @@ public sealed partial class VortexFileWriter
             VortexFileWriter writer = _writer!;
             if (!_flushing)
             {
-                writer.Gather(gathering, chunk!, _nodes[field], _rows, _blocks);
-                if (!gathering.Due)
+                writer.Gather(field, gathering, chunk!, _nodes[field], _rows, _blocks);
+                if (!writer.DueOrOver(gathering))
                 {
                     return;
                 }
@@ -706,7 +707,7 @@ public sealed partial class VortexFileWriter
             int node = gathering.Nodes.Count == 1
                 ? gathering.Nodes[0]
                 : CanonicalConcat.Concat(
-                    context.Decode, writer._isTabular ? writer._schema.GetField(field) : writer._schema, rows,
+                    context.Decode, writer.ChunkType(field), rows,
                     System.Runtime.InteropServices.CollectionsMarshal.AsSpan(gathering.Nodes));
             _gatheredFirst[field] = gathering.FirstBlock;
             _gatheredBlocks[field] = gathering.Blocks;
@@ -714,6 +715,8 @@ public sealed partial class VortexFileWriter
             gathering.Nodes.Clear();
             gathering.Rows = 0;
             gathering.Cut = gathering.Bytes;
+            Interlocked.Add(ref writer._gatheredHeld, -gathering.Held);
+            gathering.Held = 0;
             gathering.Bytes = 0;
             gathering.Blocks = 0;
             try
@@ -758,7 +761,8 @@ public sealed partial class VortexFileWriter
                 Types.Variants.VariantShredding? plan = writer._shredding?[field];
                 if (plan is null && writer.Codes(field))
                 {
-                    local = writer.Coded(field, lane.Arena, local);
+                    // A column that gathers gathered its codes already.
+                    local = _gathered[field] is null ? writer.Coded(field, lane.Arena, local) : local;
                     stats = default;
                 }
 
@@ -874,17 +878,18 @@ public sealed partial class VortexFileWriter
     /// <summary>
     /// What a thread compresses a column in: a blob workspace with a dtype arena of its own, an arena
     /// for what the schemes lay out, and the column's own dictionary of encoding ids; taken from the
-    /// process's spares for one column and given back after it.
+    /// process's spares for one column and given back after it. Kept between writers, its arenas count under the memory the
+    /// process keeps, and under the writer's account while a writer holds it.
     /// </summary>
     private sealed class CompressionLane
     {
-        private ArrayBlobWriter.Workspace _blobs = new ArrayBlobWriter.Workspace { OwnTypes = true };
+        private ArrayBlobWriter.Workspace _blobs = new ArrayBlobWriter.Workspace { OwnTypes = true, Account = MemoryAccount.Kept };
 
         private EncodingDictionary _encodings = new EncodingDictionary(ComponentKind.Array, EditionRegistry.Newest);
 
         internal ArrayBlobWriter.Workspace Blobs => _blobs;
 
-        internal CanonicalArena Arena { get; } = new CanonicalArena();
+        internal CanonicalArena Arena { get; } = new CanonicalArena(64, MemoryAccount.Kept);
 
         internal EncodingDictionary Encodings => _encodings;
 
@@ -899,7 +904,7 @@ public sealed partial class VortexFileWriter
                 lane._blobs = new ArrayBlobWriter.Workspace
                 {
                     FrameRows = writer._rowBlock, GranuleRows = writer.GranuleReadRows, SizeFirst = writer._sizeFirst,
-                    ZstdLevel = writer._zstdLevel, OwnTypes = true,
+                    ZstdLevel = writer._zstdLevel, OwnTypes = true, Account = writer.Account,
                 };
             }
 
@@ -908,6 +913,8 @@ public sealed partial class VortexFileWriter
                 lane._encodings = new EncodingDictionary(ComponentKind.Array, writer._arrayEncodings.Target);
             }
 
+            lane._blobs.Account = writer.Account;
+            lane.Arena.Account = writer.Account;
             return lane;
         }
 
@@ -919,6 +926,8 @@ public sealed partial class VortexFileWriter
         internal void Give()
         {
             Arena.Reset();
+            Arena.Account = MemoryAccount.Kept;
+            _blobs.Account = MemoryAccount.Kept;
             _encodings.Clear();
             _blobs.ReturnCompressors();
             if (!SpareSlots<CompressionLane>.Give(this))

@@ -22,7 +22,7 @@ namespace Vorticity.Parquet.Writing;
 /// (<see cref="SplitBlockBloom.Fold"/>): a value is inserted as its page closes, and none waits for
 /// the chunk's count. A page of dictionary codes is not hashed: its values are the dictionary's
 /// entries, hashed once each as the chunk closes, which counts them exactly; a value of a page
-/// written otherwise counts as one. The filter is a block of the engine's pool kept from chunk to
+/// written otherwise counts as one. The filter is a block of the pool kept from chunk to
 /// chunk, 1 MiB at most, past which its rate is worse than asked rather than its size larger; the
 /// row group writes it after its chunks and the chunk's next filter starts over.
 /// </remarks>
@@ -31,8 +31,8 @@ internal sealed class BloomCollector : IDisposable
     /// <summary>The most blocks a filter takes: 1 MiB.</summary>
     private const int MaximumBlocks = (1 << 20) / SplitBlockBloom.BytesPerBlock;
 
-    private readonly PooledBytes _words;
-    private readonly PooledBytes _header;
+    private readonly BlockBytes _words;
+    private readonly BlockBytes _header;
     private readonly int _ppm;
 
     /// <summary>A fixed-width value's bytes; 0 for a byte array, whose length is before it.</summary>
@@ -50,14 +50,13 @@ internal sealed class BloomCollector : IDisposable
     /// <param name="column">The column.</param>
     /// <param name="rate">The false-positive rate asked, in (0, 1).</param>
     /// <param name="mostValues">The most values a chunk holds: a flat column's row group's rows.</param>
-    /// <param name="pool">The engine's pool.</param>
-    internal BloomCollector(WriteColumn column, double rate, long mostValues, AlignedBufferPool pool)
+    internal BloomCollector(WriteColumn column, double rate, long mostValues)
     {
         _ppm = (int)Math.Clamp(Math.Round(rate * 1_000_000), 1, 999_999);
         _width = column.Conversion == ValueConversion.ByteArray ? 0 : column.ValueWidth;
         _initialBlocks = SplitBlockBloom.BlocksFor(mostValues, _ppm, MaximumBlocks);
-        _words = new PooledBytes(pool);
-        _header = new PooledBytes(pool);
+        _words = new BlockBytes();
+        _header = new BlockBytes();
     }
 
     /// <summary>Whether the chunk closed with a filter that <see cref="WriteToAsync"/> has yet to write.</summary>

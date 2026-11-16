@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -141,27 +142,27 @@ internal sealed class ShortTextKeys : GroupKeys
     private readonly bool _sorted;
     private readonly int _probeAhead;
     private readonly long _aheadBytes;
-    private readonly ArrayShelf? _shelf;
+    private readonly TableArrays? _account;
 
     // The words while every value met is short, then the bytes for good: one of them, never both.
     private FixedKeys<TextWord>? _words;
     private BytesKeys? _bytes;
-    private TextWord[] _block = [];
+    private ScratchBlock<TextWord> _block;
 
-    internal ShortTextKeys(ColumnShape shape, bool sorted, int probeAhead = AggregationPlan.DefaultProbeAhead, ArrayShelf? shelf = null, long aheadBytes = long.MaxValue)
+    internal ShortTextKeys(ColumnShape shape, bool sorted, int probeAhead = AggregationPlan.DefaultProbeAhead, TableArrays? account = null, long aheadBytes = long.MaxValue)
     {
         _shape = shape;
         _sorted = sorted;
         _probeAhead = probeAhead;
         _aheadBytes = aheadBytes;
-        _shelf = shelf;
-        _words = new FixedKeys<TextWord>(shape, sorted, probeAhead: probeAhead, shelf: shelf, aheadBytes: aheadBytes);
+        _account = account;
+        _words = new FixedKeys<TextWord>(shape, sorted, probeAhead: probeAhead, account: account, aheadBytes: aheadBytes);
     }
 
     /// <summary>Whether the keys are still words: every value met so far 12 bytes or less.</summary>
     internal bool Words => _words is not null;
 
-    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         if (_words is not { } words)
         {
@@ -260,7 +261,7 @@ internal sealed class ShortTextKeys : GroupKeys
             return canonical.TryWords(start, _block.AsSpan(0, end - start));
         }
 
-        TextWord[] block = _block;
+        Block<TextWord> block = _block;
         for (int row = start; row < end; row++)
         {
             if (!StorageValues.IsValid(validity, row))
@@ -278,7 +279,7 @@ internal sealed class ShortTextKeys : GroupKeys
 
     /// <summary>A block of runs or of codes, its few values looked up as bytes then as words, each once.</summary>
     private bool AssignEncoded(
-        CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges, ColumnEncoding encoding)
+        CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges, ColumnEncoding encoding)
     {
         int node = nodes[0];
         if (encoding == ColumnEncoding.RunEnd)
@@ -350,11 +351,11 @@ internal sealed class ShortTextKeys : GroupKeys
     }
 
     /// <summary>A run-end block with nulls among its runs, in canonical form row by row.</summary>
-    private bool AssignPlain(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    private bool AssignPlain(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         BytesBlock canonical = BytesBlock.Canonical(arena, nodes[0], out ReadOnlySpan<ulong> validity);
         Scratch.Grow(ref _block, rows);
-        TextWord[] block = _block;
+        Block<TextWord> block = _block;
         for (int row = 0; row < rows; row++)
         {
             if (!StorageValues.IsValid(validity, row))
@@ -389,7 +390,7 @@ internal sealed class ShortTextKeys : GroupKeys
     }
 
     /// <summary>The block through the table of bytes, the keys turned into it.</summary>
-    private bool AssignBytes(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    private bool AssignBytes(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         Saw(EncodedForms.EncodingOf(arena, nodes[0]));
         bool byRange = _bytes!.Assign(arena, nodes, rows, selection, rowGroups, ranges);
@@ -407,13 +408,13 @@ internal sealed class ShortTextKeys : GroupKeys
     /// <summary>
     /// The words turned into a table of bytes, for good: every group's key added again in the order of
     /// the groups, which keeps each its number, the null group's too; the words' arrays given back, and
-    /// their block to the process's shelf: dropped, a lane of a question grouped by a long text, the
+    /// their block to the pool: dropped, a lane of a question grouped by a long text, the
     /// pods of a route, grew a block of up to 32 768 words each time and lost it at its first long value.
     /// </summary>
     private void Demote()
     {
         FixedKeys<TextWord> words = _words!;
-        BytesKeys bytes = new BytesKeys(_shape, _sorted, _shelf);
+        BytesKeys bytes = new BytesKeys(_shape, _sorted, _account);
         Span<byte> buffer = stackalloc byte[16];
         int nullGroup = words.NullNumber;
         for (int g = 0; g < words.Count; g++)
@@ -463,11 +464,11 @@ internal sealed class ShortTextKeys : GroupKeys
 
     internal override GroupKeys Fresh() => new ShortTextKeys(_shape, _sorted, _probeAhead, aheadBytes: _aheadBytes);
 
-    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => new ShortTextKeys(_shape, _sorted, _probeAhead, shelf, _aheadBytes);
+    internal override GroupKeys ForPart(TableArrays? account = null) => new ShortTextKeys(_shape, _sorted, _probeAhead, account, _aheadBytes);
 
-    internal override GroupKeys ForTable(ArrayShelf shelf) => new ShortTextKeys(_shape, sorted: false, _probeAhead, shelf);
+    internal override GroupKeys ForTable(TableArrays account) => new ShortTextKeys(_shape, sorted: false, _probeAhead, account);
 
-    internal override GroupKeys ForSpill(ArrayShelf? shelf) => new ShortTextKeys(_shape, sorted: false, _probeAhead, shelf);
+    internal override GroupKeys ForSpill(TableArrays? account) => new ShortTextKeys(_shape, sorted: false, _probeAhead, account);
 
     internal override long Footprint => (_words?.Footprint ?? _bytes!.Footprint) + ((long)_block.Length * 16);
 

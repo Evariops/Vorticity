@@ -59,7 +59,7 @@ public class AuditTopFrontierBenchmarks
         VortexBuffer one = first.Allocate(8, 8, out Span<byte> middle);
         MemoryMarshal.Write(middle, 0L);
         int node = first.AddPrimitive(dtype, 1, Validity.NonNullable, PType.I64, one);
-        int[] groups = new int[1];
+        Block<int> groups = Blocks.Allocate<int>(1);
         _keys.Assign(first, [node], 1, [], groups, new GroupRanges());
         _frontier = groups[0];
     }

@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Keys;
@@ -114,33 +115,40 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
     private protected virtual async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
     {
         FilterLiteral best = FilterLiteral.Null;
-        int[] rows = [];
-        await foreach (RecordBatch batch in SelectedAsync(spec, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
+        ScratchBlock<int> rows = default;
+        try
         {
-            CanonicalArena arena = batch.Arena;
-            int count = batch.RowCount;
-            int node = FilterEvaluator.Resolve(arena, batch.RootIndex, column, count);
-            ReadOnlySpan<ulong> selection = batch.SelectionWords;
-            int listed = 0;
-            if (!selection.IsEmpty)
+            await foreach (RecordBatch batch in SelectedAsync(spec, metrics).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
-                Scratch.Grow(ref rows, count);
-                foreach (int row in new Selection(selection, count, batch.SelectedRows))
+                CanonicalArena arena = batch.Arena;
+                int count = batch.RowCount;
+                int node = FilterEvaluator.Resolve(arena, batch.RootIndex, column, count);
+                ReadOnlySpan<ulong> selection = batch.SelectionWords;
+                int listed = 0;
+                if (!selection.IsEmpty)
                 {
-                    rows[listed++] = row;
+                    Scratch.Grow(ref rows, count);
+                    foreach (int row in new Selection(selection, count, batch.SelectedRows))
+                    {
+                        rows[listed++] = row;
+                    }
+                }
+
+                if (!Extremes.TryFind(arena, node, rows.AsSpan(0, listed), !selection.IsEmpty, min, out int bestRow))
+                {
+                    continue;
+                }
+
+                bool numeric = arena.GetNode(ComparisonKernels.Unwrap(arena, node)).DType.Kind == DTypeKind.Decimal;
+                if (numeric ? LiteralReader.TryReadDecimal(arena, node, bestRow, out FilterLiteral literal) : LiteralReader.TryRead(arena, node, bestRow, out literal))
+                {
+                    TerminalScan.Keep(ref best, literal, min, numeric);
                 }
             }
-
-            if (!Extremes.TryFind(arena, node, rows.AsSpan(0, listed), !selection.IsEmpty, min, out int bestRow))
-            {
-                continue;
-            }
-
-            bool numeric = arena.GetNode(ComparisonKernels.Unwrap(arena, node)).DType.Kind == DTypeKind.Decimal;
-            if (numeric ? LiteralReader.TryReadDecimal(arena, node, bestRow, out FilterLiteral literal) : LiteralReader.TryRead(arena, node, bestRow, out literal))
-            {
-                TerminalScan.Keep(ref best, literal, min, numeric);
-            }
+        }
+        finally
+        {
+            Scratch.Return(ref rows);
         }
 
         return best;
@@ -157,7 +165,7 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
             throw new NotSupportedException($"'{path}' has no key cursor: {reason}.");
         }
 
-        QueryMemory memory = new QueryMemory(Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+        QueryMemory memory = QueryMemory.Start(Session);
         try
         {
             IAsyncEnumerator<RecordBatch> batches = Stream(new ScanSpec(), ReadsColumns ? [column] : null, new ScanCounters(), cancellationToken);
@@ -269,15 +277,19 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
                 return new Enumerator(source, spec, EmptyBatches.Instance, null);
             }
 
-            int[]? columns = source.ColumnsOf(spec);
+            // An order the source does not arrive in is a sort of the rows kept, held whole: a question whose memory, made
+            // here when no question gave one, the rows are read under too.
+            bool sorts = spec.OrderPath is not null && !source.ArrivesInOrder(spec);
+            QueryMemory? memory = sorts && spec.Memory is null ? QueryMemory.Start(source.Session) : null;
+            ScanSpec read = memory is null ? spec : spec.Under(memory);
+            int[]? columns = source.ColumnsOf(read);
             IAsyncEnumerator<RecordBatch> stream = part is null
-                ? source.Stream(spec, columns, metrics, cancellationToken)
-                : source.Stream(spec, columns, metrics, part, cancellationToken);
+                ? source.Stream(read, columns, metrics, cancellationToken)
+                : source.Stream(read, columns, metrics, part, cancellationToken);
 
-            // An order the source does not arrive in is a sort of the rows kept, held whole.
             return spec.OrderPath is null ? new Enumerator(source, spec, stream, columns)
-                : source.ArrivesInOrder(spec) ? new Enumerator(source, spec with { OrderPath = null, Descending = false }, stream, columns)
-                : new SortedEnumerator(source, spec, stream, columns, cancellationToken);
+                : !sorts ? new Enumerator(source, spec with { OrderPath = null, Descending = false }, stream, columns)
+                : new SortedEnumerator(source, read, stream, columns, owned: memory is not null, cancellationToken);
         }
     }
 
@@ -293,14 +305,25 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
         private readonly ScanSpec _spec;
         private readonly Enumerator _kept;
         private readonly CancellationToken _cancellationToken;
-        private QueryMemory? _memory;
+        private readonly QueryMemory? _memory;
+
+        // Whether the sort started its question, and gives its memory back.
+        private readonly bool _owned;
         private ExternalSort? _sort;
         private IAsyncEnumerator<RecordBatch>? _sorted;
 
-        internal SortedEnumerator(StreamScanSource source, ScanSpec spec, IAsyncEnumerator<RecordBatch> inner, int[]? columns, CancellationToken cancellationToken)
+        /// <param name="source">The source sorted.</param>
+        /// <param name="spec">The spec, of the question whose memory the rows were read under and are sorted under.</param>
+        /// <param name="inner">The rows read.</param>
+        /// <param name="columns">The columns the rows hold.</param>
+        /// <param name="owned">Whether the sort started its question, and gives its memory back.</param>
+        /// <param name="cancellationToken">Stops the sort.</param>
+        internal SortedEnumerator(StreamScanSource source, ScanSpec spec, IAsyncEnumerator<RecordBatch> inner, int[]? columns, bool owned, CancellationToken cancellationToken)
         {
             _source = source;
             _spec = spec;
+            _memory = spec.Memory;
+            _owned = owned;
             _cancellationToken = cancellationToken;
             _kept = new Enumerator(source, spec with { OrderPath = null, Descending = false, Options = spec.Options with { Compact = true } }, inner, columns);
         }
@@ -314,7 +337,6 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
             {
                 VortexSchema schema = _spec.Projection is { IsAll: false } mask ? ToolPaths.Project(_source.Schema, mask) : _source.Schema;
                 VortexSession session = _source.Session;
-                _memory = new QueryMemory(session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
                 VortexType type = schema.IndexOfName(_spec.OrderPath!) is int at and >= 0 ? schema[at].Type : VortexType.Null;
                 int[] delivered = new int[schema.Count];
                 for (int c = 0; c < delivered.Length; c++)
@@ -347,7 +369,10 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
                 await _sort.DisposeAsync().ConfigureAwait(false);
             }
 
-            _memory?.Dispose();
+            if (_owned)
+            {
+                _memory?.Dispose();
+            }
         }
     }
 
@@ -377,8 +402,8 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
         private readonly int[]? _fields;
 
         private readonly DType _projected;
-        private byte[] _states = [];
-        private int[] _kept = [];
+        private ScratchBlock<byte> _states;
+        private ScratchBlock<int> _kept;
         private RecordBatch? _current;
         private int _taken;
 
@@ -432,6 +457,8 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
         public ValueTask DisposeAsync()
         {
             _current?.Dispose();
+            Scratch.Return(ref _states);
+            Scratch.Return(ref _kept);
             return _inner.DisposeAsync();
         }
 

@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
@@ -9,6 +8,7 @@ using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 
+using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Compute;
 
@@ -828,7 +828,7 @@ internal sealed class PcoLatentState
 
     // A lookback's window: the latents it can look back to, then the batch's. Rented per page, as
     // upstream allocates it per page, since it is as long as the window and a window can be long.
-    private ulong[]? _window;
+    private Block<ulong> _window;
     private int _windowLength;
     private int _windowPosition;
 
@@ -897,11 +897,8 @@ internal sealed class PcoLatentState
     /// <summary>Gives back what the page rented; the slot is then empty until the next <see cref="Reset"/>.</summary>
     internal void EndPage()
     {
-        if (_window is { } window)
-        {
-            _window = null;
-            ArrayPool<ulong>.Shared.Return(window);
-        }
+        Blocks.Return(_window);
+        _window = default;
     }
 
     /// <summary>
@@ -1425,12 +1422,12 @@ internal sealed class PcoLatentState
         // Upstream's buffer: twice the window or twice a batch, whichever is longer, so that a
         // batch always fits past the window before it has to be moved back.
         int length = Math.Max(windowLength, PcoPageDecoder.BatchSize) * 2;
-        ulong[] window = ArrayPool<ulong>.Shared.Rent(length);
-        _window = window;
+        _window = Blocks.Rent<ulong>(length);
+        Span<ulong> window = _window;
 
         // All of it, not only what comes before the state: a lookback that points before the page
         // reads zeros, as upstream's zero-filled buffer gives, and never an earlier file's values.
-        window.AsSpan(0, length).Clear();
+        window.Clear();
         for (int i = windowLength - stateCount; i < windowLength; i++)
         {
             window[i] = reader.ReadUInt(bits);
@@ -1450,12 +1447,12 @@ internal sealed class PcoLatentState
     /// <param name="lookbacks">How far back each value looks.</param>
     private void UndoLookback(Span<ulong> values, int count, scoped ReadOnlySpan<ulong> lookbacks)
     {
-        ulong[] window = _window!;
+        Span<ulong> window = _window;
         int windowLength = _windowLength;
         int start = _windowPosition;
         if (start + values.Length > window.Length)
         {
-            window.AsSpan(start - windowLength, windowLength).CopyTo(window);
+            window.Slice(start - windowLength, windowLength).CopyTo(window);
             start = windowLength;
         }
 
@@ -1473,7 +1470,7 @@ internal sealed class PcoLatentState
         }
 
         // The values past the wire at a page's end are never looked back to: nothing follows them.
-        window.AsSpan(start - _stateCount, values.Length).CopyTo(values);
+        window.Slice(start - _stateCount, values.Length).CopyTo(values);
         _windowPosition = start + values.Length;
     }
 

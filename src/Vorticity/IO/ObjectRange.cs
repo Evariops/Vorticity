@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO.Pipelines;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 
 namespace Vorticity.IO;
 
@@ -60,7 +61,7 @@ internal struct ObjectRange : IDisposable
     internal readonly ReadOnlyMemory<byte> Contiguous() => IsContiguous ? _bytes.Memory : _bytes.Bytes.ToArray();
 }
 
-/// <summary>An array rented from the shared pool, returned when the lease over it is disposed.</summary>
+/// <summary>The array behind a block of the pool, given back when the lease over it is disposed.</summary>
 internal sealed class PooledBuffer : IDisposable
 {
     private byte[]? _array;
@@ -70,17 +71,11 @@ internal sealed class PooledBuffer : IDisposable
     /// <summary>Rents at least <paramref name="length"/> bytes and hands back the array with its owner.</summary>
     internal static (byte[] Array, PooledBuffer Owner) Rent(int length)
     {
-        byte[] array = ArrayPool<byte>.Shared.Rent(Math.Max(length, 1));
+        byte[] array = Blocks.Rent<byte>(Math.Max(length, 1)).Array();
         return (array, new PooledBuffer(array));
     }
 
-    public void Dispose()
-    {
-        if (Interlocked.Exchange(ref _array, null) is { } array)
-        {
-            ArrayPool<byte>.Shared.Return(array);
-        }
-    }
+    public void Dispose() => Blocks.ReturnBytes(Interlocked.Exchange(ref _array, null));
 }
 
 /// <summary>The shapes a caller often wants, over the members of <see cref="IObjectStore"/>.</summary>

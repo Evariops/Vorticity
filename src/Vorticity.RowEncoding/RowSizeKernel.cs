@@ -1,6 +1,6 @@
 using System;
-using System.Buffers;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 
@@ -124,11 +124,10 @@ internal static class RowSizeKernel
 
             // A variable child under a null parent collapses to one byte, which is what makes two
             // null parent rows byte-equal whatever their children hold.
-            int[] rented = ArrayPool<int>.Shared.Rent(rows);
+            Block<int> rented = Blocks.RentCleared<int>(rows);
             try
             {
-                Span<int> childSizes = rented.AsSpan(0, rows);
-                childSizes.Clear();
+                Span<int> childSizes = rented;
                 Add(arena, childIndex, field, childSizes);
                 for (int i = 0; i < rows; i++)
                 {
@@ -137,7 +136,7 @@ internal static class RowSizeKernel
             }
             finally
             {
-                ArrayPool<int>.Shared.Return(rented);
+                Blocks.Return(rented);
             }
         }
     }
@@ -160,11 +159,10 @@ internal static class RowSizeKernel
         }
 
         int elementCount = checked(rows * listSize);
-        int[] rented = ArrayPool<int>.Shared.Rent(elementCount);
+        Block<int> rented = Blocks.RentCleared<int>(elementCount);
         try
         {
-            Span<int> elementSizes = rented.AsSpan(0, elementCount);
-            elementSizes.Clear();
+            Span<int> elementSizes = rented;
             Add(arena, elementsIndex, field, elementSizes);
             for (int i = 0; i < rows; i++)
             {
@@ -189,7 +187,7 @@ internal static class RowSizeKernel
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 

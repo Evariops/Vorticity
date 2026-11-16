@@ -61,7 +61,7 @@ internal sealed class SealingSegmentSink : ISegmentSink
     private SealDescriptor? _descriptor;
     private EpochCipher? _cipher;
     private AesGcm? _aes;
-    private NativeSegmentOwner? _frame;
+    private BlockOwner? _frame;
     private byte[]? _appendedSaltAndCommitment;
     private long _framesStart;
     private int _filled;
@@ -69,6 +69,12 @@ internal sealed class SealingSegmentSink : ISegmentSink
     private long _frameIndex;
     private long _unflushed;
     private bool _finished;
+
+    /// <summary>
+    /// Whom the stage's frame of plaintext is counted for: the writer it serves, or the process's for a stage its maker
+    /// releases in a <c>finally</c>.
+    /// </summary>
+    internal required MemoryAccount Account { get; init; }
 
     /// <summary>A stage over <paramref name="pipe"/>, which takes the data key from <paramref name="dataKey"/> when the first byte arrives.</summary>
     /// <param name="pipe">Where the sealed bytes go; the writer completes it.</param>
@@ -265,7 +271,7 @@ internal sealed class SealingSegmentSink : ISegmentSink
 
         _descriptor = descriptor;
         _aes = _cipher.Rent();
-        _frame = AlignedBufferPool.Shared.Rent(_frameSize, VortexLimits.MaxAlignment);
+        _frame = Account.Rent(_frameSize, VortexLimits.MaxAlignment);
         if (_continued is not null)
         {
             return;

@@ -111,7 +111,7 @@ internal static class JobsBench
                 // Each job's spans, then the private bytes the process held when it started and the most it held while it ran.
                 long first;
                 long held;
-                long native;
+                long blocks;
                 long parked;
                 long committed;
                 using (PeakMemory memory = new PeakMemory())
@@ -121,7 +121,7 @@ internal static class JobsBench
                         break;
                     }
 
-                    (first, held, native, parked, committed) = (memory.First, memory.Peak, memory.PeakNative, memory.PeakParked, memory.PeakCommitted);
+                    (first, held, blocks, parked, committed) = (memory.First, memory.Peak, memory.PeakBlocks, memory.PeakParked, memory.PeakCommitted);
                 }
 
                 jobs++;
@@ -131,7 +131,7 @@ internal static class JobsBench
                     Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"  {span.Name[("vortex.dataset.".Length)..],-24} {span.Milliseconds,10:F0} ms  {span.Detail}"));
                 }
 
-                Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"  {"private bytes",-24} {first / 1e9,10:F2} GB at the start, {held / 1e9:F2} GB at most, of which {native / 1e9:F2} GB native blocks ({parked / 1e9:F2} GB parked) and {committed / 1e9:F2} GB the collector's"));
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"  {"private bytes",-24} {first / 1e9,10:F2} GB at the start, {held / 1e9:F2} GB at most, of which {committed / 1e9:F2} GB the collector's, {blocks / 1e9:F2} GB of them blocks ({parked / 1e9:F2} GB parked)"));
             }
 
             double seconds = Stopwatch.GetElapsedTime(begin).TotalSeconds;

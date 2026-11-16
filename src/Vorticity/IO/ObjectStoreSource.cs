@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
@@ -137,7 +136,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
         // The tail and the length in one answer. The block is read from its start, then the bytes are
         // moved to keep each file offset's alignment, so the open's 64-byte aligned read is a slice.
         int wanted = TailBytes + VortexLimits.MaxAlignment;
-        NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(wanted + VortexLimits.MaxAlignment, VortexLimits.MaxAlignment);
+        BlockOwner block = MemoryAccount.Kept.Rent(wanted + VortexLimits.MaxAlignment, VortexLimits.MaxAlignment);
         try
         {
             ObjectRead read = await TailAsync(block.WritableMemory(0, wanted), cancellationToken).ConfigureAwait(false);
@@ -228,33 +227,26 @@ internal sealed class ObjectStoreSource : ISegmentReader
         }
 
         int registered = requests.Count;
-        int[] order = ArrayPool<int>.Shared.Rent(Math.Max(registered, 1));
-        ulong[] keys = ArrayPool<ulong>.Shared.Rent(Math.Max(registered, 1));
-        SegmentSpec[] sorted = ArrayPool<SegmentSpec>.Shared.Rent(Math.Max(registered, 1));
-        CoalescedRun[] runs = ArrayPool<CoalescedRun>.Shared.Rent(Math.Max(registered, 1));
-        ValueTask<ObjectRead>[] reads = ArrayPool<ValueTask<ObjectRead>>.Shared.Rent(Math.Max(registered, 1));
-        NativeSegmentOwner?[] blocks = ArrayPool<NativeSegmentOwner?>.Shared.Rent(Math.Max(registered, 1));
+        ReadScratch scratch = ReadScratch.Rent(registered);
+        Block<int> order = scratch.Order;
+        Block<SegmentSpec> sorted = scratch.Sorted;
+        Block<CoalescedRun> runs = scratch.Runs;
+
+        // The reads and their blocks hold references: arrays the set keeps, cleared below once read.
+        SegmentReadArrays arrays = requests.ReadArrays;
+        ValueTask<ObjectRead>[] reads = SegmentReadArrays.Ensure(ref arrays.Reads, registered);
+        BlockOwner?[] blocks = SegmentReadArrays.Ensure(ref arrays.Owners, registered);
         int started = 0;
         try
         {
-            int pending = 0;
-            for (int slot = 0; slot < registered; slot++)
-            {
-                if (!requests.IsFilled(slot))
-                {
-                    order[pending] = slot;
-                    keys[pending] = requests.GetSpec(slot).Offset;
-                    pending++;
-                }
-            }
-
+            int pending = CoalescedReads.CollectPending(requests, order, scratch.Keys);
             if (pending == 0)
             {
                 requests.Complete();
                 return;
             }
 
-            keys.AsSpan(0, pending).Sort(order.AsSpan(0, pending));
+            scratch.Keys.AsSpan(0, pending).Sort(order.AsSpan(0, pending));
             for (int i = 0; i < pending; i++)
             {
                 sorted[i] = requests.GetSpec(order[i]);
@@ -271,7 +263,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
                 CoalescedRun run = runs[started];
                 int pad = (int)(run.Start & (VortexLimits.MaxAlignment - 1));
                 int length = checked((int)run.Length);
-                NativeSegmentOwner block = Rent(pad + length);
+                BlockOwner block = Rent(pad + length, requests.Account);
                 blocks[started] = block;
 
                 // Kept to be awaited below, each exactly once: the runs are in flight together, the
@@ -311,7 +303,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
             for (int r = 0; r < runCount; r++)
             {
                 CoalescedRun run = runs[r];
-                NativeSegmentOwner block = blocks[r]!;
+                BlockOwner block = blocks[r]!;
                 int pad = (int)(run.Start & (VortexLimits.MaxAlignment - 1));
                 ReadOnlySpan<byte> bytes = block.Buffer.Span;
                 for (int k = run.FirstIndex; k < run.FirstIndex + run.Count; k++)
@@ -351,12 +343,9 @@ internal sealed class ObjectStoreSource : ISegmentReader
                 blocks[r] = null;
             }
 
-            ArrayPool<NativeSegmentOwner?>.Shared.Return(blocks, clearArray: true);
-            ArrayPool<ValueTask<ObjectRead>>.Shared.Return(reads, clearArray: true);
-            ArrayPool<CoalescedRun>.Shared.Return(runs);
-            ArrayPool<SegmentSpec>.Shared.Return(sorted);
-            ArrayPool<ulong>.Shared.Return(keys);
-            ArrayPool<int>.Shared.Return(order);
+            // The set keeps the arrays for its next batch, and none of the references they held.
+            Array.Clear(reads);
+            scratch.Return();
         }
     }
 
@@ -380,8 +369,9 @@ internal sealed class ObjectStoreSource : ISegmentReader
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<SegmentOwner> ReadBlockAsync(long offset, int length, int alignmentExponent, bool exact, CancellationToken cancellationToken)
     {
+        // A block read alone is a file's own read, its footer or a metadata segment: memory it keeps.
         int pad = (int)(offset & (VortexLimits.MaxAlignment - 1));
-        NativeSegmentOwner block = Rent(pad + length);
+        BlockOwner block = Rent(pad + length, MemoryAccount.Kept);
         try
         {
             ObjectRead read;
@@ -419,11 +409,14 @@ internal sealed class ObjectStoreSource : ISegmentReader
     private ValueTask<ObjectRead> TailAsync(Memory<byte> destination, CancellationToken cancellationToken) =>
         _store.ReadTailAsync(_readKey, destination, cancellationToken);
 
-    /// <summary>A 64-byte aligned block of <paramref name="length"/> bytes: pooled up to the pool's largest size class.</summary>
-    private NativeSegmentOwner Rent(int length) =>
+    /// <summary>
+    /// A 64-byte aligned block of <paramref name="length"/> bytes: pooled up to the pool's largest size class, counted for
+    /// <paramref name="account"/>, the scan whose batch reads it or the memory a file keeps for its own reads.
+    /// </summary>
+    private BlockOwner Rent(int length, MemoryAccount account) =>
         length <= _options.MaxPooledBytes
-            ? AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment)
-            : NativeSegmentOwner.Allocate(length, VortexLimits.MaxAlignment);
+            ? account.Rent(length, VortexLimits.MaxAlignment)
+            : BlockOwner.Allocate(length, VortexLimits.MaxAlignment);
 
     /// <summary>Records the object's token, and refuses an answer about another object.</summary>
     private void Note(string token)

@@ -15,9 +15,8 @@ namespace Vorticity.Benchmarks.Audit;
 
 /// <summary>The distinct values of a column of many, on the core's path.</summary>
 /// <remarks>
-/// No collection forced between iterations: two in a row, no question between them, sweep the process's shelf empty
-/// (ArrayShelf's sweep), and each iteration of one or two questions would read a shelf a service under questions never
-/// sees.
+/// No collection forced between iterations: a collection under a high memory load sweeps the pool's blocks, and each
+/// iteration of one or two questions would read a pool a service under questions never sees empty.
 /// </remarks>
 [Config(typeof(BenchmarkConfig))]
 [BenchmarkCategory(BenchmarkConfig.Explore)]

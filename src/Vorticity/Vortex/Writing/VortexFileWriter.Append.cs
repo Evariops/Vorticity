@@ -5,6 +5,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
@@ -120,10 +121,9 @@ public sealed partial class VortexFileWriter
 
         VortexFileWriter writer = wrap is null
             ? OpenAppend(path, plan, effective, session, sealedLayout)
-            : await OpenWrappedAsync(path, plan, effective, wrap).ConfigureAwait(false);
+            : await OpenWrappedAsync(path, plan, effective, wrap, session).ConfigureAwait(false);
         writer._appendedPath = path;
         writer._appendOrigin = sealedLayout?.ObjectLength ?? plan.FileLength;
-        writer.Session = session;
 
         try
         {
@@ -171,6 +171,7 @@ public sealed partial class VortexFileWriter
         Microsoft.Win32.SafeHandles.SafeFileHandle handle = System.IO.File.OpenHandle(
             path, FileMode.Open, FileAccess.Write, FileShare.None, FileOptions.Asynchronous);
         FilePipeWriter? pipe = null;
+        WorkAccount account = AccountFor(session);
         try
         {
             long origin = sealedLayout?.ObjectLength ?? plan.FileLength;
@@ -182,11 +183,11 @@ public sealed partial class VortexFileWriter
             // Planning the append read the file, and may have left it mapped: on Windows a mapping
             // would forbid the rewind an abandoned append cuts the file back with.
             Vorticity.IO.MappedFileCache.ReleaseEverywhere(handle);
-            pipe = new FilePipeWriter(handle, origin, session.Options.MemoryPool) { Durable = options.Durable };
+            pipe = new FilePipeWriter(handle, origin, new AccountMemoryPool(account)) { Durable = options.Durable };
             ISegmentSink sink = sealedLayout is null
                 ? new PipeSegmentSink(pipe, plan.FileLength)
-                : new Sealing.SealingSegmentSink(pipe, sealedLayout, cancellationToken => session.Keys!.UnwrapAsync(sealedLayout.Descriptor, cancellationToken));
-            VortexFileWriter writer = Create(sink, plan.Schema, options, session);
+                : new Sealing.SealingSegmentSink(pipe, sealedLayout, cancellationToken => session.Keys!.UnwrapAsync(sealedLayout.Descriptor, cancellationToken)) { Account = account };
+            VortexFileWriter writer = Create(sink, plan.Schema, options, session, account);
             writer._filePipe = pipe;
             return writer;
         }
@@ -201,6 +202,7 @@ public sealed partial class VortexFileWriter
                 pipe.Complete();
             }
 
+            account.Dispose();
             plan.AbsorbedScratch?.Dispose();
             throw;
         }
@@ -208,7 +210,7 @@ public sealed partial class VortexFileWriter
 
     /// <summary>The append's writer over the sink a test builds from the file's stream.</summary>
     private static async ValueTask<VortexFileWriter> OpenWrappedAsync(
-        string path, AppendPlan plan, VortexWriteOptions options, Func<Stream, long, ISegmentSink> wrap)
+        string path, AppendPlan plan, VortexWriteOptions options, Func<Stream, long, ISegmentSink> wrap, VortexSession session)
     {
         FileStream stream = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
         try
@@ -220,7 +222,7 @@ public sealed partial class VortexFileWriter
 
             Vorticity.IO.MappedFileCache.ReleaseEverywhere(stream.SafeFileHandle);
             stream.Seek(0, SeekOrigin.End);
-            return Create(wrap(stream, plan.FileLength), plan.Schema, options);
+            return Create(wrap(stream, plan.FileLength), plan.Schema, options, session);
         }
         catch
         {
@@ -673,10 +675,12 @@ public sealed partial class VortexFileWriter
                 columns[field].KeptEncodings = keptLabels.AsSpan(field * keptChunks, keptChunks).ToArray();
             }
 
-            // The re-opened chunk, owned: the file is closed before the append writes.
+            // The re-opened chunk, owned: the file is closed before the append writes. Its blocks count under an account
+            // of the append's own until the writer has absorbed them; the collector closes it once nothing holds them.
             List<RecordBatch> reopened = [];
             if (reopen)
             {
+                WorkAccount reopening = new WorkAccount(QueryMemoryBudget.JobsOf(file.Session), "append");
                 await foreach (RecordBatch batch in file.ScanBuilder()
                     .Rows(new RowRange(keptRows, rows))
                     .WithPruning(false)
@@ -685,7 +689,7 @@ public sealed partial class VortexFileWriter
                     .WithCancellation(cancellationToken)
                     .ConfigureAwait(false))
                 {
-                    CanonicalArena owned = new CanonicalArena();
+                    CanonicalArena owned = new CanonicalArena(64, reopening);
                     int root = owned.CopyFrom(batch.Arena, batch.RootIndex);
                     reopened.Add(new RecordBatch(owned, root, batch.StartRow));
                 }

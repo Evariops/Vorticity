@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -8,6 +7,7 @@ using System.Threading;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Metadata;
+using Vorticity.Buffers;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 
@@ -483,8 +483,8 @@ internal sealed class LayoutTree
         }
 
         /// <summary>
-        /// Forgets the parse and keeps the builder and its scratch for the next one, or gives the
-        /// scratch back to the shared pools when another builder is kept already.
+        /// Forgets the parse and keeps the builder and its scratch for the next one, or lets go of the
+        /// scratch when another builder is kept already.
         /// </summary>
         internal void Give()
         {
@@ -506,8 +506,9 @@ internal sealed class LayoutTree
             _detachedEncodings = null;
             _types = null;
 
-            // A large tree, or a hostile one refused midway, leaves its scratch to the shared pools,
-            // which trim what no rent asks for: kept here, it would stay for the process's life.
+            // A large tree, or a hostile one refused midway, lets go of its scratch, to the pool, which
+            // lets go of what no rent asks for, and to the collector: kept here, it would stay for the
+            // process's life.
             if (ScratchBytes > KeptScratchBytes)
             {
                 ReturnScratch();
@@ -529,11 +530,11 @@ internal sealed class LayoutTree
             InspectionBudget = ((long)layoutBytes.Length * 4) + 4096;
             if (Records.Length == 0)
             {
-                Records = ArrayPool<LayoutNodeRecord>.Shared.Rent(64);
-                ChildIndices = ArrayPool<int>.Shared.Rent(64);
-                ZoneMaps = ArrayPool<ZoneMap>.Shared.Rent(16);
-                ChunkOffsets = ArrayPool<long>.Shared.Rent(64);
-                ZoneAggregates = ArrayPool<int>.Shared.Rent(32);
+                Records = new LayoutNodeRecord[64];
+                ChildIndices = Whole<int>(64);
+                ZoneMaps = new ZoneMap[16];
+                ChunkOffsets = Whole<long>(64);
+                ZoneAggregates = Whole<int>(32);
             }
 
             if (detachedEncodingIds is not null)
@@ -689,20 +690,22 @@ internal sealed class LayoutTree
 
         private AggregateSpecList? _specs;
 
-        // The parse grows these in rented arrays, and the tree keeps exact copies of them: a tree's
-        // size is known only once it is parsed, and growing its own arrays by doubling left three
-        // or four discarded generations of each behind every open.
+        // The parse grows these in the builder's scratch, and the tree keeps exact copies of them: a
+        // tree's size is known only once it is parsed, and growing its own arrays by doubling left
+        // three or four discarded generations of each behind every open. The records hold dtypes and
+        // the zone maps arrays, references no block holds: they are the builder's own arrays, which
+        // the shared builder keeps. The integers are blocks of the pool, seen at their whole capacity.
         internal LayoutNodeRecord[] Records = [];
         internal int RecordCount;
-        internal int[] ChildIndices = [];
+        internal Block<int> ChildIndices;
         internal int ChildIndexCount;
         internal ZoneMap[] ZoneMaps = [];
         internal int ZoneMapCount;
-        internal long[] ChunkOffsets = [];
+        internal Block<long> ChunkOffsets;
         internal int ChunkOffsetCount;
 
         /// <summary>The aggregates of every zone map, packed as <see cref="ZoneMap.Pack"/> packs them.</summary>
-        internal int[] ZoneAggregates = [];
+        internal Block<int> ZoneAggregates;
         internal int ZoneAggregateCount;
 
         /// <summary>
@@ -745,38 +748,50 @@ internal sealed class LayoutTree
             return RecordCount++;
         }
 
-        /// <summary>Moves <paramref name="array"/> into a rented array of at least <paramref name="needed"/> entries and returns the old one.</summary>
-        private static void Grow<T>(ref T[] array, int needed)
+        /// <summary>Moves <paramref name="array"/> into an array of at least <paramref name="needed"/> entries, twice as long at least.</summary>
+        private static void Grow<T>(ref T[] array, int needed) => Array.Resize(ref array, Capacity(array.Length, needed));
+
+        /// <summary>Moves <paramref name="block"/> into a block of at least <paramref name="needed"/> entries, seen at its whole capacity.</summary>
+        private static void Grow<T>(ref Block<T> block, int needed)
+            where T : unmanaged
         {
-            int capacity = Math.Max(array.Length, 1);
+            Blocks.Grow(ref block, Capacity(block.Length, needed));
+            block = block.WithLength(block.Capacity);
+        }
+
+        /// <summary>A block of <paramref name="length"/> entries at least, seen at its whole capacity.</summary>
+        private static Block<T> Whole<T>(int length)
+            where T : unmanaged
+        {
+            Block<T> block = Blocks.Rent<T>(length);
+            return block.WithLength(block.Capacity);
+        }
+
+        private static int Capacity(int held, int needed)
+        {
+            int capacity = Math.Max(held, 1);
             while (capacity < needed)
             {
                 capacity *= 2;
             }
 
-            T[] grown = ArrayPool<T>.Shared.Rent(capacity);
-            array.AsSpan().CopyTo(grown);
-            ArrayPool<T>.Shared.Return(array, clearArray: RuntimeHelpers.IsReferenceOrContainsReferences<T>());
-            array = grown;
+            return capacity;
         }
 
-        /// <summary>Gives the rented arrays back; the tree holds copies of what they held. Safe to call twice.</summary>
+        /// <summary>
+        /// Lets go of the scratch: the records and the zone maps to the collector, the blocks back to the pool. The tree
+        /// holds copies of what they held. Safe to call twice.
+        /// </summary>
         private void ReturnScratch()
         {
-            Return(ref Records);
-            Return(ref ChildIndices);
-            Return(ref ZoneMaps);
-            Return(ref ChunkOffsets);
-            Return(ref ZoneAggregates);
-        }
-
-        private static void Return<T>(ref T[] array)
-        {
-            if (array.Length != 0)
-            {
-                ArrayPool<T>.Shared.Return(array, clearArray: RuntimeHelpers.IsReferenceOrContainsReferences<T>());
-                array = [];
-            }
+            Records = [];
+            ZoneMaps = [];
+            Blocks.Return(ChildIndices);
+            Blocks.Return(ChunkOffsets);
+            Blocks.Return(ZoneAggregates);
+            ChildIndices = default;
+            ChunkOffsets = default;
+            ZoneAggregates = default;
         }
 
         internal int ReserveChildren(int count)

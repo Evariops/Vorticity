@@ -36,20 +36,22 @@ public sealed partial class DatasetRangedConsolidationTests
     }
 
     /// <summary>
-    /// The same days consolidated on four lanes under a jobs' budget no range fits in: the ranges run one at a time, the first
-    /// unreserved, and hold every live row as ranges side by side hold them; the jobs say how many ran at once and what they
-    /// reserved.
+    /// The same days consolidated on four lanes under a jobs' budget of 8 MiB, which holds fewer ranges than the lanes: the
+    /// ranges run fewer at a time, every job's blocks within the budget, and hold every live row as ranges side by side hold
+    /// them; the jobs say how many ran at once and what their blocks held.
     /// </summary>
     [Fact]
     public async Task UnderABudgetNoRangeFitsTheRangesRunOneAtATimeAndHoldTheSame()
     {
+        const long Budget = 8L << 20;
         (List<Row> appended, List<Row> roomy, IReadOnlyList<CompactionResult> wide) = await ConsolidateAsync(lanes: 4);
-        (_, List<Row> tight, IReadOnlyList<CompactionResult> narrow) = await ConsolidateAsync(lanes: 4, new QueryMemoryBudget(1));
+        (_, List<Row> tight, IReadOnlyList<CompactionResult> narrow) = await ConsolidateAsync(lanes: 4, new QueryMemoryBudget(Budget));
         List<Row> live = [.. appended.Where(static row => !(row.Day == 0 && row.Status == 7))];
         Assert.Equal(live, roomy.OrderBy(static row => row.Sequence));
         Assert.Equal(live, tight.OrderBy(static row => row.Sequence));
         Assert.True(wide.Any(static job => job.RangesAtOnce > 1 && job.MemoryReserved > 0), string.Join("; ", wide.Select(static job => $"{job.ObjectsIn} in, {job.BytesIn} B, {job.RangesAtOnce} at once, {job.MemoryReserved} B reserved")));
-        Assert.All(narrow, static job => Assert.Equal((1, 0L), (job.RangesAtOnce, job.MemoryReserved)));
+        Assert.All(narrow, static job => Assert.InRange(job.MemoryReserved, 0, Budget));
+        Assert.True(narrow.Max(static job => job.RangesAtOnce) <= wide.Max(static job => job.RangesAtOnce));
     }
 
     /// <summary>
@@ -220,8 +222,9 @@ public sealed partial class DatasetRangedConsolidationTests
         }
 
         await dataset.DeleteAsync<Row>(static row => row.Day == 0 & row.Status == 7, Ct);
+        // A day larger than its lanes' objects is consolidated in pieces, each a result: the last of each day is its own.
         IReadOnlyList<CompactionResult> consolidated = await dataset.ConsolidateAsync(Ct);
-        Assert.Equal(2, consolidated.Count);
+        Assert.Equal(2, consolidated.Count(static job => !job.Piece));
         await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
             Assert.True(held.Level == 1 && !held.Entry.HasDeletions, $"{lanes} lanes: '{held.Entry.Key}' at level {held.Level}, deletions {held.Entry.HasDeletions}");

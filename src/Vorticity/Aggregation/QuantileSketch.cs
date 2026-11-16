@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
+using Vorticity.Buffers;
 
 namespace Vorticity.Aggregating;
 
@@ -31,8 +32,8 @@ namespace Vorticity.Aggregating;
 /// values it holds and not the range they span.
 /// </para>
 /// <para>
-/// A sketch made for a query takes its arrays from the query's shelf, a window a power of two long so that the next
-/// question's sketches find them, and gives them back when its slot lets it go (<see cref="Release"/>): a quantile
+/// A sketch made for a query takes its arrays under the query's account, whole blocks of the pool, which the next
+/// question's sketches find again, and gives them back when its slot lets it go (<see cref="Release"/>): a quantile
 /// asked again allocates nothing, where 600 services' sketches took 11.1 MB a question.
 /// </para>
 /// </remarks>
@@ -55,21 +56,21 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
     private const int WideEntryBytes = 32;
 
     private readonly int _shift;
-    private ArrayShelf? _shelf;
+    private TableArrays? _account;
     private Store _positive;
     private Store _negative;
 
     /// <summary>
-    /// An empty sketch whose buckets split each power of two into <c>2^bits</c>, its arrays from <paramref name="shelf"/>
+    /// An empty sketch whose buckets split each power of two into <c>2^bits</c>, its arrays from <paramref name="account"/>
     /// when one is given, until <see cref="Release"/> gives them back.
     /// </summary>
-    internal QuantileSketch(int bits, ArrayShelf? shelf = null)
+    internal QuantileSketch(int bits, TableArrays? account = null)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(bits, 1);
         ArgumentOutOfRangeException.ThrowIfGreaterThan(bits, MaxBits);
         Bits = bits;
         _shift = ShiftOf(bits);
-        _shelf = shelf;
+        _account = account;
     }
 
     /// <summary>The bits a magnitude's bits are shifted by for its bucket on a grid of <paramref name="bits"/> mantissa bits.</summary>
@@ -126,12 +127,12 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
         Count += count;
         if (value > 0)
         {
-            return _positive.Add(Index(value), count, _shelf);
+            return _positive.Add(Index(value), count, _account);
         }
 
         if (value < 0)
         {
-            return _negative.Add(Index(-value), count, _shelf);
+            return _negative.Add(Index(-value), count, _account);
         }
 
         Zeros += count;
@@ -162,7 +163,7 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
         int i = 0;
         while (i < values.Length)
         {
-            if (_positive.Dense(out long[] window, out int low))
+            if (_positive.Dense(out Span<long> window, out int low))
             {
                 int start = i;
                 int shift = _shift;
@@ -207,7 +208,7 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
         Span<long> at = stackalloc long[Vector512<long>.Count];
         while (i < values.Length)
         {
-            if (_positive.Dense(out long[] window, out int low))
+            if (_positive.Dense(out Span<long> window, out int low))
             {
                 int start = i;
                 int shift = _shift;
@@ -259,30 +260,30 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
     }
 
     /// <summary>
-    /// Forgets every value and gives its arrays back to the shelf they came from: the sketch, which its slot lets go, is
+    /// Forgets every value and gives its arrays back to the account they came from: the sketch, which its slot lets go, is
     /// not used again.
     /// </summary>
     internal void Release()
     {
         Count = 0;
         Zeros = 0;
-        _positive.Release(_shelf);
-        _negative.Release(_shelf);
+        _positive.Release(_account);
+        _negative.Release(_account);
     }
 
     /// <summary>
-    /// Makes the sketch take and give back its arrays at <paramref name="shelf"/> from now on, when none of them is one a
-    /// query's memory counts (<see cref="ArrayShelf.LeastCounted"/>): a lane's shelf takes such arrays from the process's
-    /// and gives them back there, so they move with no count to settle; whether it did.
+    /// Makes the sketch take and give back its arrays at <paramref name="account"/> from now on, when none of them is one a
+    /// query's memory counts (<see cref="TableArrays.LeastCounted"/>): an account counts no such block, which it takes from
+    /// the pool and gives back there, so they move with no count to settle; whether it did.
     /// </summary>
-    internal bool TryRehome(ArrayShelf? shelf)
+    internal bool TryRehome(TableArrays? account)
     {
         if (!_positive.Uncounted || !_negative.Uncounted)
         {
             return false;
         }
 
-        _shelf = shelf;
+        _account = account;
         return true;
     }
 
@@ -306,8 +307,8 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
 
         Count += other.Count;
         Zeros += other.Zeros;
-        other._positive.AddTo(ref _positive, _shelf);
-        other._negative.AddTo(ref _negative, _shelf);
+        other._positive.AddTo(ref _positive, _account);
+        other._negative.AddTo(ref _negative, _account);
     }
 
     /// <summary>The buckets that hold values, in ascending order of value, and the zeros among them.</summary>
@@ -447,7 +448,7 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
             ref Store store = ref side == 0 ? ref _negative : ref _positive;
             if (store.IsEmpty)
             {
-                count = checked(count + store.Load(bytes, ref at, (int)entries, shift, _shelf));
+                count = checked(count + store.Load(bytes, ref at, (int)entries, shift, _account));
                 continue;
             }
 
@@ -457,7 +458,7 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
                 index = checked(index + (long)ReadVarint(bytes, ref at));
                 long held = checked((long)ReadVarint(bytes, ref at));
                 count = checked(count + held);
-                store.Add(checked((int)(index >> shift)), held, _shelf);
+                store.Add(checked((int)(index >> shift)), held, _account);
             }
         }
 
@@ -508,11 +509,11 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
         throw new VortexFormatException("A sketch holds a varint of more than 64 bits.");
     }
 
-    /// <summary>A sketch read back from the words <see cref="Write"/> wrote, a spill's or a test's, its arrays from <paramref name="shelf"/> when one is given.</summary>
-    internal static QuantileSketch Read<TWords>(int bits, ref TWords words, ArrayShelf? shelf = null)
+    /// <summary>A sketch read back from the words <see cref="Write"/> wrote, a spill's or a test's, its arrays from <paramref name="account"/> when one is given.</summary>
+    internal static QuantileSketch Read<TWords>(int bits, ref TWords words, TableArrays? account = null)
         where TWords : IWordSource, allows ref struct
     {
-        QuantileSketch sketch = new QuantileSketch(bits, shelf);
+        QuantileSketch sketch = new QuantileSketch(bits, account);
         long count = words.NextWord();
         long zeros = words.NextWord();
         for (int side = 0; side < 2; side++)
@@ -541,11 +542,11 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
     {
         if (negative)
         {
-            _negative.Add(index, count, _shelf);
+            _negative.Add(index, count, _account);
         }
         else
         {
-            _positive.Add(index, count, _shelf);
+            _positive.Add(index, count, _account);
         }
     }
 
@@ -571,12 +572,14 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
     /// </summary>
     private struct Store
     {
-        private int[] _keys;
-        private long[] _counts;
+        // Blocks of the pool, a power of two of elements each, held as their bytes alone: a sketch a group by the hundred
+        // thousand, its fields 8 bytes each as arrays were.
+        private ScratchBlock<int> _keys;
+        private ScratchBlock<long> _counts;
         private int _sparse;
 
-        // The dense window, null while sparse: counts of indices from _low on.
-        private long[]? _window;
+        // The dense window, none while sparse: counts of indices from _low on.
+        private ScratchBlock<long> _window;
         private int _low;
 
         // The buckets of values too far apart for a window, by index: what a grid of many bits over a wide range holds.
@@ -584,28 +587,28 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
 
         internal readonly long Bytes =>
             _wide is { } wide ? (long)wide.Count * WideEntryBytes
-            : _window is { } window ? (long)window.Length * sizeof(long)
-            : ((long)(_keys?.Length ?? 0) * sizeof(int)) + ((long)(_counts?.Length ?? 0) * sizeof(long));
+            : !_window.IsDefault ? (long)_window.Length * sizeof(long)
+            : ((long)_keys.Length * sizeof(int)) + ((long)_counts.Length * sizeof(long));
 
-        /// <summary>Whether no array of the store is one a query's memory counts (<see cref="ArrayShelf.LeastCounted"/>).</summary>
+        /// <summary>Whether no block of the store is one a query's memory counts (<see cref="TableArrays.LeastCounted"/>).</summary>
         internal readonly bool Uncounted =>
-            (long)(_keys?.Length ?? 0) * sizeof(int) < ArrayShelf.LeastCounted
-            && (long)(_counts?.Length ?? 0) * sizeof(long) < ArrayShelf.LeastCounted
-            && (long)(_window?.Length ?? 0) * sizeof(long) < ArrayShelf.LeastCounted;
+            (long)_keys.Length * sizeof(int) < TableArrays.LeastCounted
+            && (long)_counts.Length * sizeof(long) < TableArrays.LeastCounted
+            && (long)_window.Length * sizeof(long) < TableArrays.LeastCounted;
 
-        /// <summary>Whether the store holds no bucket and no window or map: a sparse one, empty, perhaps with its arrays.</summary>
-        internal readonly bool IsEmpty => _sparse == 0 && _window is null && _wide is null;
+        /// <summary>Whether the store holds no bucket and no window or map: a sparse one, empty, perhaps with its blocks.</summary>
+        internal readonly bool IsEmpty => _sparse == 0 && _window.IsDefault && _wide is null;
 
         /// <summary>Whether the store is a dense window, and its counts and the index of its first, which a run of adds reads in place.</summary>
-        internal readonly bool Dense(out long[] window, out int low)
+        internal readonly bool Dense(out Span<long> window, out int low)
         {
-            window = _window!;
+            window = _window.AsSpan();
             low = _low;
-            return window is not null;
+            return !_window.IsDefault;
         }
 
-        /// <summary>Adds a bucket's count, and returns the bytes the store grew by: zero unless an array grew, from <paramref name="shelf"/> when one is given.</summary>
-        internal long Add(int index, long count, ArrayShelf? shelf)
+        /// <summary>Adds a bucket's count, and returns the bytes the store grew by: zero unless an array grew, from <paramref name="account"/> when one is given.</summary>
+        internal long Add(int index, long count, TableArrays? account)
         {
             if (_wide is { } wide)
             {
@@ -614,26 +617,26 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
                 return existed ? 0 : WideEntryBytes;
             }
 
-            if (_window is { } window)
+            if (!_window.IsDefault)
             {
                 int at = index - _low;
-                if ((uint)at < (uint)window.Length)
+                if ((uint)at < (uint)_window.Length)
                 {
-                    window[at] += count;
+                    _window[at] += count;
                     return 0;
                 }
 
                 long before = Bytes;
-                Widen(index, shelf);
-                Add(index, count, shelf);
+                Widen(index, account);
+                Add(index, count, account);
                 return Bytes - before;
             }
 
             long grown = 0;
-            if (_keys is null)
+            if (_keys.IsDefault)
             {
-                _keys = Take<int>(shelf, 4);
-                _counts = Take<long>(shelf, 4);
+                _keys = Take<int>(account, 4);
+                _counts = Take<long>(account, 4);
                 grown = Bytes;
             }
 
@@ -650,37 +653,37 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
                 long before = Bytes;
                 if (_sparse >= SparseLimit)
                 {
-                    Densify(shelf);
-                    Add(index, count, shelf);
+                    Densify(account);
+                    Add(index, count, account);
                     return grown + Bytes - before;
                 }
 
-                ArrayShelf.Resize(shelf, ref _keys, _keys.Length * 2);
-                ArrayShelf.Resize(shelf, ref _counts, _counts.Length * 2);
+                Grow(account, ref _keys, _keys.Length * 2);
+                Grow(account, ref _counts, _counts.Length * 2);
                 grown += Bytes - before;
             }
 
-            Array.Copy(_keys, insert, _keys, insert + 1, _sparse - insert);
-            Array.Copy(_counts, insert, _counts, insert + 1, _sparse - insert);
+            _keys.AsSpan(insert, _sparse - insert).CopyTo(_keys.AsSpan(insert + 1));
+            _counts.AsSpan(insert, _sparse - insert).CopyTo(_counts.AsSpan(insert + 1));
             _keys[insert] = index;
             _counts[insert] = count;
             _sparse++;
             return grown;
         }
 
-        /// <summary>Forgets every count and gives its arrays back to <paramref name="shelf"/>, when they came from one.</summary>
-        internal void Release(ArrayShelf? shelf)
+        /// <summary>Forgets every count and gives its arrays back to <paramref name="account"/>, when they came from one.</summary>
+        internal void Release(TableArrays? account)
         {
-            if (shelf is not null)
+            if (account is not null)
             {
-                Give(shelf, _keys);
-                Give(shelf, _counts);
-                Give(shelf, _window);
+                Give(account, _keys);
+                Give(account, _counts);
+                Give(account, _window);
             }
 
-            _keys = null!;
-            _counts = null!;
-            _window = null;
+            _keys = default;
+            _counts = default;
+            _window = default;
             _wide = null;
             _sparse = 0;
         }
@@ -688,10 +691,7 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
         /// <summary>Forgets every count, a dense window or a map kept as it is, emptied.</summary>
         internal void Clear()
         {
-            if (_window is { } window)
-            {
-                Array.Clear(window);
-            }
+            _window.Clear();
 
             _wide?.Clear();
             _sparse = 0;
@@ -702,9 +702,9 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
         /// encoded store that <paramref name="bytes"/> holds from <paramref name="at"/> on, ascending, each index brought
         /// <paramref name="shift"/> bits coarser, and returns their counts: its arrays taken once, at the length and in the
         /// form the buckets need, sparse, a window or a map, as adding them one by one would leave them, which grew the arrays
-        /// four times from the shelf, gave each back, and searched the indices for each bucket.
+        /// four times from the account, gave each back, and searched the indices for each bucket.
         /// </summary>
-        internal long Load(ReadOnlySpan<byte> bytes, ref int at, int entries, int shift, ArrayShelf? shelf)
+        internal long Load(ReadOnlySpan<byte> bytes, ref int at, int entries, int shift, TableArrays? account)
         {
             // A first pass for the buckets the indices fall in, once coarser, and the first and the last of them.
             int from = at;
@@ -729,27 +729,27 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
             if (buckets > SparseLimit)
             {
                 // A window over the buckets, or a map of them past MaxWindow, as Densify leaves the sorted indices.
-                Give(shelf, _keys);
-                Give(shelf, _counts);
-                _keys = null!;
-                _counts = null!;
+                Give(account, _keys);
+                Give(account, _counts);
+                _keys = default;
+                _counts = default;
                 if (span > MaxWindow)
                 {
                     _wide = new Dictionary<int, long>(2 * buckets);
                 }
                 else
                 {
-                    _window = Take<long>(shelf, (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max((int)span, SparseLimit * 2)));
+                    _window = Take<long>(account, (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max((int)span, SparseLimit * 2)));
                     _low = checked((int)first);
                 }
             }
-            else if (buckets > 0 && (_keys is null || _keys.Length < buckets))
+            else if (buckets > 0 && _keys.Length < buckets)
             {
-                Give(shelf, _keys);
-                Give(shelf, _counts);
+                Give(account, _keys);
+                Give(account, _counts);
                 int length = (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(buckets, 4));
-                _keys = Take<int>(shelf, length);
-                _counts = Take<long>(shelf, length);
+                _keys = Take<int>(account, length);
+                _counts = Take<long>(account, length);
             }
 
             long count = 0;
@@ -764,9 +764,9 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
                 {
                     System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrAddDefault(wide, bucket, out _) += held;
                 }
-                else if (_window is { } window)
+                else if (!_window.IsDefault)
                 {
-                    window[bucket - _low] += held;
+                    _window[bucket - _low] += held;
                 }
                 else if (_sparse > 0 && _keys[_sparse - 1] == bucket)
                 {
@@ -783,13 +783,13 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
             return count;
         }
 
-        /// <summary>Adds this store's counts into <paramref name="into"/>, whose arrays come from <paramref name="shelf"/> when one is given.</summary>
-        internal readonly void AddTo(ref Store into, ArrayShelf? shelf)
+        /// <summary>Adds this store's counts into <paramref name="into"/>, whose arrays come from <paramref name="account"/> when one is given.</summary>
+        internal readonly void AddTo(ref Store into, TableArrays? account)
         {
             // A store that holds nothing yet, a group's first, takes this one's form and counts at once.
             if (into.IsEmpty)
             {
-                into.CopyFrom(in this, shelf);
+                into.CopyFrom(in this, account);
                 return;
             }
 
@@ -797,19 +797,20 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
             {
                 foreach ((int index, long count) in wide)
                 {
-                    into.Add(index, count, shelf);
+                    into.Add(index, count, account);
                 }
 
                 return;
             }
 
-            if (_window is { } window)
+            if (!_window.IsDefault)
             {
+                ScratchBlock<long> window = _window;
                 for (int i = 0; i < window.Length; i++)
                 {
                     if (window[i] != 0)
                     {
-                        into.Add(_low + i, window[i], shelf);
+                        into.Add(_low + i, window[i], account);
                     }
                 }
 
@@ -818,26 +819,26 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
 
             for (int i = 0; i < _sparse; i++)
             {
-                into.Add(_keys[i], _counts[i], shelf);
+                into.Add(_keys[i], _counts[i], account);
             }
         }
 
         /// <summary>
         /// Takes the form and the counts of <paramref name="source"/> into the store, which holds no bucket
         /// (<see cref="IsEmpty"/>): a sparse store's sorted indices, a window or a map, its arrays from
-        /// <paramref name="shelf"/> when one is given.
+        /// <paramref name="account"/> when one is given.
         /// </summary>
-        private void CopyFrom(in Store source, ArrayShelf? shelf)
+        private void CopyFrom(in Store source, TableArrays? account)
         {
-            if (source._wide is null && source._window is null)
+            if (source._wide is null && source._window.IsDefault)
             {
                 int buckets = source._sparse;
-                if (buckets > 0 && (_keys is null || _keys.Length < buckets))
+                if (buckets > 0 && _keys.Length < buckets)
                 {
-                    Give(shelf, _keys);
-                    Give(shelf, _counts);
-                    _keys = Take<int>(shelf, source._keys.Length);
-                    _counts = Take<long>(shelf, source._keys.Length);
+                    Give(account, _keys);
+                    Give(account, _counts);
+                    _keys = Take<int>(account, source._keys.Length);
+                    _counts = Take<long>(account, source._keys.Length);
                 }
 
                 source._keys.AsSpan(0, buckets).CopyTo(_keys);
@@ -846,18 +847,18 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
                 return;
             }
 
-            Give(shelf, _keys);
-            Give(shelf, _counts);
-            _keys = null!;
-            _counts = null!;
+            Give(account, _keys);
+            Give(account, _counts);
+            _keys = default;
+            _counts = default;
             if (source._wide is { } wide)
             {
                 _wide = new Dictionary<int, long>(wide);
                 return;
             }
 
-            long[] window = Take<long>(shelf, source._window!.Length);
-            source._window.CopyTo(window, 0);
+            ScratchBlock<long> window = Take<long>(account, source._window.Length);
+            source._window.AsSpan().CopyTo(window);
             _window = window;
             _low = source._low;
         }
@@ -885,9 +886,10 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
             }
 
             int entries = 0;
-            if (_window is { } window)
+            bool dense = !_window.IsDefault;
+            if (dense)
             {
-                foreach (long count in window)
+                foreach (long count in _window.AsSpan())
                 {
                     entries += count != 0 ? 1 : 0;
                 }
@@ -900,9 +902,9 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
             Span<byte> head = into.GetSpan(MaxVarint);
             into.Advance(Varint(head, (ulong)entries));
             int previous = 0;
-            for (int i = 0; i < (_window?.Length ?? _sparse); i++)
+            for (int i = 0; i < (dense ? _window.Length : _sparse); i++)
             {
-                (int index, long count) = _window is { } dense ? (_low + i, dense[i]) : (_keys[i], _counts[i]);
+                (int index, long count) = dense ? (_low + i, _window[i]) : (_keys[i], _counts[i]);
                 if (count == 0)
                 {
                     continue;
@@ -939,8 +941,9 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
                 return null;
             }
 
-            if (_window is { } window)
+            if (!_window.IsDefault)
             {
+                ScratchBlock<long> window = _window;
                 for (int i = 0; i < window.Length; i++)
                 {
                     int at = descending ? window.Length - 1 - i : i;
@@ -984,8 +987,9 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
                 return entries;
             }
 
-            if (_window is { } window)
+            if (!_window.IsDefault)
             {
+                ScratchBlock<long> window = _window;
                 for (int i = 0; i < window.Length; i++)
                 {
                     if (window[i] != 0)
@@ -1007,9 +1011,9 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
 
         /// <summary>
         /// Leaves the sorted indices for a dense window over the ones they span, a power of two long, or for a map of them
-        /// when that window would pass <see cref="MaxWindow"/> buckets; the indices' arrays go back to <paramref name="shelf"/>.
+        /// when that window would pass <see cref="MaxWindow"/> buckets; the indices' arrays go back to <paramref name="account"/>.
         /// </summary>
-        private void Densify(ArrayShelf? shelf)
+        private void Densify(TableArrays? account)
         {
             int low = _keys[0];
             long span = (long)_keys[_sparse - 1] - low + 1;
@@ -1025,7 +1029,7 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
             }
             else
             {
-                long[] window = Take<long>(shelf, (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max((int)span, SparseLimit * 2)));
+                ScratchBlock<long> window = Take<long>(account, (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max((int)span, SparseLimit * 2)));
                 for (int i = 0; i < _sparse; i++)
                 {
                     window[_keys[i] - low] = _counts[i];
@@ -1035,21 +1039,21 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
                 _low = low;
             }
 
-            Give(shelf, _keys);
-            Give(shelf, _counts);
-            _keys = null!;
-            _counts = null!;
+            Give(account, _keys);
+            Give(account, _counts);
+            _keys = default;
+            _counts = default;
             _sparse = 0;
         }
 
         /// <summary>
         /// Grows the window to hold <paramref name="index"/>, by half its length again at least each way it grows, a power
         /// of two long; or, when it would pass <see cref="MaxWindow"/> buckets, leaves it for a map of the buckets it holds.
-        /// The window it leaves goes back to <paramref name="shelf"/>.
+        /// The window it leaves goes back to <paramref name="account"/>.
         /// </summary>
-        private void Widen(int index, ArrayShelf? shelf)
+        private void Widen(int index, TableArrays? account)
         {
-            long[] window = _window!;
+            ScratchBlock<long> window = _window;
             int low = Math.Min(_low, index);
             int high = Math.Max(_low + window.Length - 1, index);
             int slack = window.Length / 2;
@@ -1067,28 +1071,45 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
                 }
 
                 _wide = wide;
-                _window = null;
-                Give(shelf, window);
+                _window = default;
+                Give(account, window);
                 return;
             }
 
-            long[] grown = Take<long>(shelf, (int)BitOperations.RoundUpToPowerOf2((uint)length));
-            Array.Copy(window, 0, grown, _low - newLow, window.Length);
-            Give(shelf, window);
+            ScratchBlock<long> grown = Take<long>(account, (int)BitOperations.RoundUpToPowerOf2((uint)length));
+            window.AsSpan().CopyTo(grown.AsSpan(_low - newLow));
+            Give(account, window);
             _window = grown;
             _low = newLow;
         }
 
-        /// <summary>An array of <paramref name="length"/> zeros, from <paramref name="shelf"/> when one is given.</summary>
-        private static T[] Take<T>(ArrayShelf? shelf, int length) => shelf?.Take<T>(length, zeroed: true) ?? new T[length];
+        /// <summary>
+        /// A block of <paramref name="length"/> zeros, a power of two, rented under <paramref name="account"/> when one is
+        /// given, made at its size otherwise, as a sketch with no account's arrays were, which its answers may keep; held
+        /// whole.
+        /// </summary>
+        private static ScratchBlock<T> Take<T>(TableArrays? account, int length)
+            where T : unmanaged =>
+            ScratchBlock<T>.Whole(account is null ? Blocks.Allocate<T>(length) : account.Rent<T>(length, zeroed: true));
 
-        /// <summary>Gives <paramref name="array"/> back to <paramref name="shelf"/>, when both are.</summary>
-        private static void Give<T>(ArrayShelf? shelf, T[]? array)
+        /// <summary>Gives <paramref name="block"/> back to <paramref name="account"/>, when both are: a sketch with no account leaves its blocks to the collector.</summary>
+        private static void Give<T>(TableArrays? account, ScratchBlock<T> block)
+            where T : unmanaged
         {
-            if (shelf is not null && array is { Length: > 0 })
+            if (account is not null && !block.IsDefault)
             {
-                shelf.Give(array);
+                account.Return(block.Block);
             }
+        }
+
+        /// <summary><paramref name="block"/> grown to <paramref name="length"/> elements, a power of two, those it held copied.</summary>
+        private static void Grow<T>(TableArrays? account, ref ScratchBlock<T> block, int length)
+            where T : unmanaged
+        {
+            ScratchBlock<T> grown = Take<T>(account, length);
+            block.AsSpan().CopyTo(grown.AsSpan());
+            Give(account, block);
+            block = grown;
         }
     }
 }

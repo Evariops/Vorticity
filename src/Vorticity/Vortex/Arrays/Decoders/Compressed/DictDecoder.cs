@@ -1,6 +1,7 @@
 using System;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Metadata;
+using Vorticity.Buffers;
 using Vorticity.Types;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
@@ -79,10 +80,10 @@ internal sealed class DictDecoder : ArrayDecoder
             return false;
         }
 
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(length, 1));
+        Block<byte> rented = Blocks.Rent<byte>(length);
         try
         {
-            Span<byte> states = rented.AsSpan(0, length);
+            Span<byte> states = rented;
             if (!TryAnswer(context, in node, dtype, length, predicate, states))
             {
                 return false;
@@ -93,7 +94,7 @@ internal sealed class DictDecoder : ArrayDecoder
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 
@@ -132,7 +133,7 @@ internal sealed class DictDecoder : ArrayDecoder
             CompressedThrow.ChildLength(Id, "values", values.Length, valuesLength);
         }
 
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(2 * valuesLength, 1));
+        Block<byte> rented = Blocks.Rent<byte>(2 * valuesLength);
         try
         {
             Span<byte> answers = rented.AsSpan(0, valuesLength);
@@ -177,7 +178,7 @@ internal sealed class DictDecoder : ArrayDecoder
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 
@@ -293,7 +294,7 @@ internal sealed class DictDecoder : ArrayDecoder
         // so asking again here would retain the same bytes twice. Values that reach an entry by
         // inflating a frame of them are shared too, since each batch would inflate a frame again.
         int entries = valuesLength;
-        int[]? narrowed = null;
+        Block<int> narrowed = default;
         int valuesIndex;
         // A scan that reads a few rows of each chunk narrows a range's codes as well, its values reaching an entry through the
         // frame that holds it: the whole values, decoded once for every range of the chunk, are the chunk's for a range's few.
@@ -301,7 +302,7 @@ internal sealed class DictDecoder : ArrayDecoder
             && !context.ChildRetained(in node, 1) && context.ChildSelectsWithoutFullDecode(in node, 1, dtype);
         if (fewOfChunk || (selective && !keep && produced * NarrowedValues < valuesLength && context.ChildSelectsByRow(in node, 1, dtype)))
         {
-            narrowed = System.Buffers.ArrayPool<int>.Shared.Rent(2 * produced);
+            narrowed = Blocks.Rent<int>(2 * produced);
             entries = Narrow(codes, codesPType, in codesValidity, produced, valuesLength, narrowed);
             valuesIndex = context.DecodeChildSelected(in node, 1, dtype, valuesLength, narrowed.AsSpan(produced, entries));
             codes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(narrowed.AsSpan(0, produced));
@@ -333,10 +334,7 @@ internal sealed class DictDecoder : ArrayDecoder
         }
         finally
         {
-            if (narrowed is not null)
-            {
-                System.Buffers.ArrayPool<int>.Shared.Return(narrowed);
-            }
+            Blocks.Return(narrowed);
         }
     }
 
@@ -422,10 +420,10 @@ internal sealed class DictDecoder : ArrayDecoder
     {
         Span<int> renumbered = scratch[..rows];
         Span<int> named = scratch.Slice(rows, rows);
-        ulong[]? rentedSeen = null;
-        int[]? rentedRanks = null;
-        Span<ulong> seen = words <= 256 ? stackalloc ulong[256] : (rentedSeen = System.Buffers.ArrayPool<ulong>.Shared.Rent(words));
-        Span<int> ranks = words <= 256 ? stackalloc int[256] : (rentedRanks = System.Buffers.ArrayPool<int>.Shared.Rent(words));
+        Block<ulong> rentedSeen = default;
+        Block<int> rentedRanks = default;
+        Span<ulong> seen = words <= 256 ? stackalloc ulong[256] : (rentedSeen = Blocks.Rent<ulong>(words));
+        Span<int> ranks = words <= 256 ? stackalloc int[256] : (rentedRanks = Blocks.Rent<int>(words));
         seen = seen[..words];
         ranks = ranks[..words];
         try
@@ -476,15 +474,8 @@ internal sealed class DictDecoder : ArrayDecoder
         }
         finally
         {
-            if (rentedSeen is not null)
-            {
-                System.Buffers.ArrayPool<ulong>.Shared.Return(rentedSeen);
-            }
-
-            if (rentedRanks is not null)
-            {
-                System.Buffers.ArrayPool<int>.Shared.Return(rentedRanks);
-            }
+            Blocks.Return(rentedSeen);
+            Blocks.Return(rentedRanks);
         }
     }
 

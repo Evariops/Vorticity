@@ -55,7 +55,7 @@ public sealed partial class DistributionTests
             MemoryMarshal.AsBytes(values.AsSpan()).CopyTo(into);
             int node = arena.AddPrimitive(dtype, Rows, Validity.NonNullable, PType.I64, buffer);
             BatchInput input = new BatchInput(1, arena, node, Rows, mask);
-            DistributionSlot<long, QuantileSketch?> slot = new DistributionSlot<long, QuantileSketch?>(Bits, static sketch => sketch, shelved: false);
+            DistributionSlot<long, QuantileSketch?> slot = new DistributionSlot<long, QuantileSketch?>(Bits, static sketch => sketch, accounted: false);
             slot.EnsureGroups(bounds.Count - 1);
             for (int g = 0; g + 1 < bounds.Count; g++)
             {

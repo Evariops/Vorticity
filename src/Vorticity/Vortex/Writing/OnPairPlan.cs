@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
+using Vorticity.Buffers;
 
 namespace Vorticity.Writing;
 
@@ -40,15 +41,15 @@ internal sealed class OnPairPlan
     /// <summary>The share of the column's bytes the training scans.</summary>
     private const double SampleFraction = 0.15;
 
-    private byte[] _dictionary;
-    private int[] _dictionaryOffsets;
-    private ushort[] _codes;
-    private int[] _codeOffsets;
-    private int[] _lengths;
+    private Block<byte> _dictionary;
+    private Block<int> _dictionaryOffsets;
+    private Block<ushort> _codes;
+    private Block<int> _codeOffsets;
+    private Block<int> _lengths;
 
     private OnPairPlan(
-        byte[] dictionary, int dictionaryBytes, int[] dictionaryOffsets, int tokens, ushort[] codes, int codeCount,
-        int[] codeOffsets, int[] lengths, int rows, long encodedSize)
+        Block<byte> dictionary, int dictionaryBytes, Block<int> dictionaryOffsets, int tokens, Block<ushort> codes, int codeCount,
+        Block<int> codeOffsets, Block<int> lengths, int rows, long encodedSize)
     {
         _dictionary = dictionary;
         DictionaryBytes = dictionaryBytes;
@@ -92,14 +93,19 @@ internal sealed class OnPairPlan
     /// <summary>Each row's decoded length, zero for a null row.</summary>
     internal ReadOnlySpan<int> Lengths => _lengths.AsSpan(0, Rows);
 
-    /// <summary>Hands every rental back, once; the plan is spent.</summary>
+    /// <summary>Hands every block back, once; the plan is spent.</summary>
     internal void Release()
     {
-        Return(ref _dictionary);
-        Return(ref _dictionaryOffsets);
-        Return(ref _codes);
-        Return(ref _codeOffsets);
-        Return(ref _lengths);
+        Blocks.Return(_dictionary);
+        Blocks.Return(_dictionaryOffsets);
+        Blocks.Return(_codes);
+        Blocks.Return(_codeOffsets);
+        Blocks.Return(_lengths);
+        _dictionary = default;
+        _dictionaryOffsets = default;
+        _codes = default;
+        _codeOffsets = default;
+        _lengths = default;
     }
 
     /// <summary>
@@ -120,30 +126,30 @@ internal sealed class OnPairPlan
         }
 
         ValidityReader valid = ValidityReader.Of(arena, node.Validity);
-        int[] lengths = WorkArrays.Rent<int>(rows);
-        long plain = ViewHeap.Lengths(node, valid, lengths.AsSpan(0, rows));
+        Block<int> lengths = Blocks.Rent<int>(rows);
+        long plain = ViewHeap.Lengths(node, valid, lengths);
         if (plain == 0 || plain > int.MaxValue - ViewHeap.Slack)
         {
-            WorkArrays.Return(lengths);
+            Blocks.Return(lengths);
             return null;
         }
 
         int total = (int)plain;
-        byte[] heap = WorkArrays.Rent<byte>(total + ViewHeap.Slack);
-        int[] starts = WorkArrays.Rent<int>(rows);
+        Block<byte> heap = Blocks.Rent<byte>(total + ViewHeap.Slack);
+        Block<int> starts = Blocks.Rent<int>(rows);
         Trainer? trainer = null;
-        ushort[]? codes = null;
-        int[]? codeOffsets = null;
+        Block<ushort> codes = default;
+        Block<int> codeOffsets = default;
         bool kept = false;
         try
         {
-            ViewHeap.Gather(node, lengths.AsSpan(0, rows), heap, starts.AsSpan(0, rows));
+            ViewHeap.Gather(node, lengths, heap, starts);
             trainer = Trainer.Rent();
-            int sampled = trainer.Train(heap, starts.AsSpan(0, rows), lengths.AsSpan(0, rows), total, out int sampleCodes);
+            int sampled = trainer.Train(heap, starts, lengths, total, out int sampleCodes);
 
             // The sample's codes, scaled to the column's bytes: a bound it has to clear with room.
             int width = CodeWidth(trainer.Tokens);
-            long fixedBytes = FixedBytes(trainer, rows, lengths.AsSpan(0, rows));
+            long fixedBytes = FixedBytes(trainer, rows, lengths);
             if (sampled > 0 && sizeCeiling < long.MaxValue / 2)
             {
                 long estimated = fixedBytes + ((long)sampleCodes * total / sampled * width / 8);
@@ -153,13 +159,13 @@ internal sealed class OnPairPlan
                 }
             }
 
-            codes = WorkArrays.Rent<ushort>(total);
-            codeOffsets = WorkArrays.Rent<int>(rows + 1);
+            codes = Blocks.Rent<ushort>(total);
+            codeOffsets = Blocks.Rent<int>(rows + 1);
 
             // The codes the ceiling leaves room for; a pin's ceiling leaves room for any.
             long room = sizeCeiling - fixedBytes;
             long budget = room > long.MaxValue / 8 ? long.MaxValue : room * 8 / width;
-            int count = trainer.Parse(heap, starts.AsSpan(0, rows), lengths.AsSpan(0, rows), codes, codeOffsets, budget);
+            int count = trainer.Parse(heap, starts, lengths, codes, codeOffsets, budget);
             if (count < 0)
             {
                 return null;
@@ -171,7 +177,7 @@ internal sealed class OnPairPlan
                 return null;
             }
 
-            (byte[] dictionary, int dictionaryBytes, int[] dictionaryOffsets) = trainer.TakeDictionary();
+            (Block<byte> dictionary, int dictionaryBytes, Block<int> dictionaryOffsets) = trainer.TakeDictionary();
             OnPairPlan plan = new OnPairPlan(
                 dictionary, dictionaryBytes, dictionaryOffsets, trainer.Tokens, codes, count, codeOffsets, lengths, rows, encoded);
             kept = true;
@@ -182,21 +188,13 @@ internal sealed class OnPairPlan
             trainer?.Recycle();
             if (!kept)
             {
-                if (codes is not null)
-                {
-                    WorkArrays.Return(codes);
-                }
-
-                if (codeOffsets is not null)
-                {
-                    WorkArrays.Return(codeOffsets);
-                }
-
-                WorkArrays.Return(lengths);
+                Blocks.Return(codes);
+                Blocks.Return(codeOffsets);
+                Blocks.Return(lengths);
             }
 
-            WorkArrays.Return(starts);
-            WorkArrays.Return(heap);
+            Blocks.Return(starts);
+            Blocks.Return(heap);
         }
     }
 
@@ -208,16 +206,6 @@ internal sealed class OnPairPlan
         trainer.PaddedBytes
         + FsstPlan.RowTableBytes(trainer.Tokens + 1, trainer.PaddedBytes)
         + FsstPlan.RowTableBytes(rows, FsstPlan.MaxOf(lengths));
-
-    private static void Return<T>(ref T[] rental)
-    {
-        T[] array = rental;
-        rental = [];
-        if (array.Length > 0)
-        {
-            WorkArrays.Return(array);
-        }
-    }
 
     /// <summary>
     /// The training and the parse, over tables rented once and kept by the writer's thread between
@@ -331,14 +319,14 @@ internal sealed class OnPairPlan
         /// Builds the dictionary from a sample of the rows and sorts it, returning the sample's bytes
         /// and, through <paramref name="sampleCodes"/>, the codes it takes under the final dictionary.
         /// </summary>
-        internal int Train(byte[] heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, int total, out int sampleCodes)
+        internal int Train(Block<byte> heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, int total, out int sampleCodes)
         {
             int rows = starts.Length;
             long budget = (long)(total * SampleFraction);
-            int[] order = WorkArrays.Rent<int>(rows);
+            Block<int> order = Blocks.Rent<int>(rows);
             try
             {
-                int selected = SampleOrder(order.AsSpan(0, rows), lengths, budget);
+                int selected = SampleOrder(order, lengths, budget);
                 Discover(heap, starts, lengths, order.AsSpan(0, selected), budget);
                 Sort();
 
@@ -356,7 +344,7 @@ internal sealed class OnPairPlan
             }
             finally
             {
-                WorkArrays.Return(order);
+                Blocks.Return(order);
             }
         }
 
@@ -364,7 +352,7 @@ internal sealed class OnPairPlan
         /// Encodes every row, returning the codes written, or -1 once they pass
         /// <paramref name="budget"/>.
         /// </summary>
-        internal int Parse(byte[] heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, ushort[] codes, int[] offsets, long budget)
+        internal int Parse(Block<byte> heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, Span<ushort> codes, Span<int> offsets, long budget)
         {
             int count = 0;
             offsets[0] = 0;
@@ -390,11 +378,11 @@ internal sealed class OnPairPlan
             return count;
         }
 
-        /// <summary>The sorted dictionary's rentals, handed to the plan.</summary>
-        internal (byte[] Bytes, int Length, int[] Offsets) TakeDictionary()
+        /// <summary>The sorted dictionary's blocks, handed to the plan.</summary>
+        internal (Block<byte> Bytes, int Length, Block<int> Offsets) TakeDictionary()
         {
-            byte[] bytes = WorkArrays.Rent<byte>(_paddedBytes);
-            int[] offsets = WorkArrays.Rent<int>(_tokens + 1);
+            Block<byte> bytes = Blocks.Rent<byte>(_paddedBytes);
+            Block<int> offsets = Blocks.Rent<int>(_tokens + 1);
             _bytes.AsSpan(0, _paddedBytes).CopyTo(bytes);
             _offsets.AsSpan(0, _tokens + 1).CopyTo(offsets);
             return (bytes, _paddedBytes, offsets);
@@ -447,7 +435,7 @@ internal sealed class OnPairPlan
         /// tokens counted, and a pair counted as often as the bar becomes a token of its own, which
         /// the scan then carries on from as one token.
         /// </summary>
-        private void Discover(byte[] heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, ReadOnlySpan<int> order, long budget)
+        private void Discover(Block<byte> heap, ReadOnlySpan<int> starts, ReadOnlySpan<int> lengths, ReadOnlySpan<int> order, long budget)
         {
             Threshold bar = new Threshold(Capacity - 256, budget);
             for (int i = 0; i < order.Length; i++)
@@ -535,8 +523,8 @@ internal sealed class OnPairPlan
 
             // Laid out afresh in sorted order; the old layout is read through a copy.
             int used = _offsets[tokens];
-            byte[] old = WorkArrays.Rent<byte>(used);
-            int[] oldOffsets = WorkArrays.Rent<int>(tokens + 1);
+            Block<byte> old = Blocks.Rent<byte>(used);
+            Block<int> oldOffsets = Blocks.Rent<int>(tokens + 1);
             try
             {
                 _bytes.AsSpan(0, used).CopyTo(old);
@@ -568,13 +556,13 @@ internal sealed class OnPairPlan
             }
             finally
             {
-                WorkArrays.Return(old);
-                WorkArrays.Return(oldOffsets);
+                Blocks.Return(old);
+                Blocks.Return(oldOffsets);
             }
         }
 
         /// <summary>The codes a row takes under the current dictionary, without writing them.</summary>
-        private int CountCodes(byte[] heap, int at, int length)
+        private int CountCodes(Block<byte> heap, int at, int length)
         {
             int end = at + length;
             int count = 0;
@@ -598,9 +586,9 @@ internal sealed class OnPairPlan
         /// probe masks them to the length it asks about, so the bytes past the row never count.
         /// </remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private int Longest(byte[] heap, int at, int remaining, out ushort code)
+        private int Longest(Block<byte> heap, int at, int remaining, out ushort code)
         {
-            ref byte start = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(heap), at);
+            ref byte start = ref Unsafe.Add(ref heap.GetReference(), at);
             ulong low = Unsafe.ReadUnaligned<ulong>(ref start);
             ulong high = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref start, 8));
             int window = Math.Min(remaining, MaxTokenSize);

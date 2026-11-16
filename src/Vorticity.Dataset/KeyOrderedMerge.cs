@@ -91,6 +91,24 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         _cancellationToken = cancellationToken;
     }
 
+    /// <summary>
+    /// Whom the windows of the merge's runs are counted for: the question's account, or a budget's for a job, the merge
+    /// giving them back as it ends.
+    /// </summary>
+    internal required Vorticity.Buffers.MemoryAccount Account { get; init; }
+
+    /// <summary>
+    /// Where an input is opened from: a compaction's copies in its scratch (<see cref="JobMemory.RentAsync"/>); null for the
+    /// version's own objects.
+    /// </summary>
+    internal Func<ObjectEntry, CancellationToken, ValueTask<ObjectLease>>? Rent { get; init; }
+
+    /// <summary>
+    /// The rows emitted of each input, by its rank: what a piece of a consolidation took of each input, which it marks once
+    /// its objects are committed; null when nothing counts them.
+    /// </summary>
+    internal long[]? Emitted { get; init; }
+
     /// <summary>The run the merge is on: an input's batch, or a window of it.</summary>
     /// <exception cref="InvalidOperationException">The merge is not on a run.</exception>
     internal RecordBatch Current => _current ?? throw new InvalidOperationException("The merge is not on a run.");
@@ -145,6 +163,10 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         (MergeInput chosen, int count) = Choose();
         _emitting = chosen;
         _count = count;
+        if (Emitted is { } emitted && (ulong)chosen.Rank < (ulong)emitted.Length)
+        {
+            Interlocked.Add(ref emitted[chosen.Rank], count);
+        }
         RecordBatch batch = chosen.Batch;
         if (chosen.Row == 0 && count == batch.RowCount)
         {
@@ -152,7 +174,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         }
         else
         {
-            _windows ??= new CanonicalArena();
+            _windows ??= new CanonicalArena(64, Account);
             _window = batch.Window(chosen.Row, count, _windows, _window);
             _current = _window;
         }
@@ -287,7 +309,9 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
 
     private async ValueTask OpenAsync(MergeObject next)
     {
-        ObjectLease lease = await _version.RentAsync(next.Entry, _cancellationToken).ConfigureAwait(false);
+        ObjectLease lease = Rent is { } rent
+            ? await rent(next.Entry, _cancellationToken).ConfigureAwait(false)
+            : await _version.RentAsync(next.Entry, _cancellationToken).ConfigureAwait(false);
         _opened?.Invoke(lease);
         MergeInput input = new MergeInput(this, lease, next.Entry.Key, next.Rank, next.FirstRow, _key, _low, _high);
         try

@@ -69,9 +69,8 @@ public sealed class WriteAllocationTests : IDisposable
 
     private static bool Debug => typeof(ParquetFile).Assembly.GetCustomAttribute<DebuggableAttribute>() is { IsJITOptimizerDisabled: true };
 
-    /// <summary>A session over a pool of its own, graded as the shared pool is.</summary>
-    private static VortexSession Isolated() =>
-        VortexSession.Create(options => options.MemoryPool = new AlignedMemoryPool(AlignedBufferPool.Graded(32 * 1024 * 1024, 8, demandBudget: 256L * 1024 * 1024)));
+    /// <summary>A session of its own: its blocks come from the library's pool, which the class, run alone, shares with no other test.</summary>
+    private static VortexSession Isolated() => VortexSession.Create(static _ => { });
 
     /// <summary>A schema of every kind of column the writer stages: integers, floats, text, bytes, booleans, nulls and lists.</summary>
     private static VortexSchema Mixed =>

@@ -460,6 +460,34 @@ internal sealed class DTypeArena
         return Commit(ref n, savedChild, savedName, _typeIdCount, _metaCount);
     }
 
+    /// <summary>
+    /// <see cref="Struct(ReadOnlySpan{int}, ReadOnlySpan{DType}, Nullability)"/> over fields given as nodes of this arena,
+    /// each a field's <see cref="DType.NodeIndex"/>: for a reader that gathers a struct's fields as integers, which a block
+    /// of the pool holds, rather than as dtypes, which hold a reference to the arena.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The two lengths differ, or the resulting depth exceeds the cap.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A field is not a node of this arena.</exception>
+    internal DType StructOfNodes(ReadOnlySpan<int> nameHandles, ReadOnlySpan<int> fieldNodes, Nullability nullability)
+    {
+        if (nameHandles.Length != fieldNodes.Length)
+        {
+            ThrowFormat(
+                $"Struct names.len() = {nameHandles.Length} does not match dtypes.len() = {fieldNodes.Length}.");
+        }
+
+        CheckNullability(nullability);
+        int depth = ValidateNodes(fieldNodes);
+
+        int savedChild = _childCount;
+        int savedName = _fieldNameCount;
+        DTypeNode n = NewNode(DTypeKind.Struct, nullability);
+        n.Depth = depth;
+        AppendNameHandles(nameHandles);
+        AppendNodes(fieldNodes);
+        n.ChildCount = fieldNodes.Length;
+        return Commit(ref n, savedChild, savedName, _typeIdCount, _metaCount);
+    }
+
     /// <summary>A struct dtype whose field names are interned on the fly.</summary>
     /// <inheritdoc cref="Struct(ReadOnlySpan{int}, ReadOnlySpan{DType}, Nullability)" path="/exception"/>
     public DType Struct(ReadOnlySpan<string> names, ReadOnlySpan<DType> fields, Nullability nullability)
@@ -611,6 +639,49 @@ internal sealed class DTypeArena
         _typeIdCount += typeIds.Length;
         AppendChildren(fields);
         n.ChildCount = fields.Length;
+        return Commit(ref n, savedChild, savedName, savedTypeId, _metaCount);
+    }
+
+    /// <summary>
+    /// <see cref="Union(ReadOnlySpan{int}, ReadOnlySpan{DType}, ReadOnlySpan{byte}, Nullability)"/> over fields given as
+    /// nodes of this arena, each a field's <see cref="DType.NodeIndex"/>: for a reader that gathers a union's members as
+    /// integers, which a block of the pool holds, rather than as dtypes, which hold a reference to the arena.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The three lengths differ, or the resulting depth exceeds the cap.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A field is not a node of this arena.</exception>
+    internal DType UnionOfNodes(
+        ReadOnlySpan<int> nameHandles,
+        ReadOnlySpan<int> fieldNodes,
+        ReadOnlySpan<byte> typeIds,
+        Nullability nullability)
+    {
+        if (nameHandles.Length != fieldNodes.Length)
+        {
+            ThrowFormat(
+                $"Union names.len() = {nameHandles.Length} does not match dtypes.len() = {fieldNodes.Length}.");
+        }
+
+        if (typeIds.Length != fieldNodes.Length)
+        {
+            ThrowFormat(
+                $"Union type_ids.len() = {typeIds.Length} does not match dtypes.len() = {fieldNodes.Length}.");
+        }
+
+        CheckNullability(nullability);
+        int depth = ValidateNodes(fieldNodes);
+
+        int savedChild = _childCount;
+        int savedName = _fieldNameCount;
+        int savedTypeId = _typeIdCount;
+        DTypeNode n = NewNode(DTypeKind.Union, nullability);
+        n.Depth = depth;
+        AppendNameHandles(nameHandles);
+        Ensure(ref _typeIds, _typeIdCount, typeIds.Length, _nodes.Length);
+        typeIds.CopyTo(_typeIds.AsSpan(_typeIdCount));
+        n.TypeIdStart = _typeIdCount;
+        _typeIdCount += typeIds.Length;
+        AppendNodes(fieldNodes);
+        n.ChildCount = fieldNodes.Length;
         return Commit(ref n, savedChild, savedName, savedTypeId, _metaCount);
     }
 
@@ -915,6 +986,30 @@ internal sealed class DTypeArena
         return depth;
     }
 
+    /// <summary><see cref="ValidateChildren"/> over children given as nodes of this arena.</summary>
+    private int ValidateNodes(ReadOnlySpan<int> nodes)
+    {
+        int depth = 0;
+        for (int i = 0; i < nodes.Length; i++)
+        {
+            int node = nodes[i];
+            if ((uint)node >= (uint)_nodeCount)
+            {
+                ThrowForeignNode(node);
+            }
+
+            depth = Math.Max(depth, _nodes[node].Depth);
+        }
+
+        depth++;
+        VortexLimits.CheckDepth(depth, VortexLimits.MaxDTypeDepth, "DType");
+        return depth;
+    }
+
+    [DoesNotReturn]
+    private void ThrowForeignNode(int node) =>
+        throw new ArgumentOutOfRangeException(nameof(node), node, $"Not one of the arena's {_nodeCount} nodes.");
+
     private int ChildDepth(DType child)
     {
         if (!ReferenceEquals(child.ArenaOrNull, this))
@@ -940,6 +1035,13 @@ internal sealed class DTypeArena
         }
 
         _childCount += children.Length;
+    }
+
+    private void AppendNodes(ReadOnlySpan<int> nodes)
+    {
+        Ensure(ref _children, _childCount, nodes.Length, _nodes.Length);
+        nodes.CopyTo(_children.AsSpan(_childCount));
+        _childCount += nodes.Length;
     }
 
     private void AppendNameHandles(ReadOnlySpan<int> nameHandles)

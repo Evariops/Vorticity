@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
@@ -207,7 +206,7 @@ internal static class CanonicalFilter
             return arena.AddVarBinView(node.DType, count, validity, views, default, padded);
         }
 
-        VortexBuffer[] rented = ArrayPool<VortexBuffer>.Shared.Rent(buffers);
+        Block<VortexBuffer> rented = Blocks.Rent<VortexBuffer>(buffers);
         try
         {
             for (int i = 0; i < buffers; i++)
@@ -215,12 +214,11 @@ internal static class CanonicalFilter
                 rented[i] = node.GetDataBuffer(i);
             }
 
-            return arena.AddVarBinView(
-                node.DType, count, validity, views, rented.AsSpan(0, buffers), padded);
+            return arena.AddVarBinView(node.DType, count, validity, views, rented, padded);
         }
         finally
         {
-            ArrayPool<VortexBuffer>.Shared.Return(rented, clearArray: true);
+            Blocks.Return(rented);
         }
     }
 
@@ -252,9 +250,10 @@ internal static class CanonicalFilter
 
         // No offsets to gather: the elements themselves have to be, `size` at a time.
         int elementCount = checked(count * size);
-        int[] expanded = ArrayPool<int>.Shared.Rent(Math.Max(elementCount, 1));
+        Block<int> rented = Blocks.Rent<int>(elementCount);
         try
         {
+            Span<int> expanded = rented;
             for (int i = 0; i < count; i++)
             {
                 int start = indices[i] * size;
@@ -264,12 +263,12 @@ internal static class CanonicalFilter
                 }
             }
 
-            int elements = Apply(arena, node.ElementsIndex, expanded.AsSpan(0, elementCount));
+            int elements = Apply(arena, node.ElementsIndex, expanded);
             return arena.AddFixedSizeList(node.DType, count, validity, elements, node.FixedSize);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(expanded);
+            Blocks.Return(rented);
         }
     }
 
@@ -285,7 +284,7 @@ internal static class CanonicalFilter
             return arena.AddStruct(node.DType, count, validity, default);
         }
 
-        int[] children = ArrayPool<int>.Shared.Rent(fields);
+        Block<int> children = Blocks.Rent<int>(fields);
         try
         {
             for (int i = 0; i < fields; i++)
@@ -295,11 +294,11 @@ internal static class CanonicalFilter
                 children[i] = Apply(arena, arena.GetNode(node.GetFieldIndex(i)), indices, mask);
             }
 
-            return arena.AddStruct(node.DType, count, validity, children.AsSpan(0, fields));
+            return arena.AddStruct(node.DType, count, validity, children);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(children);
+            Blocks.Return(children);
         }
     }
 

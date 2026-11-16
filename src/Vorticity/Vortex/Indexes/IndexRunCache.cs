@@ -1,37 +1,84 @@
 using System;
 using System.Collections.Generic;
+using Vorticity.Buffers;
 
 namespace Vorticity.Indexes;
 
 /// <summary>
 /// A decoded segment of a run: its keys and, for a sorted run, the rows they came from. A postings
-/// run and a dictionary hold keys without rows. A segment owns its arrays rather than pointing into
+/// run and a dictionary hold keys without rows. A segment owns its blocks rather than pointing into
 /// a scan's arena, which is reset at every batch boundary, so that it can outlive the scan that
 /// decoded it.
 /// </summary>
-/// <param name="Keys">
-/// Fixed-width keys laid end to end; for byte keys, the bytes of every key laid end to end.
-/// </param>
-/// <param name="Offsets">For byte keys, where each key starts in <paramref name="Keys"/>, and one past the last; otherwise null.</param>
-/// <param name="Rows">Each entry's row, relative to the run's first row; null for keys without rows.</param>
-/// <param name="Count">The entries.</param>
-/// <param name="WideRows">
-/// The same, for a run spanning 2³² rows or more, whose rows are 64-bit; then
-/// <paramref name="Rows"/> is null.
-/// </param>
-internal sealed record RunSegment(byte[] Keys, int[]? Offsets, uint[]? Rows, int Count, ulong[]? WideRows = null)
+/// <remarks>
+/// Its blocks are the typed pool's, given back when the file that keeps it is disposed. Arrays of their
+/// own, a run of 65 536 keys of 8 bytes was 768 KB of the large object heap at every open of its file,
+/// which ran a full collection every few opens: with the pool's blocks moved to the pinned heap, the large
+/// one kept a third of what it had, its budget shrank with it, and opening a file to count a band took
+/// 205 µs where it took 170 (2026-11-16).
+/// </remarks>
+internal sealed class RunSegment
 {
+    /// <param name="keys">Fixed-width keys laid end to end; for byte keys, the bytes of every key laid end to end.</param>
+    /// <param name="offsets">For byte keys, where each key starts in <paramref name="keys"/>, and one past the last; otherwise none.</param>
+    /// <param name="rows">Each entry's row, relative to the run's first row; none for keys without rows.</param>
+    /// <param name="count">The entries.</param>
+    /// <param name="wideRows">The same, for a run spanning 2³² rows or more, whose rows are 64-bit; then <paramref name="rows"/> is none.</param>
+    internal RunSegment(Block<byte> keys, Block<int> offsets, Block<uint> rows, int count, Block<ulong> wideRows = default)
+    {
+        Keys = keys;
+        Offsets = offsets;
+        Rows = rows;
+        Count = count;
+        WideRows = wideRows;
+    }
+
+    /// <summary>The keys laid end to end.</summary>
+    internal Block<byte> Keys { get; }
+
+    /// <summary>For byte keys, where each starts, and one past the last; none for fixed-width keys.</summary>
+    internal Block<int> Offsets { get; }
+
+    /// <summary>Each entry's row, relative to the run's first row; none for keys without rows or rows of 64 bits.</summary>
+    internal Block<uint> Rows { get; }
+
+    /// <summary>The entries.</summary>
+    internal int Count { get; }
+
+    /// <summary>The rows of a run spanning 2³² rows or more.</summary>
+    internal Block<ulong> WideRows { get; }
+
     /// <summary>What the cache charges for it.</summary>
     internal long Bytes =>
-        Keys.LongLength + ((Offsets?.LongLength ?? 0) * sizeof(int)) + ((Rows?.LongLength ?? 0) * sizeof(uint))
-        + ((WideRows?.LongLength ?? 0) * sizeof(ulong));
+        (long)Keys.Capacity + ((long)Offsets.Capacity * sizeof(int)) + ((long)Rows.Capacity * sizeof(uint)) + ((long)WideRows.Capacity * sizeof(ulong));
 
     /// <summary>Whether its entries carry rows.</summary>
-    internal bool HasRows => Rows is not null || WideRows is not null;
+    internal bool HasRows => !Rows.IsDefault || !WideRows.IsDefault;
 
     /// <summary>Entry <paramref name="index"/>'s row, relative to the run's first row.</summary>
     /// <param name="index">The entry.</param>
-    internal long RowAt(int index) => Rows is { } narrow ? narrow[index] : checked((long)WideRows![index]);
+    internal long RowAt(int index) => !Rows.IsDefault ? Rows.AsSpan()[index] : checked((long)WideRows.AsSpan()[index]);
+
+    /// <summary>Entry <paramref name="index"/>'s key bytes, keys of <paramref name="width"/> bytes when they have no offsets.</summary>
+    internal ReadOnlySpan<byte> KeyAt(int index, int width)
+    {
+        if (Offsets.IsDefault)
+        {
+            return Keys.AsSpan(index * width, width);
+        }
+
+        ReadOnlySpan<int> starts = Offsets.AsSpan();
+        return Keys.AsSpan(starts[index], starts[index + 1] - starts[index]);
+    }
+
+    /// <summary>Gives its blocks back to the pool: once, when nothing can read it any more.</summary>
+    internal void Release()
+    {
+        Blocks.Return(Keys);
+        Blocks.Return(Offsets);
+        Blocks.Return(Rows);
+        Blocks.Return(WideRows);
+    }
 }
 
 /// <summary>Where a decoded segment was read: its index origin, and the offset of its first payload there.</summary>
@@ -120,6 +167,13 @@ internal sealed class IndexRunCache
             {
                 _order.Remove(held);
                 _order.AddFirst(held);
+
+                // The segment that lost the race was never handed to anyone: its blocks go back now.
+                if (!ReferenceEquals(held.Value.Segment, segment))
+                {
+                    segment.Release();
+                }
+
                 return held.Value.Segment;
             }
 
@@ -128,6 +182,8 @@ internal sealed class IndexRunCache
                 return segment;
             }
 
+            // A segment let go here may still be read by a lane that took it before: its blocks are the collector's, not
+            // the pool's, so that no other segment is decoded into them while it is read.
             while (_bytes + bytes > _budget && _order.Last is { } oldest)
             {
                 _order.RemoveLast();
@@ -138,6 +194,25 @@ internal sealed class IndexRunCache
             _map[key] = _order.AddFirst((key, segment));
             _bytes += bytes;
             return segment;
+        }
+    }
+
+    /// <summary>
+    /// Gives back the blocks of every segment held, and holds none after: the file is disposed, and none of its scans reads
+    /// a segment any more.
+    /// </summary>
+    internal void Release()
+    {
+        lock (_gate)
+        {
+            foreach ((RunSegmentKey _, RunSegment segment) in _order)
+            {
+                segment.Release();
+            }
+
+            _order.Clear();
+            _map.Clear();
+            _bytes = 0;
         }
     }
 }

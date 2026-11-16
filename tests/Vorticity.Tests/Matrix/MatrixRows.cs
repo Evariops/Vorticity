@@ -34,8 +34,16 @@ public enum Shape
 /// <summary>The rows of the matrix, one table per <see cref="Shape"/>, the same for every run.</summary>
 internal static class MatrixRows
 {
-    /// <summary>Two whole blocks of 8 192 rows and a ragged tail.</summary>
-    internal const int Count = 20_000;
+    /// <summary>
+    /// Two whole blocks of <see cref="BlockRows"/> rows and a ragged tail: what twenty thousand rows were to the writer's
+    /// blocks of 8 192, at a sixth of the rows to write, scan and check. The tail is a thousand rows, close to the 1 024
+    /// values a bit-packing fills: a short tail padded to them costs more than its canonical bytes, and a hint to pack it
+    /// is rightly declined.
+    /// </summary>
+    internal const int Count = 3_048;
+
+    /// <summary>The rows of a block of the matrix's files.</summary>
+    internal const int BlockRows = 1_024;
 
     private static readonly DateTime Epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Unspecified);
 

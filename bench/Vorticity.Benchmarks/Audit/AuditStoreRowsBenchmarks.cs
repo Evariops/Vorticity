@@ -51,7 +51,7 @@ public class AuditStoreRowsBenchmarks
         };
 
         // The column written through a store of its own, one row at a time, and built: the source every append copies.
-        ColumnStore source = _sourceStore = ColumnStores.Create(_type, AlignedBufferPool.Shared, null);
+        ColumnStore source = _sourceStore = ColumnStores.Create(_type, QueryMemoryBudget.Process.Account, null);
         int width = Column.StartsWith("short", StringComparison.Ordinal) ? 8 : 40;
         for (int row = 0; row < Rows; row++)
         {
@@ -88,7 +88,7 @@ public class AuditStoreRowsBenchmarks
 
     private int AppendAs(bool validated)
     {
-        ColumnStore store = ColumnStores.Create(_type, AlignedBufferPool.Shared, null);
+        ColumnStore store = ColumnStores.Create(_type, QueryMemoryBudget.Process.Account, null);
         try
         {
             StoreRows.Append(store, _source, _node, validated);

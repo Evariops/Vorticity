@@ -475,10 +475,10 @@ internal sealed class VariantDirectory
             length += Digits(step.Key!.Length) + 1 + step.Key.Length;
         }
 
-        char[]? rented = length > 256 ? System.Buffers.ArrayPool<char>.Shared.Rent(length) : null;
+        Buffers.Block<char> rented = length > 256 ? Buffers.Blocks.Rent<char>(length) : default;
         try
         {
-            Span<char> joined = rented ?? stackalloc char[256];
+            Span<char> joined = rented.IsEmpty ? stackalloc char[256] : rented;
             int at = 0;
             foreach (VariantStep step in path.Steps)
             {
@@ -493,10 +493,7 @@ internal sealed class VariantDirectory
         }
         finally
         {
-            if (rented is not null)
-            {
-                System.Buffers.ArrayPool<char>.Shared.Return(rented);
-            }
+            Buffers.Blocks.Return(rented);
         }
         if (entries.IsEmpty)
         {
@@ -708,18 +705,18 @@ internal sealed class VariantDirectory
     /// </remarks>
     internal static VariantDirectory? From(ReadOnlySpan<byte> bytes, IReadOnlyList<byte[][]>? wanted)
     {
-        if (ZstdRegion.Rent(bytes, Version, out int length) is not { } body)
+        if (ZstdRegion.Rent(bytes, Version) is not { } body)
         {
             return null;
         }
 
         try
         {
-            return BodyFrom(body.AsSpan(0, length), wanted);
+            return BodyFrom(body, wanted);
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(body);
+            Buffers.Blocks.Return(body);
         }
     }
 
@@ -739,7 +736,7 @@ internal sealed class VariantDirectory
     internal static bool Visit<TVisitor>(ReadOnlySpan<byte> bytes, ref TVisitor visitor)
         where TVisitor : IDirectoryVisitor
     {
-        if (ZstdRegion.Rent(bytes, Version, out int length) is not { } body)
+        if (ZstdRegion.Rent(bytes, Version) is not { } body)
         {
             return false;
         }
@@ -748,11 +745,11 @@ internal sealed class VariantDirectory
         {
             // Walked twice, the first time to know it decodes: what a visitor takes it takes whole or not at all.
             Decodes decodes = default;
-            return VisitBody(body.AsSpan(0, length), ref decodes) && VisitBody(body.AsSpan(0, length), ref visitor);
+            return VisitBody(body, ref decodes) && VisitBody(body, ref visitor);
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(body);
+            Buffers.Blocks.Return(body);
         }
     }
 
@@ -847,28 +844,29 @@ internal sealed class VariantDirectory
     /// </summary>
     internal static DirectoryBody? Open(ReadOnlySpan<byte> bytes)
     {
-        if (ZstdRegion.Rent(bytes, Version, out int length) is not { } body)
+        if (ZstdRegion.Rent(bytes, Version) is not { } body)
         {
             return null;
         }
 
         Decodes decodes = default;
-        if (!VisitBody(body.AsSpan(0, length), ref decodes))
+        if (!VisitBody(body, ref decodes))
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(body);
+            Buffers.Blocks.Return(body);
             return null;
         }
 
-        return new DirectoryBody(body, length, decodes.Rows, decodes.GroupRows, decodes.Partial);
+        return new DirectoryBody(body, decodes.Rows, decodes.GroupRows, decodes.Partial);
     }
 
     /// <summary>
     /// A directory's body, decompressed and known to decode (<see cref="Open"/>): its head, and its entries walked as they lie,
     /// as often as asked, until it is disposed and its buffer given back.
     /// </summary>
-    internal sealed class DirectoryBody(byte[] body, int length, long rows, long groupRows, bool partial) : IDisposable
+    internal sealed class DirectoryBody(Buffers.Block<byte> body, long rows, long groupRows, bool partial) : IDisposable
     {
-        private byte[]? _body = body;
+        private Buffers.Block<byte> _body = body;
+        private bool _disposed;
 
         /// <summary>The object's rows.</summary>
         internal long Rows { get; } = rows;
@@ -883,16 +881,17 @@ internal sealed class VariantDirectory
         internal void Visit<TVisitor>(ref TVisitor visitor)
             where TVisitor : IDirectoryVisitor
         {
-            ObjectDisposedException.ThrowIf(_body is null, this);
-            VisitBody(_body.AsSpan(0, length), ref visitor);
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            VisitBody(_body, ref visitor);
         }
 
         public void Dispose()
         {
-            if (_body is { } held)
+            if (!_disposed)
             {
-                _body = null;
-                System.Buffers.ArrayPool<byte>.Shared.Return(held);
+                _disposed = true;
+                Buffers.Blocks.Return(_body);
+                _body = default;
             }
         }
     }

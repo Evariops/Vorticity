@@ -16,18 +16,18 @@ namespace Vorticity.Benchmarks.Queries;
 /// data objects (8 by default) of the dataset directory <c>DIR</c>, scanned as a job's merge reads its inputs, in their own
 /// order: the largest one a column at a time, then every column of 1, 2, 4 and 8 of them in lockstep, each holding its
 /// batch while the others step, as a merge holds an input's run. For each: the most private bytes the process held above
-/// its start, the native blocks among them and those parked in the pool, the collector's committed memory, and the rows
+/// its start, the blocks among them and those parked in the pool, the collector's committed memory, and the rows
 /// and batches read.
 /// </summary>
 internal static class InputMemoryMicro
 {
-    /// <summary>Whether a scan of one input prints its native blocks every twentieth batch (<c>VORTICITY_INPUTS_TRACE=1</c>).</summary>
+    /// <summary>Whether a scan of one input prints its blocks every twentieth batch (<c>VORTICITY_INPUTS_TRACE=1</c>).</summary>
     private static readonly bool Trace = Environment.GetEnvironmentVariable("VORTICITY_INPUTS_TRACE") == "1";
 
     internal static async Task<int> Run(string directory, int objects)
     {
         List<string> files = await LargestAsync(directory, objects);
-        Console.WriteLine("what                          rows   batches   seconds   private MB    native MB    parked MB   managed MB");
+        Console.WriteLine("what                          rows   batches   seconds   private MB    blocks MB    parked MB   managed MB");
         await using (VortexFile largest = await VortexFile.OpenAsync(files[0]))
         {
             Types.DType schema = largest.LayoutTree.Root.DType;
@@ -82,14 +82,14 @@ internal static class InputMemoryMicro
         GC.Collect();
         GC.WaitForPendingFinalizers();
         GC.Collect();
-        AlignedBufferPool.Shared.Trim();
+        MemoryAccount.Pool.Trim();
         List<VortexFile> opened = [];
         List<IAsyncEnumerator<RecordBatch>> scans = [];
         long rows = 0;
         long batches = 0;
         long begin = Stopwatch.GetTimestamp();
-        long nativeStart = NativeSegmentOwner.NativeBytes;
-        long parkedStart = AlignedBufferPool.Shared.ParkedBytes;
+        long blocksStart = BlockOwner.LiveBytes;
+        long parkedStart = MemoryAccount.Pool.ParkedBytes;
         PeakMemory memory = new PeakMemory();
         try
         {
@@ -119,7 +119,7 @@ internal static class InputMemoryMicro
                         {
                             Console.WriteLine(string.Create(
                                 CultureInfo.InvariantCulture,
-                                $"    batch {batches,5}: {rows,12:N0} rows, native {(NativeSegmentOwner.NativeBytes - nativeStart) / 1e6,8:F0} MB, parked {(AlignedBufferPool.Shared.ParkedBytes - parkedStart) / 1e6,6:F0} MB"));
+                                $"    batch {batches,5}: {rows,12:N0} rows, blocks {(BlockOwner.LiveBytes - blocksStart) / 1e6,8:F0} MB, parked {(MemoryAccount.Pool.ParkedBytes - parkedStart) / 1e6,6:F0} MB"));
                         }
                     }
                     else
@@ -147,6 +147,6 @@ internal static class InputMemoryMicro
         double seconds = Stopwatch.GetElapsedTime(begin).TotalSeconds;
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
-            $"{what,-26} {rows,11:N0} {batches,9:N0} {seconds,9:F1} {(memory.Peak - memory.First) / 1e6,12:F0} {(memory.PeakNative - nativeStart) / 1e6,12:F0} {(memory.PeakParked - parkedStart) / 1e6,12:F0} {memory.PeakCommitted / 1e6,12:F0}"));
+            $"{what,-26} {rows,11:N0} {batches,9:N0} {seconds,9:F1} {(memory.Peak - memory.First) / 1e6,12:F0} {(memory.PeakBlocks - blocksStart) / 1e6,12:F0} {(memory.PeakParked - parkedStart) / 1e6,12:F0} {memory.PeakCommitted / 1e6,12:F0}"));
     }
 }

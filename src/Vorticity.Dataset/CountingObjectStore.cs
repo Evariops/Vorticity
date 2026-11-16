@@ -1,6 +1,7 @@
 using System;
 using System.Buffers;
 using System.Collections.Generic;
+using System.IO;
 using System.IO.Pipelines;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -136,6 +137,27 @@ public sealed class CountingObjectStore : IObjectStore
 
     /// <summary>The store it counts the requests of's.</summary>
     public CostProfile CostProfile => _inner.CostProfile;
+
+    /// <inheritdoc/>
+    /// <remarks>Counted as one read, and asked of the store under it as a copy, which streams it when that store can.</remarks>
+    public async ValueTask<long> CopyToAsync(string key, long offset, long length, Stream destination, string? ifToken, CancellationToken cancellationToken)
+    {
+        Enter(ObjectOperation.Read);
+        try
+        {
+            long copied = await _inner.CopyToAsync(key, offset, length, destination, ifToken, cancellationToken).ConfigureAwait(false);
+            lock (_gate)
+            {
+                _bytesRead += copied;
+            }
+
+            return copied;
+        }
+        finally
+        {
+            Leave();
+        }
+    }
 
     /// <inheritdoc/>
     public async ValueTask<ObjectRead> ReadAsync(

@@ -111,7 +111,7 @@ internal static class CountsMicro
             for (int column = 0; column < columns; column++)
             {
                 sheets[column] = new ColumnSheetBuilder();
-                builders[column] = column == instant ? null : new ColumnCountsBuilder(sheets[column], counts, column);
+                builders[column] = column == instant ? null : new ColumnCountsBuilder(sheets[column], counts, column, QueryMemoryBudget.Process.Account);
             }
 
             long planTicks = 0;

@@ -39,20 +39,33 @@ internal sealed class PageCache
     /// <summary>A cache of at most <paramref name="capacityBytes"/> bytes of pages read from the store.</summary>
     /// <param name="capacityBytes">The budget; 0 keeps no page read, and a page larger than it is never kept.</param>
     public PageCache(long capacityBytes)
+        : this(new ClockMemo<PageReference, ReadOnlyMemory<byte>>(capacityBytes))
     {
-        ArgumentOutOfRangeException.ThrowIfNegative(capacityBytes);
-        Capacity = capacityBytes;
-        _pages = new ClockMemo<PageReference, ReadOnlyMemory<byte>>(capacityBytes);
     }
 
-    /// <summary>The budget in bytes of the pages read from the store.</summary>
-    public long Capacity { get; }
+    private PageCache(ClockMemo<PageReference, ReadOnlyMemory<byte>> pages) => _pages = pages;
+
+    /// <summary>
+    /// A handle's cache: with no budget of its own, it keeps the pages its walks read, and the registry of kept memory
+    /// takes back what it holds above <paramref name="floorBytes"/> (<see cref="LetGo"/>).
+    /// </summary>
+    /// <param name="floorBytes">The bytes of pages it keeps whatever the registry asks.</param>
+    internal static PageCache Kept(long floorBytes) => new PageCache(ClockMemo<PageReference, ReadOnlyMemory<byte>>.Kept(floorBytes));
+
+    /// <summary>The budget in bytes of the pages read from the store: <see cref="long.MaxValue"/> for a handle's, which has none.</summary>
+    public long Capacity => _pages.Budget;
 
     /// <summary>The bytes of the pages read from the store it holds now.</summary>
     public long Size => _pages.Held;
 
     /// <summary>The pages read from the store it holds now.</summary>
     public int Count => _pages.Count;
+
+    /// <summary>
+    /// Lets go of up to <paramref name="bytes"/> of the pages read from the store above the floor, the oldest kept first;
+    /// only those no walk read since the registry's timer turned before when <paramref name="stale"/>: the bytes let go.
+    /// </summary>
+    public long LetGo(long bytes, bool stale) => _pages.LetGo(bytes, stale);
 
     /// <summary>A page read from the store that <paramref name="reference"/> names, when the cache holds it.</summary>
     public bool TryGet(PageReference reference, out ReadOnlyMemory<byte> page) => _pages.TryGet(reference, out page);

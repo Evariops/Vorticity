@@ -46,7 +46,9 @@ internal sealed class SpanReader : IDisposable
     private readonly VortexReadOptions _options;
     private readonly string[] _encodings;
     private readonly IReadOnlyList<IndexSegment> _regions;
-    private readonly ChunkSpan[]?[] _columns;
+
+    // Each column's chunks, the bytes of a block of the pool, published whole for readers that take no lock; their counts.
+    private readonly byte[]?[] _columns;
     private readonly int[] _counts;
     private readonly System.Threading.Lock _gate = new System.Threading.Lock();
     private readonly long _rows;
@@ -73,7 +75,7 @@ internal sealed class SpanReader : IDisposable
         _options = options;
         _encodings = encodings;
         _regions = regions;
-        _columns = new ChunkSpan[]?[regions.Count];
+        _columns = new byte[]?[regions.Count];
         _counts = new int[regions.Count];
         _rows = rows;
         _paged = contents?.Paging is { } paging ? new PagedColumns(paging, regions.Count, contents) : null;
@@ -137,9 +139,11 @@ internal sealed class SpanReader : IDisposable
 
     /// <summary>The chunks of column <paramref name="field"/>, loaded first.</summary>
     private ReadOnlySpan<ChunkSpan> Chunks(int field) =>
-        System.Threading.Volatile.Read(ref _columns[field]) is { } chunks ? chunks.AsSpan(0, _counts[field]) : throw new InvalidOperationException($"Column {field}'s chunks were not loaded.");
+        System.Threading.Volatile.Read(ref _columns[field]) is { } chunks
+            ? System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ChunkSpan>(chunks)[.._counts[field]]
+            : throw new InvalidOperationException($"Column {field}'s chunks were not loaded.");
 
-    /// <summary>Gives the columns' chunks back to the shared pool: no read of the reader after.</summary>
+    /// <summary>Gives the columns' chunks back to the pool: no read of the reader after.</summary>
     public void Dispose()
     {
         lock (_gate)
@@ -149,7 +153,7 @@ internal sealed class SpanReader : IDisposable
                 if (_columns[field] is { } chunks)
                 {
                     _columns[field] = null;
-                    System.Buffers.ArrayPool<ChunkSpan>.Shared.Return(chunks);
+                    Buffers.Blocks.ReturnBytes(chunks);
                 }
             }
         }
@@ -905,15 +909,11 @@ internal sealed class SpanReader : IDisposable
             return;
         }
 
-        ChunkSpan[] chunks = [];
+        Buffers.Block<ChunkSpan> chunks = default;
         int count = _regions[field].Holds(bytes) ? SliceChunks.ColumnInto(bytes, out chunks) : -1;
         if (count < 0 || (count == 0 ? 0 : chunks[count - 1].EndRow) != _rows)
         {
-            if (count >= 0)
-            {
-                System.Buffers.ArrayPool<ChunkSpan>.Shared.Return(chunks);
-            }
-
+            Buffers.Blocks.Return(chunks);
             throw new VortexFormatException(
                 $"The chunk directory of column {field} does not decode, or does not cover the file's {_rows} rows.");
         }
@@ -924,12 +924,12 @@ internal sealed class SpanReader : IDisposable
             if (_columns[field] is null)
             {
                 _counts[field] = count;
-                System.Threading.Volatile.Write(ref _columns[field], chunks);
+                System.Threading.Volatile.Write(ref _columns[field], chunks.Bytes);
                 return;
             }
         }
 
-        System.Buffers.ArrayPool<ChunkSpan>.Shared.Return(chunks);
+        Buffers.Blocks.Return(chunks);
     }
 
     /// <summary>The struct of the <paramref name="fields"/> of the schema, built in <paramref name="arena"/>.</summary>

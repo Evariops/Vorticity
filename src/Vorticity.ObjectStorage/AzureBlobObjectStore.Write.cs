@@ -336,7 +336,7 @@ public sealed partial class AzureBlobObjectStore
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(bytes);
+            VortexBytePool.Instance.Return(bytes);
         }
     }
 

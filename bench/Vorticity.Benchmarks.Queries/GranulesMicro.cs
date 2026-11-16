@@ -64,7 +64,7 @@ internal static class GranulesMicro
             for (int column = 0; column < columns; column++)
             {
                 sheets[column] = new ColumnSheetBuilder();
-                counters[column] = new ColumnCountsBuilder(sheets[column], counts, column);
+                counters[column] = new ColumnCountsBuilder(sheets[column], counts, column, QueryMemoryBudget.Process.Account);
                 builders[column] = new GranuleStatsBuilder(sheets[column], counts, column, schema.GetField(column));
                 locates[column] = new LocateBuilder(sheets[column]);
             }

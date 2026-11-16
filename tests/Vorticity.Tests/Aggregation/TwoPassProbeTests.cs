@@ -11,8 +11,8 @@ namespace Vorticity.Tests.Aggregation;
 /// <summary>
 /// A key of one fixed-width column finds its groups in two passes:
 /// each row's home slot with no branch on the keys, then the rows left in their order. Every distance
-/// read ahead gives the groups of the row-at-a-time path, numbered as they first come, with nulls in
-/// the key, keys spread or crowded into one chain, under a filter, on one lane and four.
+/// read ahead gives the groups of the row-at-a-time path, with nulls in the key, keys spread or
+/// crowded into one chain, under a filter, on one lane and four.
 /// </summary>
 public sealed partial class TwoPassProbeTests
 {
@@ -36,12 +36,12 @@ public sealed partial class TwoPassProbeTests
         {
             await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
-            List<Total> oneAtATime = await RunAsync(file, filtered, probe: -1, ordered: degree > 1);
+            List<Total> oneAtATime = await RunAsync(file, filtered, probe: -1);
             Assert.True(oneAtATime.Count > 1_000, $"{oneAtATime.Count} groups");
             Assert.Contains(oneAtATime, t => t.Key is null);
             foreach (int probe in (int[])[0, 1, 7, 64])
             {
-                Assert.Equal(oneAtATime, await RunAsync(file, filtered, probe, ordered: degree > 1));
+                Assert.Equal(oneAtATime, await RunAsync(file, filtered, probe));
             }
         }
         finally
@@ -117,7 +117,11 @@ public sealed partial class TwoPassProbeTests
     }
 
     /// <summary>The groups as they come, in the order of their first rows on one lane; by key on more, whose merge orders them its own way.</summary>
-    private static async Task<List<Total>> RunAsync(VortexFile file, bool filtered, int probe, bool ordered)
+    /// <summary>
+    /// The groups of the scan, by key: a lane that spills under a process's limit delivers them in another order than the one
+    /// they came in, at one lane as at four.
+    /// </summary>
+    private static async Task<List<Total>> RunAsync(VortexFile file, bool filtered, int probe)
     {
         Scan<Row> scan = filtered ? file.Scan<Row>().Where(r => r.Value > 30L) : file.Scan<Row>();
         Vorticity.Aggregation grouped = scan.GroupBy(r => r.Key).Select(g => (g.Key, g.Count(), g.Sum(r => r.Value)));
@@ -133,7 +137,7 @@ public sealed partial class TwoPassProbeTests
 
         // The key's blocks went through the hashed path, not all through their dictionaries' codes.
         Assert.Contains(lanes, keys => keys is { OnlyDictionaries: false });
-        return ordered ? [.. totals.OrderBy(t => t.Key ?? long.MinValue)] : totals;
+        return [.. totals.OrderBy(t => t.Key ?? long.MinValue)];
     }
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;

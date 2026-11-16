@@ -1,6 +1,6 @@
 using System;
-using System.Buffers;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.IO;
 using Vorticity.Layouts;
 
@@ -106,7 +106,7 @@ internal static class SplitExecution
         // few rows of a split of tens of thousands, and an array of the split's length missed the
         // pool's buckets on every lane that rented one.
         int rows = (int)(split.End - split.Start);
-        int[] indices = ArrayPool<int>.Shared.Rent(Math.Max(take.CountIn(split), 1));
+        Block<int> indices = Blocks.Rent<int>(Math.Max(take.CountIn(split), 1));
         try
         {
             int count = take.LocalIndices(split, indices);
@@ -133,7 +133,7 @@ internal static class SplitExecution
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(indices);
+            Blocks.Return(indices);
         }
     }
 
@@ -142,7 +142,7 @@ internal static class SplitExecution
     /// the split ends within an int; leaves them the split's otherwise and returns the split's first row, which they then
     /// count from (<see cref="ScanContext.SelectionBase"/>): an int cast of a row past 2^31 named rows no chunk held.
     /// </summary>
-    internal static long FileSpace(int[] indices, int count, RowRange split)
+    internal static long FileSpace(Span<int> indices, int count, RowRange split)
     {
         if (split.End > int.MaxValue)
         {

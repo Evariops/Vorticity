@@ -180,7 +180,7 @@ internal static partial class PathsBench
         /// <summary>What the header says of the segment cache.</summary>
         internal string SegmentCacheSaid => SegmentCacheBytes switch
         {
-            < 0 => $"segments kept in the process's {Vorticity.SegmentCache.Shared.CapacityBytes >> 20} MiB",
+            < 0 => "segments kept in the process's cache",
             0 => "no segment cache",
             _ => $"segments kept in {SegmentCacheBytes >> 20} MiB",
         };

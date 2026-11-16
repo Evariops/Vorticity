@@ -112,15 +112,15 @@ internal sealed class StructLayoutReader : LayoutReader
         Scanning.ZoneKeyReads? zoned = context.ZoneKeys;
         context.ZoneKeys = null;
 
-        // A DType is managed and cannot be stackalloc'd, so the name and dtype scratch come from
-        // the pool. Both are returned in the finally.
+        // The names' handles and the fields' types as their nodes in the scan's arena, in blocks of the pool. Both are
+        // given back in the finally.
         Scratch<int> names = new Scratch<int>(whole ? 0 : selected, default);
-        Scratch<DType> fieldTypes = new Scratch<DType>(whole ? 0 : selected, default);
+        Scratch<int> fieldTypes = new Scratch<int>(whole ? 0 : selected, default);
         try
         {
             Span<int> childSpan = children.Span;
             Span<int> nameSpan = names.Span;
-            Span<DType> typeSpan = fieldTypes.Span;
+            Span<int> typeSpan = fieldTypes.Span;
 
             // Where lanes share the decodes of chunks wider than a batch, each batch starts at
             // another column, so that lanes on neighbouring batches do not reach one column's
@@ -158,11 +158,11 @@ internal sealed class StructLayoutReader : LayoutReader
                 if (!whole)
                 {
                     nameSpan[s] = context.Types.InternName(dtype.GetFieldNameUtf8(k));
-                    typeSpan[s] = DTypeImport.Into(context.Types, context.Canonical.GetNode(decoded).DType);
+                    typeSpan[s] = DTypeImport.Into(context.Types, context.Canonical.GetNode(decoded).DType).NodeIndex;
                 }
             }
 
-            DType produced = whole ? dtype : context.Types.Struct(nameSpan, typeSpan, dtype.Nullability);
+            DType produced = whole ? dtype : context.Types.StructOfNodes(nameSpan, typeSpan, dtype.Nullability);
             return context.Canonical.AddStruct(produced, length, validity, childSpan);
         }
         finally

@@ -527,7 +527,7 @@ public sealed partial class VortexFile : IAsyncDisposable
 
     private static SegmentOwner Concatenate(SegmentOwner prefix, SegmentOwner suffix, int alignment)
     {
-        NativeSegmentOwner combined = NativeSegmentOwner.Allocate(prefix.Length + suffix.Length, alignment);
+        BlockOwner combined = BlockOwner.Allocate(prefix.Length + suffix.Length, alignment);
         try
         {
             Span<byte> destination = combined.WritableSpan;
@@ -1670,7 +1670,7 @@ public sealed partial class VortexFile : IAsyncDisposable
     /// <remarks>
     /// Copied out of the tail window when first asked for, which the layout tree does once per open
     /// file: one bounded allocation buys a ReadOnlyMemory the layouts component can hold without
-    /// wrapping native memory in a MemoryManager. Two scans asking at once may both copy; either
+    /// holding the tail's block. Two scans asking at once may both copy; either
     /// copy is the same bytes.
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The file has been disposed.</exception>
@@ -1793,8 +1793,8 @@ public sealed partial class VortexFile : IAsyncDisposable
     }
 
     /// <summary>
-    /// Releases the tail buffer and disposes the segment source the file owns, which is every
-    /// source handed to an open. Idempotent. A file of its session must be disposed before the
+    /// Releases the tail buffer and the index runs the file decoded, and disposes the segment source the file owns, which
+    /// is every source handed to an open. Idempotent. A file of its session must be disposed before the
     /// session is.
     /// </summary>
     /// <returns>A task that completes when the file is closed.</returns>
@@ -1807,6 +1807,11 @@ public sealed partial class VortexFile : IAsyncDisposable
 
         Session.Detach(this);
         _tail.Release();
+        if (Volatile.Read(ref _decoded) is { } decoded && Volatile.Read(ref decoded.Runs) is { } runs)
+        {
+            runs.Release();
+        }
+
         if (Volatile.Read(ref _indexState) is { } indexes)
         {
             await DisposeIndexSourcesAsync(indexes.Origins).ConfigureAwait(false);

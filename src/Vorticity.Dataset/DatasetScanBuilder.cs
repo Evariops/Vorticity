@@ -374,6 +374,22 @@ internal sealed partial class DatasetScanBuilder
     private DatasetScanSource? _question;
 
     /// <summary>
+    /// Makes the scan a step of the question whose memory is <paramref name="memory"/>, its objects' scans counting their
+    /// blocks in <paramref name="account"/>: its reads ahead reserve in that memory rather than in one of their own, and its
+    /// objects' scans count under that account rather than each under its own. Null for either leaves the scan its own.
+    /// </summary>
+    internal DatasetScanBuilder OfMemory(QueryMemory? memory, Buffers.MemoryAccount? account)
+    {
+        _memory = memory;
+        _account = account;
+        return this;
+    }
+
+    // The memory of the question the scan is a step of, and the account its objects' scans count under; null for a scan's own.
+    private QueryMemory? _memory;
+    private Buffers.MemoryAccount? _account;
+
+    /// <summary>
     /// What the question's scans read of its objects' indexes and their granules' geometry, kept for its other scans while a
     /// lease holds the object (<see cref="RentAsync"/>) and dropped with the last: the question's, or, for a scan asked of no
     /// question, its own, which the parts it cuts share.
@@ -755,9 +771,14 @@ internal sealed partial class DatasetScanBuilder
             }
 
             yield return objects.Current;
-            using QueryMemory memory = new QueryMemory(_dataset.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+
+            // The objects opened ahead reserve in the question's memory, in one of their own for a scan of no question.
+            QueryMemory memory = _memory ?? QueryMemory.Start(_dataset.Session);
             bool ahead = _dataset.Profile.Store.Latency > TimeSpan.Zero && _variantKeys is not { Count: > 0 }
                 && memory.TryGrow(AggregationEngine.ReadAheadTarget);
+            using QueryMemory.Reservation reserved = ahead || _memory is null
+                ? new QueryMemory.Reservation(memory, ahead ? AggregationEngine.ReadAheadTarget : 0, owned: _memory is null)
+                : default;
             int most = Math.Max(1, _dataset.Session.Options.MaxConcurrentReads);
             Queue<(PositionedObject Held, long Bytes)> opened = new Queue<(PositionedObject, long)>();
             long holding = 0;

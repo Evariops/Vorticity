@@ -18,7 +18,7 @@
 //   … -- --switch merge --setting B                                                    one setting alone, for a profile of that side
 //   … -- --fixture spread-random-20000000-core2025.10                                   that fixture written if it is not yet, its path printed
 //   … -- --help                                                                         the micro benches --micro NAME runs, each with what it measures
-//   … -- --micro NAME --native-sites FILE                                               that micro, the native blocks it holds at its peak written by the site that rented them (NativeSites.cs)
+//   … -- --micro NAME --block-sites FILE                                                that micro, the blocks it holds at its peak written by the site that rented them (BlockSites.cs)
 //
 // The files are written once under ~/.cache/vorticity/queries (VORTICITY_QUERIES_CORPUS overrides it).
 using System;
@@ -100,6 +100,14 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
             args.Contains("--sealed"))),
     ["facets"] = ("the worst case of many facets, spans with a dozen repeating columns and a route under them (FacetsBench.cs)", () =>
         FacetsBench.Run((int)Option(args, "--hours", 12), Option(args, "--rate", 20), (int)Option(args, "--latency", 30), rounds, (int)Option(args, "--budget", 100))),
+    ["maintainer"] = ("the memory of a maintainer, by sort: sealed datasets appended every flush and compacted in turn (MemoryScenarios.cs)", () =>
+        MemoryScenarios.MaintainerAsync(
+            Text(args, "--store") ?? BenchStores.Of("memory-maintainer"), (int)Option(args, "--datasets", 7), (int)Option(args, "--minutes", 20),
+            Option(args, "--rate", 100), (int)Option(args, "--flush", 2), (int)Option(args, "--latency", 20), (int)Option(args, "--idle", 10))),
+    ["reader"] = ("the memory of a reader, by sort: a handle on each dataset of tables kept under several retentions, asked as sets (MemoryScenarios.cs)", () =>
+        MemoryScenarios.ReaderAsync(
+            Text(args, "--store") ?? BenchStores.Of("memory-reader"), (int)Option(args, "--tables", 8), (int)Option(args, "--retentions", 5),
+            (int)Option(args, "--rows", 40_000), (int)Option(args, "--latency", 20), (int)Option(args, "--file-rows", 0))),
     ["lifecycle"] = ("what a row costs from its append to its last rewrite, and the objects a window finds (LifecycleBench.cs)", () =>
         LifecycleBench.Run(
             (int)Option(args, "--hours", 48), Option(args, "--rate", 20), (int)Option(args, "--writers", 4), (int)Option(args, "--batch", 30),
@@ -155,8 +163,17 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         ColumnBattery.Run(Option(args, "--hours", 4), Option(args, "--rate", 50), Text(args, "--only"), Text(args, "--trace"))),
     ["peercache"] = ("a question warm from the synopsis cache's own directory, and from another's of the same root (PeerCacheMicro.cs)", () =>
         PeerCacheMicro.Run(Text(args, "--store") ?? BenchStores.Of("peercache"), (int)Option(args, "--objects", 16), (int)Option(args, "--rows", 200_000), rounds)),
+    ["poolrent"] = ("what a question's rents of the pool cost, parked, cut from a slab kept, or from new slabs (PoolRentMicro.cs)", () =>
+        Task.FromResult(PoolRentMicro.Run(rounds))),
     ["needles"] = ("what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs)", () =>
         NeedleMicro.Run((int)Option(args, "--rows", 4_000_000), rounds)),
+    ["backlog"] = ("a maintainer back to a backlog of metric records, every append spanning every series, compacted job by job under --memory-limit SIZE (BacklogBench.cs)", () =>
+        BacklogBench.RunAsync(
+            Text(args, "--store") ?? BenchStores.Of("backlog"), (int)Option(args, "--appends", 300), (int)Option(args, "--rows", 30_000),
+            (int)Option(args, "--series", 20_000),
+            Text(args, "--memory-limit") is { } limit ? VortexMemory.ParseBytes(limit) ?? throw new ArgumentException($"--memory-limit {limit} is not a size: 2g, 2048m.") : 0,
+            args.Contains("--compact-only"), (int)Option(args, "--latency", 0), (int)Option(args, "--scans", 0), args.Contains("--build-only"),
+            Text(args, "--bytes") is { } size ? VortexMemory.ParseBytes(size) ?? throw new ArgumentException($"--bytes {size} is not a size: 25g, 512m.") : 0)),
     ["inputs"] = ("--store DIR: what the inputs of a merge hold while it reads them, 1 to 8 of a dataset's largest objects in lockstep (InputMemoryMicro.cs)", () =>
         InputMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro inputs needs --store DIR, a dataset's directory."), (int)Option(args, "--objects", 8))),
     ["consolidation"] = ("--store DIR: what a consolidation holds apart from any other work, hours of log records left in level 0 consolidated on 1 lane and on 8 (ConsolidationMemoryMicro.cs)", () =>
@@ -245,8 +262,15 @@ if (Text(args, "--micro") is { } micro)
 {
     if (micros.TryGetValue(micro, out (string Help, Func<Task<int>> Run) chosen))
     {
-        // --native-sites FILE: the native blocks the run holds at its peak, by the site that rented them (NativeSites.cs).
-        using NativeSites? sites = Text(args, "--native-sites") is { } path ? NativeSites.Watch(path) : null;
+        // --block-sites FILE: the blocks the run holds at its peak, by the site that rented them (BlockSites.cs).
+        using BlockSites? sites = Text(args, "--block-sites") is { } path ? BlockSites.Watch(path) : null;
+
+        // --memory-limit SIZE: the process held to it, as a host sets it, for every micro but the backlog, which sets it itself.
+        if (micro != "backlog" && Text(args, "--memory-limit") is { } held)
+        {
+            VortexMemory.SetLimit(VortexMemory.ParseBytes(held) ?? throw new ArgumentException($"--memory-limit {held} is not a size: 2g, 2048m."));
+        }
+
         return await chosen.Run();
     }
 

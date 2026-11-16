@@ -85,12 +85,6 @@ Vorticity:     property long Groups { get; }
 Vorticity: sealed class Vorticity.AggregationPartial
 Vorticity:     method AggregationPartial FromBytes(ReadOnlyMemory<byte>)
 Vorticity:     property ReadOnlyMemory<byte> Bytes { get; }
-Vorticity: sealed class Vorticity.AlignedMemoryPool : MemoryPool<byte>
-Vorticity:     ctor AlignedMemoryPool(int = default, long = default)
-Vorticity:     method IMemoryOwner<byte> Rent(int = default)
-Vorticity:     method void Dispose(bool)
-Vorticity:     property AlignedMemoryPool Shared { get; }
-Vorticity:     property int MaxBufferSize { get; }
 Vorticity: ref struct Vorticity.BatchView
 Vorticity:     method Column<T> Column<T>(int)
 Vorticity:     method Column<T> Column<T>(string)
@@ -1195,6 +1189,7 @@ Vorticity:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory<byte>, 
 Vorticity:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
 Vorticity:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, long, PutCondition, CancellationToken)
 Vorticity:     method ValueTask<PutOutcome> PutAsync(string, ReadOnlySequence<byte>, PutCondition, CancellationToken)
+Vorticity:     method ValueTask<long> CopyToAsync(string, long, long, Stream, string, CancellationToken)
 Vorticity:     property CostProfile CostProfile { get; }
 Vorticity:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity: interface Vorticity.IO.ISegmentSource : IAsyncDisposable
@@ -1480,6 +1475,23 @@ Vorticity:     method void EndMap()
 Vorticity:     property ColumnBuilder<TKey> Keys { get; }
 Vorticity:     property ColumnBuilder<TValue> Values { get; }
 Vorticity:     property int Count { get; }
+Vorticity: sealed class Vorticity.MemoryReport : IEquatable<MemoryReport>
+Vorticity:     ctor MemoryReport()
+Vorticity:     method MemoryReport <Clone>$()
+Vorticity:     method bool Equals(MemoryReport)
+Vorticity:     method bool Equals(object)
+Vorticity:     method bool op_Equality(MemoryReport, MemoryReport)
+Vorticity:     method bool op_Inequality(MemoryReport, MemoryReport)
+Vorticity:     method int GetHashCode()
+Vorticity:     method string ToString()
+Vorticity:     property IReadOnlyDictionary<string, long> RetainedByHolder { get; init; }
+Vorticity:     property int DatasetHandles { get; init; }
+Vorticity:     property long CeilingBytes { get; init; }
+Vorticity:     property long LimitBytes { get; init; }
+Vorticity:     property long RentedBytes { get; init; }
+Vorticity:     property long ReservedBytes { get; init; }
+Vorticity:     property long RestBytes { get; init; }
+Vorticity:     property long RetainedBytes { get; init; }
 Vorticity: sealed class Vorticity.OrderPlan : IEquatable<OrderPlan>
 Vorticity:     ctor OrderPlan(string, int, Nullable<long>, bool)
 Vorticity:     method OrderPlan <Clone>$()
@@ -2551,6 +2563,10 @@ Vorticity:     property Sym<Nullable<Variant>> Item[int] { get; }
 Vorticity:     property Sym<Nullable<Variant>> Item[string] { get; }
 Vorticity: static class Vorticity.VariantSymbols.<G>$605D60C85C1CCE73E1B2B617B441846F.<M>$A8D32CB066FF2849E1A4BAB217D6AA8C
 Vorticity:     method void <Extension>$(Sym<Variant>)
+Vorticity: sealed class Vorticity.VortexBytePool : ArrayPool<byte>
+Vorticity:     method byte[] Rent(int)
+Vorticity:     method void Return(byte[], bool = default)
+Vorticity:     property VortexBytePool Instance { get; }
 Vorticity: sealed class Vorticity.VortexColumnAttribute : Attribute
 Vorticity:     ctor VortexColumnAttribute()
 Vorticity:     ctor VortexColumnAttribute(string)
@@ -2592,6 +2608,7 @@ Vorticity:     property sbyte Scale { get; }
 Vorticity: static class Vorticity.VortexDiagnostics
 Vorticity:     const string ActivitySourceName = Vorticity
 Vorticity:     const string MeterName = Vorticity
+Vorticity:     method MemoryReport GetMemoryReport()
 Vorticity: enum Vorticity.VortexEdition
 Vorticity:     const VortexEdition Core20250500 = 0
 Vorticity:     const VortexEdition Core20250600 = 1
@@ -2781,6 +2798,10 @@ Vorticity:     const int MaxMetadataKeyLength = 64
 Vorticity:     const int MaxMetadataSegments = 16
 Vorticity:     const int MaxPostscriptSize = 65527
 Vorticity:     const long DefaultMaxDecompressedBytes = 268435456
+Vorticity: static class Vorticity.VortexMemory
+Vorticity:     const string LimitVariable = VORTICITY_MEMORY_LIMIT
+Vorticity:     method void SetLimit(long)
+Vorticity:     property Nullable<long> LimitBytes { get; }
 Vorticity: sealed class Vorticity.VortexMemoryException : VortexException
 Vorticity:     ctor VortexMemoryException(string)
 Vorticity:     ctor VortexMemoryException(string, Exception)
@@ -2870,7 +2891,6 @@ Vorticity:     method void ReleaseMappedFiles()
 Vorticity:     property VortexSession Default { get; }
 Vorticity:     property VortexSessionOptions Options { get; }
 Vorticity: sealed class Vorticity.VortexSessionOptions
-Vorticity:     property MemoryPool<byte> MemoryPool { get; set; }
 Vorticity:     property ObjectStoreRegistry ObjectStores { get; }
 Vorticity:     property QueryMemoryBudget JobMemoryBudget { get; set; }
 Vorticity:     property QueryMemoryBudget MemoryBudget { get; set; }
@@ -3120,6 +3140,7 @@ Vorticity.Dataset:     method int GetHashCode()
 Vorticity.Dataset:     method string ToString()
 Vorticity.Dataset:     property CompactionOptions Compaction { get; init; }
 Vorticity.Dataset:     property IProgress<CompactionResult> Progress { get; init; }
+Vorticity.Dataset:     property Nullable<TimeSpan> VacuumEvery { get; init; }
 Vorticity.Dataset:     property TimeProvider TimeProvider { get; init; }
 Vorticity.Dataset:     property TimeSpan Idle { get; init; }
 Vorticity.Dataset:     property int Loop { get; init; }
@@ -3168,6 +3189,7 @@ Vorticity.Dataset:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory
 Vorticity.Dataset:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
 Vorticity.Dataset:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, long, PutCondition, CancellationToken)
 Vorticity.Dataset:     method ValueTask<PutOutcome> PutAsync(string, ReadOnlySequence<byte>, PutCondition, CancellationToken)
+Vorticity.Dataset:     method ValueTask<long> CopyToAsync(string, long, long, Stream, string, CancellationToken)
 Vorticity.Dataset:     method long CountOf(ObjectOperation)
 Vorticity.Dataset:     method void Reset()
 Vorticity.Dataset:     property CostProfile CostProfile { get; }
@@ -3246,8 +3268,8 @@ Vorticity.Dataset:     property int SummaryColumnLimit { get; init; }
 Vorticity.Dataset:     property long AppendBufferBytes { get; init; }
 Vorticity.Dataset:     property long InlineCompactionBytes { get; init; }
 Vorticity.Dataset:     property long MaxObjectBytes { get; init; }
-Vorticity.Dataset:     property long MaxOpenObjectBytes { get; init; }
-Vorticity.Dataset:     property long PageCacheBytes { get; init; }
+Vorticity.Dataset:     property long OpenObjectFloorBytes { get; init; }
+Vorticity.Dataset:     property long PageFloorBytes { get; init; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.DatasetVerification : IEquatable<DatasetVerification>
 Vorticity.Dataset:     ctor DatasetVerification()
 Vorticity.Dataset:     method DatasetVerification <Clone>$()
@@ -3363,6 +3385,7 @@ Vorticity.Dataset:     method ValueTask<Nullable<ObjectRead>> ReadIfPresentAsync
 Vorticity.Dataset:     method ValueTask<ObjectRead> ReadAsync(string, long, Memory<byte>, string, CancellationToken)
 Vorticity.Dataset:     method ValueTask<ObjectRead> ReadTailAsync(string, Memory<byte>, CancellationToken)
 Vorticity.Dataset:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
+Vorticity.Dataset:     method ValueTask<long> CopyToAsync(string, long, long, Stream, string, CancellationToken)
 Vorticity.Dataset:     method void Hold(string, bool)
 Vorticity.Dataset:     property CostProfile CostProfile { get; set; }
 Vorticity.Dataset:     property Func<ObjectOperation, string, bool> Fails { get; set; }
@@ -3653,6 +3676,7 @@ Vorticity.ObjectStorage:     method ValueTask<ObjectRead> ReadTailAsync(string, 
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, long, PutCondition, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, ReadOnlySequence<byte>, PutCondition, CancellationToken)
+Vorticity.ObjectStorage:     method ValueTask<long> CopyToAsync(string, long, long, Stream, string, CancellationToken)
 Vorticity.ObjectStorage:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity.ObjectStorage:     property string Account { get; }
 Vorticity.ObjectStorage:     property string Container { get; }
@@ -3680,6 +3704,7 @@ Vorticity.ObjectStorage:     method ValueTask<ObjectRead> ReadTailAsync(string, 
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, long, PutCondition, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, ReadOnlySequence<byte>, PutCondition, CancellationToken)
+Vorticity.ObjectStorage:     method ValueTask<long> CopyToAsync(string, long, long, Stream, string, CancellationToken)
 Vorticity.ObjectStorage:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity.ObjectStorage:     property string Bucket { get; }
 Vorticity.ObjectStorage: sealed class Vorticity.ObjectStorage.GoogleCloudStorageOptions
@@ -3723,6 +3748,7 @@ Vorticity.ObjectStorage:     method ValueTask<ObjectRead> ReadTailAsync(string, 
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, PutCondition, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, PipeReader, long, long, PutCondition, CancellationToken)
 Vorticity.ObjectStorage:     method ValueTask<PutOutcome> PutAsync(string, ReadOnlySequence<byte>, PutCondition, CancellationToken)
+Vorticity.ObjectStorage:     method ValueTask<long> CopyToAsync(string, long, long, Stream, string, CancellationToken)
 Vorticity.ObjectStorage:     property ObjectStoreCapabilities Capabilities { get; }
 Vorticity.ObjectStorage:     property S3Profile Profile { get; }
 Vorticity.ObjectStorage:     property string Bucket { get; }

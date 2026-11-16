@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 
 namespace Vorticity.Aggregating;
 
@@ -49,7 +50,7 @@ internal abstract class PartSource
     /// <summary>What every part reads let go, once: every part is merged, or none will be.</summary>
     internal abstract void Release();
 
-    /// <summary>A part's table let go once its batches are built: its keys' arrays back to the shelf they came from.</summary>
+    /// <summary>A part's table let go once its batches are built: its keys' arrays back to the account they came from.</summary>
     internal virtual void LetPartGo(GroupKeys keys, AggregateSlot[] slots) => keys.Release();
 
     /// <summary>The run's counts once every part is merged, with what the merge itself counted.</summary>
@@ -65,8 +66,8 @@ internal sealed class PartMerge : PartSource
 {
     private readonly AggregationPartition[] _partitions;
     private readonly GroupKeys[] _keysOf;
-    private readonly int[][] _placed;
-    private readonly int[][] _starts;
+    private readonly Block<int>[] _placed;
+    private readonly Block<int>[] _starts;
     private readonly AggregationPlan _plan;
     private readonly AggregateSlot?[] _settled;
     private readonly int[] _inputs;
@@ -80,7 +81,7 @@ internal sealed class PartMerge : PartSource
     private long _doneEntries;
 
     internal PartMerge(
-        AggregationPartition[] partitions, GroupKeys[] keysOf, int[][] placed, int[][] starts, int parts, AggregationPlan plan, AggregateSlot?[] settled,
+        AggregationPartition[] partitions, GroupKeys[] keysOf, Block<int>[] placed, Block<int>[] starts, int parts, AggregationPlan plan, AggregateSlot?[] settled,
         int[] inputs, ScanSource source, QueryMemory memory, bool byValue, long perGroup)
     {
         _partitions = partitions;
@@ -110,18 +111,11 @@ internal sealed class PartMerge : PartSource
             partition.LetGo();
         }
 
-        // The places of the lanes' groups and where each part's begin, lent by the process's shelf (Cut).
+        // The places of the lanes' groups and where each part's begin, rented from the pool (Cut).
         for (int p = 0; p < _placed.Length; p++)
         {
-            if (_placed[p] is { } placed)
-            {
-                ArrayShelf.Return(placed);
-            }
-
-            if (_starts[p] is { } starts)
-            {
-                ArrayShelf.Return(starts);
-            }
+            Blocks.Return(_placed[p]);
+            Blocks.Return(_starts[p]);
         }
 
         Array.Clear(_keysOf);
@@ -130,7 +124,7 @@ internal sealed class PartMerge : PartSource
     }
 
     /// <summary>
-    /// The part's keys, records and slots back to the process's shelf they came from: left to the
+    /// The part's keys, records and slots back to the pool they came from: left to the
     /// collector, every query at 32 lanes made its parts' tables again, 134 MB over two million names.
     /// </summary>
     internal override void LetPartGo(GroupKeys keys, AggregateSlot[] slots)
@@ -199,19 +193,19 @@ internal sealed class PartMerge : PartSource
             throw _memory.Exceeded("merge of a group by", reserve, ahead);
         }
 
-        // The part's table from the process's shelf, which counts nothing, as the reservation above
-        // stands for it: given back once the part is built (LetPartGo), for the next part or query.
-        GroupKeys keys = _byValue ? _keysOf[0].ForValuePart(part, _partBits, ArrayShelf.Retained) : _keysOf[0].ForPart(ArrayShelf.Retained);
+        // The part's table from the pool, counted by no account, as the reservation above stands
+        // for it: given back once the part is built (LetPartGo), for the next part or query.
+        GroupKeys keys = _byValue ? _keysOf[0].ForValuePart(part, _partBits, TableArrays.Uncounted) : _keysOf[0].ForPart(TableArrays.Uncounted);
         keys.Reserve(reserve);
-        AggregateSlot[] slots = AggregationPartition.NewSlots(_plan, _settled, _source, out _, ArrayShelf.Retained);
+        AggregateSlot[] slots = AggregationPartition.NewSlots(_plan, _settled, _source, out _, TableArrays.Uncounted);
         foreach (AggregateSlot slot in slots)
         {
             slot.EnsureGroups(reserve);
         }
 
-        // Where each partition's groups land in the part, the largest partition's share at most, lent by
-        // the process's shelf, which budgets what it keeps, until the part is merged.
-        int[] map = ArrayShelf.Rent<int>(Math.Max(1, most));
+        // Where each partition's groups land in the part, the largest partition's share at most, rented
+        // from the pool until the part is merged.
+        Block<int> map = Blocks.Rent<int>(Math.Max(1, most));
         int merged = 0;
         int sending = 0;
         try
@@ -247,7 +241,7 @@ internal sealed class PartMerge : PartSource
         }
         finally
         {
-            ArrayShelf.Return(map);
+            Blocks.Return(map);
         }
 
         // Twice what the part's table came to, beside the lanes', which live until the merge is done.
@@ -435,7 +429,7 @@ internal sealed class MergedParts : ResultParts
     /// <summary>
     /// The part merged, then built into its batches and let go; the lanes' tables once the last part is
     /// merged. What its table held of the query's memory stays held until the reader is done with its
-    /// batches, which the session's pool holds outside any query's count.
+    /// batches, which the library's pool holds outside any query's count.
     /// </summary>
     private async ValueTask<Built> BuildAsync(int part, CancellationToken cancellationToken)
     {
@@ -456,15 +450,15 @@ internal sealed class MergedParts : ResultParts
 
         Built built = new Built(reserved, measured);
 
-        // The part's order lent by the process's shelf, which counts nothing, as the order the part made
-        // did not; given back once the part is built.
+        // The part's order rented from the pool, which counts nothing, as the order the part made did
+        // not; given back once the part is built.
         int count = keys.Count;
-        int[] order = AggregationEngine.LentOrder(ArrayShelf.Retained, count);
+        Block<int> order = AggregationEngine.LentOrder(count);
         try
         {
             AggregationOutcome outcome = new AggregationOutcome(_plan, slots, keys, AggregationEngine.Shuffled(order, count), count) { Memory = _memory };
             built.Result = await _builder.BuildAsync(outcome, cancellationToken).ConfigureAwait(false);
-            ArrayShelf.Retained.Give(order);
+            Blocks.Return(order);
             return built;
         }
         catch

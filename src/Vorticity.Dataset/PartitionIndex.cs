@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO.Hashing;
@@ -8,6 +7,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 using Vorticity.Parquet.Encodings;
 using Vorticity.Serialization.Protobuf;
 
@@ -365,7 +365,7 @@ internal sealed class PartitionIndex
         internal void Decode(ReadOnlySpan<byte> page, Page at, List<Posting> into)
         {
             int count = Arrays(page, out int gapBits, out int placeBits, out ReadOnlySpan<byte> gaps, out ReadOnlySpan<byte> places);
-            uint[] rented = ArrayPool<uint>.Shared.Rent(2 * Stride);
+            Block<uint> rented = Blocks.Rent<uint>(2 * Stride);
             try
             {
                 Span<uint> hashes = rented.AsSpan(0, Stride);
@@ -386,7 +386,7 @@ internal sealed class PartitionIndex
             }
             finally
             {
-                ArrayPool<uint>.Shared.Return(rented);
+                Blocks.Return(rented);
             }
         }
 
@@ -552,9 +552,10 @@ internal sealed class PartitionIndex
         private Entry? _entry;
         private long _postings;
 
-        // The open page: each posting's gap and place, the page's first hash, the hash before, and the largest of each.
-        private uint[] _gaps = ArrayPool<uint>.Shared.Rent(Stride);
-        private uint[] _places = ArrayPool<uint>.Shared.Rent(Stride);
+        // The open page: each posting's gap and place, in blocks of the pool seen at their whole capacity, the page's first
+        // hash, the hash before, and the largest of each.
+        private Block<uint> _gaps = Whole(Stride);
+        private Block<uint> _places = Whole(Stride);
         private int _count;
         private ulong _pageFirst;
         private ulong _previous;
@@ -685,14 +686,14 @@ internal sealed class PartitionIndex
         {
             foreach ((ulong _, byte[] bytes, int _) in _sealed)
             {
-                ArrayPool<byte>.Shared.Return(bytes);
+                Blocks.ReturnBytes(bytes);
             }
 
             _sealed.Clear();
-            ArrayPool<uint>.Shared.Return(_gaps);
-            ArrayPool<uint>.Shared.Return(_places);
-            _gaps = [];
-            _places = [];
+            Blocks.Return(_gaps);
+            Blocks.Return(_places);
+            _gaps = default;
+            _places = default;
         }
 
         /// <summary>
@@ -763,7 +764,7 @@ internal sealed class PartitionIndex
             int gapBits = Bits(_mostGap);
             int placeBits = Bits(_mostPlace);
             int length = PageSize(_mostGap, _mostPlace, _count);
-            byte[] page = ArrayPool<byte>.Shared.Rent(length);
+            byte[] page = Blocks.Rent<byte>(length).Array();
             int header = Serialization.Varint.Write(page, (ulong)_count);
             page[header] = (byte)gapBits;
             page[header + 1] = (byte)placeBits;
@@ -796,7 +797,7 @@ internal sealed class PartitionIndex
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(page.Bytes);
+                    Blocks.ReturnBytes(page.Bytes);
                 }
             }
         }
@@ -809,12 +810,20 @@ internal sealed class PartitionIndex
         /// <summary>The bits <paramref name="value"/> takes, 0 for 0.</summary>
         private static int Bits(uint value) => 32 - BitOperations.LeadingZeroCount(value);
 
-        private static uint[] Grown(uint[] rented, int count, int size)
+        /// <summary><paramref name="rented"/> grown to <paramref name="size"/> entries at least, its first <paramref name="count"/> kept, seen at its whole capacity.</summary>
+        private static Block<uint> Grown(Block<uint> rented, int count, int size)
         {
-            uint[] grown = ArrayPool<uint>.Shared.Rent(size);
+            Block<uint> grown = Whole(size);
             rented.AsSpan(0, count).CopyTo(grown);
-            ArrayPool<uint>.Shared.Return(rented);
+            Blocks.Return(rented);
             return grown;
+        }
+
+        /// <summary>A block of <paramref name="length"/> entries at least, seen at its whole capacity.</summary>
+        private static Block<uint> Whole(int length)
+        {
+            Block<uint> block = Blocks.Rent<uint>(length);
+            return block.WithLength(block.Capacity);
         }
     }
 }

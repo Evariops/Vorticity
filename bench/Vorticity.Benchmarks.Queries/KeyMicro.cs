@@ -73,7 +73,7 @@ internal static class KeyMicro
         ColumnShape shape = new ColumnShape(new ColumnSym(Expr.Field("k"), VortexType.Int32, null, null, -1, []));
         FixedKeys<int> groups = new FixedKeys<int>(shape, sorted: false, bounds, rows: rows);
         ulong[] selection = [];
-        int[] rowGroups = new int[BatchRows];
+        Block<int> rowGroups = Blocks.Allocate<int>(BatchRows);
         GroupRanges ranges = new GroupRanges();
         long start = Stopwatch.GetTimestamp();
         for (int at = 0; at < keys.Length; at += BatchRows)

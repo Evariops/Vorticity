@@ -4,8 +4,8 @@
 // 100,000 events (an instant, a code of twenty thousand values, a body of 300 bytes) in 4 objects, blocks of 512 rows; a
 // rare code held by 30 rows scattered over them. The question counts the rows of the rare code and their distinct bodies,
 // the code asked as a range, which no sheet estimates and no zone map rules out: the first time every body is read, after
-// that the granules its pages say held a row. The handle keeps the pages within its budget (0: none), and the session's
-// synopsis cache, when it has one, keeps them on disk.
+// that the granules its pages say held a row. The handle keeps the pages, or none, and the session's synopsis cache, when
+// it has one, keeps them on disk.
 using System;
 using System.IO;
 using System.Linq;
@@ -28,9 +28,9 @@ public partial class AuditPredicatePagesBenchmarks
 
     private static readonly DateTimeOffset Start = new DateTimeOffset(2026, 10, 25, 0, 0, 0, TimeSpan.Zero);
 
-    /// <summary>The bytes the handle keeps of the pages: none, or the default.</summary>
-    [Params(0L, 16L << 20)]
-    public long Budget { get; set; }
+    /// <summary>Whether the handle keeps the pages, above a floor the process may ask back: not at all, or by default.</summary>
+    [Params(false, true)]
+    public bool Kept { get; set; }
 
     /// <summary>Whether the session has a synopsis cache on disk.</summary>
     [Params(false, true)]
@@ -82,8 +82,8 @@ public partial class AuditPredicatePagesBenchmarks
                 o.SynopsisCache = new SynopsisCache(_directory, 64L << 20);
             }
         });
-        _dataset = VortexDataset.OpenAsync(_store, options with { Session = _session, PredicatePageBytes = Budget }).AsTask().GetAwaiter().GetResult();
-        Console.WriteLine($"// budget {Budget}, disk {Disk}: {Ask()} rows, then {Ask()}");
+        _dataset = VortexDataset.OpenAsync(_store, options with { Session = _session, KeepsPredicatePages = Kept }).AsTask().GetAwaiter().GetResult();
+        Console.WriteLine($"// kept {Kept}, disk {Disk}: {Ask()} rows, then {Ask()}");
     }
 
     /// <summary>Closes the handle, the session and the store, and deletes the cache's directory.</summary>

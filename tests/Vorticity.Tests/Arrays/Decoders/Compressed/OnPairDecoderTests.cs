@@ -7,6 +7,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Text;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Types;
 using Xunit;
 
@@ -324,7 +325,7 @@ public sealed class OnPairDecoderTests
         CanonicalNode whole = harness.Node(harness.DecodeRoot(dtype, rows));
         long key = ScanContext.NodeCheckKey(9, root.Index)!.Value;
         long tag = Tag(tokens.Length, harness);
-        Assert.False(harness.Scan.TryNodeTable(key, tag, out _, out _, out _));
+        Assert.False(harness.Scan.TryNodeTable(key, tag, out _, out _));
 
         uint? outer = harness.Scan.Decode.BeginNodeCheckScope(9);
         try
@@ -339,8 +340,8 @@ public sealed class OnPairDecoderTests
                     Assert.Equal(Text(whole, start + i), Text(range, i));
                 }
 
-                Assert.True(harness.Scan.TryNodeTable(key, tag, out _, out int entries, out long facts));
-                Assert.Equal(tokens.Length, entries);
+                Assert.True(harness.Scan.TryNodeTable(key, tag, out Block<long> table, out long facts));
+                Assert.Equal(tokens.Length, table.Length);
                 Assert.Equal(ascii, (facts >> 32 & 1) == 1);
             }
         }
@@ -350,7 +351,7 @@ public sealed class OnPairDecoderTests
         }
 
         harness.Scan.Recycle();
-        Assert.False(harness.Scan.TryNodeTable(key, tag, out _, out _, out _));
+        Assert.False(harness.Scan.TryNodeTable(key, tag, out _, out _));
     }
 
     /// <summary>

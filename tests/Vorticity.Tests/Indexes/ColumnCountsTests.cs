@@ -383,7 +383,7 @@ public sealed class ColumnCountsTests
         DType dtype = VortexTypes.ToDType(schema, types);
         CountsPlan plan = CountsPlan.For(dtype)!;
         ColumnSheetBuilder sheet = new ColumnSheetBuilder();
-        ColumnCountsBuilder counts = new ColumnCountsBuilder(sheet, plan, field: 1, entryLimit);
+        ColumnCountsBuilder counts = new ColumnCountsBuilder(sheet, plan, field: 1, TestAccount.Shared, entryLimit);
         DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
         DType f64 = types.Primitive(PType.F64, Nullability.NonNullable);
         const int Part = 1_000;

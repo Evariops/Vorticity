@@ -32,3 +32,27 @@ T:System.IO.Compression.ZstandardEncoder; compress with ManagedCompressions.Zstd
 T:System.IO.Compression.ZstandardDictionary; pass the dictionary's bytes to the ZstdDecompressor or ZstdCompressor constructor of ManagedCompressions.Zstd.
 T:System.IO.Compression.ZstandardCompressionOptions; ManagedCompressions.Zstd.ZstdCompressor takes its level and dictionary in its constructor.
 T:System.IO.Compression.ZstandardStream; ManagedCompressions.Zstd compresses and decompresses whole frames in memory: ZstdCompressor, ZstdDecompressor.
+# ---------------------------------------------------------------- native memory
+# The library allocates no native memory: the collector is the only allocator of every byte it holds,
+# so that a limit on the heap is a limit on the library, and a process past it gets an exception rather
+# than a kill. A block is a managed array the runtime pins (BlockOwner), a secret a pinned array
+# wiped on dispose (SecretBytes). Mapped files and system calls are the system's, not allocations.
+T:System.Runtime.InteropServices.NativeMemory; allocate a pinned managed array (GC.AllocateUninitializedArray with pinned: true), as BlockOwner does for an aligned block.
+M:System.Runtime.InteropServices.Marshal.AllocHGlobal(System.Int32); allocate a managed array, pinned when its address must not move.
+M:System.Runtime.InteropServices.Marshal.AllocHGlobal(System.IntPtr); allocate a managed array, pinned when its address must not move.
+M:System.Runtime.InteropServices.Marshal.AllocCoTaskMem(System.Int32); allocate a managed array, pinned when its address must not move.
+M:System.GC.AddMemoryPressure(System.Int64); the library's memory is managed, and the collector already counts it.
+M:System.GC.RemoveMemoryPressure(System.Int64); the library's memory is managed, and the collector already counts it.
+# ---------------------------------------------------------------- pooled arrays
+# Every array the library rents comes from one pool, Blocks, which keeps one stack per size class, counts what it holds in
+# the memory report and gives it back to the registry of kept memory (HeldMemory) when the work needs the room or no rent
+# took it of late. The runtime's shared pool keeps arrays per type and per core, outside every count, and a private pool is
+# one more such.
+P:System.Buffers.ArrayPool`1.Shared; rent a Block<T> from Blocks (Blocks.Rent, Blocks.Return), under the query's memory where one counts (Blocks.Rent(memory, ...)), or bytes from VortexBytePool.Instance; an array that holds references is owned by what lasts, or allocated.
+M:System.Buffers.ArrayPool`1.Create; rent from Blocks, which every array of the library comes from, rather than a pool of its own.
+# ---------------------------------------------------------------- accounts
+# A block of the pool is rented under the account of the work it serves (MemoryAccount): a query's, a scan's, a writer's,
+# the process's for what the library gives back itself. The arenas' constructors without an account are the tests' and
+# the tools': their blocks are the caller's, counted nowhere.
+M:Vorticity.Arrays.CanonicalArena.#ctor(System.Int32); name the account of the arena's work: new CanonicalArena(capacity, account).
+M:Vorticity.Arrays.RetainingArena.#ctor(System.Int32); name the account of the scan whose chunks it retains: new RetainingArena(account, capacity).

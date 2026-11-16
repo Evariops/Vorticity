@@ -260,7 +260,7 @@ public abstract class VortexKeyring
 }
 ```
 
-A `DataKey` holds the key in native memory, the id of the key that wrapped it, and its wrapped bytes,
+A `DataKey` holds the key in a managed array the runtime pins, the id of the key that wrapped it, and its wrapped bytes,
 and wipes the key when it is disposed.
 
 | keyring | where | wraps with |
@@ -278,9 +278,11 @@ so it never carries a secret, and the descriptor carries it in clear, since a re
 to unwrap the key before it can read anything, as the AWS Encryption SDK keeps its encryption context
 in clear in its message header.
 
-Unwrapped data keys are cached by key id and wrapped bytes, in native memory, a bounded number of them
-for a bounded time, and wiped when they leave the cache or the session is disposed. Keys handed to
-`FromKeys` are copied into native memory the same way, and the caller's copy is the caller's.
+Unwrapped data keys are cached by key id and wrapped bytes, in pinned managed arrays, a bounded number
+of them for a bounded time, and wiped when they leave the cache or the session is disposed. A pinned
+array never moves, so the collector leaves no copy of a key behind, and a key its holder drops is wiped
+by a finalizer before the collector takes its array. Keys handed to `FromKeys` are copied the same way,
+and the caller's copy is the caller's.
 
 ### 4.4 Rotation, rekeying and shredding
 
@@ -466,7 +468,7 @@ trailer and the Vortex tail.
 A group by that spills, and a sort that writes runs, put the data they hold on local disk. When the
 session seals its files, its scratch is sealed too: frames of 64 KiB under AES-256-GCM, each written
 once when it is full, with the frame index as its nonce, under a key drawn for that scratch file, which
-no keyring wraps, held in native memory and never written anywhere. Nothing outside the process reads
+no keyring wraps, held in a pinned managed array and never written anywhere. Nothing outside the process reads
 the file, so it has no header and no trailer, and the frame being filled is served from memory. After
 a crash the scratch is unreadable, which is what scratch should be. A spill reads its sections by
 offset, which maps onto frames as any range does, and a frame a read covers whole is decrypted straight
@@ -519,7 +521,7 @@ recorded four flaws in it. Each one has its rule here:
 | flaw | rule |
 |---|---|
 | keys and nonces drawn from a non-cryptographic generator | entropy only from the operating system, through `RandomNumberGenerator` |
-| key memory cleared with a call the compiler could remove | keys in native memory, wiped with `CryptographicOperations.ZeroMemory`, which is not elided, and the platform's copies freed by disposing its `AesGcm` instances |
+| key memory cleared with a call the compiler could remove | keys in pinned managed arrays, which the collector never copies, wiped with `CryptographicOperations.ZeroMemory`, which is not elided, and the platform's copies freed by disposing its `AesGcm` instances |
 | a header edit that downgraded GCM to an unauthenticated mode | no suite field at all, a format version that fixes the suite, no unauthenticated mode, and the descriptor bound into every key |
 | a failed call to the random generator left unchecked | a failure throws, and nothing falls back |
 

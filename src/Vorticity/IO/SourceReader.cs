@@ -24,13 +24,11 @@ internal sealed class SourceReader : ISegmentReader
 {
     private readonly ISegmentSource _source;
     private readonly bool _ownsSource;
-    private readonly AlignedBufferPool _pool;
 
-    internal SourceReader(ISegmentSource source, bool ownsSource, AlignedBufferPool pool)
+    internal SourceReader(ISegmentSource source, bool ownsSource)
     {
         _source = source;
         _ownsSource = ownsSource;
-        _pool = pool;
     }
 
     public ValueTask<long> GetLengthAsync(CancellationToken cancellationToken)
@@ -50,7 +48,7 @@ internal sealed class SourceReader : ISegmentReader
         }
 
         SegmentLease lease = await _source.ReadAsync(new SegmentRange(offset, length), cancellationToken).ConfigureAwait(false);
-        return Adopt(ref lease, offset, length, 1 << spec.AlignmentExponent);
+        return Adopt(ref lease, offset, length, 1 << spec.AlignmentExponent, MemoryAccount.Kept);
     }
 
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
@@ -68,9 +66,11 @@ internal sealed class SourceReader : ISegmentReader
             pending += requests.IsFilled(slot) || requests.GetSpec(slot).Length == 0 ? 0 : 1;
         }
 
-        int[] slots = ArrayPool<int>.Shared.Rent(Math.Max(pending, 1));
-        SegmentRange[] ranges = ArrayPool<SegmentRange>.Shared.Rent(Math.Max(pending, 1));
-        SegmentLease[] leases = ArrayPool<SegmentLease>.Shared.Rent(Math.Max(pending, 1));
+        // The ranges and the leases go to the source as memory, the leases holding references: arrays the set keeps.
+        Block<int> slots = Blocks.Rent<int>(pending);
+        SegmentReadArrays arrays = requests.ReadArrays;
+        SegmentRange[] ranges = SegmentReadArrays.Ensure(ref arrays.Ranges, pending);
+        SegmentLease[] leases = SegmentReadArrays.Ensure(ref arrays.Leases, pending);
         int adopted = 0;
         try
         {
@@ -104,7 +104,7 @@ internal sealed class SourceReader : ISegmentReader
             for (; adopted < n; adopted++)
             {
                 SegmentSpec spec = requests.GetSpec(slots[adopted]);
-                requests.SetResult(slots[adopted], Adopt(ref leases[adopted], ranges[adopted].Offset, ranges[adopted].Length, 1 << spec.AlignmentExponent));
+                requests.SetResult(slots[adopted], Adopt(ref leases[adopted], ranges[adopted].Offset, ranges[adopted].Length, 1 << spec.AlignmentExponent, requests.Account));
             }
 
             requests.Complete();
@@ -121,10 +121,8 @@ internal sealed class SourceReader : ISegmentReader
         }
         finally
         {
-            Array.Clear(leases, 0, Math.Max(pending, 1));
-            ArrayPool<SegmentLease>.Shared.Return(leases);
-            ArrayPool<SegmentRange>.Shared.Return(ranges);
-            ArrayPool<int>.Shared.Return(slots);
+            Array.Clear(leases, 0, pending);
+            Blocks.Return(slots);
         }
     }
 
@@ -138,12 +136,12 @@ internal sealed class SourceReader : ISegmentReader
         }
 
         SegmentLease lease = await _source.ReadAsync(new SegmentRange(offset, actual), cancellationToken).ConfigureAwait(false);
-        return Adopt(ref lease, offset, actual, alignment);
+        return Adopt(ref lease, offset, actual, alignment, MemoryAccount.Kept);
     }
 
     public ValueTask DisposeAsync() => _ownsSource ? _source.DisposeAsync() : ValueTask.CompletedTask;
 
-    private unsafe SegmentOwner Adopt(ref SegmentLease lease, long offset, int length, int alignment)
+    private unsafe SegmentOwner Adopt(ref SegmentLease lease, long offset, int length, int alignment, MemoryAccount account)
     {
         SegmentLease taken = lease;
         lease = default;
@@ -164,7 +162,7 @@ internal sealed class SourceReader : ISegmentReader
             pin.Dispose();
         }
 
-        NativeSegmentOwner block = _pool.Rent(length, VortexLimits.MaxAlignment);
+        BlockOwner block = account.Rent(length, VortexLimits.MaxAlignment);
         try
         {
             taken.Bytes.CopyTo(block.WritableSpan);

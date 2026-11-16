@@ -266,7 +266,7 @@ public sealed class IndexWriteTests
 
         DTypeArena types = new DTypeArena();
         DType schema = types.Struct(["c"], [types.Utf8(Nullability.NonNullable)], Nullability.NonNullable);
-        IndexWriter writer = new IndexWriter(WritePolicy.Auto, schema, isTabular: true, fieldCount: 1);
+        IndexWriter writer = new IndexWriter(TestAccount.Shared, WritePolicy.Auto, schema, isTabular: true, fieldCount: 1);
         long[] chunkRows = [2L * Block, Block, Block, 3L * Block, 2L * Block, Block - 7];
         writer.Close([column], chunkRows, Block);
 

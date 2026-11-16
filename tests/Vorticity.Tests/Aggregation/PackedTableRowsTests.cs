@@ -45,7 +45,7 @@ public sealed class PackedTableRowsTests
 
             CanonicalArena arena = new CanonicalArena(Rows * 8 + 4096);
             int[] nodes = [Column(arena, a), Column(arena, b)];
-            int[] rowGroups = new int[Rows];
+            Block<int> rowGroups = Blocks.Allocate<int>(Rows);
             keys.Assign(arena, nodes, Rows, [], rowGroups, new GroupRanges());
             for (int i = 0; i < Rows; i++)
             {

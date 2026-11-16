@@ -220,7 +220,7 @@ own sections of the benchmark page and leaves the others alone:
 | the per-encoding gates | the per-encoding take and write, in one process | `--throughput`, with `--take` or `--write`, and `--check` to hold each file to its ceiling |
 | the trade-offs | every profile and hint on twenty column shapes, and what the advice picks on them | `--tradeoffs`, and `--advise` |
 | BenchmarkDotNet | one kernel against its baseline, on one clock | a class name, such as `fastlanes` |
-| the ratchets | [allocations](#5-allocations) | `dotnet test Vorticity.slnx -c Release` |
+| the ratchets | [allocations](#5-allocations) | `dotnet test Vorticity.slnx -c Release -p:Measure=true`, or `bash tests/runs-alone.sh` for the measuring ones alone |
 
 Rust is driven through [tools/vxbench-rs](../../tools/vxbench-rs), built against the same `vortex`
 pin the corpus was written with, which the library states and every page names: a C ABI for the

@@ -48,7 +48,7 @@ internal readonly struct IndexContext(ScanContext context, ScanContexts? pool) :
     /// </summary>
     internal static IndexContext Of(IIndexHost file, int origin) => file switch
     {
-        VortexFile open when open.DecodesOverOwnEncodings(origin) => new IndexContext(ScanContexts.Metadata.Rent(open), ScanContexts.Metadata),
+        VortexFile open when open.DecodesOverOwnEncodings(origin) => new IndexContext(ScanContexts.Metadata.Rent(open, Buffers.MemoryAccount.Kept), ScanContexts.Metadata),
         FooterlessIndexes footerless => new IndexContext(ScanContexts.Footerless.RentEncodings(footerless.Encodings), ScanContexts.Footerless),
         _ => new IndexContext(file.CreateIndexContext(origin), null),
     };

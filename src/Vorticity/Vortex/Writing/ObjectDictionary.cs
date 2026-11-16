@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Numerics;
@@ -317,16 +316,16 @@ internal sealed class ObjectDictionary
         {
             // An encoded column's values, each looked up once, then its codes through them.
             int values = column.EncodedValuesIndex;
-            int[] table = ArrayPool<int>.Shared.Rent(Math.Max(arena.GetNode(values).Length, 1));
+            Block<int> table = Blocks.Rent<int>(arena.GetNode(values).Length);
             try
             {
-                Span<int> translation = table.AsSpan(0, arena.GetNode(values).Length);
+                Span<int> translation = table;
                 Translation(arena, values, translation);
                 missing = Translate(column.Codes.Span, PType.U32, translation, in valid, into, codesPType, rows);
             }
             finally
             {
-                ArrayPool<int>.Shared.Return(table);
+                Blocks.Return(table);
             }
         }
         else if (_width == 0)
@@ -349,6 +348,47 @@ internal sealed class ObjectDictionary
         }
 
         return arena.AddPrimitive(codesType, rows, column.Validity, codesPType, codes);
+    }
+
+    /// <summary>
+    /// The codes of the rows of <paramref name="node"/>, a column of this dictionary's values in <paramref name="source"/>, as
+    /// a primitive node of <paramref name="codesType"/> in <paramref name="target"/>, its validity copied there: what a
+    /// writer gathers of a column written against an object dictionary, its codes rather than its values, from a batch it
+    /// does not own. A column delivered encoded is copied first and coded in <paramref name="target"/>, as
+    /// <see cref="Code"/> does it.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">A row holds a value the dictionary lacks.</exception>
+    internal int CodeInto(CanonicalArena source, int node, CanonicalArena target, DType codesType)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        ArgumentNullException.ThrowIfNull(target);
+        CanonicalNode column = source.GetNode(node);
+        if (column.Kind is CanonicalKind.Constant or CanonicalKind.RunEnd or CanonicalKind.Dictionary)
+        {
+            return Code(target, target.CopyFrom(source, node), codesType);
+        }
+
+        int rows = column.Length;
+        PType codesPType = CodesPType;
+        VortexBuffer codes = target.AllocateUninitialized(rows * codesPType.ByteWidth(), codesPType.ByteWidth(), out Span<byte> into);
+        ValidityMask valid = ValidityMask.From(source, column.Validity);
+        int missing = _width == 0
+            ? codesPType == PType.U8
+                ? CodeViews(column, in valid, MemoryMarshal.Cast<byte, byte>(into))
+                : CodeViews(column, in valid, MemoryMarshal.Cast<byte, ushort>(into))
+            : codesPType == PType.U8
+                ? CodeNumbers(column, in valid, MemoryMarshal.Cast<byte, byte>(into))
+                : CodeNumbers(column, in valid, MemoryMarshal.Cast<byte, ushort>(into));
+        if (missing >= 0)
+        {
+            throw new InvalidOperationException(
+                $"Row {missing} of a chunk holds a value its column's object dictionary of {Count} values lacks.");
+        }
+
+        Validity validity = column.Validity.Kind == ValidityKind.Bitmap
+            ? Validity.Bitmap(target.CopyFrom(source, column.Validity.CanonicalNodeIndex))
+            : column.Validity;
+        return target.AddPrimitive(codesType, rows, validity, codesPType, codes);
     }
 
     /// <summary>A text column's codes; the first row whose value the dictionary lacks, or -1.</summary>
@@ -476,19 +516,19 @@ internal sealed class ObjectDictionary
     /// found again through a table that grows. Then sorted, and laid out as a dictionary.
     /// </summary>
     /// <remarks>
-    /// Its working arrays come from the process's shelf and go back when it is disposed: a collector a column and a part
-    /// written, they were made new as they grew, 4 bytes a row of a build of the client's log records.
+    /// Its working blocks come from the pool and go back when it is disposed: a collector a column and a part written,
+    /// they were made new as they grew, 4 bytes a row of a build of the client's log records.
     /// </remarks>
     private sealed class Collector : IDisposable
     {
         private readonly DTypeKind _kind;
         private readonly PType _ptype;
         private readonly int _width;
-        private byte[] _heap = ArrayShelf.Retained.Take<byte>(1024, zeroed: false);
+        private Block<byte> _heap = Blocks.Rent<byte>(1024);
         private int _heapUsed;
-        private int[] _offsets = ArrayShelf.Retained.Take<int>(65, zeroed: true);
-        private ulong[] _keys = ArrayShelf.Retained.Take<ulong>(64, zeroed: false);
-        private int[] _slots = ArrayShelf.Retained.Take<int>(128, zeroed: true);
+        private Block<int> _offsets = Blocks.RentCleared<int>(65);
+        private Block<ulong> _keys = Blocks.Rent<ulong>(64);
+        private Block<int> _slots = Blocks.RentCleared<int>(128);
         private int _mask = 127;
         private int _count;
 
@@ -568,7 +608,7 @@ internal sealed class ObjectDictionary
 
             if (_heapUsed + value.Length > _heap.Length)
             {
-                ArrayShelf.Resize(ArrayShelf.Retained, ref _heap, ArrayShelf.Grown(_heapUsed + value.Length, _heap.Length));
+                Blocks.Resize(ref _heap, Blocks.Grown(_heapUsed + value.Length, _heap.Length));
             }
 
             value.CopyTo(_heap.AsSpan(_heapUsed));
@@ -606,8 +646,8 @@ internal sealed class ObjectDictionary
             // A key a code, and an offset a code and one past the last.
             if (_count == _keys.Length)
             {
-                ArrayShelf.Resize(ArrayShelf.Retained, ref _keys, _keys.Length * 2);
-                ArrayShelf.Resize(ArrayShelf.Retained, ref _offsets, _keys.Length + 1);
+                Blocks.Resize(ref _keys, _keys.Length * 2);
+                Blocks.Resize(ref _offsets, _keys.Length + 1);
             }
 
             _keys[_count] = key;
@@ -615,8 +655,8 @@ internal sealed class ObjectDictionary
             if (_count * 2 > _mask)
             {
                 int slots = _slots.Length * 2;
-                ArrayShelf.Retained.Give(_slots);
-                _slots = ArrayShelf.Retained.Take<int>(slots, zeroed: true);
+                Blocks.Return(_slots);
+                _slots = Blocks.RentCleared<int>(slots);
                 _mask = _slots.Length - 1;
                 for (int code = 0; code < _count; code++)
                 {
@@ -637,7 +677,7 @@ internal sealed class ObjectDictionary
             if (_width == 0)
             {
                 // Text and binary order by their bytes, unsigned, the shorter first on a tie.
-                int[] held = ArrayShelf.Retained.Take<int>(ArrayShelf.Grown(_count, 0, least: 64), zeroed: false);
+                Block<int> held = Blocks.Rent<int>(Math.Max(_count, 1));
                 Span<int> order = held.AsSpan(0, _count);
                 for (int i = 0; i < order.Length; i++)
                 {
@@ -661,7 +701,7 @@ internal sealed class ObjectDictionary
                 }
 
                 offsets[_count] = used;
-                ArrayShelf.Retained.Give(held);
+                Blocks.Return(held);
                 return new ObjectDictionary(_kind, default, bytes, offsets, hashes, _count, allReferenced);
             }
 
@@ -693,21 +733,21 @@ internal sealed class ObjectDictionary
             return new ObjectDictionary(_kind, _ptype, values, [], keys, _count, allReferenced);
         }
 
-        /// <summary>Its working arrays back to the process's shelf, once: what it finished holds arrays of its own.</summary>
+        /// <summary>Its working blocks back to the pool, once: what it finished holds arrays of its own.</summary>
         public void Dispose()
         {
-            ArrayShelf.Retained.Give(_heap);
-            ArrayShelf.Retained.Give(_offsets);
-            ArrayShelf.Retained.Give(_keys);
-            ArrayShelf.Retained.Give(_slots);
-            _heap = [];
-            _offsets = [];
-            _keys = [];
-            _slots = [];
+            Blocks.Return(_heap);
+            Blocks.Return(_offsets);
+            Blocks.Return(_keys);
+            Blocks.Return(_slots);
+            _heap = default;
+            _offsets = default;
+            _keys = default;
+            _slots = default;
         }
 
         /// <summary>The order of two collected values' bytes; a value starts at its offset and ends at the next.</summary>
-        private readonly struct ByteOrder(byte[] heap, int[] offsets) : IComparer<int>
+        private readonly struct ByteOrder(Block<byte> heap, Block<int> offsets) : IComparer<int>
         {
             public int Compare(int x, int y) => Bytes(x).SequenceCompareTo(Bytes(y));
 

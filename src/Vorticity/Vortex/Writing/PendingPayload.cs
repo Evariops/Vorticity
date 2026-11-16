@@ -1,6 +1,6 @@
 using System;
-using System.Buffers;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Indexes;
 using Vorticity.Types;
 
@@ -75,45 +75,31 @@ internal sealed class PendingPayload(
 
     internal static PendingPayload U32(uint[] words, bool compress) =>
         new PendingPayload(
-            (arena, types) => LayU32(arena, types, words, words.Length),
+            (arena, types) => LayU32(arena, types, words),
             compress,
             (long)words.Length * sizeof(uint));
 
     /// <summary>
-    /// A payload over the first <paramref name="length"/> words of a rented array, given back to
-    /// <see cref="ArrayPool{T}.Shared"/> once laid or forsaken.
+    /// A payload over the first <paramref name="length"/> words of a rented block, given back to the pool once laid or
+    /// forsaken.
     /// </summary>
     /// <remarks>
-    /// The array is the payload's from here: the caller neither gives it back nor reads or writes it again, and drops its
-    /// own reference to it, since the payload gives it back once, and an array given back twice is handed to two renters.
+    /// The block is the payload's from here: the caller neither gives it back nor reads or writes it again, and drops its
+    /// own copy of it, since the payload gives it back once, and a block given back twice is handed to two renters.
     /// </remarks>
-    internal static PendingPayload RentedU32(uint[] rented, int length, bool compress) =>
+    internal static PendingPayload RentedU32(Block<uint> rented, int length, bool compress) =>
         new PendingPayload(
-            (arena, types) => LayU32(arena, types, rented, length),
+            (arena, types) => LayU32(arena, types, rented.AsSpan(0, length)),
             compress,
             (long)length * sizeof(uint),
-            () => ArrayPool<uint>.Shared.Return(rented));
-
-    /// <summary>
-    /// A payload over the first <paramref name="length"/> words of an array of the process's shelf
-    /// (<see cref="Aggregating.ArrayShelf.Retained"/>), given back to it once laid or forsaken: the shelf keeps the arrays of
-    /// a length a writer takes again from one file to the next, where the shared pool kept a few of a length and let the rest
-    /// go.
-    /// </summary>
-    /// <remarks>The array is the payload's from here, as <see cref="RentedU32"/>'s is.</remarks>
-    internal static PendingPayload ShelvedU32(uint[] shelved, int length, bool compress) =>
-        new PendingPayload(
-            (arena, types) => LayU32(arena, types, shelved, length),
-            compress,
-            (long)length * sizeof(uint),
-            () => Aggregating.ArrayShelf.Retained.Give(shelved));
+            () => Blocks.Return(rented));
 
     /// <summary>
     /// A payload over the first <paramref name="length"/> words of a rented <see cref="ulong"/>
-    /// array, laid at 64 bits: a run's rows when it spans 2³² rows or more.
+    /// block, laid at 64 bits: a run's rows when it spans 2³² rows or more.
     /// </summary>
-    /// <remarks>The array is the payload's from here, as <see cref="RentedU32"/>'s is.</remarks>
-    internal static PendingPayload RentedU64(ulong[] rented, int length, bool compress) =>
+    /// <remarks>The block is the payload's from here, as <see cref="RentedU32"/>'s is.</remarks>
+    internal static PendingPayload RentedU64(Block<ulong> rented, int length, bool compress) =>
         new PendingPayload(
             (arena, types) =>
             {
@@ -126,13 +112,13 @@ internal sealed class PendingPayload(
             },
             compress,
             (long)length * sizeof(ulong),
-            () => ArrayPool<ulong>.Shared.Return(rented));
+            () => Blocks.Return(rented));
 
     /// <summary>
     /// A payload over the first <paramref name="length"/> words of a rented <see cref="ulong"/>
-    /// array whose values all fit 32 bits, laid at 32 bits.
+    /// block whose values all fit 32 bits, laid at 32 bits.
     /// </summary>
-    internal static PendingPayload NarrowedU32(ulong[] rented, int length, bool compress) =>
+    internal static PendingPayload NarrowedU32(Block<ulong> rented, int length, bool compress) =>
         new PendingPayload(
             (arena, types) =>
             {
@@ -151,15 +137,15 @@ internal sealed class PendingPayload(
             },
             compress,
             (long)length * sizeof(uint),
-            () => ArrayPool<ulong>.Shared.Return(rented));
+            () => Blocks.Return(rented));
 
-    private static int LayU32(CanonicalArena arena, DTypeArena types, uint[] words, int length)
+    private static int LayU32(CanonicalArena arena, DTypeArena types, ReadOnlySpan<uint> words)
     {
         Buffers.VortexBuffer buffer = arena.AllocateUninitialized(
-            length * sizeof(uint), sizeof(uint), out Span<byte> bytes);
-        System.Runtime.InteropServices.MemoryMarshal.AsBytes(words.AsSpan(0, length)).CopyTo(bytes);
+            words.Length * sizeof(uint), sizeof(uint), out Span<byte> bytes);
+        System.Runtime.InteropServices.MemoryMarshal.AsBytes(words).CopyTo(bytes);
         return arena.AddPrimitive(
-            types.Primitive(PType.U32, Nullability.NonNullable), length,
+            types.Primitive(PType.U32, Nullability.NonNullable), words.Length,
             Validity.NonNullable, PType.U32, buffer);
     }
 }

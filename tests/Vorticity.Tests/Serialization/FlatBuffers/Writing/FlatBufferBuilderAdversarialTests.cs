@@ -210,7 +210,7 @@ public sealed class FlatBufferBuilderAdversarialTests
     [Fact]
     public void A_disposed_builder_throws_rather_than_writing_into_a_returned_array()
     {
-        // The scratch array goes back to ArrayPool on Dispose. Writing into it afterwards would
+        // The scratch block goes back to the pool on Dispose. Writing into it afterwards would
         // corrupt whatever rented it next - far worse than an exception.
         var builder = new FlatBufferBuilder();
         builder.StartTable();

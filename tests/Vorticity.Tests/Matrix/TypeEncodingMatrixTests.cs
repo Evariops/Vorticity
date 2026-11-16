@@ -31,7 +31,8 @@ namespace Vorticity.Tests.Matrix;
 
 public sealed class TypeEncodingMatrixTests
 {
-    private const int BatchRows = 3_000;
+    /// <summary>The rows of a write: seven of them a file, whose ends fall inside its blocks.</summary>
+    private const int BatchRows = 400;
 
     /// <summary>Every shape under every hint, <see cref="EncodingHint.Auto"/> included.</summary>
     public static TheoryData<Shape, EncodingHint> Cases()
@@ -107,7 +108,7 @@ public sealed class TypeEncodingMatrixTests
     internal static Task<(string Path, WriteReport Report)> WrittenAsync(Shape shape, EncodingHint hint) =>
         SharedFiles.GetAsync(
             $"{nameof(TypeEncodingMatrixTests)}/{shape}/{hint}",
-            path => WriteAsync(path, MatrixRows.Shared(shape), hint, CancellationToken.None));
+            path => WriteAsync(path, MatrixRows.Shared(shape), hint, CancellationToken.None, MatrixRows.BlockRows));
 
     /// <summary>
     /// The read-back of one distinct file, shared by the cases that write it: no case's cancellation
@@ -482,11 +483,10 @@ public sealed class TypeEncodingMatrixTests
     }
 
     /// <summary>
-    /// Writes the file and its canonical twin where the Rust cross-check reads them, when asked to:
-    /// the first rows only, in blocks of 1 024, so that the reference's scalar-by-scalar comparison
-    /// still crosses blocks and chunks without spending minutes on every list of every row. The twin
-    /// of a shape is written once, by its canonical case: rewritten by every hint's case, a file just
-    /// written was replaced again and again, which Windows refused now and then at the rename.
+    /// Writes the file and its canonical twin where the Rust cross-check reads them, when asked to, in the matrix's
+    /// blocks, so that the reference's scalar-by-scalar comparison crosses blocks. The twin of a shape is written once,
+    /// by its canonical case: rewritten by every hint's case, a file just written was replaced again and again, which
+    /// Windows refused now and then at the rename.
     /// </summary>
     private static async Task ExportAsync(Shape shape, EncodingHint hint, CancellationToken ct)
     {
@@ -496,9 +496,7 @@ public sealed class TypeEncodingMatrixTests
             return;
         }
 
-        AllTypes[] rows = MatrixRows.Build(shape);
-        const int Exported = 4_096;
-        AllTypes[] head = rows.AsSpan(0, Math.Min(Exported, rows.Length)).ToArray();
+        AllTypes[] head = MatrixRows.Shared(shape);
         string name = Path.Combine("matrix", shape.ToString().ToLowerInvariant() + ".vortex");
         string reference = Path.Combine(root, "reference", name);
         string hinted = Path.Combine(root, hint.ToString(), name);
@@ -506,10 +504,10 @@ public sealed class TypeEncodingMatrixTests
         Directory.CreateDirectory(Path.GetDirectoryName(hinted)!);
         if (hint == EncodingHint.Canonical)
         {
-            await WriteAsync(reference, head, EncodingHint.Canonical, ct, blockRows: 1_024);
+            await WriteAsync(reference, head, EncodingHint.Canonical, ct, MatrixRows.BlockRows);
         }
 
-        await WriteAsync(hinted, head, hint, ct, blockRows: 1_024);
+        await WriteAsync(hinted, head, hint, ct, MatrixRows.BlockRows);
     }
 
     internal static string Temp() =>

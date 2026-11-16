@@ -403,10 +403,10 @@ internal sealed class KeyIndexPruner
     private void Kill(BlockMask live)
     {
         int words = live.Words.Length;
-        ulong[] rented = ArrayPool<ulong>.Shared.Rent(words);
+        Block<ulong> rented = Blocks.Rent<ulong>(words);
         try
         {
-            Span<ulong> kept = rented.AsSpan(0, words);
+            Span<ulong> kept = rented;
             Absent(_filter, kept);
             for (int i = 0; i < kept.Length; i++)
             {
@@ -417,7 +417,7 @@ internal sealed class KeyIndexPruner
         }
         finally
         {
-            ArrayPool<ulong>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 
@@ -450,10 +450,10 @@ internal sealed class KeyIndexPruner
         if (expr is LogicalExpr logical)
         {
             Absent(logical.Left, absent);
-            ulong[] rented = ArrayPool<ulong>.Shared.Rent(absent.Length);
+            Block<ulong> rented = Blocks.Rent<ulong>(absent.Length);
             try
             {
-                Span<ulong> right = rented.AsSpan(0, absent.Length);
+                Span<ulong> right = rented;
                 Absent(logical.Right, right);
                 for (int i = 0; i < absent.Length; i++)
                 {
@@ -462,7 +462,7 @@ internal sealed class KeyIndexPruner
             }
             finally
             {
-                ArrayPool<ulong>.Shared.Return(rented);
+                Blocks.Return(rented);
             }
 
             return;
@@ -1080,7 +1080,7 @@ internal sealed class KeyIndexPruner
         private readonly int _unit;
 
         // While a refinement runs: the covered blocks, then each presence set, a bit per block.
-        private ulong[]? _bits;
+        private Block<ulong> _bits;
 
         /// <summary>One segment's matches: per literal, the entries equal to its key.</summary>
         private readonly List<(int Literal, int Low, int High)> _matches = [];
@@ -1319,19 +1319,14 @@ internal sealed class KeyIndexPruner
         /// <summary>Takes the bits a refinement fills, no block claimed.</summary>
         internal void Rent()
         {
-            int length = (1 + Asked.Sets) * _words;
-            _bits = ArrayPool<ulong>.Shared.Rent(length);
-            _bits.AsSpan(0, length).Clear();
+            _bits = Blocks.RentCleared<ulong>((1 + Asked.Sets) * _words);
         }
 
         /// <summary>Gives the bits back once the refinement has killed its blocks.</summary>
         internal void Return()
         {
-            if (_bits is not null)
-            {
-                ArrayPool<ulong>.Shared.Return(_bits);
-                _bits = null;
-            }
+            Blocks.Return(_bits);
+            _bits = default;
         }
 
         /// <summary>
@@ -1628,7 +1623,7 @@ internal sealed class KeyIndexPruner
                 return;
             }
 
-            ulong[] bits = _bits!;
+            Span<ulong> bits = _bits;
             int word = (int)(block >> 6);
             ulong bit = 1UL << (int)(block & 63);
             int[] next = Asked.NextFeed;
@@ -1808,7 +1803,7 @@ internal sealed class KeyIndexPruner
             }
 
             int samples = (entries + SampleStride - 1) / SampleStride;
-            int[] wanted = ArrayPool<int>.Shared.Rent(samples);
+            Block<int> wanted = Blocks.Rent<int>(samples);
             try
             {
                 for (int i = 0; i < samples; i++)
@@ -1855,7 +1850,7 @@ internal sealed class KeyIndexPruner
             }
             finally
             {
-                ArrayPool<int>.Shared.Return(wanted);
+                Blocks.Return(wanted);
             }
         }
 

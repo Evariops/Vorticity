@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using Vorticity.Buffers;
 
 namespace Vorticity.Arrays;
 
@@ -42,10 +43,21 @@ internal sealed class RetainingArena : CanonicalArena
     // the arena is reset.
     private CanonicalOrigin[]? _origins;
 
-    /// <summary>Creates an arena backed by <see cref="Buffers.AlignedBufferPool.Shared"/>.</summary>
+    /// <summary>
+    /// Creates an arena whose blocks are its caller's, counted nowhere: for the tests and the tools. Banned in the library
+    /// (<c>BannedSymbols.txt</c>), whose arenas name the account of the scan they retain chunks for.
+    /// </summary>
     /// <param name="initialCapacity">Hint for the record array's initial size. Must be positive.</param>
     internal RetainingArena(int initialCapacity = 64)
-        : base(initialCapacity)
+        : base(initialCapacity, MemoryAccount.Caller)
+    {
+    }
+
+    /// <summary>Creates an arena backed by <see cref="Buffers.MemoryAccount.Pool"/>, its blocks counted for <paramref name="account"/>.</summary>
+    /// <param name="account">Whom the arena's blocks are counted for: the scan its chunks are retained for.</param>
+    /// <param name="initialCapacity">Hint for the record array's initial size. Must be positive.</param>
+    internal RetainingArena(MemoryAccount account, int initialCapacity = 64)
+        : base(initialCapacity, account)
     {
     }
 

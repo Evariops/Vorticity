@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Types.Variants;
 
 namespace Vorticity;
@@ -486,8 +487,8 @@ public readonly struct Variant : IEquatable<Variant>
             keyBytes = checked(keyBytes + Encoding.UTF8.GetByteCount(key ?? throw new ArgumentException("A variant's key is not null.", nameof(fields))));
         }
 
-        byte[]? rented = null;
-        Span<byte> keys = keyBytes <= 1024 ? stackalloc byte[1024] : (rented = System.Buffers.ArrayPool<byte>.Shared.Rent(keyBytes));
+        Block<byte> rented = default;
+        Span<byte> keys = keyBytes <= 1024 ? stackalloc byte[1024] : (rented = Blocks.Rent<byte>(keyBytes));
         Span<int> starts = stackalloc int[MostScalarFields + 1];
         Span<int> order = stackalloc int[MostScalarFields];
         try
@@ -582,10 +583,7 @@ public readonly struct Variant : IEquatable<Variant>
         }
         finally
         {
-            if (rented is not null)
-            {
-                System.Buffers.ArrayPool<byte>.Shared.Return(rented);
-            }
+            Blocks.Return(rented);
         }
     }
 

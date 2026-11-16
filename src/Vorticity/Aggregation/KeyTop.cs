@@ -3,6 +3,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Types;
 
@@ -218,7 +219,7 @@ internal sealed class KeyTop
         {
             // The order's scratch under the query's memory, as the lane's tables.
             QueryMemory? memory = partition.Memory;
-            int[] groups = QueryArrays.Rent<int>(memory, count, "top of a group by");
+            Block<int> groups = Blocks.Rent<int>(memory, count, "top of a group by");
             try
             {
                 for (int g = 0; g < count; g++)
@@ -226,29 +227,30 @@ internal sealed class KeyTop
                     groups[g] = g;
                 }
 
-                AggregationOutcome outcome = new AggregationOutcome(_query.Plan, partition.Slots, keys, []) { Memory = memory };
-                (int[] best, int kept) = GroupSelection.Order(_query, outcome, _order, groups, count, _keep, CancellationToken.None);
+                AggregationOutcome outcome = new AggregationOutcome(_query.Plan, partition.Slots, keys, default) { Memory = memory };
+                (Block<int> best, int keptCount) = GroupSelection.Order(_query, outcome, _order, groups, count, _keep, CancellationToken.None);
 
                 // In the order they were met, as the groups of a lane are numbered; the worst kept,
                 // numbered again with them, is the frontier no later row past it joins; on an extreme,
                 // its value, read before the groups are numbered again.
-                int worst = best[kept - 1];
-                partition.TopEdge = _extreme && kept == _keep ? Edge(outcome, worst) : null;
+                int worst = best[keptCount - 1];
+                partition.TopEdge = _extreme && keptCount == _keep ? Edge(outcome, worst) : null;
                 if (partition.TopEdge is long edge)
                 {
                     Tighten(edge);
                 }
-                Array.Sort(best, 0, kept);
-                partition.Keep(best.AsSpan(0, kept));
-                partition.TopFrontier = _narrows && kept == _keep ? Array.BinarySearch(best, 0, kept, worst) : -1;
+                Span<int> kept = best.AsSpan(0, keptCount);
+                kept.Sort();
+                partition.Keep(kept);
+                partition.TopFrontier = _narrows && keptCount == _keep ? kept.BinarySearch(worst) : -1;
                 GroupSelection.GiveBack(best);
 
                 // The order the lane kept by is let go, not delivered.
-                memory?.LetGo((long)kept * sizeof(int));
+                memory?.LetGo((long)keptCount * sizeof(int));
             }
             finally
             {
-                QueryArrays.Return(memory, groups);
+                Blocks.Return(memory, groups);
             }
         }
 
@@ -333,7 +335,8 @@ internal static class ValueFrontier
     private static bool Narrow<T>(CanonicalArena arena, int node, int rows, ReadOnlySpan<ulong> selection, long edge, bool descending, Span<ulong> narrowed)
         where T : unmanaged, IBinaryInteger<T>, ISignedNumber<T>
     {
-        T[] scratch = [];
+        // A primitive column is read where it lies: no scratch.
+        ScratchBlock<T> scratch = default;
         ReadOnlySpan<T> values = FixedReader.Values(arena, node, StorageKind.Primitive, ref scratch, out ReadOnlySpan<ulong> validity);
         int words = (rows + 63) >> 6;
         for (int w = 0; w < words; w++)

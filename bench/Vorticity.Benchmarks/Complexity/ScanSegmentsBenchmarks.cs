@@ -43,7 +43,7 @@ public class ScanSegmentsBenchmarks
 
     private const uint SegmentBytes = 64;
 
-    private NativeSegmentOwner _block = null!;
+    private BlockOwner _block = null!;
     private SegmentRequestSet _requests = null!;
     private ScanSegments _library = null!;
     private long _batch;
@@ -52,7 +52,7 @@ public class ScanSegmentsBenchmarks
     [GlobalSetup]
     public void Setup()
     {
-        _block = NativeSegmentOwner.Allocate((int)SegmentBytes, 64);
+        _block = BlockOwner.Allocate((int)SegmentBytes, 64);
         _requests = new SegmentRequestSet(Segments);
         _library = new ScanSegments(lanes: 1);
     }

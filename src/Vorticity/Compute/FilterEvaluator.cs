@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Threading;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -315,10 +314,10 @@ internal sealed class FilterEvaluator
     internal static void Select(RecordBatch batch, VortexExpr filter)
     {
         int rows = batch.RowCount;
-        byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
+        Block<byte> states = Blocks.Rent<byte>(rows);
         try
         {
-            Evaluate(filter, batch.Arena, batch.RootIndex, rows, states.AsSpan(0, rows));
+            Evaluate(filter, batch.Arena, batch.RootIndex, rows, states);
             int words = Math.Max((rows + 63) >> 6, 1);
             VortexBuffer selection = batch.Arena.Allocate(words * sizeof(ulong), sizeof(ulong), out Span<byte> bytes);
             Span<ulong> kept = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, ulong>(bytes);
@@ -326,12 +325,12 @@ internal sealed class FilterEvaluator
             // The states compared 64 at a time, each word of the selection written whole, and counted by its popcount; the
             // one word of a batch of no row, which no compare writes, cleared.
             kept[^1] = 0;
-            int selected = Trilean.ToWords(states.AsSpan(0, rows), Trilean.True, equal: true, kept);
+            int selected = Trilean.ToWords(states, Trilean.True, equal: true, kept);
             batch.Select(selection, selected);
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(states);
+            Blocks.Return(states);
         }
     }
 
@@ -392,7 +391,7 @@ internal sealed class FilterEvaluator
         int evaluated = destination.Length;
         int ruledOut = destination.Count(Trilean.False);
         Observe(first, ruledOut, evaluated);
-        byte[]? right = null;
+        Block<byte> right = default;
         try
         {
             for (int place = 1; place < conjuncts.Length; place++)
@@ -405,7 +404,7 @@ internal sealed class FilterEvaluator
                     break;
                 }
 
-                right ??= ArrayPool<byte>.Shared.Rent(evaluated);
+                Blocks.Ensure(ref right, evaluated);
                 Span<byte> other = right.AsSpan(0, evaluated);
                 if (open <= few)
                 {
@@ -423,10 +422,7 @@ internal sealed class FilterEvaluator
         }
         finally
         {
-            if (right is not null)
-            {
-                ArrayPool<byte>.Shared.Return(right);
-            }
+            Blocks.Return(right);
         }
 
         Reorder();
@@ -579,16 +575,14 @@ internal sealed class FilterEvaluator
                     return;
                 }
 
-                byte[] scratch = ArrayPool<byte>.Shared.Rent(destination.Length);
+                Block<byte> scratch = Blocks.Rent<byte>(destination.Length);
                 try
                 {
-                    ComparisonKernels.In(
-                        arena, column, membership.Literals, destination, scratch.AsSpan(0, destination.Length),
-                        prepared);
+                    ComparisonKernels.In(arena, column, membership.Literals, destination, scratch, prepared);
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(scratch);
+                    Blocks.Return(scratch);
                 }
 
                 return;
@@ -697,14 +691,14 @@ internal sealed class FilterEvaluator
     {
         public void Answer(CanonicalArena arena, int values, Span<byte> answers)
         {
-            byte[] scratch = ArrayPool<byte>.Shared.Rent(Math.Max(answers.Length, 1));
+            Block<byte> scratch = Blocks.Rent<byte>(answers.Length);
             try
             {
-                ComparisonKernels.In(arena, values, literals, answers, scratch.AsSpan(0, answers.Length), prepared);
+                ComparisonKernels.In(arena, values, literals, answers, scratch, prepared);
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(scratch);
+                Blocks.Return(scratch);
             }
         }
     }
@@ -742,10 +736,10 @@ internal sealed class FilterEvaluator
             return;
         }
 
-        byte[] right = ArrayPool<byte>.Shared.Rent(evaluated);
+        Block<byte> right = Blocks.Rent<byte>(evaluated);
         try
         {
-            Span<byte> other = right.AsSpan(0, evaluated);
+            Span<byte> other = right;
             if (open <= few)
             {
                 EvaluateOpen(logical.Right, arena, rootIndex, rows, selection, destination, decided, open, other, depth);
@@ -766,7 +760,7 @@ internal sealed class FilterEvaluator
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(right);
+            Blocks.Return(right);
         }
     }
 
@@ -779,26 +773,26 @@ internal sealed class FilterEvaluator
         VortexExpr filter, CanonicalArena arena, int rootIndex, int rows, ReadOnlySpan<int> selection,
         ReadOnlySpan<byte> states, byte decided, int open, Span<byte> other, int depth)
     {
-        int[] places = ArrayPool<int>.Shared.Rent(open);
-        int[] batchRows = ArrayPool<int>.Shared.Rent(open);
-        byte[] answers = ArrayPool<byte>.Shared.Rent(open);
+        // The places and the batch rows in one block, the answers in another.
+        Block<int> positions = Blocks.Rent<int>(2 * open);
+        Block<byte> answers = Blocks.Rent<byte>(open);
         try
         {
             // The open rows, found in one pass of vector compares: a search from each to the next cost a call a row, 8 % of a
             // question of one service's routes under 5xx (2026-11-08).
-            Span<int> at = places.AsSpan(0, open);
+            Span<int> at = positions.AsSpan(0, open);
             int found = RowIndices.Except(states, decided, at);
             System.Diagnostics.Debug.Assert(found == open, "The states hold as many open rows as counted.");
 
             // Where each open row is in the batch: its place, or the batch row the selection had
             // there when this node already evaluates a selection.
-            Span<int> gathered = batchRows.AsSpan(0, open);
+            Span<int> gathered = positions.AsSpan(open, open);
             for (int n = 0; n < open; n++)
             {
                 gathered[n] = selection.IsEmpty ? at[n] : selection[at[n]];
             }
 
-            Span<byte> answered = answers.AsSpan(0, open);
+            Span<byte> answered = answers;
             Evaluate(filter, arena, rootIndex, rows, gathered, answered, depth + 1);
 
             other.Fill(decided == Trilean.False ? Trilean.True : Trilean.False);
@@ -809,9 +803,8 @@ internal sealed class FilterEvaluator
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(places);
-            ArrayPool<int>.Shared.Return(batchRows);
-            ArrayPool<byte>.Shared.Return(answers);
+            Blocks.Return(positions);
+            Blocks.Return(answers);
         }
     }
 
@@ -877,7 +870,7 @@ internal sealed class FilterEvaluator
             return;
         }
 
-        byte[] rented = ArrayPool<byte>.Shared.Rent(Math.Max(destination.Length * 2, 1));
+        Block<byte> rented = Blocks.Rent<byte>(destination.Length * 2);
         try
         {
             Span<byte> tuple = rented.AsSpan(0, destination.Length);
@@ -898,7 +891,7 @@ internal sealed class FilterEvaluator
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 

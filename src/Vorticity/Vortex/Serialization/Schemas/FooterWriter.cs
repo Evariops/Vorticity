@@ -1,6 +1,6 @@
 using System;
-using System.Buffers;
 using System.Runtime.InteropServices;
+using Vorticity.Buffers;
 using Vorticity.Serialization.FlatBuffers;
 
 namespace Vorticity.Serialization.Schemas;
@@ -75,7 +75,7 @@ internal static class FooterWriter
             return 0;
         }
 
-        int[] rented = ArrayPool<int>.Shared.Rent(idOffsets.Length);
+        Block<int> tables = Blocks.Rent<int>(idOffsets.Length);
         try
         {
             for (int i = 0; i < idOffsets.Length; i++)
@@ -85,14 +85,14 @@ internal static class FooterWriter
                 ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(idOffsets[i], 0, nameof(idOffsets));
                 b.StartTable();
                 b.AddOffset(SchemaFieldIds.SpecId, idOffsets[i]);
-                rented[i] = b.EndTable();
+                tables[i] = b.EndTable();
             }
 
-            return b.CreateOffsetVector(rented.AsSpan(0, idOffsets.Length));
+            return b.CreateOffsetVector(tables);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(rented);
+            Blocks.Return(tables);
         }
     }
 
@@ -103,21 +103,21 @@ internal static class FooterWriter
             return 0;
         }
 
-        int[] rented = ArrayPool<int>.Shared.Rent(schemes.Length);
+        Block<int> tables = Blocks.Rent<int>(schemes.Length);
         try
         {
             for (int i = 0; i < schemes.Length; i++)
             {
                 b.StartTable();
                 b.AddUInt8(SchemaFieldIds.CompressionSpecScheme, (byte)schemes[i]);
-                rented[i] = b.EndTable();
+                tables[i] = b.EndTable();
             }
 
-            return b.CreateOffsetVector(rented.AsSpan(0, schemes.Length));
+            return b.CreateOffsetVector(tables);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(rented);
+            Blocks.Return(tables);
         }
     }
 
@@ -128,21 +128,21 @@ internal static class FooterWriter
             return 0;
         }
 
-        int[] rented = ArrayPool<int>.Shared.Rent(count);
+        Block<int> tables = Blocks.Rent<int>(count);
         try
         {
             for (int i = 0; i < count; i++)
             {
                 // `table EncryptionSpec {}` has no fields at all in v1.
                 b.StartTable();
-                rented[i] = b.EndTable();
+                tables[i] = b.EndTable();
             }
 
-            return b.CreateOffsetVector(rented.AsSpan(0, count));
+            return b.CreateOffsetVector(tables);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(rented);
+            Blocks.Return(tables);
         }
     }
 }

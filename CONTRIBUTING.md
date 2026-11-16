@@ -3,14 +3,20 @@
 ## What a fresh clone can run, and what it needs first
 
 A clone with nothing installed but the SDK that `global.json` asks for can build, test and publish.
-The conformance corpus is committed (876 files and their sidecars), so `dotnet test` runs everything
-on a bare clone with no toolchain beyond .NET.
+The conformance corpus is committed (876 files and their sidecars), so `dotnet test` runs on a bare clone with no
+toolchain beyond .NET.
 
 ```
 dotnet build Vorticity.slnx -c Release
 dotnet test Vorticity.slnx -c Release
+bash tests/runs-alone.sh                             # the tests that measure, which dotnet test leaves out
 dotnet publish tools/vxdump -c Release -r <rid>      # Native AOT, ~5 MB, no trim warning
 ```
+
+The tests that measure what anything beside them would move, allocations, peaks, finalizers, a shared pool, carry the
+trait `Category=RunsAlone`. A plain `dotnet test` leaves them out, so that the suite run between two changes stays the
+unit tests. `tests/runs-alone.sh` runs them, `bench/gate.sh` runs the ratchets among them, and CI runs them on a runner
+of their own. `-p:Measure=true` brings them back into any `dotnet test`.
 
 Two things are deliberately not in the repository, and each one, when missing, fails with the
 command that produces it rather than with a stack trace.
@@ -59,6 +65,7 @@ the row that matches what moved. Doing more is always allowed, doing less is not
 | the compressor, a plan, the blob, the writer, with no intent to change a byte | the same, plus `bench/crosscheck.sh` and `--throughput --write --check` |
 | bytes on disk, deliberately | the same, plus the corpus byte count before and after in the commit message |
 | indexes, keys, the dataset | the suite, `tests/scalar-pass.sh`, `bench/gate.sh` |
+| what a path allocates or holds, a pool, a finalizer | the suite, `tests/runs-alone.sh` |
 | a public signature, a visibility, an XML summary | the suite, a Release build with no warning, and the public surface record updated in the same commit |
 | the bench or the tools | `bench/gate.sh`, and the command you touched, once |
 | documents and comments only | a Release build, so the `<see cref>` links still resolve |
@@ -67,6 +74,7 @@ What each command costs, so you can choose knowingly:
 
 ```
 dotnet test Vorticity.slnx -c Release                                           ~1.5 min
+bash tests/runs-alone.sh                                                           ~1 min
 bash tests/scalar-pass.sh                                                          ~10 s
 bash bench/gate.sh                                                                  ~70 s
 bash bench/crosscheck.sh                                                            ~80 s

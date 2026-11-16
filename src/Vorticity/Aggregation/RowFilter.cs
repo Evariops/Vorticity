@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 
@@ -98,23 +99,20 @@ internal sealed class RowFilter
 internal sealed class FilterMasks
 {
     private readonly FilterPlan _plan;
-    private readonly ulong[][] _true;
-    private readonly ulong[][] _notTrue;
-    private readonly ulong[][] _filters;
+    private readonly ScratchBlock<ulong>[] _true;
+    private readonly ScratchBlock<ulong>[] _notTrue;
+    private readonly ScratchBlock<ulong>[] _filters;
     private readonly int[] _selected;
-    private byte[] _states = [];
+    private ScratchBlock<byte> _states;
     private int _rows;
 
     internal FilterMasks(FilterPlan plan)
     {
         _plan = plan;
-        _true = new ulong[plan.Conditions.Length][];
-        _notTrue = new ulong[plan.Conditions.Length][];
-        _filters = new ulong[plan.Filters.Length][];
+        _true = new ScratchBlock<ulong>[plan.Conditions.Length];
+        _notTrue = new ScratchBlock<ulong>[plan.Conditions.Length];
+        _filters = new ScratchBlock<ulong>[plan.Filters.Length];
         _selected = new int[plan.Filters.Length];
-        Array.Fill(_true, []);
-        Array.Fill(_notTrue, []);
-        Array.Fill(_filters, []);
     }
 
     /// <summary>Evaluates the conditions over a batch and works out each filter's selection.</summary>

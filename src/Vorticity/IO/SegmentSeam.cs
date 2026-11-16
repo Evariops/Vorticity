@@ -133,7 +133,7 @@ internal sealed unsafe class SegmentOwnerMemory : MemoryManager<byte>
             throw new ArgumentOutOfRangeException(nameof(elementIndex));
         }
 
-        // Every segment buffer is native or pinned for its owner's life, so its address is stable.
+        // Every segment buffer is mapped or pinned for its owner's life, so its address is stable.
         return new MemoryHandle(Unsafe.AsPointer(ref Unsafe.Add(ref MemoryMarshal.GetReference(_buffer.Span), elementIndex)));
     }
 

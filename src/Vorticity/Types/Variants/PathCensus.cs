@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
-using Vorticity.Aggregating;
+using Vorticity.Buffers;
 
 namespace Vorticity.Types.Variants;
 
@@ -99,7 +99,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
     /// <summary>Counts a null row.</summary>
     internal void AddNull() => Rows++;
 
-    /// <summary>The spans the paths keep given back to the process's shelf, once nothing reads them: the census's spans are none after.</summary>
+    /// <summary>The spans the paths keep given back to the pool, once nothing reads them: the census's spans are none after.</summary>
     internal void Release() => Root.Release();
 
     /// <summary>
@@ -472,21 +472,30 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         }
 
         /// <summary>The spans of rows values lie in, the open one's end kept beside them: a value within the gap of it touches the end alone.</summary>
+        /// <remarks>
+        /// The spans lie in a block of the pool, given back when the census is (<see cref="Release"/>): an object's census keeps
+        /// spans for each of its paths, 3 bytes a row of a build of the client's log records made new. A list keeps the block's
+        /// bytes alone, a field of 8 bytes in a list a path, and sees them as longs at their whole capacity.
+        /// </remarks>
         private struct SpanList
         {
-            private long[]? _spans;
+            private byte[]? _bytes;
             private int _count;
             private long _openEnd;
+
+            /// <summary>The block the spans lie in, every long its bytes hold.</summary>
+            private readonly Block<long> Spans => Block<long>.Over(_bytes, _bytes is null ? 0 : _bytes.Length / sizeof(long));
 
             /// <summary>The spans, a first and a last row each.</summary>
             internal ReadOnlySpan<long> View()
             {
+                Block<long> spans = Spans;
                 if (_count > 0)
                 {
-                    _spans![(2 * _count) - 1] = _openEnd;
+                    spans[(2 * _count) - 1] = _openEnd;
                 }
 
-                return _spans.AsSpan(0, 2 * _count);
+                return spans.AsSpan(0, 2 * _count);
             }
 
             /// <summary>Notes a value at <paramref name="row"/>, in the open span when it is within <paramref name="gap"/> rows of its end.</summary>
@@ -499,24 +508,23 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                 }
 
                 int last = (2 * _count) - 1;
+                Block<long> spans = Spans;
                 if (_count > 0)
                 {
-                    _spans![last] = _openEnd;
+                    spans[last] = _openEnd;
                 }
 
-                if (_spans is null || last + 2 >= _spans.Length)
+                if (last + 2 >= spans.Length)
                 {
-                    // From the process's shelf, given back when the census is (Release): an object's census keeps spans for
-                    // each of its paths, 3 bytes a row of a build of the client's log records made new.
-                    long[] held = _spans ?? [];
-                    long[] grown = ArrayShelf.Retained.Take<long>(ArrayShelf.Grown(last + 3, held.Length, least: 4), zeroed: false);
-                    held.AsSpan(0, 2 * _count).CopyTo(grown);
-                    ArrayShelf.Retained.Give(held);
-                    _spans = grown;
+                    Block<long> grown = Blocks.Rent<long>(Blocks.Grown(last + 3, spans.Length, least: 4));
+                    spans.AsSpan(0, 2 * _count).CopyTo(grown);
+                    Blocks.Return(spans);
+                    _bytes = grown.Bytes;
+                    spans = Spans;
                 }
 
-                _spans[last + 1] = row;
-                _spans[last + 2] = row;
+                spans[last + 1] = row;
+                spans[last + 2] = row;
                 _openEnd = row;
                 _count++;
             }
@@ -541,15 +549,12 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
             /// <summary>No span, the buffer kept.</summary>
             internal void Clear() => _count = 0;
 
-            /// <summary>The buffer given back to the process's shelf.</summary>
+            /// <summary>The block given back to the pool.</summary>
             internal void Release()
             {
-                if (_spans is { } spans)
-                {
-                    ArrayShelf.Retained.Give(spans);
-                    _spans = null;
-                    _count = 0;
-                }
+                Blocks.ReturnBytes(_bytes);
+                _bytes = null;
+                _count = 0;
             }
         }
 
@@ -577,7 +582,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         /// <summary>Whether a text that cut to <see cref="MaxText"/> was longer, in which case it bounds nothing from above.</summary>
         internal bool MaxTextCut => _maxTextCut;
 
-        /// <summary>The spans of this path and of every key below given back to the process's shelf, and kept no more.</summary>
+        /// <summary>The spans of this path and of every key below given back to the pool, and kept no more.</summary>
         internal void Release()
         {
             _spans.Release();

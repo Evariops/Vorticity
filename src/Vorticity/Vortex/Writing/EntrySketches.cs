@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using Vorticity.Aggregating;
+using Vorticity.Buffers;
 
 namespace Vorticity.Writing;
 
@@ -13,8 +14,8 @@ namespace Vorticity.Writing;
 /// </summary>
 /// <remarks>
 /// A sketch an entry, an object of its own with its stores' arrays, came to 2.3 bytes a row of a consolidation of S1's
-/// logs: hundreds of thousands of them an object, more than a shelf keeps. The table's arrays come from the process's shelf
-/// at lengths of powers of two, which the next object's counts take again, and go back when the counts are done.
+/// logs: hundreds of thousands of them an object. The table's blocks come from the pool at lengths of powers of two, which
+/// the next object's counts take again, and go back when the counts are done.
 /// </remarks>
 internal sealed class EntrySketches(int bits) : IDisposable
 {
@@ -27,24 +28,24 @@ internal sealed class EntrySketches(int bits) : IDisposable
     private readonly int _shift = QuantileSketch.ShiftOf(bits);
 
     // The buckets, a key a slot or Free, and their counts, half the slots full at most; the bits of a slot's hash.
-    private long[] _keys = [];
-    private long[] _counts = [];
+    private Block<long> _keys;
+    private Block<long> _counts;
     private int _held;
     private int _hashBits;
 
     // Each entry's zeros, plus one for an entry a value reached, NaN or not, which has a sketch; 0 for one none reached.
-    private long[] _zeros = [];
+    private Block<long> _zeros;
 
-    // Once sealed, the buckets in order at the front of the arrays, and where each entry's start; the bytes of one encoded.
-    private int[] _starts = [];
-    private byte[] _encoded = [];
+    // Once sealed, the buckets in order at the front of the blocks, and where each entry's start; the bytes of one encoded.
+    private Block<int> _starts;
+    private Block<byte> _encoded;
 
     /// <summary>Adds <paramref name="value"/> to entry <paramref name="entry"/>'s sketch, made at its first value: a NaN is counted in none of its buckets.</summary>
     internal void Add(int entry, double value)
     {
         if (entry >= _zeros.Length)
         {
-            Grow(ref _zeros, ArrayShelf.Grown(entry + 1, _zeros.Length), _zeros.Length, zeroed: true);
+            Blocks.Resize(ref _zeros, Blocks.Grown(entry + 1, _zeros.Length));
         }
 
         ref long zeros = ref _zeros[entry];
@@ -71,11 +72,11 @@ internal sealed class EntrySketches(int bits) : IDisposable
     /// </summary>
     internal void Remap(ReadOnlySpan<int> to)
     {
-        long[] keys = _keys;
-        long[] counts = _counts;
-        _keys = keys.Length == 0 ? [] : Take(keys.Length);
-        _keys.AsSpan().Fill(Free);
-        _counts = counts.Length == 0 ? [] : ArrayShelf.Retained.Take<long>(counts.Length, zeroed: false);
+        Block<long> keys = _keys;
+        Block<long> counts = _counts;
+        _keys = Blocks.Rent<long>(keys.Length);
+        _keys.Fill(Free);
+        _counts = Blocks.Rent<long>(counts.Length);
         _held = 0;
         for (int slot = 0; slot < keys.Length; slot++)
         {
@@ -85,11 +86,11 @@ internal sealed class EntrySketches(int bits) : IDisposable
             }
         }
 
-        Give(keys);
-        Give(counts);
+        Blocks.Return(keys);
+        Blocks.Return(counts);
 
-        long[] zeros = _zeros;
-        _zeros = zeros.Length == 0 ? [] : ArrayShelf.Retained.Take<long>(zeros.Length, zeroed: true);
+        Block<long> zeros = _zeros;
+        _zeros = Blocks.RentCleared<long>(zeros.Length);
         for (int entry = 0; entry < zeros.Length && entry < to.Length; entry++)
         {
             if (zeros[entry] > 0)
@@ -99,34 +100,36 @@ internal sealed class EntrySketches(int bits) : IDisposable
             }
         }
 
-        Give(zeros);
+        Blocks.Return(zeros);
     }
 
     /// <summary>Puts the buckets in order, entry by entry, for <see cref="Encoded"/>: the sketches take no value after.</summary>
     internal void Seal(int entries)
     {
+        Span<long> keys = _keys;
+        Span<long> counts = _counts;
         int held = 0;
-        for (int slot = 0; slot < _keys.Length; slot++)
+        for (int slot = 0; slot < keys.Length; slot++)
         {
-            if (_keys[slot] != Free)
+            if (keys[slot] != Free)
             {
-                _keys[held] = _keys[slot];
-                _counts[held] = _counts[slot];
+                keys[held] = keys[slot];
+                counts[held] = counts[slot];
                 held++;
             }
         }
 
-        _keys.AsSpan(0, held).Sort(_counts.AsSpan(0, held));
-        Give(_starts);
-        _starts = ArrayShelf.Retained.Take<int>(ArrayShelf.Grown(entries + 1, 0), zeroed: false);
+        keys[..held].Sort(counts[..held]);
+        Blocks.Ensure(ref _starts, Blocks.Grown(entries + 1, 0));
+        Span<int> starts = _starts;
         for (int entry = 0, at = 0; entry <= entries; entry++)
         {
-            while (at < held && (int)(_keys[at] >> 32) < entry)
+            while (at < held && (int)(keys[at] >> 32) < entry)
             {
                 at++;
             }
 
-            _starts[entry] = at;
+            starts[entry] = at;
         }
 
         _held = held;
@@ -151,8 +154,7 @@ internal sealed class EntrySketches(int bits) : IDisposable
         int most = (4 + (2 * (to - from))) * QuantileSketch.MaxVarint;
         if (_encoded.Length < most)
         {
-            Give(_encoded);
-            _encoded = ArrayShelf.Retained.Take<byte>(ArrayShelf.Grown(most, _encoded.Length), zeroed: false);
+            Blocks.Ensure(ref _encoded, Blocks.Grown(most, _encoded.Length));
         }
 
         Span<byte> into = _encoded;
@@ -187,11 +189,12 @@ internal sealed class EntrySketches(int bits) : IDisposable
             Rehash(Math.Max(FirstSlots, 2 * _keys.Length));
         }
 
-        int mask = _keys.Length - 1;
+        Span<long> keys = _keys;
+        int mask = keys.Length - 1;
         int slot = (int)(((ulong)key * 0x9E3779B97F4A7C15UL) >> (64 - _hashBits));
         while (true)
         {
-            long held = _keys[slot];
+            long held = keys[slot];
             if (held == key)
             {
                 _counts[slot] += count;
@@ -200,7 +203,7 @@ internal sealed class EntrySketches(int bits) : IDisposable
 
             if (held == Free)
             {
-                _keys[slot] = key;
+                keys[slot] = key;
                 _counts[slot] = count;
                 _held++;
                 return;
@@ -213,11 +216,11 @@ internal sealed class EntrySketches(int bits) : IDisposable
     /// <summary>The table grown to <paramref name="slots"/> slots, a power of two, its buckets placed again.</summary>
     private void Rehash(int slots)
     {
-        long[] keys = _keys;
-        long[] counts = _counts;
-        _keys = Take(slots);
-        _keys.AsSpan().Fill(Free);
-        _counts = ArrayShelf.Retained.Take<long>(slots, zeroed: false);
+        Block<long> keys = _keys;
+        Block<long> counts = _counts;
+        _keys = Blocks.Rent<long>(slots);
+        _keys.Fill(Free);
+        _counts = Blocks.Rent<long>(slots);
         _hashBits = BitOperations.Log2((uint)slots);
         _held = 0;
         for (int slot = 0; slot < keys.Length; slot++)
@@ -228,41 +231,23 @@ internal sealed class EntrySketches(int bits) : IDisposable
             }
         }
 
-        Give(keys);
-        Give(counts);
+        Blocks.Return(keys);
+        Blocks.Return(counts);
     }
 
-    /// <summary>Every array back to the process's shelf, once: the sketches are not used again.</summary>
+    /// <summary>Every block back to the pool, once: the sketches are not used again.</summary>
     public void Dispose()
     {
-        Give(_keys);
-        Give(_counts);
-        Give(_zeros);
-        Give(_starts);
-        Give(_encoded);
-        _keys = [];
-        _counts = [];
-        _zeros = [];
-        _starts = [];
-        _encoded = [];
+        Blocks.Return(_keys);
+        Blocks.Return(_counts);
+        Blocks.Return(_zeros);
+        Blocks.Return(_starts);
+        Blocks.Return(_encoded);
+        _keys = default;
+        _counts = default;
+        _zeros = default;
+        _starts = default;
+        _encoded = default;
         _held = 0;
-    }
-
-    private static long[] Take(int slots) => ArrayShelf.Retained.Take<long>(slots, zeroed: false);
-
-    private static void Grow(ref long[] array, int length, int kept, bool zeroed)
-    {
-        long[] grown = ArrayShelf.Retained.Take<long>(length, zeroed);
-        array.AsSpan(0, kept).CopyTo(grown);
-        Give(array);
-        array = grown;
-    }
-
-    private static void Give<T>(T[] array)
-    {
-        if (array.Length > 0)
-        {
-            ArrayShelf.Retained.Give(array);
-        }
     }
 }

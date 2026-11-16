@@ -1,10 +1,10 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Indexes;
 using Vorticity.Keys;
@@ -101,8 +101,8 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         private readonly GroupWaiter[]? _waiters;
         private readonly ScanSegments _held;
         private readonly RetainedChunks _retained;
-        private readonly long[] _rows;
-        private readonly long[] _sorted;
+        private readonly Block<long> _rows;
+        private readonly Block<long> _sorted;
         private readonly RowSelection _selection;
         private readonly List<RowRange> _splits = [];
         private KeySource? _source;
@@ -114,6 +114,10 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         private bool _positioned;
         private bool _started;
         private bool _disposed;
+
+        // Whom the walk's blocks are counted for: its question's account, or its own, closed once it is disposed.
+        private readonly Buffers.MemoryAccount _account;
+        private readonly Buffers.WorkAccount? _ownAccount;
 
         // The window's batch, current while `_hasCurrent`, and once released kept for the next
         // window to bind again, as the scan underneath keeps its own.
@@ -128,6 +132,15 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             _read = _scan.ReadProjection.RootMask;
             _keep = _scan.Projection.RootMask;
             _token = token;
+            if (_scan.Account is { } account)
+            {
+                _account = account;
+            }
+            else
+            {
+                _ownAccount = new Buffers.WorkAccount(QueryMemoryBudget.Of(_scan.File.Session), "scan");
+                _account = _ownAccount;
+            }
 
             // What the windows read and decode is held across them, and shared with the key source
             // that walks the same column: a window of a sorted key is the next window of the same
@@ -140,10 +153,10 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             _context = Lent();
             _context.ShareRetained(_retained);
 
-            // Rented rather than allocated: a window is the batch size, and two arrays of that many
-            // longs would be the large object heap's from a modest block size up.
-            _rows = ArrayPool<long>.Shared.Rent(owner._window);
-            _sorted = ArrayPool<long>.Shared.Rent(owner._window);
+            // Blocks of the pool rather than arrays of the scan's own: a window is the batch size, and two
+            // arrays of that many longs would be the large object heap's from a modest block size up.
+            _rows = Blocks.Rent<long>(owner._window);
+            _sorted = Blocks.Rent<long>(owner._window);
 
             // The window's rows, sorted, deduplicated and bounded by `Plan` and `CollectAsync`:
             // one selection per scan, refilled per window.
@@ -164,7 +177,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         /// <summary>A context of the process's pool bound to the scan's file, counting into its metrics.</summary>
         private ScanContext Lent()
         {
-            ScanContext context = ScanContexts.Shared.Rent(_scan.File);
+            ScanContext context = ScanContexts.Shared.Rent(_scan.File, _account);
             context.Metrics = _scan.Metrics;
             return context;
         }
@@ -270,8 +283,11 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
 
             _held.Dispose();
             _retained.Dispose();
-            ArrayPool<long>.Shared.Return(_rows);
-            ArrayPool<long>.Shared.Return(_sorted);
+            Blocks.Return(_rows);
+            Blocks.Return(_sorted);
+
+            // Last: what the walk's blocks still hold goes back to its budget; a batch the caller keeps is the caller's.
+            _ownAccount?.Dispose();
         }
 
         /// <summary>Drops the current batch and everything the lanes decoded for it.</summary>
@@ -489,11 +505,11 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         private int Arrange(int root, int count, int distinct)
         {
             ReadOnlySpan<long> window = _rows.AsSpan(0, count);
-            int[] permutation = ArrayPool<int>.Shared.Rent(count);
-            byte[] states = ArrayPool<byte>.Shared.Rent(distinct);
+            Block<int> permutation = Blocks.Rent<int>(count);
+            Block<byte> states = Blocks.Rent<byte>(distinct);
             try
             {
-                Span<byte> verdicts = states.AsSpan(0, distinct);
+                Span<byte> verdicts = states;
                 if (_owner._filter is null)
                 {
                     verdicts.Fill(Trilean.True);
@@ -526,8 +542,8 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             }
             finally
             {
-                ArrayPool<int>.Shared.Return(permutation);
-                ArrayPool<byte>.Shared.Return(states);
+                Blocks.Return(permutation);
+                Blocks.Return(states);
             }
         }
 
@@ -614,7 +630,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
 
             ScanCounters.Served(_scan.Metrics, context.Segments);
             _token.ThrowIfCancellationRequested();
-            int[] parts = ArrayPool<int>.Shared.Rent(to - from);
+            Block<int> parts = Blocks.Rent<int>(to - from);
             try
             {
                 for (int i = from; i < to; i++)
@@ -625,11 +641,11 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                     parts[i - from] = SplitExecution.Execute(context, tree, in _read, _splits[i], selection);
                 }
 
-                return Concat(context, parts.AsSpan(0, to - from));
+                return Concat(context, parts);
             }
             finally
             {
-                ArrayPool<int>.Shared.Return(parts);
+                Blocks.Return(parts);
             }
         }
 

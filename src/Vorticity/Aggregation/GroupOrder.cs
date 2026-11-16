@@ -7,6 +7,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
 
@@ -106,7 +107,7 @@ internal abstract class ColumnOrder
     /// <see cref="GroupSort.TopTied"/> by this order alone: through <see cref="Compare"/>, or in a
     /// loop typed on its values where it holds them.
     /// </summary>
-    internal virtual (int Before, int Tied) TopTied(int[] positions, int count, int keep, QueryMemory? memory, CancellationToken cancellationToken) =>
+    internal virtual (int Before, int Tied) TopTied(Block<int> positions, int count, int keep, QueryMemory? memory, CancellationToken cancellationToken) =>
         GroupSort.TopTied(positions, count, new ChainOrder([this]), keep, memory, cancellationToken);
 
     /// <summary>The order of the positions themselves: the last of a chain, which makes a sort stable.</summary>
@@ -117,9 +118,9 @@ internal abstract class ColumnOrder
     /// position <c>i</c> being group <c>groups[i]</c>, read from the groups' index rather than from a
     /// column of their keys built for it: ascending, the null group last, as the column would order.
     /// </summary>
-    internal static ColumnOrder ForKeys(GroupKeys keys, int[] groups, int component) => new KeyOrder(keys, groups, component);
+    internal static ColumnOrder ForKeys(GroupKeys keys, Block<int> groups, int component) => new KeyOrder(keys, groups, component);
 
-    private sealed class KeyOrder(GroupKeys keys, int[] groups, int component) : ColumnOrder([], descending: false)
+    private sealed class KeyOrder(GroupKeys keys, Block<int> groups, int component) : ColumnOrder([], descending: false)
     {
         protected override int CompareValues(int a, int b) => keys.CompareKeys(groups[a], groups[b], component);
 
@@ -325,16 +326,16 @@ internal static class ValuesOrder
     internal static bool Orders<T>() =>
         typeof(T) == typeof(long) || typeof(T) == typeof(long?) || typeof(T) == typeof(double) || typeof(T) == typeof(double?);
 
-    /// <summary>An array of the pool that holds <paramref name="count"/> values of <typeparamref name="T"/>, then their keys, reserved under the query's <paramref name="memory"/>.</summary>
-    internal static long[] Rent<T>(QueryMemory? memory, int count) =>
-        QueryArrays.Rent<long>(memory, Unsafe.SizeOf<T>() / sizeof(long) * count, "order of a group by");
+    /// <summary>A block of the pool that holds <paramref name="count"/> values of <typeparamref name="T"/>, then their keys, reserved under the query's <paramref name="memory"/>.</summary>
+    internal static Block<long> Rent<T>(QueryMemory? memory, int count) =>
+        Blocks.Rent<long>(memory, Unsafe.SizeOf<T>() / sizeof(long) * count, "order of a group by");
 
     /// <summary>The first <paramref name="count"/> values of <typeparamref name="T"/> that <paramref name="keys"/> holds before they become keys.</summary>
-    internal static Span<T> Values<T>(long[] keys, int count)
+    internal static Span<T> Values<T>(Block<long> keys, int count)
     {
-        // Numbers over numbers: a reference read from the array would be forged from its bits.
+        // Numbers over numbers: a reference read from the block would be forged from its bits.
         Debug.Assert(Orders<T>(), $"{typeof(T)} is not a value an order reads into keys.");
-        return MemoryMarshal.CreateSpan(ref Unsafe.As<long, T>(ref MemoryMarshal.GetArrayDataReference(keys)), count);
+        return count == 0 ? default : MemoryMarshal.CreateSpan(ref Unsafe.As<long, T>(ref keys.GetReference()), count);
     }
 
     /// <summary>
@@ -342,7 +343,7 @@ internal static class ValuesOrder
     /// <paramref name="keys"/> holds (<see cref="Values{T}"/>), each made its key where it lies; the
     /// order takes the array.
     /// </summary>
-    internal static ColumnOrder Over<T>(long[] keys, int count, bool descending, QueryMemory? memory)
+    internal static ColumnOrder Over<T>(Block<long> keys, int count, bool descending, QueryMemory? memory)
     {
         if (typeof(T) == typeof(long))
         {
@@ -416,7 +417,7 @@ internal static class ValuesOrder
     /// Keys ascending: the direction, and a float's NaN, zeros and null, folded into them; a long's
     /// nulls in the bits of the values present, which put them last.
     /// </summary>
-    private sealed class Keys(long[] keys, ulong[] present, QueryMemory? memory) : ColumnOrder(present, descending: false)
+    private sealed class Keys(Block<long> keys, ulong[] present, QueryMemory? memory) : ColumnOrder(present, descending: false)
     {
         /// <summary>Whether every value is present: the keys alone order them.</summary>
         private readonly bool _whole = present.Length == 0;
@@ -442,15 +443,15 @@ internal static class ValuesOrder
             return true;
         }
 
-        internal override (int Before, int Tied) TopTied(int[] positions, int count, int keep, QueryMemory? memory, CancellationToken cancellationToken) =>
+        internal override (int Before, int Tied) TopTied(Block<int> positions, int count, int keep, QueryMemory? memory, CancellationToken cancellationToken) =>
             _whole
                 ? GroupSort.TopTied(positions, count, new KeysOrder(keys), keep, memory, cancellationToken)
                 : base.TopTied(positions, count, keep, memory, cancellationToken);
 
-        internal override void Release() => QueryArrays.Return(memory, keys);
+        internal override void Release() => Blocks.Return(memory, keys);
     }
 
-    private readonly struct KeysOrder(long[] keys) : IComparer<int>
+    private readonly struct KeysOrder(Block<long> keys) : IComparer<int>
     {
         public int Compare(int x, int y) => keys[x].CompareTo(keys[y]);
     }
@@ -460,7 +461,7 @@ internal static class ValuesOrder
 /// Positions by the keys of their groups, read from the groups' index component after component,
 /// position <c>i</c> being group <c>groups[i]</c>: the tie-break of an order, a call per component.
 /// </summary>
-internal readonly struct IndexOrder(GroupKeys keys, int[] groups, int components) : IComparer<int>
+internal readonly struct IndexOrder(GroupKeys keys, Block<int> groups, int components) : IComparer<int>
 {
     public int Compare(int x, int y)
     {
@@ -509,7 +510,7 @@ internal static class GroupSort
     /// wanted; returns how many it holds in order. Its scratch is reserved under the query's
     /// <paramref name="memory"/>, when it has one.
     /// </summary>
-    internal static int Sort(int[] positions, int count, ChainOrder order, long keep, QueryMemory? memory, CancellationToken cancellationToken)
+    internal static int Sort(Block<int> positions, int count, ChainOrder order, long keep, QueryMemory? memory, CancellationToken cancellationToken)
     {
         if (keep < count)
         {
@@ -528,11 +529,11 @@ internal static class GroupSort
             positions.AsSpan(start, Math.Min(Part, count - start)).Sort(order);
         }
 
-        int[] merged = QueryArrays.Rent<int>(memory, count, "order of a group by");
+        Block<int> merged = Blocks.Rent<int>(memory, count, "order of a group by");
         try
         {
-            int[] from = positions;
-            int[] into = merged;
+            Block<int> from = positions;
+            Block<int> into = merged;
             for (int width = Part; width < count; width *= 2)
             {
                 for (int start = 0; start < count; start += 2 * width)
@@ -546,7 +547,7 @@ internal static class GroupSort
                 (from, into) = (into, from);
             }
 
-            if (!ReferenceEquals(from, positions))
+            if (!from.SameBytes(positions))
             {
                 from.AsSpan(0, count).CopyTo(positions);
             }
@@ -555,7 +556,7 @@ internal static class GroupSort
         }
         finally
         {
-            QueryArrays.Return(memory, merged);
+            Blocks.Return(memory, merged);
         }
     }
 
@@ -571,25 +572,26 @@ internal static class GroupSort
     /// A million groups by their count, their ties by their key, took 226 ms through comparisons, nearly every one a tie
     /// of counts broken by the keys' index through two calls; four passes over them here.
     /// </remarks>
-    internal static bool TrySortByKeys(int[] positions, int count, ColumnOrder[] orders, QueryMemory? memory, CancellationToken cancellationToken)
+    internal static bool TrySortByKeys(Block<int> positions, int count, ColumnOrder[] orders, QueryMemory? memory, CancellationToken cancellationToken)
     {
         if (count < 2)
         {
             return true;
         }
 
-        if (!QueryArrays.TryRent(memory, count, out ulong[] keys))
+        if (!Blocks.TryRent(memory, count, out Block<ulong> keys))
         {
             return false;
         }
 
-        if (!QueryArrays.TryRent(memory, count, out int[] spare))
+        if (!Blocks.TryRent(memory, count, out Block<int> spare))
         {
-            QueryArrays.Return(memory, keys);
+            Blocks.Return(memory, keys);
             return false;
         }
-        int[] from = positions;
-        int[] into = spare;
+
+        Block<int> from = positions;
+        Block<int> into = spare;
         Span<int> histogram = stackalloc int[256];
         try
         {
@@ -645,7 +647,7 @@ internal static class GroupSort
                 }
             }
 
-            if (!ReferenceEquals(from, positions))
+            if (!from.SameBytes(positions))
             {
                 from.AsSpan(0, count).CopyTo(positions);
             }
@@ -654,12 +656,12 @@ internal static class GroupSort
         }
         finally
         {
-            QueryArrays.Return(memory, keys);
-            QueryArrays.Return(memory, spare);
+            Blocks.Return(memory, keys);
+            Blocks.Return(memory, spare);
         }
     }
 
-    private static void Merge(int[] from, int start, int middle, int end, int[] into, ChainOrder order)
+    private static void Merge(Block<int> from, int start, int middle, int end, Block<int> into, ChainOrder order)
     {
         int left = start;
         int right = middle;
@@ -681,7 +683,7 @@ internal static class GroupSort
         // A heap of the kept positions whose top is the last of them in order.
         int size = 0;
         int capacity = Math.Min(keep, positions.Length);
-        int[] heap = QueryArrays.Rent<int>(memory, capacity, "top of a group by");
+        Block<int> heap = Blocks.Rent<int>(memory, capacity, "top of a group by");
         try
         {
             for (int i = 0; i < positions.Length; i++)
@@ -710,7 +712,7 @@ internal static class GroupSort
         }
         finally
         {
-            QueryArrays.Return(memory, heap);
+            Blocks.Return(memory, heap);
         }
     }
 
@@ -720,7 +722,7 @@ internal static class GroupSort
     /// itself included, each part unordered; the size of each. What the order cannot rank is left to
     /// a tie-break, run on the ties alone.
     /// </summary>
-    internal static (int Before, int Tied) TopTied<TOrder>(int[] positions, int count, TOrder order, int keep, QueryMemory? memory, CancellationToken cancellationToken)
+    internal static (int Before, int Tied) TopTied<TOrder>(Block<int> positions, int count, TOrder order, int keep, QueryMemory? memory, CancellationToken cancellationToken)
         where TOrder : IComparer<int>
     {
         // A heap of the kept positions whose top is the last of them, and the positions left out
@@ -728,7 +730,7 @@ internal static class GroupSort
         // and the top that leaves still ties with the new one, it joins them; when the new top is
         // before it, they are all out.
         int size = 0;
-        int[] heap = QueryArrays.Rent<int>(memory, keep, "top of a group by");
+        Block<int> heap = Blocks.Rent<int>(memory, keep, "top of a group by");
         try
         {
             int ties = 0;
@@ -796,11 +798,11 @@ internal static class GroupSort
         }
         finally
         {
-            QueryArrays.Return(memory, heap);
+            Blocks.Return(memory, heap);
         }
     }
 
-    private static void Up<TOrder>(int[] heap, int at, TOrder order)
+    private static void Up<TOrder>(Block<int> heap, int at, TOrder order)
         where TOrder : IComparer<int>
     {
         while (at > 0)
@@ -816,7 +818,7 @@ internal static class GroupSort
         }
     }
 
-    private static void Down<TOrder>(int[] heap, int size, TOrder order)
+    private static void Down<TOrder>(Block<int> heap, int size, TOrder order)
         where TOrder : IComparer<int>
     {
         int at = 0;

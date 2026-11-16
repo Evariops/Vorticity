@@ -83,10 +83,10 @@ internal sealed class CorpusBlobs
         // reinterprets `Footer.segment_specs` and `Layout.segments` in place and tests the element
         // address, so a span starting at an arbitrary offset of a managed array is refused. This is
         // what `file-open` does with the tail buffer; here a pinned copy stands in for it.
-        using PinnedArraySegmentOwner footerOwner =
-            PinnedArraySegmentOwner.CopyOf(Slice(bytes, footerSpec), 64);
-        using PinnedArraySegmentOwner layoutOwner =
-            PinnedArraySegmentOwner.CopyOf(Slice(bytes, layoutSpec), 64);
+        using BlockOwner footerOwner =
+            BlockOwner.CopyOf(Slice(bytes, footerSpec), 64);
+        using BlockOwner layoutOwner =
+            BlockOwner.CopyOf(Slice(bytes, layoutSpec), 64);
 
         int footerBudget = VortexLimits.MaxFlatBufferTables;
         FooterView footer = FooterView.Root(footerOwner.Buffer.Span, ref footerBudget);

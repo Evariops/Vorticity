@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Writing;
 
@@ -127,7 +128,8 @@ internal sealed class RawKeys<TWord> : GroupKeys
     where TWord : unmanaged, IEquatable<TWord>
 {
     private readonly RawLayout _layout;
-    private TWord[] _keys = new TWord[16];
+    // The first blocks made at their size, as the first arrays were: given back, they join the pool.
+    private Block<TWord> _keys = Buffers.Blocks.Allocate<TWord>(16);
 
     // The groups by open addressing, the slots a power of two at most half full, zero for none: a
     // group's number plus one in the low bits, as many as the slots' (a table at most half full numbers
@@ -135,25 +137,25 @@ internal sealed class RawKeys<TWord> : GroupKeys
     // group's word is read. One array: a new word reads and writes one line of it, where a byte of tag
     // and a group number in two arrays made two lines, the numbers written at random chasing the tags
     // out of the cache.
-    private uint[] _slots = new uint[32];
+    private Block<uint> _slots = Buffers.Blocks.Allocate<uint>(32);
 
     // A batch's words, built a column at a time in two halves.
-    private ulong[] _low = [];
-    private ulong[] _high = [];
-    private TWord[] _words = [];
+    private ScratchBlock<ulong> _low;
+    private ScratchBlock<ulong> _high;
+    private ScratchBlock<TWord> _words;
 
-    // Every word a group of its own, no slot looked up (Appending); the shelf a sub-table's arrays come from (ForTable).
+    // Every word a group of its own, no slot looked up (Appending); the account a sub-table's arrays come from (ForTable).
     private readonly bool _appending;
-    private readonly ArrayShelf? _shelf;
+    private readonly TableArrays _account;
 
-    internal RawKeys(RawLayout layout, bool appending = false, ArrayShelf? shelf = null)
+    internal RawKeys(RawLayout layout, bool appending = false, TableArrays? account = null)
     {
         _layout = layout;
         _appending = appending;
-        _shelf = shelf;
+        _account = account ?? TableArrays.Uncounted;
     }
 
-    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         ReadOnlySpan<TWord> words = Words(arena, nodes, rows);
         bool hasLast = false;
@@ -199,11 +201,11 @@ internal sealed class RawKeys<TWord> : GroupKeys
     /// </summary>
     private void Touch(ReadOnlySpan<TWord> words)
     {
-        uint[] slots = _slots;
+        Block<uint> slots = _slots;
         int bits = System.Numerics.BitOperations.Log2((uint)slots.Length);
         uint mask = (uint)slots.Length - 1;
-        ref uint first = ref MemoryMarshal.GetArrayDataReference(slots);
-        ref TWord keys = ref MemoryMarshal.GetArrayDataReference(_keys);
+        ref uint first = ref slots.GetReference();
+        ref TWord keys = ref _keys.GetReference();
         uint sink = 0;
         foreach (TWord word in words)
         {
@@ -222,7 +224,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
 
     internal override GroupKeys Fresh() => new RawKeys<TWord>(_layout);
 
-    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => new RawKeys<TWord>(_layout, shelf: shelf);
+    internal override GroupKeys ForPart(TableArrays? account = null) => new RawKeys<TWord>(_layout, account: account);
 
     /// <summary>The words of the groups, the slots that find them, and a batch's words.</summary>
     internal override long Footprint =>
@@ -243,24 +245,27 @@ internal sealed class RawKeys<TWord> : GroupKeys
         }
     }
 
-    /// <summary>A sub-table of the core: its arrays from the query's shelf.</summary>
-    internal override GroupKeys ForTable(ArrayShelf shelf) => new RawKeys<TWord>(_layout, shelf: shelf);
+    /// <summary>A sub-table of the core: its arrays from the query's account.</summary>
+    internal override GroupKeys ForTable(TableArrays account) => new RawKeys<TWord>(_layout, account: account);
 
     internal override void Release()
     {
-        _shelf?.Give(_keys);
-        _shelf?.Give(_slots);
-        _keys = [];
-        _slots = new uint[32];
+        _account.Return(_keys);
+        _account.Return(_slots);
+        _keys = default;
+        _slots = Buffers.Blocks.Allocate<uint>(32);
         Count = 0;
+        Scratch.Return(ref _low);
+        Scratch.Return(ref _high);
+        Scratch.Return(ref _words);
     }
 
-    /// <summary>The words' array grown to <paramref name="length"/>: from the shelf of a sub-table, the old one given back.</summary>
+    /// <summary>The words' array grown to <paramref name="length"/>: from the account of a sub-table, the old one given back.</summary>
     private void Grow(int length)
     {
-        TWord[] grown = _shelf is null ? new TWord[length] : _shelf.Take<TWord>(length, zeroed: false);
+        Block<TWord> grown = _account.Rent<TWord>(length, zeroed: false);
         _keys.AsSpan(0, Count).CopyTo(grown);
-        _shelf?.Give(_keys);
+        _account.Return(_keys);
         _keys = grown;
     }
 
@@ -296,7 +301,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
 
     internal override bool Spills => !_appending;
 
-    internal override GroupKeys ForSpill(ArrayShelf? shelf) => new RawKeys<TWord>(_layout, shelf: shelf);
+    internal override GroupKeys ForSpill(TableArrays? account) => new RawKeys<TWord>(_layout, account: account);
 
     /// <summary>The words' array, and the slots, at most half full.</summary>
     internal override long GrowthFor(int more) =>
@@ -331,7 +336,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
     /// <summary>The word: a tuple's nulls are bits of it, so no group is apart from the others.</summary>
     internal override int EntryBytes => Unsafe.SizeOf<TWord>();
 
-    internal override GroupKeys? Appending(ArrayShelf? shelf) => new RawKeys<TWord>(_layout, appending: true, shelf: shelf);
+    internal override GroupKeys? Appending(TableArrays? account) => new RawKeys<TWord>(_layout, appending: true, account: account);
 
     internal override void Scatter(ReadOnlySpan<ulong> records, LaneCore lane) => EntryKeys.Scatter<TWord>(_keys.AsSpan(0, Count), -1, records, lane);
 
@@ -413,7 +418,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
 
         // A slot's hash bits first: a new word, nine rows in ten of 1.8M pairs, finds its free slot
         // without reading a word, where it read the word of each group its chain passed.
-        uint[] slots = _slots;
+        Block<uint> slots = _slots;
         int bits = System.Numerics.BitOperations.Log2((uint)slots.Length);
         uint mask = (uint)slots.Length - 1;
         uint top = (uint)(Hash(word) >> 32);
@@ -458,15 +463,15 @@ internal sealed class RawKeys<TWord> : GroupKeys
     /// <summary>The slots at <paramref name="length"/>, every group placed again from its word.</summary>
     private void Rehash(int length)
     {
-        uint[] slots = _slots;
+        Block<uint> slots = _slots;
         if (slots.Length == length)
         {
-            slots.AsSpan().Clear();
+            slots.Clear();
         }
         else
         {
-            slots = _shelf is null ? new uint[length] : _shelf.Take<uint>(length, zeroed: true);
-            _shelf?.Give(_slots);
+            slots = _account.Rent<uint>(length, zeroed: true);
+            _account.Return(_slots);
         }
 
         int bits = System.Numerics.BitOperations.Log2((uint)length);
@@ -736,7 +741,7 @@ internal sealed class RawKeys<TWord> : GroupKeys
     private void AppendValues<TValue>(int component, bool nullable, FixedStore leaf, ReadOnlySpan<int> groups)
         where TValue : unmanaged
     {
-        TWord[] keys = _keys;
+        Block<TWord> keys = _keys;
         int shift = _layout.Shifts[component];
         int nullBit = nullable ? _layout.NullBits[component] : -1;
         if (nullBit < 0)

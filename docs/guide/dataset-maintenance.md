@@ -221,7 +221,17 @@ stopped: 1 compactions, 13 objects, lag 0
 Each turn refreshes the handle (one round trip), plans, and runs the job that is due. When nothing
 is due, the first loop (`Loop` 0) sums the counts of the deepest level's new runs of objects into
 rollups (`RollUpAsync`, see [Rollups](datasets.md#how-an-aggregation-is-answered)), reading no row,
-then sleeps for `Idle`, a minute by default, and asks again. `BytesPerSecond` paces the loop:
+deletes what its jobs replaced once no retained version reads it, runs a vacuum when one is due,
+then sleeps for `Idle`, a minute by default, and asks again.
+
+The first loop runs the vacuum itself: within its first four idle turns, at a point drawn at random so
+that loops started together spread, then every half of the retention window, a quarter either way.
+The vacuum is what deletes the commit objects of the versions past the window, which no job can tell
+apart, and what a crash or a closed handle left behind. `CompactionSchedule.VacuumEvery` sets another
+period, and `Timeout.InfiniteTimeSpan` turns it off for an application that runs its own. A vacuum
+that fails ends its activity, `vortex.dataset.vacuum`, as an error, and the loop goes on. No loop
+vacuums a dataset on a store under retention locks, where a vacuum asks for a head per object to read
+its lock: run it yourself there. `BytesPerSecond` paces the loop:
 after a job it waits until what the job wrote fits the rate, which leaves the store's bandwidth to
 the writers. The task ends with `OperationCanceledException` once the token is cancelled, or with
 the exception a job raised, which the host catches before starting the loop again.
@@ -320,10 +330,42 @@ Measured above with `CountingObjectStore`, on a dataset of one object after comp
 one. On a store where a request costs 30 ms, it is what a job takes. See
 [object-store.md](object-store.md).
 
+## Sizing a maintainer
+
+A process that runs a dataset's jobs, a maintainer, needs three things sized: its memory, its scratch
+and its window.
+
+| | what the library does with it | how to size it |
+|---|---|---|
+| The container's memory limit | The process's limit is seven eighths of the collector's heap, three quarters of the container's limit, or of the limit the host sets outside a container ([threads.md](threads.md#the-memory-limit)). The jobs' budget is half of it by default (`VortexSessionOptions.JobMemoryBudget`), and a job's blocks never pass it: a job that would is given up and a job of half as many inputs runs instead. | 2 Gi at least. Under 2 Gi the jobs' budget is 672 MiB, which holds the merge of a few dozen inputs of metric records. Give the maintainer a process of its own, not one that answers questions too. |
+| The scratch | A job that reads 16 MiB or more from an object store copies its inputs there, one request each, and reads them from the disk. It refuses to start without room for them. A dataset on the local disk reads its inputs in place. | A `ScratchDirectory` on an `emptyDir` on disk, or on a volume, never on memory (`medium: Memory`). A few times the bytes of the largest job, which is an object's size (`DatasetLayout.ObjectBytes`, 1 GiB by default) for a piece of a consolidation. Set a `ScratchBudget` at the volume's limit less what else writes there. |
+| The retention window | A job deletes what it replaced once the version before it is past the window. A job, or a piece of a consolidation, reads no more than it can commit in a quarter of the window. | At least four times the longest piece at the rate your jobs run, and no longer than your readers need: 15 minutes for a pipeline whose readers refresh often. |
+
+```csharp
+await using VortexSession session = VortexSession.Create(options =>
+{
+    options.ScratchDirectory = "/scratch";                         // an emptyDir on disk
+    options.ScratchBudget = new ScratchBudget(16L << 30);          // the volume's limit, less what else writes there
+});
+```
+
+What a maintainer catches up with is measured with `--micro backlog` (`bench/README.md`) on one core of an Apple M4 Pro. Under a limit of 2 GiB, a backlog of metric records of 25 GB, 4.2 billion rows in 13 000 appended objects, compacts in tier merges of 77 objects and 25 million rows each, 54 seconds a merge, about 460 000 rows a second, and the process's resident memory never passes 1.24 GiB. A backlog of 194 MB compacts in 50 seconds under 2 GiB, 48 under 4 GiB and 35 under 8 GiB. A job runs on one core, so the rate, not the memory, decides how large a backlog a maintainer catches up with, and how long its longest piece takes against the window.
+
+The vacuum stays for what the jobs do not delete: the objects of a job that died before its commit,
+what a closed handle left noted, and the commit objects. A maintainer's loop runs it every half
+window. If you compact by hand rather than with the loop, run it at a low pace, every few hours.
+What the bucket holds at rest follows the window first: commit objects are kept for the versions
+inside it, so a window of 15 minutes keeps a quarter of what a window of an hour keeps, and the
+loop's vacuum lets it pass the window by half a window at most.
+
 ## Watch out
 
-* Compaction and vacuum are separate. Compaction leaves the replaced objects in place for the
-  versions that still name them, and vacuum removes them once those versions are past the window.
+* A compaction deletes what it replaced, once its commit is made and the version before it is past
+  the window, as a vacuum would judge it: the handle notes the objects its jobs took out, and deletes
+  them at the end of a later job, or when `CompactAsync` finds nothing due. The outputs of a job whose
+  commit applied nothing go at once, since no version names them. What a handle closed or a process
+  ended leaves noted, and what a crash leaves behind, the vacuum still removes: the loop runs it, and
+  a host that compacts by hand runs it for those at a low pace.
 * A reader that outlives the window loses its objects. Vacuum works from the store's latest version,
   not from yours, so a handle still on an old version may find an object missing.
   `ObjectNotFoundException` then tells it to refresh.
@@ -340,7 +382,8 @@ one. On a store where a request costs 30 ms, it is what a job takes. See
   Vacuum deletes only what no retained version references, and deletes nothing until every retained
   version has been walked.
 * A dataset that receives small appends every few seconds has its own page, [frequent-appends.md](frequent-appends.md): what such appends cost, where the merges run and what its readers pay for a lag.
-* A job holds what the session's jobs' budget gives it (`VortexSessionOptions.JobMemoryBudget`). It prices an input by the rows it holds and a row by what the handle's last merge measured it to weigh, and reads its inputs in batches sized to what the budget leaves. `CompactionResult.MemoryReserved` says what it reserved. `ConsolidateAsync` merges a partition whose level 0 the budget cannot hold at once by size class first, a pass at a time, so a long backlog of small objects costs several jobs rather than one that outgrows the process.
+* A compaction over an object store needs a scratch on a disk. A job that reads 16 MiB or more copies its inputs there, one request each, and reads them from the disk rather than hold them. A dataset on the local disk reads its inputs where they lie. Give a maintainer in a container a `ScratchDirectory` on an `emptyDir` on disk or a volume, of a few times the bytes of its largest job: a job refuses to start without room for its inputs there, under the session's `ScratchBudget`, or a tenth of the directory's free space kept.
+* A job's blocks never pass the session's jobs' budget (`VortexSessionOptions.JobMemoryBudget`), half the process's limit by default, its container's when it runs in one. A job that would pass it is given up, nothing committed, and `CompactAsync` runs a job of half as many inputs in its place; only a job of the fewest inputs it may take throws `VortexMemoryException`, which says what it held. The handle prices its next job by what its last one measured, an input and the writer. `CompactionResult.MemoryReserved` says what a job's blocks held at most. `ConsolidateAsync` merges a partition whose level 0 the budget cannot hold at once by size class first, a pass at a time, so a long backlog of small objects costs several jobs rather than one that outgrows the process.
 * A vacuum's work grows with the versions the window keeps. It opens the commit object of each retained version and reads the pages that version wrote, so a dataset that commits every two seconds under a window of an hour gives each vacuum some 1,800 versions to read. Its memory does not grow with them, since it holds the pages of one version at a time. A shorter window, or fewer and larger commits, makes it cheaper.
 * A writer that dies mid-commit on `FileObjectStore` leaves no commit: the store shows a commit only
   once it is whole. On a file system that can neither rename exclusively nor link files, where the

@@ -1,6 +1,6 @@
 using System;
-using System.Buffers;
 using System.Numerics;
+using Vorticity.Buffers;
 
 namespace Vorticity.Writing;
 
@@ -68,7 +68,7 @@ internal sealed class PcoBinTrainer : IDisposable
     // The latents' least and span, and the bin of each value of the span when it is looked up.
     private ulong _minimum;
     private ulong _span;
-    private ushort[]? _lookup;
+    private Block<ushort> _lookup;
 
     /// <summary>The bins trained, in the order of their lower bounds; zero for no latents.</summary>
     internal int Count { get; private set; }
@@ -171,7 +171,7 @@ internal sealed class PcoBinTrainer : IDisposable
         }
 
         int span = (int)_span + 1;
-        ushort[] lookup = ArrayPool<ushort>.Shared.Rent(span);
+        Block<ushort> lookup = Blocks.Rent<ushort>(span);
         ReadOnlySpan<ulong> lowers = Lowers;
         for (int bin = 0; bin < Count; bin++)
         {
@@ -190,11 +190,8 @@ internal sealed class PcoBinTrainer : IDisposable
 
     private void ReleaseLookup()
     {
-        if (_lookup is { } lookup)
-        {
-            _lookup = null;
-            ArrayPool<ushort>.Shared.Return(lookup);
-        }
+        Blocks.Return(_lookup);
+        _lookup = default;
     }
 
     /// <summary>
@@ -218,9 +215,9 @@ internal sealed class PcoBinTrainer : IDisposable
     /// <summary>The bin holding <paramref name="latent"/>: the last whose lower bound it reaches.</summary>
     internal int BinOf(ulong latent)
     {
-        if (_lookup is { } lookup)
+        if (!_lookup.IsEmpty)
         {
-            return lookup[(int)(latent - _minimum)];
+            return _lookup[(int)(latent - _minimum)];
         }
 
         ReadOnlySpan<ulong> lowers = Lowers;
@@ -275,11 +272,10 @@ internal sealed class PcoBinTrainer : IDisposable
     /// <summary>The latents' runs by counting each value of their span, in order.</summary>
     private void CountRuns(ReadOnlySpan<ulong> latents, ulong minimum, int span)
     {
-        int[] counts = ArrayPool<int>.Shared.Rent(span);
+        Block<int> counts = Blocks.RentCleared<int>(span);
         try
         {
-            Span<int> tally = counts.AsSpan(0, span);
-            tally.Clear();
+            Span<int> tally = counts;
             foreach (ulong latent in latents)
             {
                 tally[(int)(latent - minimum)]++;
@@ -295,7 +291,7 @@ internal sealed class PcoBinTrainer : IDisposable
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(counts);
+            Blocks.Return(counts);
         }
     }
 

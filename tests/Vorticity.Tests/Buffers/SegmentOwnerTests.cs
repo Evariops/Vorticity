@@ -7,23 +7,7 @@ using Xunit;
 
 namespace Vorticity.Tests.Buffers;
 
-/// <summary>
-/// Runs alone, because two of its tests read a PROCESS-GLOBAL counter.
-/// </summary>
-/// <remarks>
-/// <see cref="NativeSegmentOwner.FinalizedBlockCount"/> counts every block finalized anywhere in
-/// the process, so "the counter did not move" is only a statement about THIS test while no other
-/// test class is dropping blocks on the floor in parallel. Without this it fails roughly one run
-/// in eight, off by exactly however many blocks a neighbouring class happened to abandon - a
-/// flake that reads as a finalizer bug and is not one.
-/// </remarks>
-[CollectionDefinition(nameof(FinalizerCollection), DisableParallelization = true)]
-public sealed class FinalizerCollection
-{
-}
-
-[Collection(nameof(FinalizerCollection))]
-[Trait("Category", "RunsAlone")]
+/// <summary>The reference counting of an owner, and what becomes of a block its holder drops.</summary>
 public sealed class SegmentOwnerTests
 {
     /// <summary>A no-memory owner that observes exactly when <c>FreeCore</c> runs.</summary>
@@ -178,7 +162,7 @@ public sealed class SegmentOwnerTests
         Assert.Equal(0, owner.RefCount);
     }
 
-    // ---- NativeSegmentOwner -------------------------------------------------------------
+    // ---- BlockOwner -------------------------------------------------------------
 
     [Theory]
     [InlineData(1)]
@@ -188,15 +172,17 @@ public sealed class SegmentOwnerTests
     [InlineData(16)]
     [InlineData(32)]
     [InlineData(64)]
-    public void Native_allocation_honours_every_legal_alignment(int alignment)
+    public void A_block_honours_every_legal_alignment(int alignment)
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(100, alignment);
+        // The pinned object heap only promises pointer-size alignment, so anything above 8 comes
+        // from over-allocating and offsetting inside the array.
+        using BlockOwner owner = BlockOwner.Allocate(101, alignment);
 
-        Assert.Equal(100, owner.Length);
-        Assert.Equal(100, owner.Buffer.Length);
+        Assert.Equal(101, owner.Length);
+        Assert.Equal(101, owner.Buffer.Length);
         Assert.Equal(alignment, owner.Buffer.Alignment);
         Assert.True(owner.Buffer.IsAligned);
-        Assert.Equal(100, owner.WritableSpan.Length);
+        Assert.Equal(101, owner.WritableSpan.Length);
     }
 
     [Theory]
@@ -205,20 +191,20 @@ public sealed class SegmentOwnerTests
     [InlineData(128)]
     [InlineData(-64)]
     [InlineData(int.MinValue)]
-    public void Native_allocation_rejects_an_alignment_outside_the_cap(int alignment) =>
+    public void A_block_refuses_an_alignment_outside_the_cap(int alignment) =>
         // Alignment is capped at 64 bytes.
-        Assert.Throws<VortexFormatException>(() => NativeSegmentOwner.Allocate(64, alignment));
+        Assert.Throws<VortexFormatException>(() => BlockOwner.Allocate(64, alignment));
 
     [Theory]
     [InlineData(-1)]
     [InlineData(int.MinValue)]
-    public void Native_allocation_rejects_a_negative_length(int length) =>
-        Assert.Throws<VortexFormatException>(() => NativeSegmentOwner.Allocate(length, 64));
+    public void A_block_refuses_a_negative_length(int length) =>
+        Assert.Throws<VortexFormatException>(() => BlockOwner.Allocate(length, 64));
 
     [Fact]
-    public void A_zero_length_native_segment_is_legal()
+    public void A_zero_length_block_is_legal()
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(0, 64);
+        using BlockOwner owner = BlockOwner.Allocate(0, 64);
 
         Assert.True(owner.Buffer.IsEmpty);
         Assert.True(owner.WritableSpan.IsEmpty);
@@ -230,7 +216,7 @@ public sealed class SegmentOwnerTests
     [Fact]
     public void Writes_through_WritableSpan_are_visible_through_Buffer()
     {
-        using NativeSegmentOwner owner = NativeSegmentOwner.Allocate(8, 8);
+        using BlockOwner owner = BlockOwner.Allocate(8, 8);
         owner.WritableSpan.Fill(0xAB);
 
         for (int i = 0; i < 8; i++)
@@ -240,9 +226,9 @@ public sealed class SegmentOwnerTests
     }
 
     [Fact]
-    public void Native_double_dispose_is_safe()
+    public void A_block_disposed_twice_is_safe()
     {
-        NativeSegmentOwner owner = NativeSegmentOwner.Allocate(4096, 64);
+        BlockOwner owner = BlockOwner.Allocate(4096, 64);
 
         owner.Dispose();
         owner.Dispose();
@@ -255,15 +241,15 @@ public sealed class SegmentOwnerTests
     [Fact]
     public void A_second_dispose_of_a_pooled_block_throws()
     {
-        AlignedBufferPool pool = new AlignedBufferPool();
-        NativeSegmentOwner owner = pool.Rent(4096, 64);
+        BlockPool pool = new BlockPool();
+        BlockOwner owner = pool.Rent(TestAccount.Shared, 4096, 64);
         owner.Dispose();
 
         // The next rent hands out this same owner, where a late Dispose would release the new
         // rental: it is refused while the block is still parked.
         Assert.Throws<ObjectDisposedException>(owner.Dispose);
 
-        NativeSegmentOwner again = pool.Rent(4096, 64);
+        BlockOwner again = pool.Rent(TestAccount.Shared, 4096, 64);
         Assert.Same(owner, again);
         Assert.Equal(1, again.RefCount);
         again.Dispose();
@@ -271,9 +257,9 @@ public sealed class SegmentOwnerTests
     }
 
     [Fact]
-    public void Native_memory_is_only_freed_once_even_when_release_races_dispose()
+    public void A_block_is_only_dropped_once_even_when_release_races_dispose()
     {
-        NativeSegmentOwner owner = NativeSegmentOwner.Allocate(4096, 64);
+        BlockOwner owner = BlockOwner.Allocate(4096, 64);
         owner.Retain();
 
         // Real threads, not Parallel.For: two iterations can be inlined onto one thread, and a
@@ -294,71 +280,14 @@ public sealed class SegmentOwnerTests
     }
 
     [Fact]
-    public void The_finalizer_frees_a_block_that_was_dropped_on_the_floor()
+    public void A_block_dropped_on_the_floor_is_taken_by_the_collector()
     {
-        const int Dropped = 16;
-
-        Collect();
-        long before = NativeSegmentOwner.FinalizedBlockCount;
-
-        WeakReference weak = DropBlocks(Dropped);
+        // A block is a managed array: dropped neither disposed nor released, it is garbage like any other object, and the
+        // collector takes it back with its owner. There is no finalizer to wait for.
+        WeakReference weak = DropBlocks(16);
         Collect();
 
         Assert.False(weak.IsAlive);
-        Assert.True(
-            NativeSegmentOwner.FinalizedBlockCount >= before + Dropped,
-            $"expected at least {Dropped} finalized blocks, saw " +
-            $"{NativeSegmentOwner.FinalizedBlockCount - before}");
-    }
-
-    [Fact]
-    public void A_disposed_block_is_never_finalized()
-    {
-        Collect();
-        long before = NativeSegmentOwner.FinalizedBlockCount;
-
-        DisposeBlocks(16);
-        Collect();
-
-        // Dispose suppresses finalization, so the backstop counter must not move. This is what
-        // makes the previous test's counter meaningful rather than incidental.
-        Assert.Equal(before, NativeSegmentOwner.FinalizedBlockCount);
-    }
-
-    // ---- PinnedArraySegmentOwner --------------------------------------------------------
-
-    [Theory]
-    [InlineData(1)]
-    [InlineData(2)]
-    [InlineData(4)]
-    [InlineData(8)]
-    [InlineData(16)]
-    [InlineData(32)]
-    [InlineData(64)]
-    public void A_pinned_array_is_over_allocated_until_it_is_aligned(int alignment)
-    {
-        // The pinned object heap only promises pointer-size alignment, so anything above 8 has
-        // to come from over-allocating and offsetting inside the array.
-        using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.Allocate(101, alignment);
-
-        Assert.Equal(101, owner.Length);
-        Assert.Equal(alignment, owner.Buffer.Alignment);
-        Assert.True(owner.Buffer.IsAligned);
-        Assert.Equal(101, owner.WritableSpan.Length);
-    }
-
-    // No zero is asserted: a pinned array arrives zeroed but a native block and a recycled pool
-    // block do not, and all three are interchangeable behind SegmentOwner.
-    [Fact]
-    public void A_pinned_segment_round_trips_the_bytes_written_through_it()
-    {
-        using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.Allocate(32, 64);
-
-        owner.WritableSpan.Fill(0x5A);
-        owner.WritableSpan[0] = 0x3C;
-
-        Assert.Equal(0x3C, owner.Buffer.Span[0]);
-        Assert.Equal(0x5A, owner.Buffer.Span[31]);
     }
 
     [Fact]
@@ -370,7 +299,7 @@ public sealed class SegmentOwnerTests
             source[i] = (byte)(i * 3);
         }
 
-        using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf(source, 64);
+        using BlockOwner owner = BlockOwner.CopyOf(source, 64);
 
         Assert.Equal(37, owner.Length);
         Assert.True(owner.Buffer.IsAligned);
@@ -380,74 +309,31 @@ public sealed class SegmentOwnerTests
     [Fact]
     public void CopyOf_accepts_an_empty_source()
     {
-        using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf(default, 64);
+        using BlockOwner owner = BlockOwner.CopyOf(default, 64);
 
         Assert.True(owner.Buffer.IsEmpty);
         Assert.True(owner.Buffer.IsAligned);
     }
 
-    [Theory]
-    [InlineData(0)]
-    [InlineData(3)]
-    [InlineData(128)]
-    [InlineData(-1)]
-    public void Pinned_allocation_rejects_an_alignment_outside_the_cap(int alignment) =>
-        Assert.Throws<VortexFormatException>(() => PinnedArraySegmentOwner.Allocate(16, alignment));
-
     [Fact]
-    public void Pinned_allocation_rejects_a_negative_length() =>
-        Assert.Throws<VortexFormatException>(() => PinnedArraySegmentOwner.Allocate(-1, 64));
-
-    [Fact]
-    public void Pinned_allocation_rejects_a_length_that_cannot_be_padded_into_one_array() =>
+    public void A_block_refuses_a_length_that_cannot_be_padded_into_one_array() =>
         // length + alignment - 1 must not silently wrap to a small positive int.
-        Assert.Throws<VortexFormatException>(() => PinnedArraySegmentOwner.Allocate(int.MaxValue, 64));
-
-    [Fact]
-    public void Pinned_double_dispose_is_safe()
-    {
-        PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.Allocate(64, 64);
-
-        owner.Dispose();
-        owner.Dispose();
-
-        Assert.Throws<ObjectDisposedException>(() => owner.WritableSpan.Length);
-        Assert.Throws<ObjectDisposedException>(() => owner.Retain());
-    }
+        Assert.Throws<VortexFormatException>(() => BlockOwner.Allocate(int.MaxValue, 64));
 
     // ---- helpers -------------------------------------------------------------------------
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static WeakReference DropBlocks(int count)
     {
-        NativeSegmentOwner? last = null;
+        BlockOwner? last = null;
         for (int i = 0; i < count; i++)
         {
-            // Deliberately neither disposed nor released: this is the leak the finalizer exists
-            // to catch.
-            last = NativeSegmentOwner.Allocate(4096, 64);
+            // Deliberately neither disposed nor released.
+            last = BlockOwner.Allocate(4096, 64);
         }
 
         return new WeakReference(last);
     }
 
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void DisposeBlocks(int count)
-    {
-        for (int i = 0; i < count; i++)
-        {
-            NativeSegmentOwner.Allocate(4096, 64).Dispose();
-        }
-    }
-
-    private static void Collect()
-    {
-        for (int i = 0; i < 3; i++)
-        {
-            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-            GC.WaitForPendingFinalizers();
-        }
-
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
-    }
+    private static void Collect() => GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
 }

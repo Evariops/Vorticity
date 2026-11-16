@@ -31,14 +31,16 @@ public sealed partial class DatasetJobBudgetTests
     }
 
     /// <summary>
-    /// Two days of documents consolidated on four lanes, under the process's jobs' share and under a budget that holds
-    /// nothing: the census of their paths on one lane, the ranges one at a time, every row the same.
+    /// Two days of documents consolidated on four lanes, under the process's jobs' share and under a budget of 24 MiB, which
+    /// holds a lane but not four: the census of their paths and the ranges on fewer lanes, every row the same. A budget
+    /// that holds nothing refuses a job's first block, which then fails, where it used to run past it.
     /// </summary>
     [Fact]
     public async Task AConsolidationOfVariantsTheJobsBudgetRefusesCountsAndWritesOnOneLaneAndHoldsTheSameRows()
     {
         List<Doc> wide = await ConsolidateAsync(jobs: null);
-        List<Doc> narrow = await ConsolidateAsync(jobs: new QueryMemoryBudget(1));
+        List<Doc> narrow = await ConsolidateAsync(jobs: new QueryMemoryBudget(24L << 20));
+        await Assert.ThrowsAsync<VortexMemoryException>(async () => await ConsolidateAsync(jobs: new QueryMemoryBudget(1)));
         Assert.Equal(wide.Count, narrow.Count);
         for (int i = 0; i < wide.Count; i++)
         {

@@ -43,7 +43,8 @@ internal static class DatasetMaintenance
         if (compacted is not null)
         {
             Console.WriteLine($"compacted: version {compacted.Version}, {compacted.Outcome}, level {compacted.FromLevel} to {compacted.ToLevel}, " +
-                $"{compacted.ObjectsIn} objects in and {compacted.ObjectsOut} out, {compacted.BytesIn} bytes in and {compacted.BytesOut} out, {compacted.Rows} rows");
+                $"{compacted.ObjectsIn} objects in and {compacted.ObjectsOut} out, {compacted.BytesIn} bytes in and {compacted.BytesOut} out, {compacted.Rows} rows, " +
+                $"its blocks {compacted.MemoryReserved} bytes at most, {compacted.ScratchBytes} bytes on the scratch");
         }
 
         Console.WriteLine($"  cost: {Cost(store)}");
@@ -95,6 +96,7 @@ internal static class DatasetMaintenance
         Console.WriteLine($"{Appends} more appends: {dataset.ObjectCount} objects, lag {dataset.Lag}");
         int ran = 0;
         using CancellationTokenSource stop = new CancellationTokenSource();
+        // The loop also vacuums, every half of the retention window; VacuumEvery sets another period, or turns it off.
         Task loop = dataset.RunCompactionAsync(
             new CompactionSchedule { Idle = TimeSpan.FromMilliseconds(10), Progress = new Counting(() => Interlocked.Increment(ref ran)) },
             stop.Token);

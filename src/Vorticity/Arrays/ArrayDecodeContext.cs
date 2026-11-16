@@ -628,9 +628,9 @@ internal sealed class ArrayDecodeContext
     {
         if (_scan.NodeCheckScope is uint segment
             && ScanContext.NodeCheckKey(segment, node.Index) is long key
-            && _scan.TryNodeTable(key, tag, out long[] array, out int length, out facts))
+            && _scan.TryNodeTable(key, tag, out Block<long> kept, out facts))
         {
-            table = array.AsSpan(0, length);
+            table = kept;
             return true;
         }
 
@@ -640,20 +640,19 @@ internal sealed class ArrayDecodeContext
     }
 
     /// <summary>
-    /// Keeps <paramref name="table"/>, built from <paramref name="node"/> and rented from
-    /// <see cref="System.Buffers.ArrayPool{T}.Shared"/>, for this scan's next ranges of the node.
+    /// Keeps <paramref name="table"/>, built from <paramref name="node"/> in a block of the pool, for this scan's next
+    /// ranges of the node.
     /// </summary>
     /// <param name="node">The node it was built from.</param>
     /// <param name="tag">What it was built against.</param>
     /// <param name="facts">What the decoder keeps with it.</param>
     /// <param name="table">The table, which the context owns when this returns true.</param>
-    /// <param name="length">Its entries.</param>
     /// <returns>Whether it is kept; when not, outside a reader-opened scope, the caller still owns it.</returns>
-    internal bool KeepTable(in ArrayNode node, long tag, long facts, long[] table, int length)
+    internal bool KeepTable(in ArrayNode node, long tag, long facts, Block<long> table)
     {
         if (_scan.NodeCheckScope is uint segment && ScanContext.NodeCheckKey(segment, node.Index) is long key)
         {
-            _scan.KeepNodeTable(key, tag, facts, table, length);
+            _scan.KeepNodeTable(key, tag, facts, table);
             return true;
         }
 

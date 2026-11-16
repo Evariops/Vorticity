@@ -9,7 +9,7 @@ namespace Vorticity.Parquet.Reading;
 /// <remarks>
 /// A pool of its own, apart from the core's, whose contexts are bound to Vortex files. Its bound is
 /// what a few wide scans hold at once, three contexts a field of a hundred: a context past it is
-/// disposed, and the kept ones go after a collection once no scan has taken one over a minute.
+/// disposed, and after each collection of the oldest generation, those no scan took since the one before go.
 /// </remarks>
 internal static class DetachedContexts
 {

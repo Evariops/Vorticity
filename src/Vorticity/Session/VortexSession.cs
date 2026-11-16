@@ -16,7 +16,6 @@ namespace Vorticity;
 /// <remarks>Set inside <see cref="VortexSession.Create"/>; frozen when it returns.</remarks>
 public sealed class VortexSessionOptions
 {
-    private MemoryPool<byte> _memoryPool = AlignedMemoryPool.Shared;
     private SegmentCache? _segmentCache;
     private SynopsisCache? _synopsisCache;
     private int _maxConcurrentReads = 128;
@@ -35,23 +34,6 @@ public sealed class VortexSessionOptions
 
     internal VortexSessionOptions()
     {
-    }
-
-    /// <summary>
-    /// Where the batches, the builders' buffers and the segments read through a caller's
-    /// <see cref="ISegmentSource"/> come from. The engine decodes into 64-byte aligned native blocks,
-    /// so an <see cref="AlignedMemoryPool"/> serves it directly; another pool serves the builders and
-    /// the owned batches, and the engine falls back to <see cref="AlignedMemoryPool.Shared"/>.
-    /// </summary>
-    /// <remarks>
-    /// The sources of this library read segments into <see cref="AlignedMemoryPool.Shared"/>, whatever
-    /// the session's pool: a file opened from a path, a <see cref="FileSegmentSource"/>. A mapped file
-    /// or bytes in memory are read where they lie.
-    /// </remarks>
-    public MemoryPool<byte> MemoryPool
-    {
-        get => _memoryPool;
-        set => _memoryPool = Set(value ?? throw new ArgumentNullException(nameof(value)));
     }
 
     /// <summary>
@@ -197,12 +179,13 @@ public sealed class VortexSessionOptions
     }
 
     /// <summary>
-    /// The memory the session's queries share with those of every session given the same budget: the
-    /// tables of their groups and the parts their merges build. Null, the default, shares the process's,
-    /// a margin under the memory the process may use.
+    /// The memory the session's queries and scans share with those of every session given the same budget:
+    /// the segments a scan reads and the batches it builds until it ends, the tables of a query's groups and
+    /// the parts its merges build. Null, the default, shares the process's, a margin under the memory the
+    /// process may use.
     /// </summary>
     /// <remarks>
-    /// A query that needs more than its budget grants fails with a <see cref="VortexMemoryException"/>.
+    /// A query or a scan that needs more than its budget grants fails with a <see cref="VortexMemoryException"/>.
     /// The budget is the host's: disposing the session leaves it to the others.
     /// </remarks>
     public QueryMemoryBudget? MemoryBudget
@@ -212,14 +195,16 @@ public sealed class VortexSessionOptions
     }
 
     /// <summary>
-    /// The memory the session's background jobs share with those of every session given the same budget: the merges of a
-    /// dataset's levels, its consolidations, the stores of its appends. Null, the default, shares the process's jobs' share,
-    /// half the memory the process may use; the queries' <see cref="MemoryBudget"/> has the rest.
+    /// The memory the session's background jobs and writers share with those of every session given the same budget: the
+    /// merges of a dataset's levels, its consolidations, the stores of its appends, a file writer's blocks. Null, the
+    /// default, gives them half the process's limit, carved out of it and read again as the limit moves: what the rest of
+    /// the process holds does not take a job's room. A host that wants another share sets one here.
     /// </summary>
     /// <remarks>
-    /// A job holds what it reserves and waits for room rather than failing: a consolidation runs fewer ranges of its keys at
-    /// once, an append writes its largest part sooner. Only what a job cannot do in less fails it, with a
-    /// <see cref="VortexMemoryException"/>. The budget is the host's: disposing the session leaves it to the others.
+    /// A compaction job's blocks never pass the budget: a job that would is given up, its blocks given back, and the next
+    /// plan takes fewer inputs. A consolidation runs fewer ranges of its keys at once, an append writes its largest part
+    /// sooner. Only what a job cannot do in less fails it, with a <see cref="VortexMemoryException"/>. The budget is the
+    /// host's: disposing the session leaves it to the others.
     /// </remarks>
     public QueryMemoryBudget? JobMemoryBudget
     {
@@ -315,9 +300,6 @@ public sealed class VortexSessionOptions
         { CapacityBytes: 0 } => null,
         { } given => given,
     };
-
-    /// <summary>The engine's pool: the aligned pool's own, or the shared one.</summary>
-    internal AlignedBufferPool EnginePool => _memoryPool is AlignedMemoryPool aligned ? aligned.Inner : AlignedBufferPool.Shared;
 
     internal void Freeze()
     {
@@ -454,7 +436,7 @@ public sealed class VortexSession : IAsyncDisposable
     {
         ArgumentNullException.ThrowIfNull(source);
         ThrowIfDisposed();
-        ISegmentReader reader = source as ISegmentReader ?? new SourceReader(source, ownsSource: true, Options.EnginePool);
+        ISegmentReader reader = source as ISegmentReader ?? new SourceReader(source, ownsSource: true);
         return OpenReaderAsync(reader, source.GetType().Name, options, cancellationToken);
     }
 
@@ -540,7 +522,7 @@ public sealed class VortexSession : IAsyncDisposable
         await using (reader.ConfigureAwait(false))
         {
             long length = await reader.GetLengthAsync(cancellationToken).ConfigureAwait(false);
-            byte[] buffer = ArrayPool<byte>.Shared.Rent((int)Math.Min(Chunk, Math.Max(length, 1)));
+            Block<byte> buffer = Blocks.Rent<byte>((int)Math.Min(Chunk, Math.Max(length, 1)));
             try
             {
                 for (long at = 0; at < length; at += Chunk)
@@ -562,7 +544,7 @@ public sealed class VortexSession : IAsyncDisposable
             finally
             {
                 System.Security.Cryptography.CryptographicOperations.ZeroMemory(buffer);
-                ArrayPool<byte>.Shared.Return(buffer);
+                Blocks.Return(buffer);
             }
         }
     }
@@ -802,11 +784,6 @@ public sealed class VortexSession : IAsyncDisposable
 
         Mappings?.Clear();
         Keys?.Dispose();
-        if (Options.MemoryPool is AlignedMemoryPool aligned && !ReferenceEquals(aligned, AlignedMemoryPool.Shared))
-        {
-            aligned.Dispose();
-        }
-
         ReadGate.Dispose();
         await Options.ObjectStores.DisposeAsync().ConfigureAwait(false);
     }

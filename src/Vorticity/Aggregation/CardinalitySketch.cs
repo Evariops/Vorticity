@@ -3,6 +3,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Numerics;
+using Vorticity.Buffers;
 using Vorticity.Serialization;
 
 namespace Vorticity.Aggregating;
@@ -310,11 +311,11 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
             return;
         }
 
-        // The set registers in the order of their indexes, through a rented array of every rank.
-        byte[] rented = ArrayPool<byte>.Shared.Rent(Registers);
+        // The set registers in the order of their indexes, through a block of every rank.
+        Block<byte> rented = Blocks.Rent<byte>(Registers);
         try
         {
-            Span<byte> ranks = rented.AsSpan(0, Registers);
+            Span<byte> ranks = rented;
             Ranks(ranks);
             Span<byte> sparse = into.GetSpan(1 + Varint.MaxLength64 + (set * (Varint.MaxLength32 + 1)));
             sparse[0] = SparseForm;
@@ -334,7 +335,7 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 

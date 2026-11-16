@@ -111,10 +111,9 @@ public sealed record DatasetOptions
     public int SummaryColumnLimit { get; init; } = ColumnSummary.DefaultLimit;
 
     /// <summary>
-    /// How many data objects stay open between scans at most; 4 096 by default, past which
-    /// <see cref="MaxOpenObjectBytes"/> bounds them first. A data object is immutable, so an open
-    /// handle never goes stale: this only bounds the parsed footers held, an open holding no
-    /// descriptor of its own.
+    /// How many data objects stay open between scans at most; 4 096 by default. A data object is immutable, so an open
+    /// handle never goes stale: this only bounds the parsed footers held, an open holding no descriptor of its own, and
+    /// the process takes back what they weigh above <see cref="OpenObjectFloorBytes"/> when its work needs the room.
     /// </summary>
     /// <remarks>
     /// A scan in key order holds open at once every object whose keys interleave with another's,
@@ -124,26 +123,34 @@ public sealed record DatasetOptions
     public int MaxOpenObjects { get; init; } = 4_096;
 
     /// <summary>
-    /// The bytes the data objects open between scans keep, least recently used first out; 64 MiB by
-    /// default. An open object keeps the tail its open read and its footer parsed, some 30 KB for an
-    /// object of a thousand rows and 90 KB for one of a few thousand, which a question that opens it
-    /// again parses again: two to three times what the same question costs on the objects kept open.
-    /// </summary>
-    public long MaxOpenObjectBytes { get; init; } = 64L << 20;
-
-    /// <summary>
-    /// The bytes of tree pages read from the store that the handle keeps from one version it reads to
-    /// the next, least recently used first out; 32 MiB by default, and 0 keeps none past the version
-    /// that read them. A version names every page its commit did not rewrite by the reference an
-    /// earlier version gave it, so a refresh or a commit asks the store again only for the pages that
-    /// changed, as long as the pages it walks fit here.
+    /// What the data objects open between scans weigh that the handle keeps whatever the process asks; 8 MiB by default.
+    /// The objects kept open have no budget of their own: the handle keeps those its questions opened, and gives back the
+    /// least recently used past this floor when the process's work needs the room, or once no question used them of late.
+    /// An open object keeps the tail its open read and its footer parsed, some 30 KB for an object of a thousand rows and
+    /// 90 KB for one of a few thousand, which a question that opens it again parses again: two to three times what the
+    /// same question costs on the objects kept open.
     /// </summary>
     /// <remarks>
-    /// Beside them the handle keeps, whatever this says, what the reads opening the last sixteen
-    /// versions it read or wrote brought back of their pages: the pages those versions wrote, which a
-    /// later version names until a commit rewrites them.
+    /// Forty handles over sets of five datasets each kept 41 MiB in all after two turns of the slow timer, about a mebibyte a
+    /// handle, under their floors: the questions asked then made no request to the store, where the first round made 160
+    /// (<c>vortex-queries --micro reader</c>, 2026-11-16).
     /// </remarks>
-    public long PageCacheBytes { get; init; } = 32L << 20;
+    public long OpenObjectFloorBytes { get; init; } = 8L << 20;
+
+    /// <summary>
+    /// The bytes of tree pages read from the store that the handle keeps from one version it reads to the next whatever
+    /// the process asks; 4 MiB by default. The pages have no budget of their own: the handle keeps those its walks read,
+    /// and gives back the least recently used past this floor when the process's work needs the room, or once no walk
+    /// read them of late. A version names every page its commit did not rewrite by the reference an earlier version gave
+    /// it, so a refresh or a commit asks the store again only for the pages that changed, as long as the handle still
+    /// keeps the pages it walks.
+    /// </summary>
+    /// <remarks>
+    /// Beside them the handle keeps, whatever this says, what the reads opening the last sixteen versions it read or
+    /// wrote brought back of their pages: the pages those versions wrote, which a later version names until a commit
+    /// rewrites them. The floors of forty handles kept what their questions read, as <see cref="OpenObjectFloorBytes"/> says.
+    /// </remarks>
+    public long PageFloorBytes { get; init; } = 4L << 20;
 
     /// <summary>
     /// The most bytes a commit that takes level 0 past its ceiling compacts before it returns; 0, the
@@ -234,10 +241,11 @@ public sealed record DatasetOptions
     internal int ChunkBytes { get; init; } = 1 << 20;
 
     /// <summary>
-    /// The bytes a handle keeps of the granules its filters kept rows in (<see cref="PredicatePages"/>), least used first
-    /// out: 16 MiB by default; 0 keeps none, the session's synopsis cache, when it has one, then holding them alone.
+    /// Whether a handle keeps the granules its filters kept rows in (<see cref="PredicatePages"/>), what it holds above a
+    /// floor given back when the process asks: true by default; false keeps none, the session's synopsis cache, when it
+    /// has one, then holding them alone.
     /// </summary>
-    internal long PredicatePageBytes { get; init; } = PredicatePages.DefaultBudget;
+    internal bool KeepsPredicatePages { get; init; } = true;
 
     /// <summary>
     /// The rows after which the chunks of every column of an object end together, at least: 2^22 by default. A lane's

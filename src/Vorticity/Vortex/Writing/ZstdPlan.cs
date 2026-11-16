@@ -8,10 +8,10 @@ using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
 
 using ManagedCompressions.Zstd;
-using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
+using Vorticity.Buffers;
 using Vorticity.Types;
 
 namespace Vorticity.Writing;
@@ -41,9 +41,9 @@ internal readonly partial struct ZstdPlan
     /// <summary>Bytes past a stream's end that <see cref="LayViews"/> writes over.</summary>
     private const int StreamSlack = 48;
 
-    private readonly int[] _frames;
+    private readonly Block<int> _frames;
 
-    private ZstdPlan(byte[] data, int[] frames, int frameCount)
+    private ZstdPlan(Block<byte> data, Block<int> frames, int frameCount)
     {
         Data = data;
         _frames = frames;
@@ -52,10 +52,10 @@ internal readonly partial struct ZstdPlan
 
     /// <summary>
     /// The compressed frames back to back, exactly as they go into the buffers; the rest is slack in
-    /// a pooled rental sized for the worst case. Ownership of the array passes to whoever writes the
+    /// a pooled block sized for the worst case. Ownership of the block passes to whoever writes the
     /// plan, or back to the pool through <see cref="Release"/>; after either, it must not be read.
     /// </summary>
-    internal byte[] Data { get; }
+    internal Block<byte> Data { get; }
 
     /// <summary>Bytes of <see cref="Data"/> that are frames: what the column costs.</summary>
     internal int CompressedLength => _frames[((FrameCount - 1) * FrameFields)];
@@ -74,12 +74,12 @@ internal readonly partial struct ZstdPlan
     /// <summary>Hands <see cref="Data"/> and the frame table back to the pool, for a plan nobody wrote.</summary>
     internal void Release()
     {
-        WorkArrays.Return(Data);
+        Blocks.Return(Data);
         ReleaseFrames();
     }
 
     /// <summary>Hands the frame table back to the pool, once the frames are laid out and described.</summary>
-    internal void ReleaseFrames() => WorkArrays.Return(_frames);
+    internal void ReleaseFrames() => Blocks.Return(_frames);
 
     /// <summary>
     /// Compresses a <c>VarBinView</c> or <c>Primitive</c> node's valid values, returning
@@ -122,7 +122,7 @@ internal readonly partial struct ZstdPlan
         bool anyGain)
     {
         int rows = node.Length;
-        int blocks = Blocks(rows, frameRows);
+        int blocks = FrameBlocks(rows, frameRows);
         Ahead? ahead = workspace?.Ahead is null ? null : AheadOf(arena, in node, workspace, frameRows);
         if (ahead is { Ready: true })
         {
@@ -139,8 +139,8 @@ internal readonly partial struct ZstdPlan
         // Rented, not allocated: pricing zstd needs two buffers the size of the column for a
         // candidate that may lose. A block's frame ends where its values end, so the stream is cut
         // as it is laid out: its end and its values, per block, go into the frame table.
-        byte[] stream = WorkArrays.Rent<byte>((int)streamBytes + StreamSlack);
-        int[] frames = WorkArrays.Rent<int>(blocks * FrameFields);
+        Block<byte> stream = Blocks.Rent<byte>((int)streamBytes + StreamSlack);
+        Block<int> frames = Blocks.Rent<int>(blocks * FrameFields);
         try
         {
             LayViews(arena, node, stream, frames, blocks, frameRows);
@@ -150,7 +150,7 @@ internal readonly partial struct ZstdPlan
         }
         finally
         {
-            WorkArrays.Return(stream);
+            Blocks.Return(stream);
         }
     }
 
@@ -612,7 +612,7 @@ internal readonly partial struct ZstdPlan
 
         int rows = node.Length;
         ReadOnlySpan<byte> source = node.Values.Span;
-        int blocks = Blocks(rows, frameRows);
+        int blocks = FrameBlocks(rows, frameRows);
         Ahead? ahead = workspace?.Ahead is null ? null : AheadOf(arena, in node, workspace, frameRows);
         if (ahead is { Ready: true })
         {
@@ -624,8 +624,8 @@ internal readonly partial struct ZstdPlan
         // compressed as it stands. It has to be sliced at `rows * width`: the arena's block can be
         // longer than the rows this node owns, and a longer input is a different frame.
         bool allValid = node.Validity.IsAllValid;
-        byte[]? stream = allValid ? null : WorkArrays.Rent<byte>((rows * width) + CompactSlack);
-        int[] frames = WorkArrays.Rent<int>(Math.Max(blocks, 1) * FrameFields);
+        Block<byte> stream = allValid ? default : Blocks.Rent<byte>((rows * width) + CompactSlack);
+        Block<int> frames = Blocks.Rent<int>(Math.Max(blocks, 1) * FrameFields);
         try
         {
             int valueCount = 0;
@@ -633,7 +633,7 @@ internal readonly partial struct ZstdPlan
             for (int block = 0; block < blocks; block++)
             {
                 int end = (int)Math.Min((long)(block + 1) * frameRows, rows);
-                if (stream is null)
+                if (allValid)
                 {
                     valueCount = end;
                 }
@@ -657,12 +657,12 @@ internal readonly partial struct ZstdPlan
             ahead?.Note((long)valueCount * width, blocks);
             if (valueCount == 0)
             {
-                WorkArrays.Return(frames);
+                Blocks.Return(frames);
                 return null;
             }
 
             int streamBytes = valueCount * width;
-            ReadOnlySpan<byte> input = stream is null
+            ReadOnlySpan<byte> input = allValid
                 ? source[..streamBytes]
                 : stream.AsSpan(0, streamBytes);
 
@@ -675,15 +675,12 @@ internal readonly partial struct ZstdPlan
         }
         finally
         {
-            if (stream is not null)
-            {
-                WorkArrays.Return(stream);
-            }
+            Blocks.Return(stream);
         }
     }
 
     /// <summary>How many blocks of <paramref name="frameRows"/> rows <paramref name="rows"/> make.</summary>
-    private static int Blocks(int rows, int frameRows) =>
+    private static int FrameBlocks(int rows, int frameRows) =>
         rows == 0 ? 0 : (int)(((long)rows + frameRows - 1) / frameRows);
 
     /// <summary>
@@ -704,7 +701,7 @@ internal readonly partial struct ZstdPlan
     /// <param name="numerator">The margin: the frames must be under this many tenths or quarters of it.</param>
     /// <param name="denominator">Of this many.</param>
     private static ZstdPlan? Compress(
-        ArrayBlobWriter.Workspace? workspace, ReadOnlySpan<byte> stream, int[] frames, int blocks,
+        ArrayBlobWriter.Workspace? workspace, ReadOnlySpan<byte> stream, Block<int> frames, int blocks,
         long canonicalSize, int numerator, int denominator)
     {
         long bound = 0;
@@ -715,7 +712,7 @@ internal readonly partial struct ZstdPlan
             from = to;
         }
 
-        byte[] destination = WorkArrays.Rent<byte>(checked((int)bound));
+        Block<byte> destination = Blocks.Rent<byte>(checked((int)bound));
         bool kept = false;
         try
         {
@@ -760,8 +757,8 @@ internal readonly partial struct ZstdPlan
         {
             if (!kept)
             {
-                WorkArrays.Return(destination);
-                WorkArrays.Return(frames);
+                Blocks.Return(destination);
+                Blocks.Return(frames);
             }
         }
     }

@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -60,14 +59,28 @@ namespace Vorticity.Scanning;
 /// </remarks>
 internal sealed class ScanSegments : IDisposable
 {
+    /// <summary>The most entries a set keeps for its next scan: a wider table's goes to the collector with its scan.</summary>
+    private const int MostKeptEntries = 4096;
+
+    /// <summary>The table before the first claim lends one, and after the dispose gave it back: no entry, and never added to.</summary>
+    private static readonly EntryTable s_unlent = new EntryTable(null);
+
     private readonly Lanes? _lanes;
-    private Entry[] _entries = [];
+
+    /// <summary>
+    /// The entries and the set that lent them, the set of the batch whose claim came first, which keeps them between its
+    /// scans (<see cref="SegmentReadArrays.KeptScanTable"/>).
+    /// </summary>
+    private EntryTable _table = s_unlent;
     private int _count;
     private long _tickets;
     private bool _failed;
 
     /// <param name="lanes">How many batches may be built at once; above one, a batch may wait for another's read.</param>
     internal ScanSegments(int lanes) => _lanes = lanes > 1 ? new Lanes(lanes) : null;
+
+    /// <summary>The entries the scan holds, the first <see cref="_count"/> live or dead.</summary>
+    private Entry[] Entries => _table.Items;
 
     /// <summary>The lock the process lent the set, when lanes share it; null for a set of one lane.</summary>
     internal Lock? SharedGate => _lanes?.Gate;
@@ -103,6 +116,14 @@ internal sealed class ScanSegments : IDisposable
     {
         using (Enter())
         {
+            // The entries hold their segments' owners, which no block of the pool holds, and are read without the lock
+            // through a snapshot of the array: an array the first batch's set lends, which its context keeps between scans,
+            // or one made for that set when a scan beside this one holds the set's.
+            if (ReferenceEquals(_table, s_unlent))
+            {
+                _table = Interlocked.Exchange(ref requests.ReadArrays.KeptScanTable, null) ?? new EntryTable(requests);
+            }
+
             // Each slot the batch has not filled, looked up by its hash among what the scan holds: filled from a segment held,
             // waited for when another batch reads it, claimed when nobody does. The batch's slots, not every segment the
             // batches in flight hold: at 64 columns and 16 lanes, a thousand entries walked at each step under the lock.
@@ -127,7 +148,7 @@ internal sealed class ScanSegments : IDisposable
                     continue;
                 }
 
-                ref Entry entry = ref _entries[held];
+                ref Entry entry = ref Entries[held];
                 entry.LastUse = Math.Max(entry.LastUse, batch);
                 if (entry.Owner is { } owner)
                 {
@@ -148,7 +169,7 @@ internal sealed class ScanSegments : IDisposable
                     int held = Find(spec.Offset, spec.Length, hash);
                     if (held >= 0)
                     {
-                        _entries[held].LastUse = Math.Max(_entries[held].LastUse, alongBatches[a]);
+                        Entries[held].LastUse = Math.Max(Entries[held].LastUse, alongBatches[a]);
                         continue;
                     }
 
@@ -234,7 +255,7 @@ internal sealed class ScanSegments : IDisposable
 
                 SegmentSpec spec = requests.GetSpec(slot);
                 int held = Find(spec.Offset, spec.Length, SegmentRequestSet.HashOf(spec.Offset, spec.Length));
-                if (held >= 0 && _entries[held].Owner is null && _entries[held].Claimant == batch)
+                if (held >= 0 && Entries[held].Owner is null && Entries[held].Claimant == batch)
                 {
                     own.AddTouched(spec, requests.TouchesLittle(slot) ? 0 : long.MaxValue);
                 }
@@ -261,7 +282,7 @@ internal sealed class ScanSegments : IDisposable
                     continue;
                 }
 
-                ref Entry entry = ref _entries[held];
+                ref Entry entry = ref Entries[held];
                 if (entry.Owner is not null || entry.Claimant != batch)
                 {
                     continue;
@@ -273,7 +294,7 @@ internal sealed class ScanSegments : IDisposable
                 VortexBuffer view = requests.GetBuffer(slot);
                 if (entry.Along && owner.Buffer.Length > view.Length)
                 {
-                    NativeSegmentOwner copy = SegmentCache.Copy(view);
+                    BlockOwner copy = SegmentCache.Copy(view, requests.Account);
                     entry.Owner = copy;
                     entry.View = copy.Buffer;
                 }
@@ -298,8 +319,8 @@ internal sealed class ScanSegments : IDisposable
         for (int i = 0; i < _count; i++)
         {
             System.Diagnostics.Debug.Assert(
-                _entries[i].Dead || _entries[i].Owner is not null || _entries[i].Claimant != batch,
-                $"Batch {batch} published without the segment it claimed at {_entries[i].Offset}: its set is not the one it claimed with.");
+                Entries[i].Dead || Entries[i].Owner is not null || Entries[i].Claimant != batch,
+                $"Batch {batch} published without the segment it claimed at {Entries[i].Offset}: its set is not the one it claimed with.");
         }
     }
 
@@ -313,7 +334,7 @@ internal sealed class ScanSegments : IDisposable
             int kept = 0;
             for (int i = 0; i < _count; i++)
             {
-                if (_entries[i].Dead || (_entries[i].Owner is null && _entries[i].Claimant == batch))
+                if (Entries[i].Dead || (Entries[i].Owner is null && Entries[i].Claimant == batch))
                 {
                     continue;
                 }
@@ -344,7 +365,7 @@ internal sealed class ScanSegments : IDisposable
             int dead = 0;
             for (int i = 0; i < _count; i++)
             {
-                ref Entry entry = ref _entries[i];
+                ref Entry entry = ref Entries[i];
                 if (entry.Dead)
                 {
                     dead++;
@@ -364,7 +385,7 @@ internal sealed class ScanSegments : IDisposable
                 int kept = 0;
                 for (int i = 0; i < _count; i++)
                 {
-                    if (!_entries[i].Dead)
+                    if (!Entries[i].Dead)
                     {
                         Keep(i, ref kept);
                     }
@@ -383,7 +404,7 @@ internal sealed class ScanSegments : IDisposable
     {
         if (kept != i)
         {
-            _entries[kept] = _entries[i];
+            Entries[kept] = Entries[i];
         }
 
         kept++;
@@ -435,21 +456,27 @@ internal sealed class ScanSegments : IDisposable
         internal SegmentWaiter?[] Parked { get; } = new SegmentWaiter?[lanes];
     }
 
-    /// <summary>Releases everything held and gives the array back, then the lock, once no batch runs.</summary>
+    /// <summary>Releases everything held and gives the entries back to the set that lent them, cleared, then the lock, once no batch runs.</summary>
     public void Dispose()
     {
         using (Enter())
         {
             for (int i = 0; i < _count; i++)
             {
-                _entries[i].Owner?.Release();
+                Entries[i].Owner?.Release();
             }
 
             _count = 0;
-            if (_entries.Length > 0)
+            EntryTable table = _table;
+            _table = s_unlent;
+            if (table.Lender is { } lender)
             {
-                ArrayPool<Entry>.Shared.Return(_entries, clearArray: true);
-                _entries = [];
+                // Whole: the chains' heads lie past the entries.
+                Array.Clear(table.Items);
+                if (table.Items.Length <= MostKeptEntries)
+                {
+                    Interlocked.CompareExchange(ref lender.ReadArrays.KeptScanTable, table, null);
+                }
             }
         }
 
@@ -474,7 +501,7 @@ internal sealed class ScanSegments : IDisposable
     /// </remarks>
     private bool MayRelease(long batch)
     {
-        Entry[] entries = Volatile.Read(ref _entries);
+        Entry[] entries = Volatile.Read(ref Volatile.Read(ref _table).Items);
         int count = Math.Min(Volatile.Read(ref _count), entries.Length);
         for (int i = 0; i < count; i++)
         {
@@ -490,7 +517,7 @@ internal sealed class ScanSegments : IDisposable
     /// <summary>The entry of the segment at <paramref name="offset"/>, whose hash is <paramref name="hash"/>, or -1, by the chain of its bucket.</summary>
     private int Find(ulong offset, uint length, int hash)
     {
-        Entry[] entries = _entries;
+        Entry[] entries = Entries;
         if (entries.Length == 0)
         {
             return -1;
@@ -510,23 +537,18 @@ internal sealed class ScanSegments : IDisposable
 
     private void Add(Entry entry)
     {
-        if (_count == _entries.Length)
+        if (_count == Entries.Length)
         {
-            // Rented rather than allocated: the array is the same size on every batch of the scan,
-            // and a scan's allocation is held to a ceiling counted in bytes.
-            Entry[] bigger = ArrayPool<Entry>.Shared.Rent(Math.Max(16, _entries.Length * 2));
-            if (_entries.Length > 0)
-            {
-                Array.Copy(_entries, bigger, _count);
-                ArrayPool<Entry>.Shared.Return(_entries, clearArray: true);
-            }
-
-            _entries = bigger;
+            // Grown once for the set that lent it, whose next scans borrow it: it is the same size on every batch of a
+            // scan, and a scan's allocation is held to a ceiling counted in bytes.
+            Entry[] bigger = new Entry[Math.Max(16, Entries.Length * 2)];
+            Array.Copy(Entries, bigger, _count);
+            _table.Items = bigger;
             Relink();
         }
 
         // The slot's head belongs to the bucket its index names, not to the entry stored in it.
-        ref Entry slot = ref _entries[_count];
+        ref Entry slot = ref Entries[_count];
         entry.Head = slot.Head;
         slot = entry;
         Link(_count++);
@@ -543,7 +565,7 @@ internal sealed class ScanSegments : IDisposable
             return;
         }
 
-        Array.Clear(_entries, kept, _count - kept);
+        Array.Clear(Entries, kept, _count - kept);
         _count = kept;
         Relink();
     }
@@ -558,7 +580,7 @@ internal sealed class ScanSegments : IDisposable
     /// <summary>Puts entry <paramref name="e"/> at the head of the chain of its segment's bucket.</summary>
     private void Link(int e)
     {
-        Entry[] entries = _entries;
+        Entry[] entries = Entries;
         ref Entry entry = ref entries[e];
         int bucket = entry.Hash & (Buckets(entries) - 1);
         entry.Next = entries[bucket].Head;
@@ -568,7 +590,7 @@ internal sealed class ScanSegments : IDisposable
     /// <summary>Chains every entry anew, once entries have moved.</summary>
     private void Relink()
     {
-        Entry[] entries = _entries;
+        Entry[] entries = Entries;
         int buckets = Buckets(entries);
         for (int b = 0; b < buckets; b++)
         {
@@ -618,7 +640,7 @@ internal sealed class ScanSegments : IDisposable
 
             SegmentSpec spec = requests.GetSpec(slot);
             int held = Find(spec.Offset, spec.Length, SegmentRequestSet.HashOf(spec.Offset, spec.Length));
-            if (held >= 0 && _entries[held].Owner is null && _entries[held].Claimant != waiter.Batch)
+            if (held >= 0 && Entries[held].Owner is null && Entries[held].Claimant != waiter.Batch)
             {
                 return true;
             }
@@ -627,8 +649,21 @@ internal sealed class ScanSegments : IDisposable
         return false;
     }
 
+    /// <summary>
+    /// The entries of a scan's table and the set that lent them, which keeps the table between its scans: the set its context
+    /// holds outlives them, and a table grown for one scan serves the next as it is.
+    /// </summary>
+    internal sealed class EntryTable(SegmentRequestSet? lender)
+    {
+        /// <summary>The entries, grown by doubling; read without the lock through a snapshot.</summary>
+        internal Entry[] Items = [];
+
+        /// <summary>The set the table goes back to; null for the empty table no scan holds.</summary>
+        internal SegmentRequestSet? Lender { get; } = lender;
+    }
+
     /// <summary>A segment the scan holds, or one a batch has claimed and is reading when it has no owner yet.</summary>
-    private struct Entry
+    internal struct Entry
     {
         internal ulong Offset;
         internal uint Length;

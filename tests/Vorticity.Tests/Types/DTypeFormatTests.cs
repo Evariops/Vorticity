@@ -183,7 +183,7 @@ public sealed class DTypeFormatTests
         DType d = a.Struct(handles, fields, Nullability.NonNullable);
 
         // Warm the render path on a SMALL dtype: enough to JIT it, but it must not put a
-        // name-sized array into ArrayPool<char>.Shared, which would hide the very rental this
+        // name-sized block into the pool, which would hide the very rental this
         // measures. For the same reason no other test may render a name in this size class.
         DType warm = a.Struct(["a"], [i32], Nullability.NonNullable);
         for (int i = 0; i < 20; i++)

@@ -1,7 +1,8 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
-using Vorticity.Aggregating;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
+using Vorticity.Buffers;
 
 namespace Vorticity.RowEncoding;
 
@@ -13,18 +14,19 @@ namespace Vorticity.RowEncoding;
 /// <remarks>
 /// Not a durable format: the byte layout may change between Vortex releases, so these bytes are
 /// comparable only among keys produced by one version and never in a persisted index. The three
-/// buffers are rented, from the shared array pool or past a mebibyte from the process's shelf, and
-/// <see cref="Dispose"/> returns them and invalidates every span handed out.
+/// buffers are blocks of the pool, and <see cref="Dispose"/> returns them and invalidates every
+/// span handed out.
 /// </remarks>
 public sealed class RowKeys : IEncodedKeys
 {
-    private byte[]? _elements;
-    private int[]? _offsets;
-    private int[]? _sizes;
+    private Block<byte> _elements;
+    private Block<int> _offsets;
+    private Block<int> _sizes;
     private int _rowCount;
     private int _totalBytes;
+    private bool _disposed;
 
-    internal RowKeys(byte[] elements, int[] offsets, int[] sizes, int rowCount, int totalBytes)
+    internal RowKeys(Block<byte> elements, Block<int> offsets, Block<int> sizes, int rowCount, int totalBytes)
     {
         _elements = elements;
         _offsets = offsets;
@@ -43,21 +45,33 @@ public sealed class RowKeys : IEncodedKeys
     public ReadOnlySpan<byte> Elements => Live().AsSpan(0, _totalBytes);
 
     /// <summary>Where each row begins in <see cref="Elements"/>.</summary>
-    public ReadOnlySpan<int> Offsets => _offsets is null ? ThrowDisposedInts() : _offsets.AsSpan(0, _rowCount);
+    public ReadOnlySpan<int> Offsets => _disposed ? ThrowDisposedInts() : _offsets.AsSpan(0, _rowCount);
 
     /// <summary>How many bytes each row occupies.</summary>
-    public ReadOnlySpan<int> Sizes => _sizes is null ? ThrowDisposedInts() : _sizes.AsSpan(0, _rowCount);
+    public ReadOnlySpan<int> Sizes => _disposed ? ThrowDisposedInts() : _sizes.AsSpan(0, _rowCount);
 
     /// <summary>The key of the 0-based row <paramref name="index"/>, borrowed from this instance.</summary>
+    /// <remarks>
+    /// The index is checked once against the rows, which the offsets and the sizes hold, and read in them unchecked: a merge
+    /// reads a key at each level of its heap, and the blocks' indexers checked each again, which made a merge of keys
+    /// interleaved row by row 13 % slower than over arrays (2026-11-16). The bytes keep their check.
+    /// </remarks>
     public ReadOnlySpan<byte> Row(int index)
     {
-        ArgumentOutOfRangeException.ThrowIfNegative(index);
-        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, _rowCount);
-        byte[] elements = Live();
-        int[] offsets = _offsets!;
-        int[] sizes = _sizes!;
-        return elements.AsSpan(offsets[index], sizes[index]);
+        if ((uint)index >= (uint)_rowCount)
+        {
+            ThrowRow(index);
+        }
+
+        Block<byte> elements = Live();
+        int start = Unsafe.Add(ref _offsets.GetReference(), index);
+        int size = Unsafe.Add(ref _sizes.GetReference(), index);
+        return elements.AsSpan(start, size);
     }
+
+    [DoesNotReturn]
+    private void ThrowRow(int index) =>
+        throw new ArgumentOutOfRangeException(nameof(index), index, $"A row of the {_rowCount} keys encoded.");
 
     /// <summary>Compares two rows the way a sort would: by their bytes.</summary>
     public int Compare(int left, int right) => Row(left).SequenceCompareTo(Row(right));
@@ -91,25 +105,25 @@ public sealed class RowKeys : IEncodedKeys
     /// </remarks>
     internal void SortStable(Span<int> indices)
     {
-        byte[] elements = Live();
+        Block<byte> elements = Live();
         if (indices.Length <= ComparedRows)
         {
             Compared(indices, elements, 0);
             return;
         }
 
-        ulong[] prefixes = WorkArrays.Rent<ulong>(indices.Length);
-        ulong[] spare = WorkArrays.Rent<ulong>(indices.Length);
-        int[] places = WorkArrays.Rent<int>(indices.Length);
+        Block<ulong> prefixes = Blocks.Rent<ulong>(indices.Length);
+        Block<ulong> spare = Blocks.Rent<ulong>(indices.Length);
+        Block<int> places = Blocks.Rent<int>(indices.Length);
         try
         {
-            Radix(indices, prefixes.AsSpan(0, indices.Length), spare.AsSpan(0, indices.Length), places.AsSpan(0, indices.Length), elements, 0);
+            Radix(indices, prefixes, spare, places, elements, 0);
         }
         finally
         {
-            WorkArrays.Return(prefixes);
-            WorkArrays.Return(spare);
-            WorkArrays.Return(places);
+            Blocks.Return(prefixes);
+            Blocks.Return(spare);
+            Blocks.Return(places);
         }
     }
 
@@ -117,10 +131,10 @@ public sealed class RowKeys : IEncodedKeys
     private const int ComparedRows = 48;
 
     /// <summary>The rows of <paramref name="indices"/> sorted by their bytes from <paramref name="at"/> on, then by their places.</summary>
-    private void Radix(Span<int> indices, Span<ulong> prefixes, Span<ulong> spare, Span<int> places, byte[] elements, int at)
+    private void Radix(Span<int> indices, Span<ulong> prefixes, Span<ulong> spare, Span<int> places, Block<byte> elements, int at)
     {
-        int[] offsets = _offsets!;
-        int[] sizes = _sizes!;
+        ReadOnlySpan<int> offsets = _offsets;
+        ReadOnlySpan<int> sizes = _sizes;
         for (int i = 0; i < indices.Length; i++)
         {
             prefixes[i] = Prefix(elements, offsets[indices[i]], sizes[indices[i]], at);
@@ -161,7 +175,7 @@ public sealed class RowKeys : IEncodedKeys
     }
 
     /// <summary>Whether the rows of <paramref name="run"/> hold keys of one size.</summary>
-    private static bool SameSizes(ReadOnlySpan<int> run, int[] sizes)
+    private static bool SameSizes(ReadOnlySpan<int> run, ReadOnlySpan<int> sizes)
     {
         int size = sizes[run[0]];
         foreach (int row in run)
@@ -176,12 +190,12 @@ public sealed class RowKeys : IEncodedKeys
     }
 
     /// <summary>The eight bytes of a key from <paramref name="at"/>, big-endian, zeros past its end.</summary>
-    private static ulong Prefix(byte[] elements, int offset, int size, int at)
+    private static ulong Prefix(ReadOnlySpan<byte> elements, int offset, int size, int at)
     {
         int left = size - at;
         if (left >= sizeof(ulong))
         {
-            return System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(elements.AsSpan(offset + at, sizeof(ulong)));
+            return System.Buffers.Binary.BinaryPrimitives.ReadUInt64BigEndian(elements.Slice(offset + at, sizeof(ulong)));
         }
 
         ulong prefix = 0;
@@ -212,10 +226,12 @@ public sealed class RowKeys : IEncodedKeys
             return;
         }
 
+        // A digit of eight bits counts on the stack; one of sixteen, 256 kilobytes, in a block.
         int digitBits = keys.Length >= 1 << 16 ? 16 : 8;
-        int[] counts = ArrayPool<int>.Shared.Rent(1 << digitBits);
+        Block<int> rented = digitBits == 16 ? Blocks.Rent<int>(1 << 16) : default;
         try
         {
+            Span<int> count = digitBits == 16 ? rented : stackalloc int[1 << 8];
             Span<ulong> fromKeys = keys;
             Span<int> fromPlaces = places;
             Span<ulong> toKeys = spareKeys;
@@ -228,7 +244,6 @@ public sealed class RowKeys : IEncodedKeys
                     continue;
                 }
 
-                Span<int> count = counts.AsSpan(0, 1 << digitBits);
                 count.Clear();
                 foreach (ulong key in fromKeys)
                 {
@@ -267,7 +282,7 @@ public sealed class RowKeys : IEncodedKeys
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(counts);
+            Blocks.Return(rented);
         }
     }
 
@@ -275,9 +290,9 @@ public sealed class RowKeys : IEncodedKeys
     /// Sorts the rows of <paramref name="run"/> by their bytes from <paramref name="at"/> on, then their indices: by
     /// insertion when they are few, by an introsort otherwise.
     /// </summary>
-    private void Compared(Span<int> run, byte[] elements, int at)
+    private void Compared(Span<int> run, Block<byte> elements, int at)
     {
-        ByKeyThenIndex order = new ByKeyThenIndex(elements, _offsets!, _sizes!, at);
+        ByKeyThenIndex order = new ByKeyThenIndex(elements, _offsets, _sizes, at);
         if (run.Length > ComparedRows)
         {
             run.Sort(order);
@@ -304,81 +319,79 @@ public sealed class RowKeys : IEncodedKeys
     /// </summary>
     internal bool Same(int left, int right)
     {
-        byte[] elements = Live();
-        return elements.AsSpan(_offsets![left], _sizes![left]).SequenceEqual(elements.AsSpan(_offsets[right], _sizes[right]));
+        Block<byte> elements = Live();
+        return elements.AsSpan(_offsets[left], _sizes[left]).SequenceEqual(elements.AsSpan(_offsets[right], _sizes[right]));
     }
 
     /// <summary>
-    /// Room for the keys of <paramref name="rowCount"/> rows, the keys held let go: each row's size and start, its buffers
+    /// Room for the keys of <paramref name="rowCount"/> rows, the keys held let go: each row's size and start, its blocks
     /// kept where they are large enough, else rented larger, the smaller given back. Every span handed out becomes invalid.
     /// </summary>
-    internal (int[] Sizes, int[] Offsets) Rows(int rowCount)
+    internal (Block<int> Sizes, Block<int> Offsets) Rows(int rowCount)
     {
         _ = Live();
-        Grow(ref _sizes!, rowCount);
-        Grow(ref _offsets!, rowCount);
+        Room(ref _sizes, rowCount);
+        Room(ref _offsets, rowCount);
         (_rowCount, _totalBytes) = (0, 0);
         return (_sizes, _offsets);
     }
 
     /// <summary>Room for <paramref name="totalBytes"/> bytes of keys, after <see cref="Rows"/>.</summary>
-    internal byte[] Bytes(int totalBytes)
+    internal Block<byte> Bytes(int totalBytes)
     {
-        Grow(ref _elements!, totalBytes);
+        Room(ref _elements, totalBytes);
         return _elements;
     }
 
     /// <summary>Holds the keys of <paramref name="rowCount"/> rows, <paramref name="totalBytes"/> bytes, written in the room made.</summary>
     internal void Hold(int rowCount, int totalBytes) => (_rowCount, _totalBytes) = (rowCount, totalBytes);
 
-    private static void Grow<T>(ref T[] rented, int length)
+    /// <summary>A block of <paramref name="length"/> elements at least, what <paramref name="rented"/> held let go: within its bytes, or rented anew.</summary>
+    private static void Room<T>(ref Block<T> rented, int length)
+        where T : unmanaged
     {
-        if (rented.Length < Math.Max(length, 1))
+        int wanted = Math.Max(length, 1);
+        if (wanted > rented.Capacity)
         {
-            WorkArrays.Return(rented);
-            rented = WorkArrays.Rent<T>(Math.Max(length, rented.Length * 2));
+            Blocks.Return(rented);
+            rented = Blocks.Rent<T>(Math.Max(wanted, rented.Capacity * 2));
+        }
+        else if (wanted > rented.Length)
+        {
+            rented = rented.WithLength(rented.Capacity);
         }
     }
 
-    /// <summary>Returns the pooled buffers. Every span handed out becomes invalid.</summary>
+    /// <summary>Returns the pooled blocks. Every span handed out becomes invalid.</summary>
     public void Dispose()
     {
-        byte[]? elements = _elements;
-        int[]? offsets = _offsets;
-        int[]? sizes = _sizes;
-        _elements = null;
-        _offsets = null;
-        _sizes = null;
-
-        if (elements is not null)
+        if (_disposed)
         {
-            WorkArrays.Return(elements);
+            return;
         }
 
-        if (offsets is not null)
-        {
-            WorkArrays.Return(offsets);
-        }
-
-        if (sizes is not null)
-        {
-            WorkArrays.Return(sizes);
-        }
+        _disposed = true;
+        Blocks.Return(_elements);
+        Blocks.Return(_offsets);
+        Blocks.Return(_sizes);
+        _elements = default;
+        _offsets = default;
+        _sizes = default;
     }
 
-    private byte[] Live()
+    private Block<byte> Live()
     {
-        ObjectDisposedException.ThrowIf(_elements is null, this);
+        ObjectDisposedException.ThrowIf(_disposed, this);
         return _elements;
     }
 
     private ReadOnlySpan<int> ThrowDisposedInts() => throw new ObjectDisposedException(nameof(RowKeys));
 
     /// <summary>
-    /// A struct comparer over the keys' buffers, unchecked, of their bytes from <c>at</c> on, the bytes before it equal; the
-    /// rows of one key by their index.
+    /// A struct comparer over the keys' blocks, of their bytes from <c>at</c> on, the bytes before it equal; the rows of one
+    /// key by their index.
     /// </summary>
-    private readonly struct ByKeyThenIndex(byte[] elements, int[] offsets, int[] sizes, int at) : IComparer<int>
+    private readonly struct ByKeyThenIndex(Block<byte> elements, Block<int> offsets, Block<int> sizes, int at) : IComparer<int>
     {
         public int Compare(int left, int right)
         {

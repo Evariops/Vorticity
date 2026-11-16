@@ -76,8 +76,9 @@ three sources:
 A `MemorySegmentSource` keeps its bytes on a 64-byte boundary, the widest alignment a segment can
 declare, so every read is a view a decoder can use as it is. Bytes that already sit on such a
 boundary are read where they lie. Bytes that do not, which is the usual case for a `byte[]`, are
-copied once into memory the source owns, when the source is created. To avoid that copy, rent the
-memory from an `AlignedMemoryPool` and read the file into it.
+copied once into memory the source owns, when the source is created. To avoid that copy, read the
+file into memory that starts on such a boundary, a slice of a pinned array at its first 64-byte
+aligned byte, say.
 
 For a file on an object store, implement `ISegmentSource` for your service: a length and two read
 methods ([object-store.md](object-store.md)). The demonstration file fits in the page cache, so the
@@ -150,8 +151,9 @@ read are served from it. A file shorter than that window is read entirely by its
 each segment once, and a segment that spans several batches is shared by them rather than read
 again. A `SegmentCache` works across scans: the first scan of the session reads the 45 segments and
 finds none in the cache, and a second scan of the same file reads nothing because all 45 come from
-the cache. A session given none shares the process's, `SegmentCache.Shared`, a sixteenth of the
-memory the process may use and 1 GiB at most; give it one to size what it keeps, or one of 0 bytes to
+the cache. A session given none shares the process's, `SegmentCache.Shared`, which has no budget of
+its own: it keeps what the work leaves, and gives back what it holds above a floor when the work needs
+the room or no scan read it of late. Give the session one to bound what it keeps, or one of 0 bytes to
 keep nothing. When every read is a request to a remote service, the cache is what spares a question
 asked again its round trips.
 

@@ -1,7 +1,7 @@
 using System;
-using System.Buffers;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
@@ -111,9 +111,9 @@ internal static class StoreRows
         // The offsets and sizes are read with their types resolved once, not once a row, as the 64-bit words they become.
         CanonicalNode view = arena.GetNode(node);
         int elements = view.ElementsIndex;
-        long[] words = ArrayPool<long>.Shared.Rent(Math.Max(1, 2 * rows));
-        int[] counts = ArrayPool<int>.Shared.Rent(Math.Max(1, rows));
-        int[]? indices = null;
+        Block<long> words = Blocks.Rent<long>(Math.Max(1, 2 * rows));
+        Block<int> counts = Blocks.Rent<int>(Math.Max(1, rows));
+        Block<int> indices = default;
         try
         {
             Span<long> offsets = words.AsSpan(0, rows);
@@ -127,7 +127,7 @@ internal static class StoreRows
                 total = checked(total + counts[row]);
             }
 
-            indices = ArrayPool<int>.Shared.Rent(Math.Max(1, total));
+            indices = Blocks.Rent<int>(Math.Max(1, total));
             int at = 0;
             for (int row = 0; row < rows; row++)
             {
@@ -143,12 +143,9 @@ internal static class StoreRows
         }
         finally
         {
-            ArrayPool<long>.Shared.Return(words);
-            ArrayPool<int>.Shared.Return(counts);
-            if (indices is not null)
-            {
-                ArrayPool<int>.Shared.Return(indices);
-            }
+            Blocks.Return(words);
+            Blocks.Return(counts);
+            Blocks.Return(indices);
         }
     }
 

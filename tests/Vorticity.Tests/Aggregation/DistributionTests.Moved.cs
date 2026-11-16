@@ -10,7 +10,7 @@ namespace Vorticity.Tests.Aggregation;
 public sealed partial class DistributionTests
 {
     /// <summary>
-    /// A lane's slot of a quantile, its sketches from the lane's shelf, moved into a part's slot that holds no group yet: the
+    /// A lane's slot of a quantile, its sketches from the lane's account, moved into a part's slot that holds no group yet: the
     /// sketch of three buckets, its arrays under a page, is the part's from then on and the lane's no more; the sketch of
     /// forty, a window of five kilobytes the lane's memory counts, is merged into a sketch of the part's own and stays the
     /// lane's. Both give the quantiles the lane's gave, and once both slots let go, the lane's memory holds nothing. Made
@@ -21,9 +21,9 @@ public sealed partial class DistributionTests
     public void ALanesSketchesMoveIntoAPartAsTheyAreWhereNoMemoryCountsTheirArrays()
     {
         using QueryMemory memory = new QueryMemory(new QueryMemoryBudget(64 << 20));
-        ArrayShelf laneShelf = new ArrayShelf(memory);
-        DistributionSlot<double, double?> lane = new DistributionSlot<double, double?>(4, static s => s?.Quantile(0.99), shelved: true);
-        lane.Govern(laneShelf);
+        TableArrays laneAccount = new TableArrays(memory);
+        DistributionSlot<double, double?> lane = new DistributionSlot<double, double?>(4, static s => s?.Quantile(0.99), accounted: true);
+        lane.Govern(laneAccount);
         lane.EnsureGroups(2);
         QuantileSketch few = lane.Sketch(0);
         few.AddAll<double>([1, 2, 4]);
@@ -32,8 +32,8 @@ public sealed partial class DistributionTests
         (double? FewP99, double? ManyP99) expected = (few.Quantile(0.99), many.Quantile(0.99));
         Assert.True(memory.Measured > 0, "the window counts in the lane's memory");
 
-        DistributionSlot<double, double?> part = new DistributionSlot<double, double?>(4, static s => s?.Quantile(0.99), shelved: true);
-        part.Govern(ArrayShelf.Retained);
+        DistributionSlot<double, double?> part = new DistributionSlot<double, double?>(4, static s => s?.Quantile(0.99), accounted: true);
+        part.Govern(TableArrays.Uncounted);
         part.EnsureGroups(2);
         part.MoveFrom(lane, [0, 1], [1, 0]);
 
@@ -44,7 +44,7 @@ public sealed partial class DistributionTests
         Assert.Equal(expected, (part.Held(1)!.Quantile(0.99), part.Held(0)!.Quantile(0.99)));
 
         lane.Release();
-        laneShelf.LetGo();
+        laneAccount.LetGo();
         part.Release();
         Assert.Equal(0, memory.Measured);
         Assert.Equal(0, memory.Held);

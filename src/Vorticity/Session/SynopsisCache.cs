@@ -390,7 +390,7 @@ public sealed class SynopsisCache : IAsyncDisposable
             return true;
         }
 
-        NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
+        BlockOwner block = MemoryAccount.Kept.Rent(length, VortexLimits.MaxAlignment);
         try
         {
             Span<byte> bytes = block.WritableSpan[..length];
@@ -446,7 +446,7 @@ public sealed class SynopsisCache : IAsyncDisposable
         }
 
         long length = entry.Bytes;
-        NativeSegmentOwner? block = length is > 0 && length <= maxLength ? AlignedBufferPool.Shared.Rent((int)length, VortexLimits.MaxAlignment) : null;
+        BlockOwner? block = length is > 0 && length <= maxLength ? MemoryAccount.Kept.Rent((int)length, VortexLimits.MaxAlignment) : null;
         if (block is null || !ReadWhole(entry, block.WritableSpan[..(int)length]))
         {
             block?.Release();
@@ -468,7 +468,7 @@ public sealed class SynopsisCache : IAsyncDisposable
     /// checksum its file holds after it; false when the cache does not hold it, or, when it shares a root, another cache of
     /// the root, or held it torn, which it then drops.
     /// </summary>
-    internal bool TryReadData(UInt128 uid, IndexSegment segment, out SegmentOwner owner)
+    internal bool TryReadData(UInt128 uid, IndexSegment segment, MemoryAccount account, out SegmentOwner owner)
     {
         owner = null!;
         ReadOnlySpan<char> name = DataNameOf(uid, segment, stackalloc char[MaxDataNameLength]);
@@ -479,7 +479,7 @@ public sealed class SynopsisCache : IAsyncDisposable
 
         if (Find(name) is not { } entry)
         {
-            return _root is not null && TryPeerData(segment, name, out owner);
+            return _root is not null && TryPeerData(segment, name, account, out owner);
         }
 
         // Mapped and verified once a mapping, as a region is.
@@ -512,7 +512,7 @@ public sealed class SynopsisCache : IAsyncDisposable
             return true;
         }
 
-        NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length + DataTrailerBytes, VortexLimits.MaxAlignment);
+        BlockOwner block = account.Rent(length + DataTrailerBytes, VortexLimits.MaxAlignment);
         try
         {
             Span<byte> bytes = block.WritableSpan[..(length + DataTrailerBytes)];
@@ -1118,7 +1118,7 @@ public sealed class SynopsisCache : IAsyncDisposable
         int length = checked((int)region.Length);
         if (LeasePeer(name, length) is { } file)
         {
-            NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
+            BlockOwner block = MemoryAccount.Kept.Rent(length, VortexLimits.MaxAlignment);
             try
             {
                 Span<byte> bytes = block.WritableSpan[..length];
@@ -1147,13 +1147,13 @@ public sealed class SynopsisCache : IAsyncDisposable
     /// As <see cref="TryPeerRegion"/>, for a data segment, checked against the checksum its file holds after it. It stays in
     /// that directory, so that a segment the caches read lies once on the disk.
     /// </summary>
-    private bool TryPeerData(IndexSegment segment, ReadOnlySpan<char> name, out SegmentOwner owner)
+    private bool TryPeerData(IndexSegment segment, ReadOnlySpan<char> name, MemoryAccount account, out SegmentOwner owner)
     {
         owner = null!;
         int length = checked((int)segment.Length);
         if (LeasePeer(name, length + DataTrailerBytes) is { } file)
         {
-            NativeSegmentOwner block = AlignedBufferPool.Shared.Rent(length + DataTrailerBytes, VortexLimits.MaxAlignment);
+            BlockOwner block = account.Rent(length + DataTrailerBytes, VortexLimits.MaxAlignment);
             try
             {
                 // Once its bytes held their checksum, a file's read leaves the checksum unread.
@@ -1305,7 +1305,7 @@ public sealed class SynopsisCache : IAsyncDisposable
         {
             if (file is not null)
             {
-                NativeSegmentOwner block = AlignedBufferPool.Shared.Rent((int)length, VortexLimits.MaxAlignment);
+                BlockOwner block = MemoryAccount.Kept.Rent((int)length, VortexLimits.MaxAlignment);
                 try
                 {
                     Span<byte> bytes = block.WritableSpan[..(int)length];

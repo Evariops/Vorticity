@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
@@ -9,6 +8,7 @@ using System.Threading.Tasks.Sources;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.IO;
@@ -102,6 +102,12 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
             : question?.Projected(keep, tree.Root.DType) ?? keep.ProjectedSchema(tree.Root.DType, new DTypeArena());
     }
 
+    /// <summary>
+    /// Whom each scan's blocks are counted for: the question it serves; null, each scan counts under an account of its own,
+    /// under its session's memory budget, closed when its enumerator is disposed.
+    /// </summary>
+    internal Buffers.MemoryAccount? Account { get; init; }
+
     /// <summary>The schema every batch of this scan carries.</summary>
     /// <remarks>
     /// It is what <see cref="RecordBatch.DType"/> reports for every batch, and the two are
@@ -132,7 +138,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live: null, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: ReadsAhead));
+            readAhead: ReadsAhead, account: Account));
 
     /// <summary>
     /// The chunks of the variant columns the scan reads through some shredded keys alone; null when it
@@ -234,7 +240,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            zones: zones, widenRows: WidenRows, readAhead: ReadsAhead));
+            zones: zones, widenRows: WidenRows, readAhead: ReadsAhead, account: Account));
 
     /// <summary>
     /// The most rows a run of zones the zone maps prove whole is read in as one batch, rather than
@@ -256,7 +262,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(proven), _filter, proven, live, _metrics,
             cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: ReadsAhead));
+            readAhead: ReadsAhead, account: Account));
 #pragma warning restore VSTHRD200
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
@@ -301,7 +307,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
 /// pays, not what the scan costs across every thread.
 /// </para>
 /// </remarks>
-internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
+internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerator<RecordBatch>
 {
     private readonly LayoutTree _tree;
     private readonly ISegmentReader _source;
@@ -323,6 +329,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     private readonly CancellationToken _token;
     private readonly Lane?[] _lanes;
     private readonly ScanSegments _segments;
+
+    // Whom the scan's blocks are counted for: its question's account, or its own, which it closes as it ends.
+    // Whom the scan's blocks are counted for: the question's account, or the scan itself, its own account, closed once its
+    // lanes are given back.
+    private readonly Buffers.MemoryAccount _account;
     private readonly RetainedChunks _retained;
     private readonly bool _sinkDecodes;
 
@@ -502,8 +513,18 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         bool sinkDecodes = false,
         ZonePruner? zones = null,
         int widenRows = 0,
-        int readAhead = 0)
+        int readAhead = 0,
+        Buffers.MemoryAccount? account = null)
+        : base(QueryMemoryBudget.Of(file.Session), "scan")
     {
+        // The question's account when the scan serves one, the scan holding nothing of its own to give back; else the scan
+        // itself, an account no other object, closed once its lanes are given back.
+        _account = account ?? this;
+        if (account is not null)
+        {
+            GC.SuppressFinalize(this);
+        }
+
         _compact = compact;
         _widenRows = widenRows > plan.MaxRows && compact && !filterProven && !reverse && take is null &&
             filter is not null && zones is not null
@@ -589,7 +610,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         // The mask, the metrics sink and the encoded delivery outlive every batch of the scan, so
         // they are set once here and never by `ResetBatch`; the readers read the mask in file
         // coordinates and add what they materialize to the sink.
-        ScanContext context = ScanContexts.Shared.Rent(file);
+        ScanContext context = ScanContexts.Shared.Rent(file, _account);
         context.LiveBlocks = live;
         context.Metrics = metrics;
         context.KeepEncodings = keepEncodings;
@@ -1357,7 +1378,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 return;
             }
 
-            walk = _along = AlongWalk.Begin(ScanContexts.Shared.Rent(lane.Context.File));
+            walk = _along = AlongWalk.Begin(ScanContexts.Shared.Rent(lane.Context.File, _account));
         }
 
         if (walk.Batch <= batch)
@@ -1949,13 +1970,14 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         ProjectionWindow(context, split);
 
         int rows = arena.GetNode(first).Length;
-        byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
+        Block<byte> states = Blocks.Rent<byte>(rows);
 
-        // Room for every row: the selection writes a slot per row before deciding.
-        int[] kept = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        // Room for every row: the selection writes a slot per row before deciding. One at least: a selection of no row
+        // is still one, which the default block is not.
+        Block<int> kept = Blocks.Rent<int>(Math.Max(rows, 1));
         try
         {
-            Span<byte> window = states.AsSpan(0, rows);
+            Span<byte> window = states;
             if (alone)
             {
                 _evaluator!.EvaluateColumn(arena, first, rows, window);
@@ -1970,8 +1992,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(states);
-            ArrayPool<int>.Shared.Return(kept);
+            Blocks.Return(states);
+            Blocks.Return(kept);
         }
     }
 
@@ -1987,7 +2009,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
     /// <param name="rows">The split's rows.</param>
     /// <param name="window">The filter's state a row, where the filter was evaluated here: what a mask of the kept rows is taken from.</param>
     /// <returns>The batch's root.</returns>
-    private int ExecuteKept(Lane lane, RowRange split, int[] kept, int count, int rows, ReadOnlySpan<byte> window = default)
+    private int ExecuteKept(Lane lane, RowRange split, Block<int> kept, int count, int rows, ReadOnlySpan<byte> window = default)
     {
         ScanContext context = lane.Context;
         CanonicalArena arena = context.Canonical;
@@ -2226,14 +2248,14 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         int rows = (int)(split.End - split.Start);
-        int[] kept = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+        Block<int> kept = Blocks.Rent<int>(Math.Max(rows, 1));
         try
         {
             return ExecuteKept(lane, split, kept, Selected(context, answer, kept), rows);
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(kept);
+            Blocks.Return(kept);
         }
     }
 
@@ -2367,11 +2389,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         int rows = context.Canonical.GetNode(root).Length;
-        byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
-        int[]? selected = null;
+        Block<byte> states = Blocks.Rent<byte>(rows);
+        Block<int> selected = default;
         try
         {
-            Span<byte> window = states.AsSpan(0, rows);
+            Span<byte> window = states;
             _evaluator!.Evaluate(context.Canonical, root, rows, window);
 
             int count = Trilean.CountTrue(window);
@@ -2384,18 +2406,15 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             else if (count != rows)
             {
                 // Room for every row: the selection writes a slot per row before deciding.
-                selected = ArrayPool<int>.Shared.Rent(rows);
+                selected = Blocks.Rent<int>(rows);
                 CanonicalFilter.Select(window, selected);
                 root = Keep(context.Canonical, root, selected.AsSpan(0, count), window);
             }
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(states);
-            if (selected is not null)
-            {
-                ArrayPool<int>.Shared.Return(selected);
-            }
+            Blocks.Return(states);
+            Blocks.Return(selected);
         }
 
         return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
@@ -2425,11 +2444,11 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
         }
 
-        byte[] states = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
-        int[]? local = null;
+        Block<byte> states = Blocks.Rent<byte>(rows);
+        Block<int> local = default;
         try
         {
-            Span<byte> window = states.AsSpan(0, rows);
+            Span<byte> window = states;
             if (_evaluator is not null && !proven)
             {
                 _evaluator.Evaluate(context.Canonical, root, rows, window);
@@ -2442,13 +2461,12 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             if (_take is not null)
             {
                 // A row outside the take is not selected, whatever the filter says of it.
-                local = ArrayPool<int>.Shared.Rent(Math.Max(rows, 1));
+                local = Blocks.Rent<int>(rows);
                 int wanted = _take.LocalIndices(split, local);
-                byte[] kept = ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
+                Block<byte> kept = Blocks.RentCleared<byte>(rows);
                 try
                 {
-                    Span<byte> taken = kept.AsSpan(0, rows);
-                    taken.Clear();
+                    Span<byte> taken = kept;
                     for (int i = 0; i < wanted; i++)
                     {
                         taken[local[i]] = 1;
@@ -2464,7 +2482,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(kept);
+                    Blocks.Return(kept);
                 }
             }
 
@@ -2473,11 +2491,8 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(states);
-            if (local is not null)
-            {
-                ArrayPool<int>.Shared.Return(local);
-            }
+            Blocks.Return(states);
+            Blocks.Return(local);
         }
 
         return ProjectionTrim.Apply(context.Canonical, root, in _mask, in _keep, _schema);
@@ -2526,11 +2541,10 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         CanonicalSupport.CopyBits(node.Bits.Span, node.BitOffset, raw, 0, rows);
         if (!valid.AllValid)
         {
-            ulong[] known = ArrayPool<ulong>.Shared.Rent(words);
+            Block<ulong> known = Blocks.RentCleared<ulong>(words);
             try
             {
-                Span<ulong> knownWords = known.AsSpan(0, words);
-                knownWords.Clear();
+                Span<ulong> knownWords = known;
                 CanonicalSupport.CopyBits(valid.Bits, valid.BitOffset, System.Runtime.InteropServices.MemoryMarshal.AsBytes(knownWords), 0, rows);
                 for (int w = 0; w < words; w++)
                 {
@@ -2539,7 +2553,7 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
             }
             finally
             {
-                ArrayPool<ulong>.Shared.Return(known);
+                Blocks.Return(known);
             }
         }
 
@@ -2568,15 +2582,15 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         }
 
         int words = (window.Length + 63) >> 6;
-        ulong[] mask = ArrayPool<ulong>.Shared.Rent(words);
+        Block<ulong> mask = Blocks.Rent<ulong>(words);
         try
         {
-            Trilean.ToWords(window, Trilean.True, equal: true, mask.AsSpan(0, words));
-            return CanonicalFilter.Apply(arena, root, kept, mask.AsSpan(0, words));
+            Trilean.ToWords(window, Trilean.True, equal: true, mask);
+            return CanonicalFilter.Apply(arena, root, kept, mask);
         }
         finally
         {
-            ArrayPool<ulong>.Shared.Return(mask);
+            Blocks.Return(mask);
         }
     }
 
@@ -3074,6 +3088,13 @@ internal sealed class BatchAsyncEnumerator : IAsyncEnumerator<RecordBatch>
         _segments.Dispose();
         _retained.Dispose();
         (_extras as LaneWindow)?.ReturnGate();
+
+        // Last: what the scan's blocks still hold goes back to its budget; a batch the caller keeps is the caller's.
+        if (ReferenceEquals(_account, this))
+        {
+            Close();
+            GC.SuppressFinalize(this);
+        }
     }
 
     /// <summary>

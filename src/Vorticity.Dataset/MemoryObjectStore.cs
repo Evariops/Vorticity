@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.IO.Pipelines;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -145,6 +146,31 @@ public sealed class MemoryObjectStore : IObjectStore
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
         await StartAsync(ObjectOperation.Read, key, cancellationToken).ConfigureAwait(false);
         return Find(key, ifToken) is { } entry ? Read(entry, key, offset, destination) : null;
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>Counted and failed as one read: the bytes written to <paramref name="destination"/> in one go.</remarks>
+    public async ValueTask<long> CopyToAsync(string key, long offset, long length, Stream destination, string? ifToken, CancellationToken cancellationToken)
+    {
+        ObjectKey.Check(key);
+        ArgumentNullException.ThrowIfNull(destination);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        await StartAsync(ObjectOperation.Read, key, cancellationToken).ConfigureAwait(false);
+        Entry entry = Find(key, ifToken) ?? throw ObjectNotFoundException.For(key);
+        if (length == 0)
+        {
+            return 0;
+        }
+
+        if (offset >= entry.Bytes.Length)
+        {
+            throw ObjectStoreExtensions.PastEnd(key, offset, entry.Bytes.Length);
+        }
+
+        int copied = (int)Math.Min(length, entry.Bytes.Length - offset);
+        await destination.WriteAsync(entry.Bytes.AsMemory((int)offset, copied), cancellationToken).ConfigureAwait(false);
+        return copied;
     }
 
     /// <summary>Copies an object's bytes from <paramref name="offset"/>: its array is never written after it is stored, so it is copied out after the lock.</summary>

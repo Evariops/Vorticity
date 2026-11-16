@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Vorticity.Buffers;
 
 namespace Vorticity.Aggregating;
 
@@ -50,11 +51,11 @@ internal struct KeyTable<TValue>
     // The slots, from the first word of a line of 64 bytes of their store: a line of slots is then
     // one of cache, where the data of an array of slots starts anywhere a word starts, and a slot of
     // 32 bytes lay across two lines one time in three.
-    private ulong[] _store;
+    private Block<ulong> _store;
     private int _base;
     private int _length;
-    private int[] _chains;
-    private Entry[] _overflow;
+    private Block<int> _chains;
+    private Block<Entry> _overflow;
     private int _overflowed;
     private ulong _multiplier;
     private ulong _seed;
@@ -66,25 +67,25 @@ internal struct KeyTable<TValue>
 
     // Whether the table was cleared to keep some groups, a stream's or a cache's: it then fills to six tenths (Clear).
     private bool _carried;
-    private readonly ArrayShelf? _shelf;
+    private readonly TableArrays? _account;
 
     public KeyTable()
     {
-        _store = [];
-        _chains = [];
-        _overflow = [];
     }
 
-    /// <summary>The slots, from the first line of their store.</summary>
+    /// <summary>The slots, from the first line of their store; none before the first key.</summary>
     private readonly Span<Slot> Slots
     {
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => MemoryMarshal.CreateSpan(ref Unsafe.As<ulong, Slot>(ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(_store), _base)), _length);
+        get => _length == 0 ? default : MemoryMarshal.CreateSpan(ref Unsafe.As<ulong, Slot>(ref Unsafe.Add(ref _store.GetReference(), _base)), _length);
     }
 
-    /// <summary>A table that takes its arrays from a query's shelf and gives them back as it grows: a sub-table of the core.</summary>
-    internal KeyTable(ArrayShelf shelf)
-        : this() => _shelf = shelf;
+    /// <summary>A table that rents its blocks under a query's account and gives them back as it grows: a sub-table of the core.</summary>
+    internal KeyTable(TableArrays account)
+        : this() => _account = account;
+
+    /// <summary>The account the table's blocks are rented under: none counts nothing.</summary>
+    private readonly TableArrays Arrays => _account ?? TableArrays.Uncounted;
 
     /// <summary>The keys the table holds.</summary>
     internal readonly int Count => _count;
@@ -339,8 +340,8 @@ internal struct KeyTable<TValue>
     /// </summary>
     internal void Clear(int room)
     {
-        Array.Clear(_store);
-        Array.Clear(_chains);
+        _store.Clear();
+        _chains.Clear();
         _overflowed = 0;
         _count = 0;
 
@@ -518,10 +519,10 @@ internal struct KeyTable<TValue>
     /// <summary>Places every key again in <paramref name="length"/> slots, a prime, under the seed the table has.</summary>
     private void Resize(int length)
     {
-        ulong[] oldStore = _store;
+        Block<ulong> oldStore = _store;
         Span<Slot> old = Slots;
-        int[] chains = _chains;
-        Entry[] overflow = _overflow;
+        Block<int> chains = _chains;
+        Block<Entry> overflow = _overflow;
         int overflowed = _overflowed;
 
         // The store a line longer than the slots, which start at its first line.
@@ -553,32 +554,34 @@ internal struct KeyTable<TValue>
             Place(overflow[i].Key, overflow[i].Group);
         }
 
-        _shelf?.Give(oldStore);
-        _shelf?.Give(chains);
+        TableArrays arrays = Arrays;
+        arrays.Return(oldStore);
+        arrays.Return(chains);
         if (!kept)
         {
-            _shelf?.Give(overflow);
+            arrays.Return(overflow);
         }
     }
 
     /// <summary>The word of <paramref name="store"/> a line of 64 bytes starts at.</summary>
-    internal static unsafe int LineStart(ulong[] store)
+    internal static unsafe int LineStart(Block<ulong> store)
     {
-        nint address = (nint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(store));
+        nint address = (nint)Unsafe.AsPointer(ref store.GetReference());
         return (int)((-address & (GroupRecords.Line - 1)) / sizeof(ulong));
     }
 
-    /// <summary>Gives the table's arrays back to its shelf: a sub-table split, whose groups another holds.</summary>
+    /// <summary>Gives the table's blocks back to its account: a sub-table split, whose groups another holds.</summary>
     internal void Release()
     {
-        _shelf?.Give(_store);
-        _shelf?.Give(_chains);
-        _shelf?.Give(_overflow);
-        _store = [];
+        TableArrays arrays = Arrays;
+        arrays.Return(_store);
+        arrays.Return(_chains);
+        arrays.Return(_overflow);
+        _store = default;
         _base = 0;
         _length = 0;
-        _chains = [];
-        _overflow = [];
+        _chains = default;
+        _overflow = default;
         _overflowed = 0;
         _count = 0;
         _growAt = 0;
@@ -615,9 +618,9 @@ internal struct KeyTable<TValue>
     {
         if (_overflowed == _overflow.Length)
         {
-            Entry[] grown = NewArray<Entry>(Math.Max(16, 2 * _overflow.Length));
-            _overflow.CopyTo(grown, 0);
-            _shelf?.Give(_overflow);
+            Block<Entry> grown = NewArray<Entry>(Math.Max(16, 2 * _overflow.Length));
+            _overflow.CopyTo(grown);
+            Arrays.Return(_overflow);
             _overflow = grown;
         }
 
@@ -626,8 +629,9 @@ internal struct KeyTable<TValue>
         head = ++_overflowed;
     }
 
-    /// <summary>An array of the table's, zeroed: from its shelf when it has one.</summary>
-    private readonly T[] NewArray<T>(int length) => _shelf is null ? new T[length] : _shelf.Take<T>(length, zeroed: true);
+    /// <summary>A block of the table's, zeroed, rented under its account.</summary>
+    private readonly Block<T> NewArray<T>(int length)
+        where T : unmanaged => Arrays.Rent<T>(length, zeroed: true);
 
     /// <summary><paramref name="value"/> modulo <paramref name="divisor"/> by a multiplication, as the runtime's dictionary takes it.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

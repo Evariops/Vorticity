@@ -10,15 +10,15 @@ internal sealed class StructStore : ColumnStore
 {
     private int _rows;
 
-    internal StructStore(DType dtype, ColumnStore[] children, AlignedBufferPool pool)
-        : base(dtype, pool)
+    internal StructStore(DType dtype, ColumnStore[] children, MemoryAccount account)
+        : base(dtype, account)
     {
         Children = children;
     }
 
     /// <summary>A struct whose type is given rather than read off the dtype: the one column of a file whose root is not a struct, seen as a struct of it.</summary>
-    internal StructStore(DType dtype, VortexType type, ColumnStore[] children, AlignedBufferPool pool)
-        : base(dtype, type, pool)
+    internal StructStore(DType dtype, VortexType type, ColumnStore[] children, MemoryAccount account)
+        : base(dtype, type, account)
     {
         Children = children;
     }
@@ -178,18 +178,18 @@ internal sealed class StructStore : ColumnStore
 /// <summary>A list column: an offset and a size per row over one elements column, the form the engine's list view reads.</summary>
 internal sealed unsafe class ListStore : ColumnStore
 {
-    private NativeSegmentOwner? _offsetsOwner;
+    private BlockOwner? _offsetsOwner;
     private byte* _offsets;
     private int _offsetBytes;
-    private NativeSegmentOwner? _sizesOwner;
+    private BlockOwner? _sizesOwner;
     private byte* _sizes;
     private int _sizeBytes;
     private int _capacity;
     private bool _open;
     private int _openStart;
 
-    internal ListStore(DType dtype, ColumnStore elements, AlignedBufferPool pool)
-        : base(dtype, pool)
+    internal ListStore(DType dtype, ColumnStore elements, MemoryAccount account)
+        : base(dtype, account)
     {
         Elements = elements;
     }
@@ -366,13 +366,13 @@ internal sealed unsafe class ListStore : ColumnStore
         Elements.Release();
         if (_offsetsOwner is not null)
         {
-            Pool.Return(_offsetsOwner);
+            _offsetsOwner.Release();
             _offsetsOwner = null;
         }
 
         if (_sizesOwner is not null)
         {
-            Pool.Return(_sizesOwner);
+            _sizesOwner.Release();
             _sizesOwner = null;
         }
 
@@ -390,8 +390,8 @@ internal sealed unsafe class ListStore : ColumnStore
         if (Count == _capacity)
         {
             long needed = ((long)Count + 1) * sizeof(int);
-            Grow(Pool, ref _offsetsOwner, ref _offsets, ref _offsetBytes, (long)Count * sizeof(int), needed);
-            Grow(Pool, ref _sizesOwner, ref _sizes, ref _sizeBytes, (long)Count * sizeof(int), needed);
+            Grow(Account, ref _offsetsOwner, ref _offsets, ref _offsetBytes, (long)Count * sizeof(int), needed);
+            Grow(Account, ref _sizesOwner, ref _sizes, ref _sizeBytes, (long)Count * sizeof(int), needed);
             _capacity = Math.Min(_offsetBytes, _sizeBytes) / sizeof(int);
         }
 
@@ -407,8 +407,8 @@ internal sealed class FixedListStore : ColumnStore
     private bool _open;
     private int _openStart;
 
-    internal FixedListStore(DType dtype, ColumnStore elements, AlignedBufferPool pool)
-        : base(dtype, pool)
+    internal FixedListStore(DType dtype, ColumnStore elements, MemoryAccount account)
+        : base(dtype, account)
     {
         Elements = elements;
         Size = checked((int)dtype.FixedSize);
@@ -548,8 +548,8 @@ internal sealed class FixedListStore : ColumnStore
 /// <summary>An extension column: its storage, labelled with the extension's dtype when it is built.</summary>
 internal sealed class ExtensionStore : ColumnStore
 {
-    internal ExtensionStore(DType dtype, ColumnStore storage, AlignedBufferPool pool)
-        : base(dtype, pool)
+    internal ExtensionStore(DType dtype, ColumnStore storage, MemoryAccount account)
+        : base(dtype, account)
     {
         Storage = storage;
     }
@@ -594,9 +594,9 @@ internal sealed class ExtensionStore : ColumnStore
 /// <summary>Makes the store tree of a dtype.</summary>
 internal static class ColumnStores
 {
-    internal static ColumnStore Create(DType dtype, AlignedBufferPool pool, VortexExtensionRegistry? extensions)
+    internal static ColumnStore Create(DType dtype, MemoryAccount account, VortexExtensionRegistry? extensions)
     {
-        ColumnStore store = Create(dtype, pool);
+        ColumnStore store = Create(dtype, account);
         Attach(store, extensions);
         return store;
     }
@@ -605,12 +605,12 @@ internal static class ColumnStores
     /// The store of a file's rows, whose root is <paramref name="schema"/>: the struct of its columns,
     /// or, for a root that is not a struct, its one column seen as a struct of it.
     /// </summary>
-    internal static StructStore Root(DType schema, AlignedBufferPool pool, VortexExtensionRegistry? extensions)
+    internal static StructStore Root(DType schema, MemoryAccount account, VortexExtensionRegistry? extensions)
     {
-        ColumnStore store = Create(schema, pool, extensions);
+        ColumnStore store = Create(schema, account, extensions);
         return schema.Kind == DTypeKind.Struct
             ? (StructStore)store
-            : new StructStore(schema, VortexType.Struct([new VortexField(string.Empty, store.Type)]), [store], pool);
+            : new StructStore(schema, VortexType.Struct([new VortexField(string.Empty, store.Type)]), [store], account);
     }
 
     private static void Attach(ColumnStore store, VortexExtensionRegistry? extensions)
@@ -639,29 +639,29 @@ internal static class ColumnStores
         }
     }
 
-    private static ColumnStore Create(DType dtype, AlignedBufferPool pool)
+    private static ColumnStore Create(DType dtype, MemoryAccount account)
     {
         switch (dtype.Kind)
         {
             case DTypeKind.Null:
-                return new NullStore(dtype, pool);
+                return new NullStore(dtype, account);
             case DTypeKind.Bool:
-                return new BoolStore(dtype, pool);
+                return new BoolStore(dtype, account);
             case DTypeKind.Primitive:
             case DTypeKind.Decimal:
-                return new FixedStore(dtype, pool);
+                return new FixedStore(dtype, account);
             case DTypeKind.Utf8:
             case DTypeKind.Binary:
-                return new VarBinStore(dtype, pool);
+                return new VarBinStore(dtype, account);
             case DTypeKind.Struct:
             {
                 ColumnStore[] children = new ColumnStore[dtype.FieldCount];
                 for (int i = 0; i < children.Length; i++)
                 {
-                    children[i] = Create(dtype.GetField(i), pool);
+                    children[i] = Create(dtype.GetField(i), account);
                 }
 
-                return new StructStore(dtype, children, pool);
+                return new StructStore(dtype, children, account);
             }
 
             case DTypeKind.Variant:
@@ -669,24 +669,24 @@ internal static class ColumnStores
                 // A variant is the struct of its metadata and its value wearing the variant dtype:
                 // the shape a read delivers, and the one the writer writes as vortex.parquet.variant.
                 DType binary = dtype.Arena.Binary(Nullability.NonNullable);
-                return new StructStore(dtype, [new VarBinStore(binary, pool), new VarBinStore(binary, pool)], pool);
+                return new StructStore(dtype, [new VarBinStore(binary, account), new VarBinStore(binary, account)], account);
             }
 
             case DTypeKind.List:
-                return new ListStore(dtype, Create(dtype.ElementType, pool), pool);
+                return new ListStore(dtype, Create(dtype.ElementType, account), account);
             case DTypeKind.FixedSizeList:
-                return new FixedListStore(dtype, Create(dtype.ElementType, pool), pool);
+                return new FixedListStore(dtype, Create(dtype.ElementType, account), account);
             case DTypeKind.Map:
             {
                 // A map is its list of entries, each a non-nullable {key, value}: the shape the
                 // decoder reads a map back as, so the node this builds is the one a read delivers.
                 DType entries = dtype.Arena.Struct(["key", "value"], [dtype.KeyType, dtype.ValueType], Nullability.NonNullable);
-                return new ListStore(dtype, Create(entries, pool), pool);
+                return new ListStore(dtype, Create(entries, account), account);
             }
             case DTypeKind.Extension:
             {
-                ColumnStore storage = Create(dtype.StorageType, pool);
-                ExtensionStore extension = new ExtensionStore(dtype, storage, pool);
+                ColumnStore storage = Create(dtype.StorageType, account);
+                ExtensionStore extension = new ExtensionStore(dtype, storage, account);
                 storage.ExtensionMetadata = dtype.ExtensionMetadata.ToArray();
                 if (storage is FixedStore fixedStorage)
                 {

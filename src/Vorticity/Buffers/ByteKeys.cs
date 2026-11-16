@@ -47,19 +47,16 @@ internal sealed class ByteKeys : IEqualityComparer<byte[]>, IAlternateEqualityCo
             return false;
         }
 
-        byte[]? rented = count > 256 ? System.Buffers.ArrayPool<byte>.Shared.Rent(count) : null;
+        Block<byte> rented = count > 256 ? Blocks.Rent<byte>(count) : default;
         try
         {
-            Span<byte> encoded = rented is null ? stackalloc byte[256] : rented;
+            Span<byte> encoded = rented.IsDefault ? stackalloc byte[256] : rented;
             int written = System.Text.Encoding.UTF8.GetBytes(text, encoded);
             return encoded[..written].SequenceEqual(utf8);
         }
         finally
         {
-            if (rented is not null)
-            {
-                System.Buffers.ArrayPool<byte>.Shared.Return(rented);
-            }
+            Blocks.Return(rented);
         }
     }
 }

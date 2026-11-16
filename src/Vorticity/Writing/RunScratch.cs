@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.CompilerServices;
@@ -7,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
+using Vorticity.Buffers;
 
 namespace Vorticity.Writing;
 
@@ -123,7 +123,7 @@ internal sealed class RunScratch : IDisposable
             int at = (int)(_length % PageBytes);
             if (page == _pages.Count)
             {
-                _pages.Add(ArrayPool<byte>.Shared.Rent(PageBytes));
+                _pages.Add(Blocks.Rent<byte>(PageBytes).Array());
             }
 
             int take = Math.Min(PageBytes - at, bytes.Length);
@@ -354,14 +354,14 @@ internal sealed class RunScratch : IDisposable
         if (!_sealFile)
         {
             _flushed = (long)whole * PageBytes;
-            _tail = whole < _pages.Count ? _pages[whole] : ArrayPool<byte>.Shared.Rent(PageBytes);
+            _tail = whole < _pages.Count ? _pages[whole] : Blocks.Rent<byte>(PageBytes).Array();
         }
 
         foreach (byte[] page in _pages)
         {
             if (!ReferenceEquals(page, _tail))
             {
-                ArrayPool<byte>.Shared.Return(page);
+                Blocks.ReturnBytes(page);
             }
         }
 
@@ -378,12 +378,18 @@ internal sealed class RunScratch : IDisposable
         if (_tail is { } tail)
         {
             _tail = null;
-            ArrayPool<byte>.Shared.Return(tail);
+            Blocks.ReturnBytes(tail);
         }
 
+        // A sealed store's pages hold plaintext, wiped before they go back.
         foreach (byte[] page in _pages)
         {
-            ArrayPool<byte>.Shared.Return(page, clearArray: _sealFile);
+            if (_sealFile)
+            {
+                System.Security.Cryptography.CryptographicOperations.ZeroMemory(page);
+            }
+
+            Blocks.ReturnBytes(page);
         }
 
         _pages.Clear();
@@ -408,10 +414,10 @@ internal sealed class ScratchFrames : IDisposable
 
     private readonly Sealing.EpochCipher _cipher;
 
-    // From the shared pool, as a plain scratch's pages are: a spill pays no buffer of its own. The
-    // frame being filled holds plaintext, and is wiped before it goes back.
-    private readonly byte[] _pending = ArrayPool<byte>.Shared.Rent(FrameBytes);
-    private readonly byte[] _sealed = ArrayPool<byte>.Shared.Rent(SealedFrameBytes);
+    // From the pool, as a plain scratch's pages are: a spill pays no buffer of its own. The frame
+    // being filled holds plaintext, and is wiped before it goes back.
+    private readonly Block<byte> _pending = Blocks.Rent<byte>(FrameBytes);
+    private readonly Block<byte> _sealed = Blocks.Rent<byte>(SealedFrameBytes);
 
     /// <summary>Held while the writer moves to the next frame, and while a reader copies out of the one being filled.</summary>
     private readonly object _gate = new object();
@@ -440,7 +446,7 @@ internal sealed class ScratchFrames : IDisposable
             if (_filled == FrameBytes)
             {
                 Seal();
-                await RandomAccess.WriteAsync(file, _sealed.AsMemory(0, SealedFrameBytes), _written * SealedFrameBytes, cancellationToken).ConfigureAwait(false);
+                await RandomAccess.WriteAsync(file, _sealed.AsMemory(), _written * SealedFrameBytes, cancellationToken).ConfigureAwait(false);
 
                 // The frame is on disk before a reader is sent there, and the buffer is refilled only
                 // once no reader can still be copying the frame out of it.
@@ -478,11 +484,11 @@ internal sealed class ScratchFrames : IDisposable
             int count = (int)Math.Min(writtenBytes - offset, destination.Length);
             long last = (offset + count - 1) / FrameBytes;
             int frames = (int)(last - first + 1);
-            byte[] sealedRun = ArrayPool<byte>.Shared.Rent(frames * SealedFrameBytes);
-            byte[]? plain = null;
+            Block<byte> sealedRun = Blocks.Rent<byte>(frames * SealedFrameBytes);
+            Block<byte> plain = default;
             try
             {
-                Memory<byte> run = sealedRun.AsMemory(0, frames * SealedFrameBytes);
+                Memory<byte> run = sealedRun.AsMemory();
                 long at = first * SealedFrameBytes;
                 while (!run.IsEmpty)
                 {
@@ -500,13 +506,13 @@ internal sealed class ScratchFrames : IDisposable
             }
             finally
             {
-                if (plain is not null)
+                if (!plain.IsEmpty)
                 {
                     System.Security.Cryptography.CryptographicOperations.ZeroMemory(plain);
-                    ArrayPool<byte>.Shared.Return(plain);
+                    Blocks.Return(plain);
                 }
 
-                ArrayPool<byte>.Shared.Return(sealedRun);
+                Blocks.Return(sealedRun);
             }
         }
     }
@@ -521,8 +527,8 @@ internal sealed class ScratchFrames : IDisposable
 
         _cipher.Dispose();
         System.Security.Cryptography.CryptographicOperations.ZeroMemory(_pending);
-        ArrayPool<byte>.Shared.Return(_pending);
-        ArrayPool<byte>.Shared.Return(_sealed);
+        Blocks.Return(_pending);
+        Blocks.Return(_sealed);
     }
 
     private void Seal()
@@ -530,7 +536,7 @@ internal sealed class ScratchFrames : IDisposable
         System.Security.Cryptography.AesGcm aes = _cipher.Rent();
         try
         {
-            Sealing.EpochCipher.Seal(aes, _written, final: false, _pending.AsSpan(0, FrameBytes), _sealed.AsSpan(0, FrameBytes), _sealed.AsSpan(FrameBytes, Sealing.SealedFormat.TagBytes));
+            Sealing.EpochCipher.Seal(aes, _written, final: false, _pending, _sealed.AsSpan(0, FrameBytes), _sealed.AsSpan(FrameBytes, Sealing.SealedFormat.TagBytes));
         }
         finally
         {
@@ -543,7 +549,7 @@ internal sealed class ScratchFrames : IDisposable
     /// <paramref name="offset"/>: a frame the destination holds whole straight into it, one it holds in
     /// part into <paramref name="plain"/>, rented the first time, and copied out.
     /// </summary>
-    private void Open(byte[] sealedRun, long first, int frames, ref byte[]? plain, long offset, Span<byte> destination)
+    private void Open(ReadOnlySpan<byte> sealedRun, long first, int frames, ref Block<byte> plain, long offset, Span<byte> destination)
     {
         System.Security.Cryptography.AesGcm aes = _cipher.Rent();
         try
@@ -554,16 +560,20 @@ internal sealed class ScratchFrames : IDisposable
                 long frameStart = index * FrameBytes;
                 long from = Math.Max(offset, frameStart);
                 long to = Math.Min(offset + destination.Length, frameStart + FrameBytes);
-                ReadOnlySpan<byte> ciphertext = sealedRun.AsSpan(f * SealedFrameBytes, FrameBytes);
-                ReadOnlySpan<byte> tag = sealedRun.AsSpan((f * SealedFrameBytes) + FrameBytes, Sealing.SealedFormat.TagBytes);
+                ReadOnlySpan<byte> ciphertext = sealedRun.Slice(f * SealedFrameBytes, FrameBytes);
+                ReadOnlySpan<byte> tag = sealedRun.Slice((f * SealedFrameBytes) + FrameBytes, Sealing.SealedFormat.TagBytes);
                 if (to - from == FrameBytes)
                 {
                     Sealing.EpochCipher.Open(aes, index, final: false, ciphertext, tag, destination.Slice((int)(from - offset), FrameBytes), index * SealedFrameBytes);
                     continue;
                 }
 
-                plain ??= ArrayPool<byte>.Shared.Rent(FrameBytes);
-                Sealing.EpochCipher.Open(aes, index, final: false, ciphertext, tag, plain.AsSpan(0, FrameBytes), index * SealedFrameBytes);
+                if (plain.IsEmpty)
+                {
+                    plain = Blocks.Rent<byte>(FrameBytes);
+                }
+
+                Sealing.EpochCipher.Open(aes, index, final: false, ciphertext, tag, plain, index * SealedFrameBytes);
                 plain.AsSpan((int)(from - frameStart), (int)(to - from)).CopyTo(destination[(int)(from - offset)..]);
             }
         }

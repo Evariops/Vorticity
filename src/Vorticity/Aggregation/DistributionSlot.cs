@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 
 namespace Vorticity.Aggregating;
@@ -9,7 +10,7 @@ namespace Vorticity.Aggregating;
 /// A distribution per group: a <see cref="QuantileSketch"/> each, made at a group's first value. The
 /// sketches' arrays are counted as they grow, so the query's memory holds them as it holds every other
 /// state, and they spill as their buckets. A slot whose answers read their sketches, a quantile's, takes
-/// the arrays from its query's shelf and gives them back as it lets each sketch go; one whose answers are
+/// the arrays from its query's account and gives them back as it lets each sketch go; one whose answers are
 /// the sketches themselves leaves them to the answers.
 /// </summary>
 /// <typeparam name="TValue">The column's storage type.</typeparam>
@@ -22,13 +23,13 @@ internal sealed class DistributionSlot<TValue, TResult> : SketchSlot<QuantileSke
 
     private readonly int _bits;
     private readonly Func<QuantileSketch?, TResult> _final;
-    private readonly bool _shelved;
-    private TValue[] _values = [];
+    private readonly bool _accounted;
+    private ScratchBlock<TValue> _values;
     private MaskCache _rows;
-    private ulong[] _clip = [];
+    private ScratchBlock<ulong> _clip;
 
     // The values a filter keeps of a range, compacted.
-    private TValue[] _picked = [];
+    private ScratchBlock<TValue> _picked;
 
     // The bytes the sketches grew by, and the values and states stepped into them, over the slot's life: what a value
     // costs them on average once their windows densify and widen, where a sparse bucket's twelve bytes left the budget
@@ -38,29 +39,29 @@ internal sealed class DistributionSlot<TValue, TResult> : SketchSlot<QuantileSke
 
     /// <param name="bits">The grid's mantissa bits.</param>
     /// <param name="final">A group's answer from its sketch.</param>
-    /// <param name="shelved">Whether the answers only read the sketches, which may then take their arrays from the query's shelf.</param>
-    internal DistributionSlot(int bits, Func<QuantileSketch?, TResult> final, bool shelved)
+    /// <param name="accounted">Whether the answers only read the sketches, which may then take their arrays from the query's account.</param>
+    internal DistributionSlot(int bits, Func<QuantileSketch?, TResult> final, bool accounted)
     {
         _bits = bits;
         _final = final;
-        _shelved = shelved;
+        _accounted = accounted;
     }
 
     private protected override long ValueBytes => Math.Max(BytesPerValue, _stepped == 0 ? 0 : _grown / _stepped);
 
-    private protected override QuantileSketch New() => new QuantileSketch(_bits, _shelved ? Shelf : null);
+    private protected override QuantileSketch New() => new QuantileSketch(_bits, _accounted ? Account : null);
 
-    private protected override QuantileSketch Read(ref SpillReader reader) => QuantileSketch.Read(_bits, ref reader, _shelved ? Shelf : null);
+    private protected override QuantileSketch Read(ref SpillReader reader) => QuantileSketch.Read(_bits, ref reader, _accounted ? Account : null);
 
     /// <summary>
     /// Another table's sketch taken as it is: one whose arrays no query's memory counts, small ones, given back to this
-    /// slot's shelf from now on; or any, where the answers hold the sketches and nothing is given back.
+    /// slot's account from now on; or any, where the answers hold the sketches and nothing is given back.
     /// </summary>
-    private protected override bool Adopts(QuantileSketch sketch) => !_shelved || sketch.TryRehome(Shelf);
+    private protected override bool Adopts(QuantileSketch sketch) => !_accounted || sketch.TryRehome(Account);
 
     private protected override void Released(QuantileSketch sketch)
     {
-        if (_shelved)
+        if (_accounted)
         {
             sketch.Release();
         }
@@ -72,7 +73,7 @@ internal sealed class DistributionSlot<TValue, TResult> : SketchSlot<QuantileSke
         _stepped += rows;
     }
 
-    /// <summary>Lets the sketches go, and gives the slot's buffers back to the process's shelf, which the next query's take.</summary>
+    /// <summary>Lets the sketches go, and gives the slot's buffers back to the pool, which the next query's take.</summary>
     internal override void Release()
     {
         base.Release();

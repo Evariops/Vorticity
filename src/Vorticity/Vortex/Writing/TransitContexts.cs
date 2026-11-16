@@ -23,20 +23,22 @@ internal static class TransitContexts
     private static readonly Lock Gate = new Lock();
     private static int _count;
 
-    /// <summary>A context an earlier writer gave back, or a new one when none waits.</summary>
-    internal static ScanContext Rent()
+    /// <summary>A context an earlier writer gave back, or a new one when none waits, its blocks counted for <paramref name="account"/>, the writer's.</summary>
+    internal static ScanContext Rent(Buffers.MemoryAccount account)
     {
+        ScanContext? context = null;
         lock (Gate)
         {
             if (_count > 0)
             {
-                ScanContext context = Contexts[--_count]!;
+                context = Contexts[--_count]!;
                 Contexts[_count] = null;
-                return context;
             }
         }
 
-        return new ScanContext([]);
+        context ??= new ScanContext([]);
+        context.Account = account;
+        return context;
     }
 
     /// <summary>Resets <paramref name="context"/> and keeps it for a later writer, or disposes it past the bound.</summary>
@@ -44,6 +46,7 @@ internal static class TransitContexts
     {
         context.ResetBatch();
         context.Types.Clear();
+        context.Account = Buffers.MemoryAccount.Kept;
         lock (Gate)
         {
             if (_count < Capacity)

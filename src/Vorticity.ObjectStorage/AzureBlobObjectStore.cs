@@ -1,7 +1,7 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Runtime.CompilerServices;
@@ -250,6 +250,79 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
         return ValueTask.CompletedTask;
     }
 
+    /// <inheritdoc/>
+    /// <remarks>
+    /// One GetBlob of the whole range, its body written to <paramref name="destination"/> as it arrives; a body cut short is
+    /// asked again from where it stopped, under the transport's retries, of the blob its first answer came from.
+    /// </remarks>
+    public async ValueTask<long> CopyToAsync(string key, long offset, long length, Stream destination, string? ifToken, CancellationToken cancellationToken)
+    {
+        CheckKey(key);
+        ArgumentNullException.ThrowIfNull(destination);
+        ArgumentOutOfRangeException.ThrowIfNegative(offset);
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        ThrowIfDisposed();
+        if (length == 0)
+        {
+            return 0;
+        }
+
+        CopyProgress progress = new CopyProgress { Token = ifToken };
+        return await _transport.SendAsync(
+            "GetBlob",
+            new CopyRequest(this, key, offset, length, destination, progress),
+            static (s, ct) => s.Store.BuildCopyAsync(s, ct),
+            static (response, s, ct) => s.Store.ConsumeCopyAsync(response, s, ct),
+            idempotent: true,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private ValueTask<HttpRequestMessage> BuildCopyAsync(CopyRequest s, CancellationToken cancellationToken)
+    {
+        string range = string.Create(CultureInfo.InvariantCulture, $"bytes={s.Offset + s.Progress.Written}-{s.Offset + s.Length - 1}");
+        (string, string)[] headers = s.Progress.Token is { } token
+            ? [("x-ms-range", range), ("If-Match", token)]
+            : [("x-ms-range", range)];
+        return BuildAsync(HttpMethod.Get, s.Key, string.Empty, null, headers, cancellationToken);
+    }
+
+    private async ValueTask<long> ConsumeCopyAsync(HttpResponseMessage response, CopyRequest s, CancellationToken cancellationToken)
+    {
+        long from = s.Offset + s.Progress.Written;
+        HttpStatusCode status = response.StatusCode;
+        if (status == HttpStatusCode.RequestedRangeNotSatisfiable)
+        {
+            long? size = HttpAnswers.ContentRange(response)?.Total;
+            await ReadErrorAsync(response, cancellationToken).ConfigureAwait(false);
+            throw StoreFailures.PastEnd(s.Key, from, size ?? -1);
+        }
+
+        if (status is not (HttpStatusCode.PartialContent or HttpStatusCode.OK))
+        {
+            throw await FailureAsync(response, "GetBlob", s.Key, s.Progress.Token, cancellationToken).ConfigureAwait(false);
+        }
+
+        long announced = response.Content.Headers.ContentLength
+            ?? throw new ObjectStoreException($"GetBlob on '{s.Key}' was answered without a length.");
+        (long first, long total) = status == HttpStatusCode.PartialContent
+            ? HttpAnswers.ContentRange(response) ?? throw new ObjectStoreException($"GetBlob on '{s.Key}' was answered with a partial body and no Content-Range.")
+            : from == 0 ? (0, announced) : throw new ObjectStoreException($"GetBlob on '{s.Key}' was answered with the whole blob where bytes from {from} were asked.");
+        if (first != from)
+        {
+            throw new ObjectStoreException($"GetBlob on '{s.Key}' was answered with bytes from {first} where {from} was asked.");
+        }
+
+        s.Progress.Token ??= HttpAnswers.ETagOf(response, s.Key, null);
+        long end = Math.Min(s.Offset + s.Length, total);
+        await _transport.CopyBodyAsync(response, s.Into, Math.Min(announced, end - from), s.Progress, cancellationToken).ConfigureAwait(false);
+        if (s.Offset + s.Progress.Written < end)
+        {
+            throw new StoreRetryException($"the body of GetBlob on '{s.Key}' ended at {s.Offset + s.Progress.Written} of {end} bytes", RetryBudget.RetryCost);
+        }
+
+        return s.Progress.Written;
+    }
+
     private ValueTask<HttpRequestMessage> BuildReadAsync(ReadRequest s, CancellationToken cancellationToken)
     {
         string range = string.Create(CultureInfo.InvariantCulture, $"bytes={s.Offset}-{s.Offset + s.Destination.Length - 1}");
@@ -354,7 +427,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(bytes);
+            VortexBytePool.Instance.Return(bytes);
         }
     }
 
@@ -468,7 +541,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(bytes);
+            VortexBytePool.Instance.Return(bytes);
         }
     }
 
@@ -488,6 +561,8 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
 
     /// <summary>A read's request; with <paramref name="IfPresent"/>, a 404 is answered <see cref="StoreReads.Absent"/> rather than thrown.</summary>
     private readonly record struct ReadRequest(AzureBlobObjectStore Store, string Key, long Offset, Memory<byte> Destination, string? IfToken, bool IfPresent = false);
+
+    private readonly record struct CopyRequest(AzureBlobObjectStore Store, string Key, long Offset, long Length, Stream Into, CopyProgress Progress);
 
     private readonly record struct ListRequest(AzureBlobObjectStore Store, string Prefix, string? StartAfter, string? Marker, List<ObjectListing> Page);
 }

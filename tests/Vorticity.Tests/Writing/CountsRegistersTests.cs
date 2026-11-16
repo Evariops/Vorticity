@@ -100,7 +100,7 @@ public sealed class CountsRegistersTests
         host.HashRows();
         plan.Wide.Add(new WideColumn(0, service));
         plan.Wide.Add(new WideColumn(1, host));
-        ColumnCountsBuilder counts = new ColumnCountsBuilder(service, plan, field: 0);
+        ColumnCountsBuilder counts = new ColumnCountsBuilder(service, plan, field: 0, TestAccount.Shared);
         DType utf8 = types.Utf8(Nullability.NonNullable);
         DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
         long most = 0;

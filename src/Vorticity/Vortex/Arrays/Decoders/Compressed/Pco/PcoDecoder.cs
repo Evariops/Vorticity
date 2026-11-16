@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Threading;
 
 using Vorticity.Arrays.Decoders.Canonical;
@@ -82,16 +81,16 @@ internal sealed class PcoDecoder : ArrayDecoder
         {
             output = CompressedValues.Allocate(context, outputBytes, width, Id, out Span<byte> destination);
             int denseBytes = (int)wrapper.ValueCount * width;
-            byte[] dense = ArrayPool<byte>.Shared.Rent(Math.Max(denseBytes, 1));
+            Block<byte> dense = Blocks.Rent<byte>(denseBytes);
             try
             {
-                DecodeValues(node, wrapper, number, dense.AsSpan(0, denseBytes), ranks: default);
+                DecodeValues(node, wrapper, number, dense, ranks: default);
                 ValidityMask mask = ValidityMask.From(context, validity);
                 ValidRows.Spread(dense.AsSpan(0, valid * width), destination, in mask, length, width, Id);
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(dense);
+                Blocks.Return(dense);
             }
         }
 
@@ -239,7 +238,7 @@ internal sealed class PcoDecoder : ArrayDecoder
         Scratch<ulong> batchValues = new Scratch<ulong>(PcoPageDecoder.BatchSize, default);
         Scratch<int> batchOffsetBits = new Scratch<int>(PcoPageDecoder.BatchSize, default);
         Scratch<ulong> primaryScratch = new Scratch<ulong>(width == 8 ? 0 : PcoPageDecoder.BatchSize, default);
-        byte[]? pageRental = null;
+        Block<byte> pageRental = default;
 
         // The latent states are reset by each page, and the chunk metadata with its tables refilled
         // by each chunk, rather than rebuilt, for the same reason as the buffers above; and both are
@@ -298,18 +297,7 @@ internal sealed class PcoDecoder : ArrayDecoder
                             }
 
                             int pageBytes = pageValues * width;
-                            if (pageRental is null || pageRental.Length < pageBytes)
-                            {
-                                byte[]? smaller = pageRental;
-                                pageRental = null;
-                                if (smaller is not null)
-                                {
-                                    ArrayPool<byte>.Shared.Return(smaller);
-                                }
-
-                                pageRental = ArrayPool<byte>.Shared.Rent(pageBytes);
-                            }
-
+                            Blocks.Ensure(ref pageRental, pageBytes);
                             Span<byte> page = pageRental.AsSpan(0, pageBytes);
                             PcoPageDecoder.DecodeJoined(
                                 meta!, node.GetBuffer(pageBuffer).Span, pageValues, secondaryScratch.Span, in batchScratch, page);
@@ -341,10 +329,7 @@ internal sealed class PcoDecoder : ArrayDecoder
             // A dictionary is rented by its chunk; the metadata kept for the next decode holds none.
             reused.Meta.Release();
             GiveSpare(reused);
-            if (pageRental is not null)
-            {
-                ArrayPool<byte>.Shared.Return(pageRental);
-            }
+            Blocks.Return(pageRental);
 
             primaryScratch.Dispose();
             batchOffsetBits.Dispose();

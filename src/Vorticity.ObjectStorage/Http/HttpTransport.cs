@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
@@ -352,6 +351,57 @@ internal sealed class HttpTransport : IDisposable
         return total;
     }
 
+    /// <summary>
+    /// Writes an answer's body to <paramref name="destination"/> as it arrives, <paramref name="length"/> bytes at most, each
+    /// counted in <paramref name="progress"/> once written, under the stall deadline: the attempt that follows a body cut
+    /// short asks for the bytes after those. The answer's disposal closes the body. A failure to write the destination is
+    /// its own, never retried: only the body's are.
+    /// </summary>
+    /// <exception cref="StoreRetryException">The body stalled or its connection failed.</exception>
+    internal async ValueTask CopyBodyAsync(HttpResponseMessage response, Stream destination, long length, CopyProgress progress, CancellationToken cancellationToken)
+    {
+        long copied = 0;
+        bool writing = false;
+        byte[] block = VortexBytePool.Instance.Rent((int)Math.Min(CopyBlockBytes, Math.Max(length, 1)));
+        try
+        {
+            Stream body = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            using CancellationTokenSource stall = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            stall.CancelAfter(_options.StallTimeout);
+            while (copied < length)
+            {
+                int read = await body.ReadAsync(block.AsMemory(0, (int)Math.Min(block.Length, length - copied)), stall.Token).ConfigureAwait(false);
+                if (read == 0)
+                {
+                    break;
+                }
+
+                writing = true;
+                await destination.WriteAsync(block.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                writing = false;
+                copied += read;
+                progress.Written += read;
+                stall.CancelAfter(_options.StallTimeout);
+            }
+        }
+        catch (OperationCanceledException stalled) when (!writing && !cancellationToken.IsCancellationRequested)
+        {
+            throw new StoreRetryException($"the body stalled for {_options.StallTimeout.TotalSeconds:0.###} s after {copied} bytes", RetryBudget.TimeoutCost, stalled);
+        }
+        catch (Exception lost) when (!writing && lost is HttpRequestException or IOException)
+        {
+            throw new StoreRetryException($"the body failed after {copied} bytes: {lost.Message}", RetryBudget.RetryCost, lost);
+        }
+        finally
+        {
+            VortexBytePool.Instance.Return(block);
+            StoreTelemetry.Read(copied);
+        }
+    }
+
+    /// <summary>The bytes a copy reads from a body and writes at a time.</summary>
+    private const int CopyBlockBytes = 1 << 20;
+
     /// <summary>Reads a small body whole, up to <paramref name="limit"/> bytes, into a pooled array the caller returns.</summary>
     /// <exception cref="StoreRetryException">The body stalled or its connection failed.</exception>
     /// <exception cref="ObjectStoreException">The body is longer than <paramref name="limit"/>.</exception>
@@ -363,7 +413,7 @@ internal sealed class HttpTransport : IDisposable
             throw new ObjectStoreException($"An answer of {announced} bytes is past the {limit} this store reads.");
         }
 
-        byte[] bytes = ArrayPool<byte>.Shared.Rent((int)Math.Min(announced ?? 16_384, limit) + 1);
+        byte[] bytes = VortexBytePool.Instance.Rent((int)Math.Min(announced ?? 16_384, limit) + 1);
         int length = 0;
         try
         {
@@ -381,15 +431,15 @@ internal sealed class HttpTransport : IDisposable
                     throw new ObjectStoreException($"An answer past {limit} bytes is longer than this store reads.");
                 }
 
-                byte[] larger = ArrayPool<byte>.Shared.Rent(Math.Min(bytes.Length * 2, limit + 1));
+                byte[] larger = VortexBytePool.Instance.Rent(Math.Min(bytes.Length * 2, limit + 1));
                 bytes.AsSpan(0, length).CopyTo(larger);
-                ArrayPool<byte>.Shared.Return(bytes);
+                VortexBytePool.Instance.Return(bytes);
                 bytes = larger;
             }
         }
         catch
         {
-            ArrayPool<byte>.Shared.Return(bytes);
+            VortexBytePool.Instance.Return(bytes);
             throw;
         }
     }

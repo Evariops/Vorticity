@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Layouts;
@@ -109,7 +110,8 @@ internal sealed class ConvertedColumn<T>(string name, VortexType type, FieldExpr
 
         VortexSessionOptions options = session.Options;
         ResultValues.Copy(null, arena, node, source, options.Extensions, _values, null);
-        _store ??= ColumnStores.Create(VortexTypes.ToDType(Type, new DTypeArena()), options.EnginePool, options.Extensions);
+        // Under the account of the batches it builds into: the scan's.
+        _store ??= ColumnStores.Create(VortexTypes.ToDType(Type, new DTypeArena()), arena.Account, options.Extensions);
         _store.Truncate(0);
         ResultValues.Append(_store, _values, rows, null);
         return _store.Build(arena, rows);
@@ -182,6 +184,10 @@ internal sealed class ProjectionQuery : ResultQuery
     internal override ScanCounters Counters => Host.Counters;
 
     internal override IAsyncEnumerator<RecordBatch> Batches(CancellationToken cancellationToken) => new ProjectedBatches(this, cancellationToken);
+
+    /// <summary>The projected rows, read under <paramref name="memory"/>, the question's that sorts them, when one is given.</summary>
+    internal override IAsyncEnumerator<RecordBatch> Batches(Aggregating.QueryMemory? memory, CancellationToken cancellationToken) =>
+        new ProjectedBatches(this, cancellationToken, memory);
 
     internal override ValueTask<ScanPlan> ExplainAsync(bool analyze, CancellationToken cancellationToken) =>
         Host.Source.PlanAsync(SourceSpec(keepEncodings: true, out _), analyze, cancellationToken);
@@ -287,17 +293,18 @@ internal sealed class ProjectedBatches : IAsyncEnumerator<RecordBatch>
     private readonly DType _dtype;
     private IAsyncEnumerator<RecordBatch>? _inner;
     private RecordBatch? _current;
-    private int[] _rows = [];
-    private int[] _children = [];
+    private ScratchBlock<int> _rows;
+    private ScratchBlock<int> _children;
     private long _position;
     private bool _begun;
     private bool _ended;
 
-    internal ProjectedBatches(ProjectionQuery query, CancellationToken cancellationToken)
+    internal ProjectedBatches(ProjectionQuery query, CancellationToken cancellationToken, Aggregating.QueryMemory? memory = null)
     {
         _query = query;
         _cancellationToken = cancellationToken;
-        _spec = query.SourceSpec(keepEncodings: true, out bool narrowed);
+        ScanSpec spec = query.SourceSpec(keepEncodings: true, out bool narrowed);
+        _spec = memory is null ? spec : spec.Under(memory);
         _skip = narrowed ? 0 : query.Skip;
         _end = narrowed || query.Take == long.MaxValue ? long.MaxValue : query.Skip + query.Take;
         _dtype = VortexTypes.ToDType(query.Schema, new DTypeArena());
@@ -347,6 +354,8 @@ internal sealed class ProjectedBatches : IAsyncEnumerator<RecordBatch>
             column.Release();
         }
 
+        Scratch.Return(ref _rows);
+        Scratch.Return(ref _children);
         End();
     }
 

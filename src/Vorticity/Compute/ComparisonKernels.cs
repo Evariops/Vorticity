@@ -1,11 +1,11 @@
 using System;
-using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Types;
 using Vorticity.Types.Numerics;
@@ -59,16 +59,16 @@ internal static partial class ComparisonKernels
         {
             if (EncodedAnswers.TryValues(arena, nodeIndex, destination.Length, out int values, out int count))
             {
-                byte[] rented = ArrayPool<byte>.Shared.Rent(Math.Max(count, 1));
+                Block<byte> rented = Blocks.Rent<byte>(count);
                 try
                 {
-                    Span<byte> answers = rented.AsSpan(0, count);
+                    Span<byte> answers = rented;
                     Compare(arena, values, op, literal, answers);
                     EncodedAnswers.Expand(arena, nodeIndex, answers, destination);
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(rented);
+                    Blocks.Return(rented);
                 }
 
                 return;
@@ -137,16 +137,16 @@ internal static partial class ComparisonKernels
             // values instead of the rows gains the most.
             if (EncodedAnswers.TryValues(arena, storage, destination.Length, out int values, out int count))
             {
-                byte[] rented = ArrayPool<byte>.Shared.Rent(Math.Max(count, 1));
+                Block<byte> rented = Blocks.Rent<byte>(count);
                 try
                 {
-                    Span<byte> answers = rented.AsSpan(0, count);
+                    Span<byte> answers = rented;
                     StringMatch(arena, values, op, pattern, escape, answers);
                     EncodedAnswers.Expand(arena, storage, answers, destination);
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(rented);
+                    Blocks.Return(rented);
                 }
 
                 return;
@@ -227,15 +227,15 @@ internal static partial class ComparisonKernels
             return;
         }
 
-        byte[]? rentedLiterals = null;
-        int[]? rentedEnds = null;
+        Block<byte> rentedLiterals = default;
+        Block<int> rentedEnds = default;
         bool small = pattern.Length <= StackPattern;
         Span<byte> literals = small
             ? stackalloc byte[StackPattern]
-            : (rentedLiterals = ArrayPool<byte>.Shared.Rent(pattern.Length));
+            : (rentedLiterals = Blocks.Rent<byte>(pattern.Length));
         Span<int> ends = small
             ? stackalloc int[(StackPattern / 2) + 1]
-            : (rentedEnds = ArrayPool<int>.Shared.Rent((pattern.Length / 2) + 1));
+            : (rentedEnds = Blocks.Rent<int>((pattern.Length / 2) + 1));
         try
         {
             if (!BytePattern.TryPlan(pattern, escape, literals, ends, out LikePlan plan))
@@ -270,11 +270,8 @@ internal static partial class ComparisonKernels
         }
         finally
         {
-            if (rentedLiterals is not null)
-            {
-                ArrayPool<byte>.Shared.Return(rentedLiterals);
-                ArrayPool<int>.Shared.Return(rentedEnds!);
-            }
+            Blocks.Return(rentedLiterals);
+            Blocks.Return(rentedEnds);
         }
     }
 
@@ -411,7 +408,7 @@ internal static partial class ComparisonKernels
         {
             if (EncodedAnswers.TryValues(arena, storage, destination.Length, out int values, out int count))
             {
-                byte[] rented = ArrayPool<byte>.Shared.Rent(Math.Max(count * 2, 1));
+                Block<byte> rented = Blocks.Rent<byte>(count * 2);
                 try
                 {
                     Span<byte> answers = rented.AsSpan(0, count);
@@ -420,7 +417,7 @@ internal static partial class ComparisonKernels
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(rented);
+                    Blocks.Return(rented);
                 }
 
                 return;

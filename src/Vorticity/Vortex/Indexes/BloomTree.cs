@@ -23,7 +23,7 @@ internal readonly unsafe struct BloomWords
 
     /// <summary>
     /// The words of <paramref name="bytes"/>, read where they lie: the one way to view words, so that a view holds what a
-    /// <see cref="VortexBuffer"/> holds, memory that does not move, mapped, native or pinned, and is valid while the
+    /// <see cref="VortexBuffer"/> holds, memory that does not move, mapped or pinned, and is valid while the
     /// buffer's owner is held, as every buffer of the reader is. A node read over them is valid as long, its pruner
     /// holding the owners until it is disposed.
     /// </summary>

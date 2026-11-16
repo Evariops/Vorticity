@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
@@ -107,7 +106,8 @@ internal sealed class ScanContext : IDisposable
         // takes the hint nor gives one.
         _notesTrees = capacity >= ScanCapacity;
         _scratchNodes = new ArrayNodeArena(capacity, _notesTrees ? file.LargestArrayTree : 0);
-        _batchCanonical = retaining ? new RetainingArena(capacity) : new CanonicalArena(capacity);
+        // Kept until a scan takes the context and names its own account (ScanContexts.Rent).
+        _batchCanonical = retaining ? new RetainingArena(MemoryAccount.Kept, capacity) : new CanonicalArena(capacity, MemoryAccount.Kept);
 
         // Deliberately not sized from the arena capacity. A batch registers one segment per leaf it
         // reads, which the set's own default already covers, so widening it to the arena capacity
@@ -157,7 +157,7 @@ internal sealed class ScanContext : IDisposable
 
         Scalars = new ScalarStore();
         _scratchNodes = new ArrayNodeArena();
-        _batchCanonical = new CanonicalArena();
+        _batchCanonical = new CanonicalArena(64, MemoryAccount.Kept);
         Segments = new SegmentRequestSet();
         Decode = new ArrayDecodeContext(this);
     }
@@ -182,7 +182,8 @@ internal sealed class ScanContext : IDisposable
         }
     }
 
-    private int[]? _selection;
+    /// <summary>The rows selected, a block its exchanger rented and gives back; the default when no selection is in force.</summary>
+    private Block<int> _selection;
     private int _selectionCount;
 
     /// <summary>
@@ -319,6 +320,29 @@ internal sealed class ScanContext : IDisposable
     private readonly CanonicalArena _batchCanonical;
 
     /// <summary>
+    /// Whom the context's blocks are counted for from now on, its batch's, its retained chunks' and its slices': the scan it
+    /// serves, set as a scan takes the context. A block rented before keeps the account it was rented under.
+    /// </summary>
+    internal MemoryAccount Account
+    {
+        get => _batchCanonical.Account;
+        set
+        {
+            _batchCanonical.Account = value;
+            Segments.Account = value;
+            if (Along?.Own is { } own)
+            {
+                own.Account = value;
+            }
+
+            if (_memory?.Slice is { } slice)
+            {
+                slice.Account = value;
+            }
+        }
+    }
+
+    /// <summary>
     /// Set while a chunk is being decoded straight into the arena that will retain it: the entry it
     /// will become, which gathers the segments the decode depends on as it runs.
     /// </summary>
@@ -402,12 +426,12 @@ internal sealed class ScanContext : IDisposable
                 WriteSelectionRange();
             }
 
-            return _selection is null ? default : _selection.AsSpan(0, _selectionCount);
+            return _selection.AsSpan(0, _selectionCount);
         }
     }
 
     /// <summary>Whether a selection is in force for this batch.</summary>
-    internal bool HasSelection => _selection is not null;
+    internal bool HasSelection => !_selection.IsDefault;
 
     /// <summary>
     /// The row of the selection's sibling space its entries count from: 0, an entry naming its row itself, but at the root
@@ -439,9 +463,9 @@ internal sealed class ScanContext : IDisposable
             return count > 0;
         }
 
-        if (_selection is { } rows && count > 0 && rows[count - 1] - rows[0] + 1 == count)
+        if (!_selection.IsDefault && count > 0 && _selection[count - 1] - _selection[0] + 1 == count)
         {
-            first = rows[0];
+            first = _selection[0];
             return true;
         }
 
@@ -456,7 +480,7 @@ internal sealed class ScanContext : IDisposable
     internal bool TryGetSelectionBounds(out int first, out int last)
     {
         int count = _selectionCount;
-        if (count <= 0 || _selection is not { } rows)
+        if (count <= 0 || _selection.IsDefault)
         {
             first = 0;
             last = -1;
@@ -470,8 +494,8 @@ internal sealed class ScanContext : IDisposable
             return true;
         }
 
-        first = rows[0];
-        last = rows[count - 1];
+        first = _selection[0];
+        last = _selection[count - 1];
         return true;
     }
 
@@ -604,21 +628,21 @@ internal sealed class ScanContext : IDisposable
     /// The set a batch reads the segments it claimed through while it waits for those another batch of its scan reads
     /// (<see cref="Scanning.ScanSegments.ReadOwnAsync"/>): <see cref="AlongSegments.Own"/>, made at the first such wait.
     /// </summary>
-    internal SegmentRequestSet OwnSegments() => (Along ??= new AlongSegments()).Own ??= new SegmentRequestSet();
+    internal SegmentRequestSet OwnSegments() => (Along ??= new AlongSegments()).Own ??= new SegmentRequestSet { Account = Account };
 
     /// <summary>
     /// The segments of the splits ahead a batch reads along with its own, and the batch that asks for each; and, for a
     /// context a scan rents to plan them in rather than to run a batch on, the scan's walk over those splits.
     /// </summary>
     /// <remarks>
-    /// The arrays are the process's pool's, taken at the first segment and given back once the segments are claimed or
+    /// The lists are blocks of the pool, taken at the first segment and given back once the segments are claimed or
     /// forgotten: a context the scan draws from a pool other scans churn need not have read along before for its batch
     /// to read along without allocating.
     /// </remarks>
     internal sealed class AlongSegments
     {
-        private Serialization.Schemas.SegmentSpec[]? _specs;
-        private long[]? _batches;
+        private Block<Serialization.Schemas.SegmentSpec> _specs;
+        private Block<long> _batches;
         private int _count;
 
         /// <summary>
@@ -642,39 +666,32 @@ internal sealed class ScanContext : IDisposable
         /// <summary>Adds a segment for the batch to read along, for batch <paramref name="batch"/>.</summary>
         internal void Add(in Serialization.Schemas.SegmentSpec spec, long batch)
         {
-            if (_specs is null || _batches is null || _count == Math.Min(_specs.Length, _batches.Length))
+            if (_count == Math.Min(_specs.Length, _batches.Length))
             {
                 Grow();
             }
 
-            _specs![_count] = spec;
-            _batches![_count] = batch;
+            _specs[_count] = spec;
+            _batches[_count] = batch;
             _count++;
         }
 
-        /// <summary>Forgets the segments, claimed or none for the next batch, and gives the arrays back.</summary>
+        /// <summary>Forgets the segments, claimed or none for the next batch, and gives the blocks back.</summary>
         internal void Clear()
         {
             _count = 0;
-            if (_specs is { } specs)
-            {
-                _specs = null;
-                System.Buffers.ArrayPool<Serialization.Schemas.SegmentSpec>.Shared.Return(specs);
-            }
-
-            if (_batches is { } batches)
-            {
-                _batches = null;
-                System.Buffers.ArrayPool<long>.Shared.Return(batches);
-            }
+            Blocks.Return(_specs);
+            Blocks.Return(_batches);
+            _specs = default;
+            _batches = default;
         }
 
-        /// <summary>Takes arrays twice as long, or the first, and moves the segments into them.</summary>
+        /// <summary>Takes blocks twice as long, or the first, and moves the segments into them.</summary>
         private void Grow()
         {
             int length = _count == 0 ? 16 : _count * 2;
-            Serialization.Schemas.SegmentSpec[] specs = System.Buffers.ArrayPool<Serialization.Schemas.SegmentSpec>.Shared.Rent(length);
-            long[] batches = System.Buffers.ArrayPool<long>.Shared.Rent(length);
+            Block<Serialization.Schemas.SegmentSpec> specs = Blocks.Rent<Serialization.Schemas.SegmentSpec>(length);
+            Block<long> batches = Blocks.Rent<long>(length);
             Specs.CopyTo(specs);
             Batches.CopyTo(batches);
             int count = _count;
@@ -686,17 +703,17 @@ internal sealed class ScanContext : IDisposable
     /// <summary>
     /// Replaces the selection and returns what was there, for a reader that re-bases it per child.
     /// </summary>
-    /// <param name="rows">The new selection, or <see langword="null"/> to clear it.</param>
+    /// <param name="rows">The new selection, or the default to clear it.</param>
     /// <param name="count">How many entries of <paramref name="rows"/> are live.</param>
     /// <param name="selectionBase">The row its entries count from (<see cref="SelectionBase"/>).</param>
     /// <returns>The previous selection, to be restored by the caller with <see cref="RestoreSelection"/>.</returns>
-    internal SavedSelection ExchangeSelection(int[]? rows, int count, long selectionBase = 0)
+    internal SavedSelection ExchangeSelection(Block<int> rows, int count, long selectionBase = 0)
     {
         SavedSelection previous = new SavedSelection(_selection, _selectionCount, _selectionStart, _selectionBase);
         _selection = rows;
-        _selectionCount = rows is null ? 0 : count;
+        _selectionCount = rows.IsDefault ? 0 : count;
         _selectionStart = -1;
-        _selectionBase = rows is null ? 0 : selectionBase;
+        _selectionBase = rows.IsDefault ? 0 : selectionBase;
         return previous;
     }
 
@@ -708,7 +725,7 @@ internal sealed class ScanContext : IDisposable
     /// <param name="start">The first row.</param>
     /// <param name="count">How many rows.</param>
     /// <returns>The previous selection, to be restored by the caller with <see cref="RestoreSelection"/>.</returns>
-    internal SavedSelection ExchangeSelectionRange(int[] buffer, int start, int count)
+    internal SavedSelection ExchangeSelectionRange(Block<int> buffer, int start, int count)
     {
         SavedSelection previous = new SavedSelection(_selection, _selectionCount, _selectionStart, _selectionBase);
         _selection = buffer;
@@ -734,7 +751,7 @@ internal sealed class ScanContext : IDisposable
     /// </summary>
     internal readonly struct SavedSelection
     {
-        internal SavedSelection(int[]? buffer, int count, int start, long selectionBase)
+        internal SavedSelection(Block<int> buffer, int count, int start, long selectionBase)
         {
             Buffer = buffer;
             Count = count;
@@ -742,7 +759,7 @@ internal sealed class ScanContext : IDisposable
             Base = selectionBase;
         }
 
-        internal int[]? Buffer { get; }
+        internal Block<int> Buffer { get; }
 
         internal int Count { get; }
 
@@ -1219,10 +1236,9 @@ internal sealed class ScanContext : IDisposable
     /// </summary>
     /// <param name="key">From <see cref="NodeCheckKey"/>.</param>
     /// <param name="tag">What the table was built against, which must match: the decoder's own check.</param>
-    /// <param name="table">The table's array, the context's.</param>
-    /// <param name="length">Its entries.</param>
+    /// <param name="table">The table's block, the context's.</param>
     /// <param name="facts">What the decoder kept with it.</param>
-    internal bool TryNodeTable(long key, long tag, out long[] table, out int length, out long facts)
+    internal bool TryNodeTable(long key, long tag, out Block<long> table, out long facts)
     {
         if (_memory?.Tables is { } tables)
         {
@@ -1230,42 +1246,37 @@ internal sealed class ScanContext : IDisposable
             {
                 if (kept.Key == key + 1 && kept.Tag == tag)
                 {
-                    (table, length, facts) = (kept.Array!, kept.Length, kept.Facts);
+                    (table, facts) = (kept.Table, kept.Facts);
                     return true;
                 }
             }
         }
 
-        (table, length, facts) = ([], 0, 0);
+        (table, facts) = (default, 0);
         return false;
     }
 
     /// <summary>
-    /// Keeps <paramref name="table"/>, rented from <see cref="ArrayPool{T}.Shared"/> and built from the node named by
-    /// <paramref name="key"/>, for the next ranges of that node this context reads, until the context is recycled.
+    /// Keeps <paramref name="table"/>, a block of the pool built from the node named by <paramref name="key"/>, for the next
+    /// ranges of that node this context reads, until the context is recycled.
     /// </summary>
     /// <param name="key">From <see cref="NodeCheckKey"/>.</param>
     /// <param name="tag">What the table was built against.</param>
     /// <param name="facts">What the decoder keeps with it.</param>
     /// <param name="table">The table, which the context then owns and gives back to the pool.</param>
-    /// <param name="length">Its entries.</param>
     /// <remarks>
     /// Like a passed check, a table is a fact of the file's bytes, not of the batch, and the reader only names a node
     /// within a scan: <see cref="Recycle"/> gives every table back, so none outlives the scan that read its node. A
     /// kernel that reads through a kept table still bounds what it reads by the table, never by the bytes again.
     /// </remarks>
-    internal void KeepNodeTable(long key, long tag, long facts, long[] table, int length)
+    internal void KeepNodeTable(long key, long tag, long facts, Block<long> table)
     {
         BatchMemory memory = _memory ??= new BatchMemory();
         NodeTable[] tables = memory.Tables ??= new NodeTable[NodeTableSlots];
         ref NodeTable slot = ref tables[memory.NextTable];
         memory.NextTable = (memory.NextTable + 1) % NodeTableSlots;
-        if (slot.Array is { } evicted)
-        {
-            ArrayPool<long>.Shared.Return(evicted);
-        }
-
-        slot = new NodeTable(key + 1, tag, facts, table, length);
+        Blocks.Return(slot.Table);
+        slot = new NodeTable(key + 1, tag, facts, table);
     }
 
     /// <summary>Gives every kept table back to the pool.</summary>
@@ -1275,11 +1286,7 @@ internal sealed class ScanContext : IDisposable
         {
             foreach (ref NodeTable kept in tables.AsSpan())
             {
-                if (kept.Array is { } array)
-                {
-                    ArrayPool<long>.Shared.Return(array);
-                }
-
+                Blocks.Return(kept.Table);
                 kept = default;
             }
 
@@ -1288,7 +1295,7 @@ internal sealed class ScanContext : IDisposable
     }
 
     /// <summary>A table a decoder built from a node: its key plus one (0: empty), its tag, its facts and its entries.</summary>
-    private readonly record struct NodeTable(long Key, long Tag, long Facts, long[]? Array, int Length);
+    private readonly record struct NodeTable(long Key, long Tag, long Facts, Block<long> Table);
 
     /// <summary>See <see cref="_memory"/>.</summary>
     private sealed class BatchMemory
@@ -1558,7 +1565,8 @@ internal sealed class ScanContext : IDisposable
             "No child is claimed on this scan context: a child's decode follows a miss of TryGetRetainedChild.");
         _childClaim = null;
         _child = claim;
-        CanonicalArena arena = claim.Arena ??= new RetainingArena();
+        CanonicalArena arena = claim.Arena ??= new RetainingArena(Account);
+        arena.Account = Account;
         claim.Depend(Segments.OwnerHolding(Nodes.FirstBlobBuffer()));
         return arena;
     }
@@ -1692,8 +1700,10 @@ internal sealed class ScanContext : IDisposable
         _building = claim;
 
         // The arena is made for the first decode the entry holds, not for the claim: a claim given
-        // back without a decode, an answer an encoding declined, never needs one.
-        CanonicalArena arena = claim.Arena ??= new RetainingArena();
+        // back without a decode, an answer an encoding declined, never needs one. An entry kept from another scan counts
+        // for this one from now on.
+        CanonicalArena arena = claim.Arena ??= new RetainingArena(Account);
+        arena.Account = Account;
 
         // What the decode views is the blob in the node arena, which a flat reader loads just
         // before it begins; a child decoded inside the redirect notes its own segment as it loads.
@@ -1750,7 +1760,7 @@ internal sealed class ScanContext : IDisposable
             return false;
         }
 
-        memory.Slice ??= new CanonicalArena();
+        memory.Slice ??= new CanonicalArena(64, Account);
         memory.SliceBuilding = _building;
         memory.Slicing = true;
         return true;
@@ -1795,7 +1805,7 @@ internal sealed class ScanContext : IDisposable
             _retained?.Release(Batch - 1);
         }
 
-        _selection = null;
+        _selection = default;
         _selectionCount = 0;
         _selectionStart = -1;
         if (_pushed is not null)
@@ -1919,6 +1929,9 @@ internal sealed class ScanContext : IDisposable
         ResetBatch();
         _batchCanonical.Reset();
         (_batchCanonical as RetainingArena)?.ForgetKept();
+
+        // Kept again until the next scan names its account: the scan's own is let go with the scan.
+        Account = MemoryAccount.Kept;
         AbandonRetained();
         if (_ownsRetained)
         {

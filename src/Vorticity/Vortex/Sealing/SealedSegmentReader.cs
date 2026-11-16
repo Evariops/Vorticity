@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -181,7 +180,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
             long tailStart = TailOf(layout, endStart);
             if (tailStart < layout.PlainLength)
             {
-                tail = Decrypt(layout, ciphers, end.Buffer.Span, endStart, tailStart, layout.PlainLength);
+                tail = Decrypt(layout, ciphers, end.Buffer.Span, endStart, tailStart, layout.PlainLength, MemoryAccount.Kept);
             }
             else if (layout.Epochs[^1] is { PlainLength: 0 } empty && empty.FramesStart >= endStart)
             {
@@ -383,23 +382,27 @@ internal sealed class SealedSegmentReader : ISegmentReader
             return;
         }
 
-        int[] order = ArrayPool<int>.Shared.Rent(registered);
-        ulong[] keys = ArrayPool<ulong>.Shared.Rent(registered);
-        SegmentSpec[] sorted = ArrayPool<SegmentSpec>.Shared.Rent(registered);
-        CoalescedRun[] runs = ArrayPool<CoalescedRun>.Shared.Rent(registered);
-        int[] groups = ArrayPool<int>.Shared.Rent(registered + 1);
-        int[] stored = ArrayPool<int>.Shared.Rent(registered);
+        ReadScratch scratch = ReadScratch.Rent(registered);
+        Block<int> order = scratch.Order;
+        Block<SegmentSpec> sorted = scratch.Sorted;
+        Block<CoalescedRun> runs = scratch.Runs;
+
+        // A group's first run, then the slot its frames take among the store's ranges.
+        Block<int> groups = Blocks.Rent<int>(registered + 1);
+        Block<int> stored = Blocks.Rent<int>(registered);
         SegmentRequestSet ciphertext = RentSet();
+        ciphertext.Account = requests.Account;
         try
         {
-            int pending = Collect(requests, order, keys);
+            int pending = CoalescedReads.CollectPending(requests, order, scratch.Keys);
             if (pending == 0)
             {
                 requests.Complete();
                 return;
             }
 
-            int runCount = Plan(requests, order, keys, sorted, runs, pending, _plainLength, _options);
+            // The plaintext's length bounds the segments as a file's would.
+            int runCount = CoalescedReads.PlanRuns(requests, order, scratch.Keys, sorted, runs, pending, _plainLength, _options);
             int groupCount = Group(runs, runCount, groups);
 
             // The groups whose every frame the cache keeps come from the disk, the rest from the store in one
@@ -434,12 +437,9 @@ internal sealed class SealedSegmentReader : ISegmentReader
         finally
         {
             ReturnSet(ciphertext);
-            ArrayPool<int>.Shared.Return(stored);
-            ArrayPool<int>.Shared.Return(groups);
-            ArrayPool<CoalescedRun>.Shared.Return(runs);
-            ArrayPool<SegmentSpec>.Shared.Return(sorted);
-            ArrayPool<ulong>.Shared.Return(keys);
-            ArrayPool<int>.Shared.Return(order);
+            Blocks.Return(stored);
+            Blocks.Return(groups);
+            scratch.Return();
         }
     }
 
@@ -569,14 +569,15 @@ internal sealed class SealedSegmentReader : ISegmentReader
     /// the plaintext.
     /// </summary>
     /// <exception cref="VortexEncryptionException">A frame does not authenticate; the block is wiped and released.</exception>
-    private static NativeSegmentOwner Decrypt(
-        SealedLayout layout, EpochCipher[] ciphers, ReadOnlySpan<byte> ciphertext, long cipherBase, long frameStart, long frameEnd)
+    private static BlockOwner Decrypt(
+        SealedLayout layout, EpochCipher[] ciphers, ReadOnlySpan<byte> ciphertext, long cipherBase, long frameStart, long frameEnd,
+        MemoryAccount account)
     {
         int pad = (int)(frameStart & (VortexLimits.MaxAlignment - 1));
         int plainBytes = checked((int)(frameEnd - frameStart));
-        NativeSegmentOwner block = plainBytes + pad <= SegmentReadOptions.DefaultMaxPooledBytes
-            ? AlignedBufferPool.Shared.Rent(plainBytes + pad, VortexLimits.MaxAlignment)
-            : NativeSegmentOwner.Allocate(plainBytes + pad, VortexLimits.MaxAlignment);
+        BlockOwner block = plainBytes + pad <= SegmentReadOptions.DefaultMaxPooledBytes
+            ? account.Rent(plainBytes + pad, VortexLimits.MaxAlignment)
+            : BlockOwner.Allocate(plainBytes + pad, VortexLimits.MaxAlignment);
         Span<byte> plain = block.WritableSpan.Slice(pad, plainBytes);
         int frameSize = layout.FrameSize;
         int current = -1;
@@ -635,7 +636,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
         (long cipherStart, long cipherEnd) = CipherRange(frameStart, frameEnd);
         int cipherLength = checked((int)(cipherEnd - cipherStart));
         SegmentOwner cipher = await _inner.ReadRangeAsync(cipherStart, cipherLength, 1, cancellationToken).ConfigureAwait(false);
-        NativeSegmentOwner block;
+        BlockOwner block;
         try
         {
             if (cipher.Length != cipherLength)
@@ -643,7 +644,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
                 SegmentIo.ThrowTruncatedRead(cipherStart, cipherLength, cipher.Length);
             }
 
-            block = Decrypt(_layout, _ciphers, cipher.Buffer.Span, cipherStart, frameStart, frameEnd);
+            block = Decrypt(_layout, _ciphers, cipher.Buffer.Span, cipherStart, frameStart, frameEnd, MemoryAccount.Kept);
         }
         finally
         {
@@ -658,7 +659,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
             }
 
             // An offset that is not a multiple of the alignment asked for: copied to a block's base.
-            NativeSegmentOwner copy = AlignedBufferPool.Shared.Rent(length, VortexLimits.MaxAlignment);
+            BlockOwner copy = MemoryAccount.Kept.Rent(length, VortexLimits.MaxAlignment);
             view.Span.CopyTo(copy.WritableSpan);
             return copy;
         }
@@ -694,44 +695,11 @@ internal sealed class SealedSegmentReader : ISegmentReader
 
     // ---- batches ----------------------------------------------------------------------------
 
-    /// <summary>The slots that still need bytes, keyed by offset for the sort.</summary>
-    private static int Collect(SegmentRequestSet requests, int[] order, ulong[] keys)
-    {
-        int pending = 0;
-        for (int slot = 0; slot < requests.Count; slot++)
-        {
-            if (!requests.IsFilled(slot))
-            {
-                order[pending] = slot;
-                keys[pending] = requests.GetSpec(slot).Offset;
-                pending++;
-            }
-        }
-
-        return pending;
-    }
-
-    /// <summary>Sorts the pending specs by offset, checks them against the plaintext, and plans the coalesced runs over it.</summary>
-    private static int Plan(
-        SegmentRequestSet requests, int[] order, ulong[] keys, SegmentSpec[] sorted, CoalescedRun[] runs,
-        int pending, long plainLength, SegmentReadOptions options)
-    {
-        keys.AsSpan(0, pending).Sort(order.AsSpan(0, pending));
-        for (int i = 0; i < pending; i++)
-        {
-            sorted[i] = requests.GetSpec(order[i]);
-            SegmentIo.ValidateSpec(in sorted[i], out long offset, out int length);
-            SegmentIo.CheckInFile(offset, length, plainLength);
-        }
-
-        return SegmentCoalescer.Plan(sorted.AsSpan(0, pending), runs.AsSpan(0, pending), options);
-    }
-
     /// <summary>
     /// Groups the runs whose frames touch, so that no frame is read or decrypted twice: group <c>g</c> is
     /// the runs <c>[groups[g], groups[g + 1])</c>.
     /// </summary>
-    private int Group(CoalescedRun[] runs, int runCount, int[] groups)
+    private int Group(ReadOnlySpan<CoalescedRun> runs, int runCount, Span<int> groups)
     {
         int groupCount = 0;
         long groupEnd = 0;
@@ -765,13 +733,13 @@ internal sealed class SealedSegmentReader : ISegmentReader
     /// frames, and publishes the segments of its runs; the frames of each declared region go to the cache.
     /// </summary>
     private void Publish(
-        SegmentRequestSet requests, ReadOnlySpan<byte> cipher, CoalescedRun[] runs, int firstRun, int endRun,
-        SegmentSpec[] sorted, int[] order)
+        SegmentRequestSet requests, ReadOnlySpan<byte> cipher, ReadOnlySpan<CoalescedRun> runs, int firstRun, int endRun,
+        ReadOnlySpan<SegmentSpec> sorted, ReadOnlySpan<int> order)
     {
         long frameStart = FrameStart(runs[firstRun].Start);
         long frameEnd = FrameEnd(runs[endRun - 1].End - 1);
         long cipherStart = CipherOffset(_layout, frameStart);
-        NativeSegmentOwner block = Decrypt(_layout, _ciphers, cipher, cipherStart, frameStart, frameEnd);
+        BlockOwner block = Decrypt(_layout, _ciphers, cipher, cipherStart, frameStart, frameEnd, requests.Account);
         try
         {
             SetResults(requests, block, frameStart, runs, firstRun, endRun, sorted, order, kept: false);
@@ -792,7 +760,9 @@ internal sealed class SealedSegmentReader : ISegmentReader
     /// when a frame is not kept; when a frame or a region fails, the group's frames are dropped, and the store
     /// sends them again.
     /// </summary>
-    private bool ServeKept(SegmentRequestSet requests, CoalescedRun[] runs, int firstRun, int endRun, SegmentSpec[] sorted, int[] order)
+    private bool ServeKept(
+        SegmentRequestSet requests, ReadOnlySpan<CoalescedRun> runs, int firstRun, int endRun, ReadOnlySpan<SegmentSpec> sorted,
+        ReadOnlySpan<int> order)
     {
         ISealedFrameCache cache = _cache!;
         long frameStart = FrameStart(runs[firstRun].Start);
@@ -808,10 +778,11 @@ internal sealed class SealedSegmentReader : ISegmentReader
 
         (long cipherStart, long cipherEnd) = CipherRange(frameStart, frameEnd);
         int cipherLength = checked((int)(cipherEnd - cipherStart));
-        NativeSegmentOwner cipher = cipherLength <= _options.MaxPooledBytes
-            ? AlignedBufferPool.Shared.Rent(cipherLength, VortexLimits.MaxAlignment)
-            : NativeSegmentOwner.Allocate(cipherLength, VortexLimits.MaxAlignment);
-        NativeSegmentOwner? block = null;
+        // The scan's, as the plaintext is: a sealed read holds its two blocks under the account of the scan that asks.
+        BlockOwner cipher = cipherLength <= _options.MaxPooledBytes
+            ? requests.Account.Rent(cipherLength, VortexLimits.MaxAlignment)
+            : BlockOwner.Allocate(cipherLength, VortexLimits.MaxAlignment);
+        BlockOwner? block = null;
         try
         {
             Span<byte> bytes = cipher.WritableSpan[..cipherLength];
@@ -827,7 +798,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
 
             try
             {
-                block = Decrypt(_layout, _ciphers, bytes, cipherStart, frameStart, frameEnd);
+                block = Decrypt(_layout, _ciphers, bytes, cipherStart, frameStart, frameEnd, requests.Account);
             }
             catch (VortexEncryptionException)
             {
@@ -853,8 +824,8 @@ internal sealed class SealedSegmentReader : ISegmentReader
 
     /// <summary>Publishes the segments of the runs <c>[firstRun, endRun)</c> from <paramref name="block"/>, their plaintext from <paramref name="frameStart"/> on.</summary>
     private void SetResults(
-        SegmentRequestSet requests, NativeSegmentOwner block, long frameStart, CoalescedRun[] runs, int firstRun, int endRun,
-        SegmentSpec[] sorted, int[] order, bool kept)
+        SegmentRequestSet requests, BlockOwner block, long frameStart, ReadOnlySpan<CoalescedRun> runs, int firstRun, int endRun,
+        ReadOnlySpan<SegmentSpec> sorted, ReadOnlySpan<int> order, bool kept)
     {
         ReadOnlySpan<byte> bytes = block.Buffer.Span;
         int pad = (int)(frameStart & (VortexLimits.MaxAlignment - 1));
@@ -878,9 +849,9 @@ internal sealed class SealedSegmentReader : ISegmentReader
                 }
 
                 // A sparse run would pin its whole block for a few segments: each is copied out.
-                NativeSegmentOwner owner = spec.Length <= _options.MaxPooledBytes
-                    ? AlignedBufferPool.Shared.Rent((int)spec.Length, VortexLimits.MaxAlignment)
-                    : NativeSegmentOwner.Allocate((int)spec.Length, VortexLimits.MaxAlignment);
+                BlockOwner owner = spec.Length <= _options.MaxPooledBytes
+                    ? requests.Account.Rent((int)spec.Length, VortexLimits.MaxAlignment)
+                    : BlockOwner.Allocate((int)spec.Length, VortexLimits.MaxAlignment);
                 try
                 {
                     segment.CopyTo(owner.WritableSpan);
@@ -896,7 +867,8 @@ internal sealed class SealedSegmentReader : ISegmentReader
 
     /// <summary>Whether every declared region among the runs <c>[firstRun, endRun)</c> holds its checksum in <paramref name="block"/>.</summary>
     private static bool DeclaredHold(
-        ISealedFrameCache cache, NativeSegmentOwner block, long frameStart, CoalescedRun[] runs, int firstRun, int endRun, SegmentSpec[] sorted)
+        ISealedFrameCache cache, BlockOwner block, long frameStart, ReadOnlySpan<CoalescedRun> runs, int firstRun, int endRun,
+        ReadOnlySpan<SegmentSpec> sorted)
     {
         ReadOnlySpan<byte> bytes = block.Buffer.Span;
         int pad = (int)(frameStart & (VortexLimits.MaxAlignment - 1));
@@ -922,8 +894,8 @@ internal sealed class SealedSegmentReader : ISegmentReader
     /// authenticated into <paramref name="block"/> and the region's plaintext holds its checksum.
     /// </summary>
     private void Keep(
-        ISealedFrameCache cache, ReadOnlySpan<byte> cipher, long cipherStart, NativeSegmentOwner block, long frameStart,
-        CoalescedRun[] runs, int firstRun, int endRun, SegmentSpec[] sorted)
+        ISealedFrameCache cache, ReadOnlySpan<byte> cipher, long cipherStart, BlockOwner block, long frameStart,
+        ReadOnlySpan<CoalescedRun> runs, int firstRun, int endRun, ReadOnlySpan<SegmentSpec> sorted)
     {
         ReadOnlySpan<byte> bytes = block.Buffer.Span;
         int pad = (int)(frameStart & (VortexLimits.MaxAlignment - 1));
@@ -968,7 +940,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
         return (epoch.FramesStart + (index * (_frameSize + SealedFormat.TagBytes)), length + SealedFormat.TagBytes);
     }
 
-    private static long Useful(in CoalescedRun run, SegmentSpec[] sorted)
+    private static long Useful(in CoalescedRun run, ReadOnlySpan<SegmentSpec> sorted)
     {
         long useful = 0;
         for (int k = run.FirstIndex; k < run.FirstIndex + run.Count; k++)

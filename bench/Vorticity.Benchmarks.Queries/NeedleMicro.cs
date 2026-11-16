@@ -210,7 +210,7 @@ internal static class NeedleMicro
         }
 
         using SafeFileHandle handle = System.IO.File.OpenHandle(path);
-        Dictionary<long, (NativeBlob First, NativeBlob Second)> blobs = [];
+        Dictionary<long, (AlignedBlob First, AlignedBlob Second)> blobs = [];
         try
         {
             // Each probe's segment, by its key or its hash, read once.
@@ -225,7 +225,7 @@ internal static class NeedleMicro
                 if (!blobs.ContainsKey(segments[p]))
                 {
                     Fence fence = fences[(int)segments[p]];
-                    blobs[segments[p]] = (NativeBlob.Read(handle, fence.Regions[0]), NativeBlob.Read(handle, fence.Regions[1]));
+                    blobs[segments[p]] = (AlignedBlob.Read(handle, fence.Regions[0]), AlignedBlob.Read(handle, fence.Regions[1]));
                 }
             }
 
@@ -243,7 +243,7 @@ internal static class NeedleMicro
                 {
                     Fence fence = fences[(int)segments[p]];
                     int entries = (int)fence.Bounds.Entries;
-                    (NativeBlob keys, NativeBlob places) = blobs[segments[p]];
+                    (AlignedBlob keys, AlignedBlob places) = blobs[segments[p]];
                     context.ResetBatch();
                     context.Decode.LoadBlob(keys.Buffer);
                     CanonicalNode keyNode = context.Canonical.GetNode(context.Decode.DecodeRoot(context.Nodes.Root, firstType, entries));
@@ -262,7 +262,7 @@ internal static class NeedleMicro
         }
         finally
         {
-            foreach ((NativeBlob a, NativeBlob b) in blobs.Values)
+            foreach ((AlignedBlob a, AlignedBlob b) in blobs.Values)
             {
                 a.Dispose();
                 b.Dispose();
@@ -271,7 +271,7 @@ internal static class NeedleMicro
     }
 
     /// <summary>A run's segment: its rows decoded, its keys searched; the entries equal to the literal.</summary>
-    private static int Search(ScanContext context, CanonicalNode keys, NativeBlob rows, DType u32, int entries, byte[] literal)
+    private static int Search(ScanContext context, CanonicalNode keys, AlignedBlob rows, DType u32, int entries, byte[] literal)
     {
         context.Decode.LoadBlob(rows.Buffer);
         context.Decode.DecodeRoot(context.Nodes.Root, u32, entries);
@@ -300,7 +300,7 @@ internal static class NeedleMicro
     }
 
     /// <summary>A hashed segment: its gaps summed to the cut hash wanted, then the blocks of the pairs that hold it.</summary>
-    private static int Walk(ScanContext context, CanonicalNode gapNode, NativeBlob blockBlob, DType u32, int entries, ulong cut, ulong wanted)
+    private static int Walk(ScanContext context, CanonicalNode gapNode, AlignedBlob blockBlob, DType u32, int entries, ulong cut, ulong wanted)
     {
         ReadOnlySpan<uint> gaps = MemoryMarshal.Cast<byte, uint>(gapNode.Values.Span);
         int at = 0;
@@ -329,33 +329,25 @@ internal static class NeedleMicro
         return found;
     }
 
-    /// <summary>A blob in native memory aligned as a segment is, so that its buffers decode in place.</summary>
-    private sealed unsafe class NativeBlob : IDisposable
+    /// <summary>A blob in a block aligned as a segment is, so that its buffers decode in place.</summary>
+    private sealed class AlignedBlob : IDisposable
     {
-        private byte* _bytes;
+        private readonly BlockOwner _block;
 
-        private NativeBlob(int length)
+        private AlignedBlob(int length) => _block = BlockOwner.Allocate(length, VortexLimits.MaxAlignment);
+
+        internal int Length => _block.Length;
+
+        internal VortexBuffer Buffer => _block.Buffer;
+
+        internal static AlignedBlob Read(SafeFileHandle handle, IndexSegment region)
         {
-            _bytes = (byte*)NativeMemory.AlignedAlloc((nuint)Math.Max(length, 1), 1 << VortexLimits.MaxAlignmentExponent);
-            Length = length;
-        }
-
-        internal int Length { get; }
-
-        internal VortexBuffer Buffer => VortexBuffer.FromPointer(_bytes, Length, VortexLimits.MaxAlignmentExponent);
-
-        internal static NativeBlob Read(SafeFileHandle handle, IndexSegment region)
-        {
-            NativeBlob blob = new NativeBlob((int)region.Length);
-            RandomAccess.Read(handle, new Span<byte>(blob._bytes, blob.Length), (long)region.Offset);
+            AlignedBlob blob = new AlignedBlob((int)region.Length);
+            RandomAccess.Read(handle, blob._block.WritableSpan, (long)region.Offset);
             return blob;
         }
 
-        public void Dispose()
-        {
-            NativeMemory.AlignedFree(_bytes);
-            _bytes = null;
-        }
+        public void Dispose() => _block.Dispose();
     }
 }
 

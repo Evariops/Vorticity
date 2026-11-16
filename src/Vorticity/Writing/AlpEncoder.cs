@@ -5,8 +5,8 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using System.Runtime.Intrinsics.X86;
-using Vorticity.Aggregating;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Arrays.Decoders.Compressed;
 using Vorticity.Compute;
@@ -26,14 +26,14 @@ namespace Vorticity.Writing;
 /// </summary>
 internal readonly struct AlpPlan
 {
-    private readonly byte[] _encoded;
-    private readonly int[] _patchIndices;
-    private readonly byte[] _patchValues;
+    private readonly Block<byte> _encoded;
+    private readonly Block<int> _patchIndices;
+    private readonly Block<byte> _patchValues;
     private readonly int _patchWidth;
 
     private AlpPlan(
-        byte exponentE, byte exponentF, byte[] encoded, int encodedLength, PType encodedPType,
-        int[] patchIndices, byte[] patchValues, int patchCount, int patchWidth, long encodedSize)
+        byte exponentE, byte exponentF, Block<byte> encoded, int encodedLength, PType encodedPType,
+        Block<int> patchIndices, Block<byte> patchValues, int patchCount, int patchWidth, long encodedSize)
     {
         ExponentE = exponentE;
         ExponentF = exponentF;
@@ -56,7 +56,7 @@ internal readonly struct AlpPlan
     /// <summary>The encoded integers, little-endian, one per row; not to be read once given back.</summary>
     internal ReadOnlySpan<byte> Encoded => _encoded.AsSpan(0, EncodedLength);
 
-    /// <summary>How many bytes of the rental the integers occupy.</summary>
+    /// <summary>How many bytes of the block the integers occupy.</summary>
     internal int EncodedLength { get; }
 
     /// <summary>Their physical type: <c>i32</c> for f32, <c>i64</c> for f64.</summary>
@@ -75,10 +75,10 @@ internal readonly struct AlpPlan
     internal long EncodedSize { get; }
 
     /// <summary>
-    /// The patch values' rental and the bytes of it that are values, at the column's own float
+    /// The patch values' block and the bytes of it that are values, at the column's own float
     /// width, for the one caller that hands them on to be given back.
     /// </summary>
-    internal (byte[] Values, int Length) PatchValueRental => (_patchValues, PatchCount * _patchWidth);
+    internal (Block<byte> Values, int Length) PatchValueRental => (_patchValues, PatchCount * _patchWidth);
 
     /// <summary>
     /// Hands back the rentals no one has taken over: the integers unless
@@ -98,25 +98,15 @@ internal readonly struct AlpPlan
             ReturnEncoded();
         }
 
-        if (_patchIndices.Length > 0)
+        Blocks.Return(_patchIndices);
+        if (!valuesHanded)
         {
-            WorkArrays.Return(_patchIndices);
-        }
-
-        if (!valuesHanded && _patchValues.Length > 0)
-        {
-            WorkArrays.Return(_patchValues);
+            Blocks.Return(_patchValues);
         }
     }
 
     /// <summary>Hands the integers back to the pool, once they live somewhere else.</summary>
-    internal void ReturnEncoded()
-    {
-        if (_encoded.Length > 0)
-        {
-            WorkArrays.Return(_encoded);
-        }
-    }
+    internal void ReturnEncoded() => Blocks.Return(_encoded);
 
     /// <summary>The largest <c>e</c> each width searches: 10^18 is the last power of ten an i64 holds.</summary>
     private const int MaxExponentDouble = 18;
@@ -168,16 +158,16 @@ internal readonly struct AlpPlan
         // hand the heap a whole copy of it. The rental goes back when the plan is refused here, or
         // when the writer has laid the integers in the arena.
         int encodedLength = rows * sizeof(long);
-        byte[] encodedBytes = WorkArrays.Rent<byte>(Math.Max(encodedLength, 1));
-        Span<long> encoded = MemoryMarshal.Cast<byte, long>(encodedBytes.AsSpan(0, encodedLength));
+        Block<byte> encodedBytes = Blocks.Rent<byte>(encodedLength);
+        Span<long> encoded = MemoryMarshal.Cast<byte, long>(encodedBytes.AsSpan());
 
         // The patch buffers are rented and sized for the worst case, which is every row a patch. A
         // `List` that grows by doubling is cheap when ALP fits and ruinous when it does not: a
         // column built to defeat ALP turns every row into a patch, and the two lists reallocating
         // their way up dominate the write. Rented, so the worst case costs the pool and not the
         // heap.
-        int[] indices = WorkArrays.Rent<int>(rows);
-        double[] patches = WorkArrays.Rent<double>(rows);
+        Block<int> indices = Blocks.Rent<int>(rows);
+        Block<double> patches = Blocks.Rent<double>(rows);
         bool kept = false;
         try
         {
@@ -190,19 +180,19 @@ internal readonly struct AlpPlan
 
             AlpPlan plan = new AlpPlan(
                 (byte)e, (byte)f, encodedBytes, encodedLength, PType.I64,
-                RentedCopy(indices.AsSpan(0, patchCount)),
-                RentedCopy(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
+                RentedCopy<int>(indices.AsSpan(0, patchCount)),
+                RentedCopy<byte>(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
                 patchCount, sizeof(double), size);
             kept = true;
             return plan;
         }
         finally
         {
-            WorkArrays.Return(indices);
-            WorkArrays.Return(patches);
+            Blocks.Return(indices);
+            Blocks.Return(patches);
             if (!kept)
             {
-                WorkArrays.Return(encodedBytes);
+                Blocks.Return(encodedBytes);
             }
         }
     }
@@ -216,10 +206,10 @@ internal readonly struct AlpPlan
         (int e, int f) = BestExponentsSingle(values, mask, rows);
 
         int encodedLength = rows * sizeof(int);
-        byte[] encodedBytes = WorkArrays.Rent<byte>(Math.Max(encodedLength, 1));
-        Span<int> encoded = MemoryMarshal.Cast<byte, int>(encodedBytes.AsSpan(0, encodedLength));
-        int[] indices = WorkArrays.Rent<int>(rows);
-        float[] patches = WorkArrays.Rent<float>(rows);
+        Block<byte> encodedBytes = Blocks.Rent<byte>(encodedLength);
+        Span<int> encoded = MemoryMarshal.Cast<byte, int>(encodedBytes.AsSpan());
+        Block<int> indices = Blocks.Rent<int>(rows);
+        Block<float> patches = Blocks.Rent<float>(rows);
         bool kept = false;
         try
         {
@@ -232,19 +222,19 @@ internal readonly struct AlpPlan
 
             AlpPlan plan = new AlpPlan(
                 (byte)e, (byte)f, encodedBytes, encodedLength, PType.I32,
-                RentedCopy(indices.AsSpan(0, patchCount)),
-                RentedCopy(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
+                RentedCopy<int>(indices.AsSpan(0, patchCount)),
+                RentedCopy<byte>(MemoryMarshal.AsBytes(patches.AsSpan(0, patchCount))),
                 patchCount, sizeof(float), size);
             kept = true;
             return plan;
         }
         finally
         {
-            WorkArrays.Return(indices);
-            WorkArrays.Return(patches);
+            Blocks.Return(indices);
+            Blocks.Return(patches);
             if (!kept)
             {
-                WorkArrays.Return(encodedBytes);
+                Blocks.Return(encodedBytes);
             }
         }
     }
@@ -267,11 +257,11 @@ internal readonly struct AlpPlan
     /// value into <paramref name="patches"/>, both of a row a value at least, its slot then taking the
     /// first integer kept. The patches' count.
     /// </summary>
-    internal static int Encode(ReadOnlySpan<double> values, int e, int f, Span<long> encoded, int[] indices, double[] patches) =>
+    internal static int Encode(ReadOnlySpan<double> values, int e, int f, Span<long> encoded, Span<int> indices, Span<double> patches) =>
         EncodeRows(values, ValidityMask.NonNullable, values.Length, e, f, encoded, indices, patches);
 
-    /// <inheritdoc cref="Encode(ReadOnlySpan{double}, int, int, Span{long}, int[], double[])"/>
-    internal static int Encode(ReadOnlySpan<float> values, int e, int f, Span<int> encoded, int[] indices, float[] patches) =>
+    /// <inheritdoc cref="Encode(ReadOnlySpan{double}, int, int, Span{long}, Span{int}, Span{double})"/>
+    internal static int Encode(ReadOnlySpan<float> values, int e, int f, Span<int> encoded, Span<int> indices, Span<float> patches) =>
         EncodeRows(values, ValidityMask.NonNullable, values.Length, e, f, encoded, indices, patches);
 
     /// <summary>
@@ -280,7 +270,7 @@ internal readonly struct AlpPlan
     /// the null rows' slots filled with the first integer kept. The patches' count.
     /// </summary>
     private static int EncodeRows(
-        ReadOnlySpan<double> values, ValidityMask mask, int rows, int e, int f, Span<long> encoded, int[] indices, double[] patches)
+        ReadOnlySpan<double> values, ValidityMask mask, int rows, int e, int f, Span<long> encoded, Span<int> indices, Span<double> patches)
     {
         double scale = AlpTables.F10Double[e];
         double inverse = AlpTables.If10Double[f];
@@ -323,13 +313,13 @@ internal readonly struct AlpPlan
         // Patched and null slots take a real encoded value rather than zero: the integers are
         // bit-packed downstream over their own range, and a stray zero among values near 10^9
         // widens that range for nothing.
-        FillGaps(encoded, indices.AsSpan(0, patchCount), mask, rows, fill ?? 0);
+        FillGaps(encoded, indices[..patchCount], mask, rows, fill ?? 0);
         return patchCount;
     }
 
-    /// <inheritdoc cref="EncodeRows(ReadOnlySpan{double}, ValidityMask, int, int, int, Span{long}, int[], double[])"/>
+    /// <inheritdoc cref="EncodeRows(ReadOnlySpan{double}, ValidityMask, int, int, int, Span{long}, Span{int}, Span{double})"/>
     private static int EncodeRows(
-        ReadOnlySpan<float> values, ValidityMask mask, int rows, int e, int f, Span<int> encoded, int[] indices, float[] patches)
+        ReadOnlySpan<float> values, ValidityMask mask, int rows, int e, int f, Span<int> encoded, Span<int> indices, Span<float> patches)
     {
         float scale = AlpTables.F10Single[e];
         float inverse = AlpTables.If10Single[f];
@@ -367,23 +357,19 @@ internal readonly struct AlpPlan
             patchCount++;
         }
 
-        FillGaps(encoded, indices.AsSpan(0, patchCount), mask, rows, fill ?? 0);
+        FillGaps(encoded, indices[..patchCount], mask, rows, fill ?? 0);
         return patchCount;
     }
 
     /// <summary>
-    /// The patches a plan keeps, copied out of the worst-case rentals into rentals of their own
+    /// The patches a plan keeps, copied out of the worst-case blocks into blocks of their own
     /// size, so that a plan holds what it has rather than a row's worth per row until it is
-    /// written; the empty array when there are none.
+    /// written; the empty block when there are none.
     /// </summary>
-    private static T[] RentedCopy<T>(ReadOnlySpan<T> patches)
+    private static Block<T> RentedCopy<T>(ReadOnlySpan<T> patches)
+        where T : unmanaged
     {
-        if (patches.IsEmpty)
-        {
-            return [];
-        }
-
-        T[] copy = WorkArrays.Rent<T>(patches.Length);
+        Block<T> copy = Blocks.Rent<T>(patches.Length);
         patches.CopyTo(copy);
         return copy;
     }
@@ -403,7 +389,7 @@ internal readonly struct AlpPlan
     /// <returns>The rows handled: the largest multiple of two.</returns>
     private static int LanesDouble(
         ReadOnlySpan<double> values, Span<long> encoded, int e, int f, ReadOnlySpan<byte> bits, int bitOffset,
-        int[] indices, double[] patches, ref int patchCount, ref long? fill)
+        Span<int> indices, Span<double> patches, ref int patchCount, ref long? fill)
     {
         int length = values.Length & ~1;
         Vector128<double> scale = Vector128.Create(AlpTables.F10Double[e]);
@@ -456,7 +442,7 @@ internal readonly struct AlpPlan
     /// <returns>The rows handled: the largest multiple of four.</returns>
     private static int LanesSingle(
         ReadOnlySpan<float> values, Span<int> encoded, int e, int f, ReadOnlySpan<byte> bits, int bitOffset,
-        int[] indices, float[] patches, ref int patchCount, ref int? fill)
+        Span<int> indices, Span<float> patches, ref int patchCount, ref int? fill)
     {
         int length = values.Length & ~3;
         Vector128<float> scale = Vector128.Create(AlpTables.F10Single[e]);
@@ -516,7 +502,7 @@ internal readonly struct AlpPlan
     /// <returns>The rows handled: the largest multiple of four.</returns>
     private static int LanesDouble256(
         ReadOnlySpan<double> values, Span<long> encoded, int e, int f, ReadOnlySpan<byte> bits, int bitOffset,
-        int[] indices, double[] patches, ref int patchCount, ref long? fill)
+        Span<int> indices, Span<double> patches, ref int patchCount, ref long? fill)
     {
         int length = values.Length & ~3;
         Vector256<double> scale = Vector256.Create(AlpTables.F10Double[e]);
@@ -587,7 +573,7 @@ internal readonly struct AlpPlan
     /// <returns>The rows handled: the largest multiple of sixteen.</returns>
     private static int LanesSingle512(
         ReadOnlySpan<float> values, Span<int> encoded, int e, int f, ReadOnlySpan<byte> bits, int bitOffset,
-        int[] indices, float[] patches, ref int patchCount, ref int? fill)
+        Span<int> indices, Span<float> patches, ref int patchCount, ref int? fill)
     {
         int length = values.Length & ~15;
         Vector512<float> scale = Vector512.Create(AlpTables.F10Single[e]);
@@ -599,8 +585,8 @@ internal readonly struct AlpPlan
         ref int destination = ref MemoryMarshal.GetReference(encoded);
         bool masked = !bits.IsEmpty;
         int patched = patchCount;
-        ref int patchIndex = ref MemoryMarshal.GetArrayDataReference(indices);
-        ref float patchValue = ref MemoryMarshal.GetArrayDataReference(patches);
+        ref int patchIndex = ref MemoryMarshal.GetReference(indices);
+        ref float patchValue = ref MemoryMarshal.GetReference(patches);
         for (int i = 0; i < length; i += 16)
         {
             Vector512<float> value = Vector512.LoadUnsafe(ref source, (nuint)i);

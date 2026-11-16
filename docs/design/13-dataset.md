@@ -100,12 +100,21 @@ identical trees identical page for page. There is no separate page object, no or
 crash, and one conditional creation per commit.
 
 A reference names its page in every version that shares it, so a handle keeps what it has from one
-version to the next: the pages it read from the store, evicted least recently used first within
-`DatasetOptions.PageCacheBytes` (32 MiB by default), what the reads that opened its last sixteen
-versions brought back of their pages regions, and where each version's pages start. A refresh or a
-commit only asks the store again for the pages that changed. Pages are kept page by page only when
-read from the store, and kept by version when a read brought them back with their commit, since most
-of what a version wrote the next one rewrites, and a budget in bytes would fill up with those. With a
+version to the next: the pages it read from the store, with no budget of their own, given back least
+recently used first above `DatasetOptions.PageFloorBytes` (4 MiB by default) when the process's work
+needs the room or no walk read them of late; what the reads that opened its last sixteen versions
+brought back of their pages regions; and where each version's pages start. A refresh or a commit only
+asks the store again for the pages that changed. Pages are kept page by page only when read from the
+store, and kept by version when a read brought them back with their commit, since most of what a
+version wrote the next one rewrites, and the pages kept would fill up with those.
+
+The handle's other caches follow the same rule: the objects it keeps open (above
+`DatasetOptions.OpenObjectFloorBytes`, 8 MiB by default), the synopses it parsed, its partitions'
+indexes and the entries found in them, its filters' pages, its index entries and its sealed store's
+trailers each keep what questions read, with a small floor of their own. None has a ceiling: what a
+handle keeps grows with what its questions read, not with the number of handles, and the process
+takes back what they hold above their floors, the open objects before the pages and the pages before
+what is parsed, when its work needs the room, or once nothing read it for a turn of a slow timer. With a
 synopsis cache on the session ([the synopsis cache](19-object-storage.md#105-the-synopsis-cache-on-the-local-disk)),
 a page read from the store is also kept on the local disk under its XXH3-128, which names those bytes
 in every version and dataset: a handle opened later, after a restart or in another process, whose
@@ -612,6 +621,7 @@ outputs), and never merges two trees. Each operation carries its own answer to a
 | compaction, compaction on overlapping inputs | the second finds an input missing and abandons, and its outputs are garbage |
 | compaction, compaction into the same level from another one, on inputs they do not share | the second finds, inside the range of the sort key its sources span, an object of the level it writes that it did not read, and abandons, since its outputs would overlap it |
 | vacuum, anything | vacuum only deletes what no retained version references and what is older than the window ([lifecycle](#10-lifecycle)) |
+| a compaction's deletes, a reader of an older version | a job deletes the objects it replaced after its commit and never before, each once the version before the one that took it out is no longer retained, by the vacuum's own rule: a reader within the window still finds every object of its version ([15-compaction.md](15-compaction.md)) |
 | delete or update, append | the appended object is not among those the change read, so it stays and its rows are not touched |
 | delete or update, anything that rewrites or marks an object it read | an input is gone or its entry changed, so the replacement is abandoned and the change is worked out again on the version that won ([deleting rows](#12-deleting-and-updating-rows)) |
 | compaction, delete or update that marks one of its inputs | the entry the compaction read changed, so it abandons, since its outputs would bring the marked rows back, and they are garbage |
@@ -785,7 +795,7 @@ An open reads an object's last 64 KiB, and an object no larger comes whole with 
 
 ## 10. Lifecycle
 
-- Vacuum (`VacuumAsync`, explicit, never automatic) marks everything the retained versions reference
+- Vacuum (`VacuumAsync`, and the background loop's first loop of a dataset when nothing is due, every half of the retention window by default, `CompactionSchedule.VacuumEvery`, none on a store under retention locks) marks everything the retained versions reference
   (a subtree already seen is not walked again, so the versions cost their distinct pages), then
   deletes the unmarked commit objects and data objects older than the retention window, seven days by
   default (`DatasetOptions.RetentionWindow`), always keeping the latest version. What ages is the
@@ -832,6 +842,7 @@ stores this repository ships for S3, Azure and Cloud Storage, are in
 | `ReadAsync(key, offset, destination, ifToken)` reads into the caller's memory and returns the bytes read, the object's length and its token from one answer | every read. A data object's segment source plans its reads with the core's coalescer, issues them together, and reads each into the aligned block the scan decodes from |
 | `ReadIfPresentAsync(key, offset, destination, ifToken)` reads as `ReadAsync` does, a missing key answered `null` | the commit after the one a refresh holds, absent whenever nothing is new: the absence is an answer, not an exception, so a reader that refreshes every second throws nothing |
 | `ReadTailAsync(key, destination)` reads the last bytes with the object's length | opening an object whose length nothing recorded. A data object's entry records it, so its open is one read of the tail |
+| `CopyToAsync(key, offset, length, stream, ifToken)` writes a range to a stream as it arrives | a compaction's inputs, each copied once to the local scratch. An HTTP store asks for the whole object in one request, where reads of 4 MiB cost 256 requests an object of a gigabyte |
 | `HeadAsync(key)` returns the size, the token, the store's creation time, and the retention date and legal hold on a locked store | the versions after a known one, and the lock of an object about to go when the listing does not say it |
 | `PutAsync(key, pipe, length, condition)` writes if the key is free, if the object still has a token, or always | every write, streamed. A dataset only creates, with the key free as its condition |
 | `DeleteAsync(keys)` | vacuum, a batch at a time, where an absent key is not an error |

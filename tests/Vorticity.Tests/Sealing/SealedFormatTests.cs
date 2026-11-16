@@ -294,6 +294,33 @@ public sealed class SealedFormatTests
         return all.Buffer.Span.ToArray();
     }
 
+    /// <summary>
+    /// A batch read decrypts its frames into blocks counted for the account of the requests that asked, a scan's: they
+    /// count while the requests hold their segments, and nothing once the requests let them go.
+    /// </summary>
+    [Fact]
+    public async Task ABatchReadCountsItsPlaintextForItsRequestsUntilTheyLetItGo()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using VortexKeyring keyring = SealedObjects.Keyring();
+        using DataKey key = await keyring.GenerateAsync(ReadOnlyMemory<byte>.Empty, ct);
+        byte[] plaintext = SealedObjects.Pattern(200_000);
+        byte[] sealedBytes = await SealedObjects.SealAsync(plaintext, key, SealParameters.ForFile(12), 65_536, ct);
+        await using SealedSegmentReader reader = await SealedObjects.OpenAsync(sealedBytes, keyring, ct);
+        TestAccount account = new TestAccount();
+        using Vorticity.IO.SegmentRequestSet requests = new Vorticity.IO.SegmentRequestSet { Account = account };
+        requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(1_000, 3_000, 0, 0, 0));
+        requests.Add(new Vorticity.Serialization.Schemas.SegmentSpec(150_000, 20_000, 0, 0, 0));
+
+        await reader.ReadManyAsync(requests, ct);
+
+        Assert.Equal(plaintext.AsSpan(1_000, 3_000).ToArray(), requests.GetBuffer(0).Span.ToArray());
+        Assert.Equal(plaintext.AsSpan(150_000, 20_000).ToArray(), requests.GetBuffer(1).Span.ToArray());
+        Assert.True(account.Held >= 23_000, $"{account.Held} bytes counted");
+        requests.Release();
+        Assert.Equal(0, account.Held);
+    }
+
     /// <summary>The header, both descriptors, and the trailer's fixed fields of a one-epoch object.</summary>
     private static int Overhead(byte[] sealedBytes) =>
         SealedFormat.HeaderPrefixBytes + (2 * DescriptorLength(sealedBytes)) + 4 + SealedFormat.EpochEntryBytes + SealedFormat.TrailerSuffixBytes;

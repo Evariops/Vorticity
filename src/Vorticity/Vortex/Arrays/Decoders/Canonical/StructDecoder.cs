@@ -261,12 +261,14 @@ internal sealed class StructDecoder : ArrayDecoder
         int selected = projection.SelectedCount(dtype.FieldCount);
         Scratch<int> children = new Scratch<int>(selected, default);
         Scratch<int> names = new Scratch<int>(selected, default);
-        Scratch<DType> types = new Scratch<DType>(selected, default);
+        Scratch<int> types = new Scratch<int>(selected, default);
         try
         {
             Span<int> childSpan = children.Span;
             Span<int> nameSpan = names.Span;
-            Span<DType> typeSpan = types.Span;
+
+            // The fields' types as their nodes in the scan's arena.
+            Span<int> typeSpan = types.Span;
 
             for (int s = 0; s < selected; s++)
             {
@@ -279,11 +281,11 @@ internal sealed class StructDecoder : ArrayDecoder
                 // Imported, not passed through: the field's DType belongs to the file's arena and a
                 // struct built here must have children of this one.
                 typeSpan[s] = DTypeImport.Into(
-                    context.Types, context.Canonical.GetNode(child).DType);
+                    context.Types, context.Canonical.GetNode(child).DType).NodeIndex;
             }
 
             context.Scan.FieldsHonoured = true;
-            DType narrowed = context.Types.Struct(nameSpan, typeSpan, dtype.Nullability);
+            DType narrowed = context.Types.StructOfNodes(nameSpan, typeSpan, dtype.Nullability);
             return context.Canonical.AddStruct(narrowed, count, validity, childSpan);
         }
         finally

@@ -60,6 +60,41 @@ public sealed class GoogleTests
     }
 
     [Fact]
+    public async Task ACopyIsOneRangeAndACopyCutShortAsksForWhatIsLeftOfTheSameGeneration()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using GoogleEmulator emulator = new GoogleEmulator();
+        byte[] content = Encoding.ASCII.GetBytes("0123456789");
+        emulator.Seed(Bucket, "f", content);
+        string generation = emulator.GenerationOf(Bucket, "f");
+        List<string?> matched = [];
+        emulator.Intercept = (request, index) =>
+        {
+            matched.Add(S3ReadTests.IfMatch(request, "x-goog-if-generation-match"));
+            if (index != 1)
+            {
+                return null;
+            }
+
+            HttpResponseMessage cut = new HttpResponseMessage(System.Net.HttpStatusCode.PartialContent) { Content = new FaultyContent(content, 4, stall: false) };
+            cut.Content.Headers.TryAddWithoutValidation("Content-Range", $"bytes 0-{content.Length - 1}/{content.Length}");
+            cut.Headers.TryAddWithoutValidation("x-goog-generation", generation);
+            return cut;
+        };
+        await using GoogleCloudStorageObjectStore store = Store(emulator);
+
+        using System.IO.MemoryStream part = new System.IO.MemoryStream();
+        Assert.Equal(5, await store.CopyToAsync("f", 2, 5, part, null, ct));
+        Assert.Equal("23456", Encoding.ASCII.GetString(part.ToArray()));
+
+        using System.IO.MemoryStream copy = new System.IO.MemoryStream();
+        Assert.Equal(10, await store.CopyToAsync("f", 0, 10, copy, null, ct));
+        Assert.Equal(content, copy.ToArray());
+        Assert.Equal(["GET /warehouse/f bytes=2-6", "GET /warehouse/f bytes=0-9", "GET /warehouse/f bytes=4-9"], emulator.Log);
+        Assert.Equal([null, null, generation], matched);
+    }
+
+    [Fact]
     public async Task ASuffixReadOnceProvenOpensInOneRequest()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

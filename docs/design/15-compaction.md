@@ -175,6 +175,8 @@ jobs so that no two read or write the same level (a job on levels that share not
 another's input), and a loop takes the one ranked at its index. A descent and a read of every leaf
 rank the same jobs.
 
+When nothing is due, the first loop also runs the vacuum, every `VacuumEvery`, half the retention window by default, a quarter either way, the first within its first four idle turns. A job deletes the data objects it replaced once no retained version reads them, but not the commit objects, which the trees of later versions share: only the vacuum's walk of the retained versions tells which one no version reads any more. Left to the application, the vacuum was forgotten: a pipeline's bucket held 11 664 commit objects for 925 MB. A vacuum is cheap since its walk reads each retained version once, 0.4 to 0.6 s for 800 versions at 20 ms a request. The first one runs soon after the loop starts, since a period of 3.5 days, half the default window, would never come for a maintainer restarted every day. No loop vacuums a store under retention locks, where the vacuum asks for a head per object to read its lock.
+
 Leases were weighed and set aside. A loop would create `leases/<level>/<end of a span>` with
 put-if-absent before a job, and hold its levels until the span ends. Once the commit of a job checks
 the part of the level it writes ([three drivers](#2-three-drivers-for-one-job)), a lease protects
@@ -334,14 +336,15 @@ own directory, on another lane than its writer's (`DatasetOptions.PathDirectoryO
 
 ### The memory of a job
 
-A job holds what it reserves in the session's jobs' budget (`VortexSessionOptions.JobMemoryBudget`), half the process's
-limit by default and reserved in the process's budget too, so that the queries have the rest ([the
-governor](16-queries.md#the-governor)). The stores of an append reserve there what they hold, and write their largest
-partition sooner when it is refused.
+A job's memory is its blocks, and they never pass the session's jobs' budget (`VortexSessionOptions.JobMemoryBudget`). By default that budget is half the process's limit, read again as the limit moves, and each block a job rents asks the process too, which weighs it against the rest of its memory as it weighs a question's: given the whole limit and never refused there, the jobs' blocks and those the pool parked for them, 1 222 MiB, filled a heap held to 1.5 GiB, and a writer's own array found no room. The blocks of a job's inputs, their reads, their batches and the merge's keys, rent under one hard budget, and those of its writer, each object's writer and its sink, under another, both under the job's (`JobMemory`). A block none of them can take is refused rather than counted past, as a query's lane growth would be: the job gives up its objects and its blocks, the handle takes half as many inputs in its next plan, and the caller plans again rather than run the same job twice. Only a job of the fewest inputs it may take that is refused fails, with a `VortexMemoryException` that says what it held. The stores of an append reserve in the same budget what they hold, past it when they must but never past the process's own ceiling by more than a sixteenth, and write their largest partition sooner when it is refused.
 
-A job prices what it holds by the rows it holds, not by the bytes its inputs are written in. A row is priced at what the handle's last merge measured it to weigh decoded, the bytes of the batches its inputs handed over. A handle that has measured none reads the first batch of the job's largest input and measures it before the job sizes anything, and a plan prices a row at the least its schema's columns take until then. An open input holds its batch three times over, the batch, the chunks it was cut from and what its columns' reshaping keeps: 1.78 KB of resident memory a row for 530 bytes of batch, on metric records of maps and lists. It holds besides four times the chunks it keeps open, a chunk of each column as its object's contents count them, and 128 KiB at least, its reader and its footer: 0.10 to 0.15 MB an input, measured linear from 8 to 3 283 open inputs of 24 KB. The writer gathers sixteen times the dataset's chunk bytes for each column at most, the least rate a column is taken to encode to, and five times its chunk's target for a variant column it shreds, but never more than the rows the job writes, which it holds once at most: priced by its chunks alone, a job of 200 000 rows of metrics was priced 2.6 GB and held 380 MB.
+A job is priced by what the handle's last job measured, not by a model. Each job learns what an input held at most, its inputs' blocks over their count at the rows of their batches, and what its writer held at most, and the next plan sizes a job by them. Before any job, a handle prices an input at its open chunks, 128 KiB at least, and its batch at three times what a row weighs decoded, the first guess, and its writer at sixteen times the dataset's chunk bytes for each column, five times its chunk's target for a variant column it shreds, no more than the rows the job writes. The model it replaces was off by 1.4 to 3.1 times on three jobs of real metric records, whose writer, priced 192 MiB by its columns, held 691 MiB with its shredding.
 
-A merge reads its inputs in batches of what the budget leaves once its writer and its open inputs are counted, about a million rows together at most, a power of two between a block of 8 192 rows and a window, each batch decoded on its own, so that what a merge holds of its inputs does not grow with them. Priced so, a merge of 8 inputs of 26 000 rows reserved 416 MB and held 423, one of 32 such inputs reserved 850 MB and held 1 139, and the consolidation of 3 305 inputs of four rows reserved 495 MB and held 517. A consolidation's census counts its inputs on as many lanes as the budget holds, each reserving a batch of an input's rows and a slice of a wide shredding. Its ranges run side by side as many as the budget holds, each reserving before it starts what its inputs' batches, its open inputs and its writer hold. The first runs whether it fits or not, as a job in one piece does, and the others wait for a lane.
+A job is bounded by three quantities, none of them a model. Its width, the inputs it holds open, by the budget less its writer over what an input held in the handle's last job. Its bytes, by what the session's scratch leaves, its budget's room or nine tenths of its directory's free space, and by what it can commit in time: a quarter of the retention window at the bytes a second the handle's last job read, since a commit refuses objects begun half the window ago. The same bound sizes a piece of a consolidation, an object's size at most. A merge of a size class takes as many inputs as the three hold, the fan-out at least.
+
+A job that reads 16 MiB or more reads its inputs through the local scratch (`JobInputs`): each object is copied once, as the first pass asks for it, to a directory of the job's own, its bytes as the store holds them, sealed when the dataset seals them, and decrypted segment by segment as the job reads them from the disk. The copy is one request to an HTTP store (`IObjectStore.CopyToAsync`), its body written to the file as it arrives, where reads of 4 MiB cost 256 requests an object of a gigabyte. A store on the local disk or in memory (`CostProfile.LocalDisk`, `CostProfile.Memory`) is read in place: a copy would only move the bytes to the disk they lie on, or that the process holds already. A compaction therefore needs a scratch on a disk, the session's `ScratchDirectory` or the default one, never a file system in memory, and refuses to start without one, or without room there for its inputs: under the session's `ScratchBudget`, or a tenth of the directory's free space kept. The directory goes with the job; one a dead process left is removed by the next job once a day old. Below 16 MiB the copy saves nothing: a maintainer's 49 jobs of a few small objects each made 2 443 requests in 35.3 s read from a store answering in 20 ms, and 2 450 in 36.4 to 36.7 s through the scratch.
+
+A merge reads its inputs in batches of what the budget leaves once its writer and its open inputs are counted, by bytes alone, at what a row of a batch held in the handle's last job: a power of two between 1 024 rows and a window, each batch decoded on its own, so that what a merge holds of its inputs does not grow with them. The backlog bench's consolidation of 9 million rows merged 345 000 rows a second from 74 inputs under 2 GiB, at the narrowest batches its budget left, and 263 000 from 300 inputs under 8 GiB, at a block and more. A job's writer gathers its columns in an eighth of the jobs' budget at most, past which a column writes its chunk early: a quarter left the inputs less room, and the backlog compacted under 2 GiB in 17 jobs and 55 s instead of 11 and 49; a sixteenth took 8 jobs and 48 s, its object 2.3 % larger. A floor of a block of 8 192 rows held 4.7 GB for a merge of 201 inputs of metric records; under a block, the decoders decode a range of a chunk all the same. A consolidation's census counts its inputs on as many lanes as the room the jobs' budget leaves holds, each priced at an input and a slice of a wide shredding. Its ranges run side by side as many as that room holds, each priced at its inputs and its writer, one at least.
 
 `ConsolidateAsync` consolidates a partition at once when its level 0, all open at once, and one object of level 1 at a time fit the budget at a block of rows each. Otherwise it merges the partition's size classes first, a pass at a time, each pass committed, until they do: the passes of an external sort, each one durable and visible to readers. A partition with no merge due is consolidated anyway.
 
@@ -398,12 +401,44 @@ to lose less were weighed, none built:
 | the object built from parts | a partition's rows written as several objects first, each committed alone, then the partition's object assembled from theirs | parts that keep the shredding they chose; the object's tables merged from the parts' | the partition rewritten whole a second time, unless it is assembled by copying the parts' segments, a format change |
 | a smaller object | the size the layout's objects aim at (`DatasetLayout.ObjectBytes`) cuts a partition's rows into objects of that size | nothing new | more objects over a window, a request each |
 
+A fourth way is built: a consolidation that reads more than the layout's object size runs a piece at a
+time (`DatasetCompactor.Pieces`). Each job takes the keys of the partition below a cut, the first key of
+a granule of its inputs' sparse indexes past an object's size of what is left, moved up so that no object
+of level 1 lies across it; it writes them to level 1 and commits. The inputs of level 0 it took rows of go
+back to level 0 in the same commit with those rows marked, as a delete marks them, a run from row 0 since
+an input's rows are in the key's order; one it took every row of goes. The next job's plan finds what is
+left and consolidates the next piece, each input read from past its marked run, the objects of level 1 the
+earlier pieces wrote left out. A failure loses one piece, and each piece commits within its own share of
+the window. A consolidation runs in one piece when an input keeps no sparse index of its keys, or carries
+the counts of rows a delete marked, which a piece's marks would leave behind. Each piece writes the
+partition's index again, its objects' postings with those the index before covers still: a partition of
+`P` pieces writes its index `P` times, a cost that grows as `P²` in the index's bytes, measured before it
+is changed.
+
 The third is there today: a dataset whose failed jobs cost too much declares a smaller size, and each
 job at risk is that much smaller. The second is the shape of a job that resumes, at the price of a
 format change, and waits for a measure of how often jobs fail. A delete that marks an input while the
-job runs is the common reason a job starts again: its commit abandons the job and leaves its outputs
-to vacuum. Carrying the delete's marks over to the outputs would answer it without either, and is not
-done.
+job runs is the common reason a job starts again: its commit abandons the job, whose outputs no version
+names and which the job deletes at once. Carrying the delete's marks over to the outputs would answer it
+without either, and is not done.
+
+### Cleaning up after itself
+
+A job deletes what it replaced, after its commit and never before. The handle notes the objects the
+commit took out, with the version that took them out and when it knew that version to be the latest. A
+version stays retained while the commit that superseded it is younger than the retention window, or
+while it is among the versions the dataset keeps whatever their age, as the vacuum judges it: an object
+taken out by version `R` is read by version `R - 1` last, and goes once that version is no longer
+retained. The handle deletes what is due at the end of each job, and when a step finds nothing to
+compact, in batches of a thousand keys, without listing the store or walking a tree. Its clock reads the
+time a little after the store dated the commit, so it deletes a little later than a vacuum would, never
+sooner. A job whose commit applied nothing deletes its own outputs at once.
+
+The notes live in the handle. What a handle closed or a process ended leaves noted, the objects of a job
+that crashed before its commit, and every commit object, stay the vacuum's: a commit object is shared by
+the trees of the versions after it, and only a walk of the retained versions tells which ones nothing
+reads. A store under a retention lock deletes nothing before its lock lets go, which the vacuum waits
+for: there, the handle notes nothing.
 
 ## 4. Folding marks where no merge goes
 

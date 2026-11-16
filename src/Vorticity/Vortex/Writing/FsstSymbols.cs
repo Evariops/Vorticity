@@ -3,8 +3,8 @@ using System.Diagnostics;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Buffers;
 using System.Collections.Generic;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 
 namespace Vorticity.Writing;
@@ -78,9 +78,9 @@ internal sealed class FsstSymbols
 
         /// <summary>
         /// Room for the drawn sample: at most <see cref="SampleTarget"/> lines, since either way of
-        /// building the sample draws at least one byte per line. It lives here rather than in an
-        /// <see cref="ArrayPool{T}"/> because a pool of <see cref="Line"/> would be a whole new
-        /// shared pool with its own Gen2 trimming callback.
+        /// building the sample draws at least one byte per line. It lives here, made once with the
+        /// set of tables that <see cref="SpareSlots{T}"/> keeps from one column-chunk to the next,
+        /// rather than rented at every training.
         /// </summary>
         internal Line[] Sample => _sample ??= new Line[SampleTarget];
 
@@ -510,7 +510,7 @@ internal sealed class FsstSymbols
         ulong random = Hash(4637947);
         long bytes = 0;
         int walked = 0;
-        int[]? filled = null;
+        Block<int> filled = default;
         try
         {
             while (bytes < SampleTarget)
@@ -534,10 +534,7 @@ internal sealed class FsstSymbols
         }
         finally
         {
-            if (filled is not null)
-            {
-                ArrayPool<int>.Shared.Return(filled);
-            }
+            Blocks.Return(filled);
         }
     }
 
@@ -547,9 +544,9 @@ internal sealed class FsstSymbols
     /// found in the list of non-empty rows, <paramref name="filled"/>, made at the first draw past it.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static int Find(ReadOnlySpan<int> lengths, int start, int nonEmpty, ref int walked, ref int[]? filled)
+    private static int Find(ReadOnlySpan<int> lengths, int start, int nonEmpty, ref int walked, ref Block<int> filled)
     {
-        if (filled is null)
+        if (filled.IsEmpty)
         {
             // The walk counts its steps by offset, a loop whose only carried value is that offset.
             int rows = lengths.Length;
@@ -587,10 +584,11 @@ internal sealed class FsstSymbols
         return at < filled.Length ? filled[at] : filled[0];
     }
 
-    /// <summary>The <paramref name="nonEmpty"/> non-empty rows in ascending order, in an array rented from the shared pool.</summary>
-    private static int[] Filled(ReadOnlySpan<int> lengths, int nonEmpty)
+    /// <summary>The <paramref name="nonEmpty"/> non-empty rows in ascending order, in a block of the pool.</summary>
+    private static Block<int> Filled(ReadOnlySpan<int> lengths, int nonEmpty)
     {
-        int[] filled = ArrayPool<int>.Shared.Rent(nonEmpty);
+        Block<int> block = Blocks.Rent<int>(nonEmpty);
+        Span<int> filled = block;
         int count = 0;
         for (int row = 0; row < lengths.Length; row++)
         {
@@ -600,7 +598,7 @@ internal sealed class FsstSymbols
             }
         }
 
-        return filled;
+        return block;
     }
 
     private static ulong Hash(ulong value) => (value * 2971215073UL) ^ (value >> 15);

@@ -71,7 +71,7 @@ public sealed class BenchmarkConfig : ManualConfig
     /// The fast profile is in-process unconditionally -- three seconds of measurement does not pay
     /// ten seconds of generating and building a host. <c>--full</c> is the opposite trade and now
     /// runs OUT of process by default: process isolation per case, no JIT or
-    /// `ArrayPool.Shared` state carried from the previous class, GC and runtime jobs side by side,
+    /// pool state carried from the previous class, GC and runtime jobs side by side,
     /// and `--disasm`, which the in-process toolchain cannot do at all. This flag is the escape
     /// hatch for the case where the generated host is the problem rather than the answer.
     /// </remarks>

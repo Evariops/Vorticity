@@ -387,18 +387,19 @@ public sealed class DatasetPageCacheTests
     }
 
     [Fact]
-    public async Task AHandleThatKeepsNoPageReadsTheTreeAgainAfterACommit()
+    public async Task AHandleWhosePagesWereAskedBackReadsTheTreeAgainAfterACommit()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
-        await using VortexDataset dataset = await CreateAsync(store, new DatasetOptions { PageCacheBytes = 0 }, ct);
+        await using VortexDataset dataset = await CreateAsync(store, new DatasetOptions { PageFloorBytes = 0 }, ct);
 
         store.Reset();
         Assert.Equal(Objects, await CountAsync(dataset, ct));
         long first = store.Requests;
         await AddAsync(store, Objects / 2, ct);
         await dataset.RefreshAsync(ct);
+        ((Vorticity.Buffers.IHeldMemory)dataset).GiveBack(Vorticity.Buffers.KeptKind.Pages, long.MaxValue);
         store.Reset();
         Assert.Equal(Objects + 1, await CountAsync(dataset, ct));
 
@@ -444,19 +445,23 @@ public sealed class DatasetPageCacheTests
     }
 
     [Fact]
-    public async Task AVersionKeepsWhatItReadWithinTheHandlesBudgetAndNoMore()
+    public async Task AVersionKeepsWhatItReadAboveTheHandlesFloorUntilAskedBack()
     {
-        // The pages a walk reads go to the handle's cache, which lets the least recently used go;
-        // the version does not hold them besides, so a second walk of a tree larger than the budget
-        // reads again what the budget let go.
+        // The pages a walk reads go to the handle's cache, which keeps them all, and lets the least recently used past its
+        // floor go when the process asks; the version does not hold them besides, so a second walk of a tree larger than
+        // the floor reads again what the handle let go, and nothing while it kept everything.
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore inner = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(inner);
-        await using VortexDataset dataset = await CreateAsync(store, new DatasetOptions { PageCacheBytes = 256 << 10 }, ct);
+        await using VortexDataset dataset = await CreateAsync(store, new DatasetOptions { PageFloorBytes = 256 << 10 }, ct);
 
         store.Reset();
         Assert.Equal(Objects, await CountAsync(dataset, ct));
         long first = store.Requests;
+        store.Reset();
+        Assert.Equal(Objects, await CountAsync(dataset, ct));
+        Assert.Equal(0, store.Requests);
+        ((Vorticity.Buffers.IHeldMemory)dataset).GiveBack(Vorticity.Buffers.KeptKind.Pages, long.MaxValue);
         store.Reset();
         Assert.Equal(Objects, await CountAsync(dataset, ct));
         Assert.InRange(store.Requests, 1, first);
@@ -961,87 +966,6 @@ public sealed class DatasetPageCacheTests
         System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(key.AsSpan(8), (ulong)(uid >> 64));
         System.Buffers.Binary.BinaryPrimitives.WriteUInt64BigEndian(key.AsSpan(16), (ulong)uid);
         return new DatasetOperation.AddObject(key, entry) { Level = 1 };
-    }
-
-    /// <summary>
-    /// A store that holds each read and head, while <see cref="Holding"/>, until the test lets the round
-    /// go: requests sent without waiting for one another are held together however late a busy thread
-    /// sends the last, and a request sent once an answer is in waits for the next round.
-    /// </summary>
-    private sealed class RoundStore(IObjectStore inner) : ForwardingStore(inner)
-    {
-        /// <summary>How long a round waits for its requests, which only a caller that waits for an answer before it sends the next reaches.</summary>
-        internal static readonly TimeSpan Patience = TimeSpan.FromSeconds(30);
-
-        private readonly object _gate = new object();
-        private readonly SemaphoreSlim _arrived = new SemaphoreSlim(0);
-        private readonly List<ObjectOperation> _held = [];
-        private TaskCompletionSource _release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        /// <summary>Whether reads and heads are held; set it with nothing in flight.</summary>
-        internal bool Holding { get; set; }
-
-        /// <summary>Waits until <paramref name="count"/> requests are held, lets the round go, and returns their kinds, in the enumeration's order.</summary>
-        internal async Task<ObjectOperation[]> ReleaseAsync(int count, CancellationToken cancellationToken)
-        {
-            for (int i = 0; i < count; i++)
-            {
-                if (!await _arrived.WaitAsync(Patience, cancellationToken))
-                {
-                    Assert.Fail($"{i} of the round's {count} requests went out before an answer came back.");
-                }
-            }
-
-            lock (_gate)
-            {
-                ObjectOperation[] round = [.. _held.Order()];
-                _held.Clear();
-                TaskCompletionSource release = _release;
-                _release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-                release.SetResult();
-                return round;
-            }
-        }
-
-        public override async ValueTask<ObjectRead> ReadAsync(
-            string key, long offset, Memory<byte> destination, string? ifToken, CancellationToken cancellationToken)
-        {
-            await HoldAsync(ObjectOperation.Read, cancellationToken);
-            return await Inner.ReadAsync(key, offset, destination, ifToken, cancellationToken);
-        }
-
-        public override async ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
-        {
-            await HoldAsync(ObjectOperation.Read, cancellationToken);
-            return await Inner.ReadTailAsync(key, destination, cancellationToken);
-        }
-
-        public override async ValueTask<ObjectHead?> HeadAsync(string key, CancellationToken cancellationToken)
-        {
-            await HoldAsync(ObjectOperation.Head, cancellationToken);
-            return await Inner.HeadAsync(key, cancellationToken);
-        }
-
-        public override ValueTask DisposeAsync()
-        {
-            _arrived.Dispose();
-            return ValueTask.CompletedTask;
-        }
-
-        private Task HoldAsync(ObjectOperation operation, CancellationToken cancellationToken)
-        {
-            lock (_gate)
-            {
-                if (!Holding)
-                {
-                    return Task.CompletedTask;
-                }
-
-                _held.Add(operation);
-                _arrived.Release();
-                return _release.Task.WaitAsync(cancellationToken);
-            }
-        }
     }
 
     /// <summary>A store that holds back the answer to one put, once the object is in: a writer not told yet.</summary>

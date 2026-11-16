@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using Vorticity.Scanning;
@@ -35,6 +36,10 @@ public static class VortexDiagnostics
 
     /// <summary>The name of the library's <see cref="ActivitySource"/>.</summary>
     public const string ActivitySourceName = "Vorticity";
+
+    /// <summary>The memory the library holds in this process now, by sort: for a log line, a health page or a test.</summary>
+    /// <returns>The numbers, read at this instant.</returns>
+    public static MemoryReport GetMemoryReport() => MemoryReport.Now();
 }
 
 /// <summary>The instruments behind <see cref="VortexDiagnostics"/>.</summary>
@@ -62,6 +67,40 @@ internal static class VortexTelemetry
     private static readonly Counter<long> SynopsisRefused = Meter.CreateCounter<long>("vortex.synopsis_cache.refused", "{region}", "Regions a synopsis cache refused, larger than its capacity.");
     private static readonly Counter<long> SynopsisCorrupt = Meter.CreateCounter<long>("vortex.synopsis_cache.corrupt", "{region}", "Regions whose file on the disk failed its checksum, dropped and read again.");
     private static readonly UpDownCounter<long> SynopsisHeld = Meter.CreateUpDownCounter<long>("vortex.synopsis_cache.held", "By", "Bytes the synopsis caches hold on the local disk.");
+
+    // The memory the library holds, by sort, read when a listener collects: the same numbers as MemoryReport.
+    private static readonly ObservableGauge<long> MemoryLimit = Meter.CreateObservableGauge(
+        "vortex.memory.limit", static () => QueryMemoryBudget.ProcessLimit(), "By", "The limit the process is held to.");
+
+    private static readonly ObservableGauge<long> MemoryCeiling = Meter.CreateObservableGauge(
+        "vortex.memory.ceiling", static () => QueryMemoryBudget.Process.CeilingBytes, "By", "What the reservations of questions and jobs may reach now.");
+
+    private static readonly ObservableGauge<long> MemoryReserved = Meter.CreateObservableGauge(
+        "vortex.memory.reserved", static () => QueryMemoryBudget.Process.ReservedBytes, "By", "What the questions and the jobs reserved.");
+
+    private static readonly ObservableGauge<long> MemoryRented = Meter.CreateObservableGauge(
+        "vortex.memory.rented", static () => MemoryReport.RentedNow(), "By", "The bytes of the blocks in use.");
+
+    private static readonly ObservableGauge<long> MemoryRetained = Meter.CreateObservableGauge(
+        "vortex.memory.retained", static () => Retained(), "By", "The bytes kept for the next operations, by holder.");
+
+    private static readonly ObservableGauge<long> MemoryRest = Meter.CreateObservableGauge(
+        "vortex.memory.rest", static () => QueryMemoryBudget.Process.RestBytes, "By", "The rest of the process, as the library measures it.");
+
+    private static readonly ObservableGauge<int> DatasetHandles = Meter.CreateObservableGauge(
+        "vortex.dataset.handles", static () => Buffers.HeldMemory.ByHolder().GetValueOrDefault("datasets").Holders, "{handle}", "The dataset handles open.");
+
+    /// <summary>What each holder keeps, a measurement tagged by its holder.</summary>
+    private static IEnumerable<Measurement<long>> Retained()
+    {
+        foreach (KeyValuePair<string, (long Bytes, int Holders)> holder in Buffers.HeldMemory.ByHolder())
+        {
+            yield return new Measurement<long>(holder.Value.Bytes, new KeyValuePair<string, object?>("holder", holder.Key));
+        }
+    }
+
+    /// <summary>Makes the memory gauges, which a static field initializer would leave to the first counter's use.</summary>
+    internal static void EnsureMemoryGauges() => _ = (MemoryLimit, MemoryCeiling, MemoryReserved, MemoryRented, MemoryRetained, MemoryRest, DatasetHandles);
 
     /// <summary>Starts the activity of one scan, or returns null when nothing listens.</summary>
     /// <remarks>

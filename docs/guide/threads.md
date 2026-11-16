@@ -5,7 +5,6 @@ Configure a session, share what is safe to share, and turn on parallelism where 
 ```csharp
 await using VortexSession session = VortexSession.Create(o =>
 {
-    o.MemoryPool = new AlignedMemoryPool();
     o.SegmentCache = new SegmentCache(256L * 1024 * 1024);
     o.MaxConcurrentReads = 32;
     o.MaxDegreeOfParallelism = 4;
@@ -35,14 +34,14 @@ A `VortexSession` holds what would otherwise be process-wide state, so a host de
 
 | option | default | what it governs |
 |---|---|---|
-| `MemoryPool` | `AlignedMemoryPool.Shared` | every batch and builder buffer, and the segments read by a source of yours. The file sources of the library read into `AlignedMemoryPool.Shared` |
-| `SegmentCache` | the process's, `SegmentCache.Shared`: a sixteenth of the memory the process may use, 1 GiB at most; none for a session with a `Keyring` | segments kept across scans, one budget for every file of the sessions that share it whose reads do I/O. A cache of 0 bytes keeps none |
+| `SegmentCache` | the process's, `SegmentCache.Shared`, with no budget of its own: what the work leaves, given back above a floor when the work needs the room or no scan read it of late; none for a session with a `Keyring` | segments kept across scans, one budget for every file of the sessions that share it whose reads do I/O. A cache of 0 bytes keeps none |
 | `MaxConcurrentReads` | 128 | reads in flight across every scan of every file of the session whose reads do I/O |
 | `MaxDegreeOfParallelism` | 1 | how many chunks a scan decodes and aggregates at once, and how many threads a writer uses |
-| `IndexCacheBytes` | 64 MiB | decoded index runs kept per open file |
+| `IndexCacheBytes` | 64 MiB | decoded index runs kept per open file, in blocks of the pool given back when the file is disposed |
 | `MappedFileCacheCount` | 64 | files opened from a path that stay mapped after they are closed, so the next open reuses the mapping |
 | `MapFiles` | true | whether a file opened from a path is mapped by its first scan. When false, it is read positionally, and a file truncated during a scan fails the read instead of the process |
-| `MemoryBudget` | the process's | the memory the session's queries share with every session given the same `QueryMemoryBudget`: their group tables and their merges. Past it, a group by spills to `ScratchDirectory`, or fails with `VortexMemoryException` |
+| `MemoryBudget` | the process's | the memory the session's queries share with every session given the same `QueryMemoryBudget`: their group tables, their merges and the batches of their results until they are delivered. Past it, a group by spills to `ScratchDirectory`, or fails with `VortexMemoryException` |
+| `JobMemoryBudget` | the process's | the memory the session's writers and a dataset's jobs share with every session given the same `QueryMemoryBudget`: their builders, their pages and the bytes their pipes hold. Past it, a write fails with `VortexMemoryException` rather than the process being killed |
 | `ScratchDirectory` | the system's temporary directory, or the user's cache when that lies in memory | where a group by writes what its memory budget cannot hold, and where a sort and a writer write their runs. A file system in memory is refused: where `/tmp` is one, as on Ubuntu 26.04, the default is `$XDG_CACHE_HOME/vorticity`, or `~/.cache/vorticity`, which the `Vorticity` event source says once |
 | `ScratchBudget` | none, a tenth of the directory's free space is kept free | the scratch space the session's queries share with every session given the same `ScratchBudget`. Past it, `VortexMemoryException`, and no file is left behind |
 | `Extensions` | empty | extension types the session reads beyond the editions |
@@ -52,6 +51,8 @@ The options are set inside `Create` and frozen when it returns. Setting one afte
 VortexSession.Create.` `VortexFile.OpenAsync(path)` uses `VortexSession.Default`, which is
 immutable: the shared pool, no cache, 128 reads in flight, no parallelism, and 64 closed files kept
 mapped.
+
+Up to version 0.13, `MemoryPool` took an `AlignedMemoryPool` or any `MemoryPool<byte>` for the session's buffers, and `AlignedMemoryPool` was public. Both are gone: every block the library rents comes from its one pool, which the memory limit governs ([The memory limit](#the-memory-limit)). A store, a sink or a transport written against the public surface rents its buffers from `VortexBytePool.Instance`, an `ArrayPool<byte>` over the same pool, kept and let go as the library's blocks are.
 
 A session is disposed after its files. Disposing it while one is still open throws
 `InvalidOperationException: The session still has 'readings.vortex' open; dispose every file before
@@ -69,34 +70,69 @@ would, because two scans asking for the same segment at the same moment both mis
 
 ## The memory the pool keeps
 
-Every block a scan, a read or a write gives back is parked in the process-wide pool for the next rent,
-in size classes of powers of two from 4 KiB to 32 MiB. At rest a class keeps a few blocks. Under
-demand a class up to 8 MiB keeps up to 64 MiB per processor, as long as every class together parks
-less than 256 MiB per processor: up to 8 GiB on a machine of 32 processors. A class above 8 MiB keeps
-16 MiB per processor, and one block of up to 256 MiB is kept on its own.
+Every block a scan, a read or a write gives back is parked in the process-wide pool for the next rent, in size classes of powers of two from 4 KiB to 32 MiB, and one block of up to 256 MiB on its own. The arrays a table, a decoder or a writer grows, which need no fixed address, come from the pool's typed face, in classes of powers of two up to 64 KiB and eight sizes an octave past it, so that a block wastes an eighth of itself at most. The pool has no budget of its own and reads no processor count: it keeps every block given back, so it never holds more than the work rented at once, and the process takes back what it keeps above a floor of 256 KiB a class.
 
-At each full collection, the pool frees what a class keeps once no rent has asked for it for a minute,
-and everything it keeps when the machine's memory load is high. In a container, the runtime measures
-that load against the container's memory limit.
+It lets go in three ways. After each full collection, every class lets go of the blocks no rent took since the collection before: under pressure the collector runs more often, and the pool empties faster. Every 30 seconds a slow timer does the same, for the process that neither allocates nor collects: at rest, the pool is back to its floors within a minute. And when a reservation finds no room, or the machine's memory load is high at a collection, the process takes back everything kept above the floors, in a fixed order: the pool's blocks first, then the segments a cache keeps, then the objects a dataset keeps open, then its pages, what costs no request to rebuild before what does. In a container, the runtime measures the memory load against the container's memory limit. Two full collections with no work between them, as a benchmark that collects before each round runs, empty the pool down to its floors: the next work rents its blocks anew.
 
-It keeps that much because 32 questions at once each hold dozens of blocks of the same few classes.
-With 1 GiB parked in all, one block in four was freed as it came back, and the next rent took it from
-the system again, every page faulted anew: the declared spans and logs at a tenth of the design's
-rate answered about half as many questions a second as once the blocks were kept. Sealing an hour
-at the design's rate peaks at 9.8 GB instead of 8.8.
+Keeping every block given back serves 32 questions at once, which each hold dozens of blocks of the same few classes: with 1 GiB parked in all, one block in four was freed as it came back, and the next rent took it from the system again, every page faulted anew. The floors keep what the next question rents first: on an Apple M4 Pro, the 448 rents of 4 to 256 KiB a question makes took 25 to 27 µs from blocks parked, 64 to 68 µs cut from a slab kept and 84 to 92 µs from new slabs. A turn of the slow timer took 1.1 to 1.6 ms with 40 dataset handles open, whose floors kept everything they read: the questions asked after two turns made no request to the store.
 
-The blocks parked are native memory: they count in the process's private bytes, not in the managed
-heap's counters, and a heap dump does not show them. To bound what a session's batches, builders and
-decodes keep, give it a pool of its own:
+The blocks parked are managed arrays the runtime keeps pinned: they count in the managed heap, a heap dump shows them on the pinned object heap, and `vortex.memory.retained` tags them `pool` ([observability.md](observability.md#the-memory)). There is one pool in the process. What a session's work holds of it while it runs is counted in its budgets: a query's blocks under `MemoryBudget` until its result is delivered, a writer's under `JobMemoryBudget` until it is disposed. To bound them, give the session budgets of its own:
 
 ```csharp
 await using VortexSession session = VortexSession.Create(o =>
-    o.MemoryPool = new AlignedMemoryPool(maxRetainedBytes: 512L * 1024 * 1024));
+{
+    o.MemoryBudget = new QueryMemoryBudget(512L * 1024 * 1024);
+    o.JobMemoryBudget = new QueryMemoryBudget(256L * 1024 * 1024);
+});
 ```
 
-The reads of the library's own sources, its files, its object stores and its caches, still go through
-the process-wide pool, whose budgets grow with `Environment.ProcessorCount`, which a container's CPU
-limit lowers.
+What the pool keeps parked between rents is counted in no budget: it is the process's, kept above its floors only for as long as rents take it, and read by the budgets with the rest of the process.
+
+## The memory limit
+
+The library holds its work to the process's limit. In a container, the limit is the container's, read from its cgroup, v2 then v1, when the process starts and again every second. Outside a container, nothing holds the process but the collector, whose limit is the machine's memory unless the host configured the heap's. A host that wants its process held to less sets the limit itself, in code or in its environment:
+
+```csharp
+VortexMemory.SetLimit(4L << 30);   // as a container's limit of 4 GiB would hold the process
+```
+
+```
+VORTICITY_MEMORY_LIMIT=4g          # read when the library first needs a limit; 4294967296, 4096m and 4Gi say the same
+```
+
+A value of the variable that is no size fails each need of the limit with the same `InvalidOperationException`, which names the variable and its value. A limit set is taken as a container's limit of that size would be, and in a container the least of the two holds. The collector's heap is held to three quarters of it, what the runtime gives itself in a container: near that, the collector runs full collections before an allocation fails. The library's own limit is seven eighths of the heap's, and its budgets read what the process uses every second, its resident memory outside a container. The questions reserve within it, and the jobs within their share, half of it by default, each block of a job asking the process too. A block is reserved before it is allocated, so a block the budget refuses never reaches the heap. The quarter of the limit the heap leaves is for what the collector does not hold: the runtime, the threads' stacks, the native allocator. Measured with the backlog bench, what the process held past its committed heap peaked at 345 MiB under 2 GiB, within that quarter of 512 MiB, and what no reservation counts grew by 155 MiB in a second at most, within the eighth the library keeps as a margin.
+
+| limit | the collector's heap | the library's limit | the jobs' budget |
+|---|---|---|---|
+| 2 GiB | 1 536 MiB | 1 344 MiB | 672 MiB |
+| 4 GiB | 3 072 MiB | 2 688 MiB | 1 344 MiB |
+| 8 GiB | 6 144 MiB | 5 376 MiB | 2 688 MiB |
+
+Measured with the backlog bench (`--micro backlog --memory-limit`), a maintainer compacting 300 appends of metric records, 9 million rows, 194 MB, on an Apple M4 Pro:
+
+| limit | jobs | time | peak resident | written over the backlog |
+|---|---|---|---|---|
+| 2 GiB | 11 | 50 s | 1 240 MiB | 0.69 |
+| 4 GiB | 5 | 48 s | 2 013 MiB | 0.61 |
+| 8 GiB | 1 | 35 s | 1 711 MiB | 0.25 |
+
+A tighter limit makes the jobs narrower: more of them, each rewriting part of the backlog before the last consolidates it. A job refused once by its budget plans narrower and runs; none failed. An append is held the same way: an append of 324 000 rows, whose columns end in blocks of 64 MiB, is refused by its budget under 1 GiB rather than failing the heap ([frequent-appends.md](frequent-appends.md)).
+
+The blocks the library rents are pieces of pinned slabs of one size, which a slab given back leaves whole for the next one. Blocks of every size, each a pinned array of its own, left holes in the pinned heap that no other allocation could use, which the heap's limit counts: under 2 GiB, a compaction failed with 452 MB of them free.
+
+A slab goes back to the collector with its last piece, so the pool lets go of its blocks slab by slab. Before each letting go it counts what each slab holds, and orders each class's blocks so that a rent takes those of the slab most in use and a letting go those of the slab least in use: the slabs the work no longer needs empty, and go. Asked for room, it gives back first the blocks of an array of their own, then every slab whose pieces it keeps all, then the blocks of the slabs least in use. A class's floor stays only on a slab that rented blocks keep alive anyway, or on one slab: 256 KiB of floor left alone on a slab would keep 32 MiB. What the slabs hold free between their pieces is the pool's, counted under `pool` in the memory kept: the next blocks are cut from it without the heap growing. The budget still counts it with the rest of the process, since the arrays a query's tables grow cannot use it.
+
+Measured with the same bench, after the jobs, two turns of the slow timer and a full collection that gives the collector's free regions back, the maintainer's handle still open:
+
+| Limit | Slabs left | Resident | What the questions get |
+|---|---|---|---|
+| 2 GiB | 288 MiB, 275 of it free | 539 MiB | 919 MiB of 1 344 |
+| 4 GiB | 32 MiB | 228 MiB | 2 105 MiB of 2 688 |
+| 8 GiB | 32 MiB | 171 MiB | 5 307 MiB of 5 376 |
+
+Under 2 GiB the eleven narrower jobs leave 11 MiB of blocks the handle keeps, its open objects and pages, spread over nine slabs, which they hold alive: a slab goes with its last piece. The pool letting go class by class, before the slabs were let go whole, left 608 MiB of slabs for 5 MiB of blocks under 2 GiB, and the process 782 MiB resident.
+
+Set the limit when the process starts, before it holds data: `SetLimit` refuses a limit whose heap the collector already passes after a full collection, and the limit set before stays. `VortexMemory.LimitBytes` says the limit set, and `VortexDiagnostics.GetMemoryReport().LimitBytes` the library's own.
 
 ## What is safe to share
 
@@ -226,8 +262,6 @@ an `await`. Do the columnar work, then await what you need, then let the loop mo
 
 * A batch's columns must not cross threads. Their spans point into buffers the scan reuses. To hand
   rows to another thread, take owned batches ([owned-batches.md](owned-batches.md)).
-* A `MemoryPool` other than an `AlignedMemoryPool` only serves the builders and the owned batches,
-  and the engine then decodes into `AlignedMemoryPool.Shared`.
 * Two hosts in one process that want different parallelism or caches need two sessions, not a
   setting changed between calls.
 * In a container, the free space a disk reports is not the real limit. A Kubernetes pod's writable

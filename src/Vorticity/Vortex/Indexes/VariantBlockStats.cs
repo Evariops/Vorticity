@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 using Vorticity.Serialization;
 using Vorticity.Serialization.Protobuf;
 using Vorticity.Types.Variants;
@@ -322,23 +323,17 @@ internal readonly record struct BlockBound(int Block, long Values, long Low, lon
 /// Under the index budget, those that narrow their blocks least go first.
 /// </para>
 /// </remarks>
-internal sealed class VariantBlockStats : IDisposable
+internal sealed class VariantBlockStats
 {
     private const byte Version = 1;
 
     // The regions of statistics built to be written, a key's each, encoded once.
     private readonly byte[][]? _regions;
 
-    // Whether the blocks read lie in arrays rented for them, which the statistics give back when they are disposed: read
-    // at each scan's pruning and dropped after it, where arrays of their own outlived it, 10 % of what the mix of questions
-    // kept past a collection (2026-11-08).
-    private bool _rented;
-
-    internal VariantBlockStats(IReadOnlyList<(string Key, PathClass Class)> keys, ReadOnlyMemory<BlockBound>[] blocks, bool rented = false)
+    internal VariantBlockStats(IReadOnlyList<(string Key, PathClass Class)> keys, ReadOnlyMemory<BlockBound>[] blocks)
     {
         Keys = keys;
         Blocks = blocks;
-        _rented = rented;
     }
 
     /// <summary>Statistics built to be written: the keys and classes, and each one's region (<see cref="KeyBytes"/>).</summary>
@@ -358,24 +353,6 @@ internal sealed class VariantBlockStats : IDisposable
     /// not read, and for statistics built to be written, which hold their regions instead.
     /// </summary>
     internal IReadOnlyList<ReadOnlyMemory<BlockBound>> Blocks { get; }
-
-    /// <summary>Gives the arrays of the blocks read back to the pool: no block is read after.</summary>
-    public void Dispose()
-    {
-        if (!_rented)
-        {
-            return;
-        }
-
-        _rented = false;
-        foreach (ReadOnlyMemory<BlockBound> blocks in Blocks)
-        {
-            if (System.Runtime.InteropServices.MemoryMarshal.TryGetArray(blocks, out ArraySegment<BlockBound> array) && array.Array is { Length: > 0 } rented)
-            {
-                System.Buffers.ArrayPool<BlockBound>.Shared.Return(rented, clearArray: true);
-            }
-        }
-    }
 
     /// <summary>Which of the keys and classes is <paramref name="key"/> of <paramref name="class"/>, or -1.</summary>
     internal int IndexOf(string key, PathClass @class)
@@ -465,15 +442,15 @@ internal sealed class VariantBlockStats : IDisposable
     private static byte[] Encode(int count, ReadOnlySpan<byte> blocks)
     {
         int length = Varint.Size((ulong)count) + blocks.Length;
-        byte[] plain = Aggregating.WorkArrays.Rent<byte>(length);
+        Buffers.Block<byte> plain = Buffers.Blocks.Rent<byte>(length);
         try
         {
             blocks.CopyTo(plain.AsSpan(Varint.Write(plain, (ulong)count)));
-            return ZstdRegion.Encode(Version, plain.AsSpan(0, length));
+            return ZstdRegion.Encode(Version, plain);
         }
         finally
         {
-            Aggregating.WorkArrays.Return(plain);
+            Buffers.Blocks.Return(plain);
         }
     }
 
@@ -484,22 +461,22 @@ internal sealed class VariantBlockStats : IDisposable
     /// </remarks>
     internal static ReadOnlyMemory<BlockBound>? KeyFrom(ReadOnlySpan<byte> bytes)
     {
-        if (ZstdRegion.Rent(bytes, Version, out int length) is not { } plain)
+        if (ZstdRegion.Rent(bytes, Version) is not { } plain)
         {
             return null;
         }
 
         try
         {
-            ProtoReader reader = new ProtoReader(plain.AsSpan(0, length));
+            ProtoReader reader = new ProtoReader(plain);
             ulong count = reader.ReadVarint();
-            if (count > (ulong)length)
+            if (count > (ulong)plain.Length)
             {
                 return null;
             }
 
-            // Rented, at least as long: the statistics give it back when they are disposed.
-            BlockBound[] blocks = count == 0 ? [] : System.Buffers.ArrayPool<BlockBound>.Shared.Rent((int)count);
+            // Their own, at their length: a bound holds its texts, which no block of bytes can.
+            BlockBound[] blocks = count == 0 ? [] : new BlockBound[(int)count];
             int block = 0;
             for (int i = 0; i < (int)count; i++)
             {
@@ -513,17 +490,7 @@ internal sealed class VariantBlockStats : IDisposable
                 blocks[i] = new BlockBound(block, values, low, high, min, max);
             }
 
-            if (reader.End)
-            {
-                return blocks.AsMemory(0, (int)count);
-            }
-
-            if (blocks.Length != 0)
-            {
-                System.Buffers.ArrayPool<BlockBound>.Shared.Return(blocks, clearArray: true);
-            }
-
-            return null;
+            return reader.End ? blocks : null;
         }
         catch (Exception malformed) when (malformed is VortexFormatException or OverflowException)
         {
@@ -531,7 +498,7 @@ internal sealed class VariantBlockStats : IDisposable
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(plain);
+            Buffers.Blocks.Return(plain);
         }
     }
 
@@ -585,14 +552,13 @@ internal sealed class VariantBlockStats : IDisposable
                 ReadOnlySpan<byte> region = requests.GetBuffer(k).Span;
                 if (!run.Payload[found[k].Place].Holds(region) || KeyFrom(region) is not { } read)
                 {
-                    new VariantBlockStats(keys, blocks, rented: true).Dispose();
                     return (null, requests.Count, bytes);
                 }
 
                 blocks[k] = read;
             }
 
-            return (new VariantBlockStats(keys, blocks, rented: true), requests.Count, bytes);
+            return (new VariantBlockStats(keys, blocks), requests.Count, bytes);
         }
 
         return (null, 0, 0);
@@ -670,7 +636,7 @@ internal sealed class VariantBlockStats : IDisposable
         /// <summary>
         /// The statistics that can prune among the file's <paramref name="blocks"/> blocks, within
         /// <paramref name="maxBytes"/> bytes, those that narrow their blocks least left out first; null
-        /// when none can. The builder's last use: its streams' bytes go back to the process's shelf.
+        /// when none can. The builder's last use: its streams' bytes go back to the pool.
         /// </summary>
         internal VariantBlockStats? Build(int blocks, long maxBytes)
         {
@@ -680,7 +646,7 @@ internal sealed class VariantBlockStats : IDisposable
             }
             finally
             {
-                // The builder's last use: its streams' bytes back to the shelf, the regions kept copies of them.
+                // The builder's last use: its streams' bytes back to the pool, the regions kept copies of them.
                 foreach (KeyStream stream in _streams)
                 {
                     stream.GiveBack();
@@ -856,9 +822,9 @@ internal sealed class VariantBlockStats : IDisposable
                 ReadOnlySpan<byte> rest = chunk.Body[chunk.FirstBytes..];
                 if (_length + 10 + rest.Length > _bytes.Length)
                 {
-                    // The process's shelf's, at a power of two, which the next object's streams find again.
+                    // A block of the pool, at a power of two, which the next object's streams find again.
                     int size = Math.Max(_length + 10 + rest.Length, Math.Max(256, _bytes.Length * 2));
-                    byte[] grown = Aggregating.ArrayShelf.Retained.Take<byte>((int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)size), zeroed: false);
+                    byte[] grown = Buffers.Blocks.Rent<byte>(size).Array();
                     Body.CopyTo(grown);
                     GiveBack();
                     _bytes = grown;
@@ -874,14 +840,11 @@ internal sealed class VariantBlockStats : IDisposable
             /// <summary>The blocks held, read back in order.</summary>
             internal BoundsReader Read() => new BoundsReader(Body, Count);
 
-            /// <summary>Gives the stream's bytes back to the process's shelf; the stream holds none after.</summary>
+            /// <summary>Gives the stream's bytes back to the pool; the stream holds none after.</summary>
             internal void GiveBack()
             {
-                if (_bytes.Length > 0)
-                {
-                    Aggregating.ArrayShelf.Retained.Give(_bytes);
-                    _bytes = [];
-                }
+                Buffers.Blocks.ReturnBytes(_bytes);
+                _bytes = [];
             }
 
             private void Write(ulong value) => _length += Varint.Write(_bytes.AsSpan(_length), value);

@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
@@ -395,22 +394,21 @@ internal static class RowEncodeKernel
         RowValidity parent, int rows,
         ReadOnlySpan<int> offsets, Span<int> cursors, Span<byte> destination)
     {
-        int[] sizes = ArrayPool<int>.Shared.Rent(rows);
-        int[] scratchOffsets = ArrayPool<int>.Shared.Rent(rows);
-        int[] scratchCursors = ArrayPool<int>.Shared.Rent(rows);
-        byte[]? scratch = null;
+        // The child's sizes, its rows' starts in the scratch, and their cursors, in one block.
+        Block<int> rowScratch = Blocks.Rent<int>(3 * rows);
+        Block<byte> scratch = default;
         try
         {
-            Span<int> childSizes = sizes.AsSpan(0, rows);
+            Span<int> childSizes = rowScratch.AsSpan(0, rows);
             childSizes.Clear();
             RowSizeKernel.Add(arena, childIndex, field, childSizes);
 
-            Span<int> starts = scratchOffsets.AsSpan(0, rows);
+            Span<int> starts = rowScratch.AsSpan(rows, rows);
             int total = Prefix(childSizes, starts);
-            scratch = ArrayPool<byte>.Shared.Rent(Math.Max(total, 1));
-            Span<int> zero = scratchCursors.AsSpan(0, rows);
+            scratch = Blocks.Rent<byte>(total);
+            Span<int> zero = rowScratch.AsSpan(2 * rows, rows);
             zero.Clear();
-            RowEncodeKernel.Encode(arena, childIndex, field, starts, zero, scratch.AsSpan(0, total));
+            RowEncodeKernel.Encode(arena, childIndex, field, starts, zero, scratch);
 
             byte childNull = RowSentinels.ChildCanonicalNull(childType, field);
             for (int i = 0; i < rows; i++)
@@ -430,14 +428,8 @@ internal static class RowEncodeKernel
         }
         finally
         {
-            if (scratch is not null)
-            {
-                ArrayPool<byte>.Shared.Return(scratch);
-            }
-
-            ArrayPool<int>.Shared.Return(scratchCursors);
-            ArrayPool<int>.Shared.Return(scratchOffsets);
-            ArrayPool<int>.Shared.Return(sizes);
+            Blocks.Return(scratch);
+            Blocks.Return(rowScratch);
         }
     }
 
@@ -464,12 +456,12 @@ internal static class RowEncodeKernel
         RowWidth width = RowWidths.For(elementType);
         byte childNull = RowSentinels.ChildCanonicalNull(elementType, field);
         int elementCount = checked(rows * listSize);
-        int[] elementOffsets = ArrayPool<int>.Shared.Rent(Math.Max(elementCount, 1));
-        int[] elementCursors = ArrayPool<int>.Shared.Rent(Math.Max(elementCount, 1));
+        // The elements' starts and their cursors, in one block.
+        Block<int> elementScratch = Blocks.Rent<int>(2 * elementCount);
         try
         {
-            Span<int> starts = elementOffsets.AsSpan(0, elementCount);
-            Span<int> zero = elementCursors.AsSpan(0, elementCount);
+            Span<int> starts = elementScratch.AsSpan(0, elementCount);
+            Span<int> zero = elementScratch.AsSpan(elementCount, elementCount);
             zero.Clear();
 
             if (width.IsFixed)
@@ -511,16 +503,16 @@ internal static class RowEncodeKernel
                 return;
             }
 
-            int[] sizes = ArrayPool<int>.Shared.Rent(Math.Max(elementCount, 1));
-            byte[]? scratch = null;
+            Block<int> sizes = Blocks.Rent<int>(elementCount);
+            Block<byte> scratch = default;
             try
             {
-                Span<int> elementSizes = sizes.AsSpan(0, elementCount);
+                Span<int> elementSizes = sizes;
                 elementSizes.Clear();
                 RowSizeKernel.Add(arena, elementsIndex, field, elementSizes);
                 int total = Prefix(elementSizes, starts);
-                scratch = ArrayPool<byte>.Shared.Rent(Math.Max(total, 1));
-                Encode(arena, elementsIndex, field, starts, zero, scratch.AsSpan(0, total));
+                scratch = Blocks.Rent<byte>(total);
+                Encode(arena, elementsIndex, field, starts, zero, scratch);
 
                 for (int i = 0; i < rows; i++)
                 {
@@ -549,18 +541,13 @@ internal static class RowEncodeKernel
             }
             finally
             {
-                if (scratch is not null)
-                {
-                    ArrayPool<byte>.Shared.Return(scratch);
-                }
-
-                ArrayPool<int>.Shared.Return(sizes);
+                Blocks.Return(scratch);
+                Blocks.Return(sizes);
             }
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(elementCursors);
-            ArrayPool<int>.Shared.Return(elementOffsets);
+            Blocks.Return(elementScratch);
         }
     }
 

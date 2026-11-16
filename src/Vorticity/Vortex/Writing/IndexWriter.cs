@@ -1,11 +1,11 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
 using Vorticity.Layouts;
@@ -27,6 +27,8 @@ internal sealed record FragmentBinding(long Length, Guid? Identity, string? Toke
 /// </summary>
 internal sealed class IndexWriter : IDisposable
 {
+    // Whom the arenas the indexes slice keys and variant rows into are counted for: the writer's or the indexer's work.
+    private readonly MemoryAccount _account;
     private readonly WritePolicy _policy;
     private readonly bool _isTabular;
     private readonly int _budgetPerMille;
@@ -96,12 +98,13 @@ internal sealed class IndexWriter : IDisposable
     /// there and write nothing.
     /// </summary>
     internal IndexWriter(
-        WritePolicy policy, DType schema, bool isTabular, int fieldCount, int budgetPerMille = 100, int blockRows = 0,
+        MemoryAccount account, WritePolicy policy, DType schema, bool isTabular, int fieldCount, int budgetPerMille = 100, int blockRows = 0,
         IKeyEncoder? keyEncoder = null, string? scratchDirectory = null, long scratchMemoryBytes = DefaultScratchMemoryBytes,
         long wideRowsAbove = uint.MaxValue, bool sealScratch = false,
         IReadOnlyList<(int Field, string Key, Types.Variants.PathClass Class)>? variantKeys = null,
         Func<string, IHashTap?>? taps = null, long hashedUnitBytes = 0)
     {
+        _account = account;
         _policy = policy;
         _isTabular = isTabular;
         _budgetPerMille = budgetPerMille;
@@ -457,16 +460,16 @@ internal sealed class IndexWriter : IDisposable
                 continue;
             }
 
-            CanonicalArena slices = _keySlices ??= new CanonicalArena();
+            CanonicalArena slices = _keySlices ??= new CanonicalArena(64, _account);
             slices.Reset();
 
             // Rented for the batch, as a nested column's are: two arrays a key and a batch were made new.
-            int[] rentedColumns = ArrayPool<int>.Shared.Rent(fields.Length);
-            bool[] rentedInclude = ArrayPool<bool>.Shared.Rent(count);
+            Block<int> rentedColumns = Buffers.Blocks.Rent<int>(fields.Length);
+            Block<bool> rentedInclude = Buffers.Blocks.Rent<bool>(count);
             try
             {
-                Span<int> columns = rentedColumns.AsSpan(0, fields.Length);
-                Span<bool> include = rentedInclude.AsSpan(0, count);
+                Span<int> columns = rentedColumns;
+                Span<bool> include = rentedInclude;
                 include.Fill(true);
                 bool masked = true;
                 for (int c = 0; c < fields.Length; c++)
@@ -510,8 +513,8 @@ internal sealed class IndexWriter : IDisposable
             }
             finally
             {
-                ArrayPool<int>.Shared.Return(rentedColumns);
-                ArrayPool<bool>.Shared.Return(rentedInclude);
+                Buffers.Blocks.Return(rentedColumns);
+                Buffers.Blocks.Return(rentedInclude);
             }
         }
     }
@@ -535,11 +538,11 @@ internal sealed class IndexWriter : IDisposable
                 continue;
             }
 
-            bool[] include = ArrayPool<bool>.Shared.Rent(count);
+            Block<bool> include = Buffers.Blocks.Rent<bool>(count);
             try
             {
                 bool masked = false;
-                int leaf = Descend(arena, fieldNodes, chain, start, include.AsSpan(0, count), ref masked);
+                int leaf = Descend(arena, fieldNodes, chain, start, include, ref masked);
                 if (leaf < 0)
                 {
                     foreach (IndexBuilder builder in _builders[field])
@@ -554,8 +557,8 @@ internal sealed class IndexWriter : IDisposable
                 int from = start;
                 if (masked)
                 {
-                    source = _keySlices ??= new CanonicalArena();
-                    leaf = Masked(arena, leaf, start, include.AsSpan(0, count));
+                    source = _keySlices ??= new CanonicalArena(64, _account);
+                    leaf = Masked(arena, leaf, start, include);
                     from = 0;
                 }
 
@@ -566,7 +569,7 @@ internal sealed class IndexWriter : IDisposable
             }
             finally
             {
-                ArrayPool<bool>.Shared.Return(include);
+                Buffers.Blocks.Return(include);
             }
         }
     }
@@ -1929,7 +1932,7 @@ internal sealed class IndexWriter : IDisposable
         {
             if (SheetOf(field) is { } sheet)
             {
-                _builders[field].Add(new ColumnCountsBuilder(sheet, plan, field));
+                _builders[field].Add(new ColumnCountsBuilder(sheet, plan, field, _account));
             }
         }
     }
@@ -2326,7 +2329,7 @@ internal sealed class IndexWriter : IDisposable
                 int[] held = [.. slots];
                 int keyed = Array.FindIndex(held, slot => variants[slot]!.Value.Path.Steps.Length > 1) is int first and >= 0 ? first : held.Length;
                 Compute.VariantFieldExpr[] paths = Array.ConvertAll(held, slot => variants[slot]!.Value.Path);
-                feeds[field] = new VariantFeed(held, keyed == 0 ? null : new Compute.VariantFieldExpr.KeyReads(paths[..keyed]), paths[keyed..]);
+                feeds[field] = new VariantFeed(held, keyed == 0 ? null : new Compute.VariantFieldExpr.KeyReads(paths[..keyed]), paths[keyed..], _account);
             }
         }
 
@@ -2338,7 +2341,7 @@ internal sealed class IndexWriter : IDisposable
     /// and the nodes they read into, in an arena of the column's own, so that each variant column feeds its keys on the
     /// thread that ingests it.
     /// </summary>
-    private sealed class VariantFeed(int[] slots, Compute.VariantFieldExpr.KeyReads? reads, Compute.VariantFieldExpr[] nested)
+    private sealed class VariantFeed(int[] slots, Compute.VariantFieldExpr.KeyReads? reads, Compute.VariantFieldExpr[] nested, MemoryAccount account)
     {
         private CanonicalArena? _rows;
 
@@ -2354,7 +2357,7 @@ internal sealed class IndexWriter : IDisposable
         internal int[] Nodes { get; } = new int[slots.Length];
 
         /// <summary>Where the keys' values are read into before their builders take them, emptied after each batch.</summary>
-        internal CanonicalArena Rows => _rows ??= new CanonicalArena();
+        internal CanonicalArena Rows => _rows ??= new CanonicalArena(64, account);
 
         internal void Release()
         {

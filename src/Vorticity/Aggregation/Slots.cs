@@ -4,6 +4,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -204,17 +205,17 @@ internal abstract class AggregateSlot
     internal virtual GroupRecords? Bound => null;
 
     /// <summary>
-    /// The shelf the slot's own arrays grow from from now on: a lane's, under its query's memory, or a
+    /// The account the slot's own arrays grow from from now on: a lane's, under its query's memory, or a
     /// core's. Called once, as its partition makes the
     /// slot. Nothing for a slot whose states all lie in records its partition shares.
     /// </summary>
-    internal virtual void Govern(ArrayShelf shelf)
+    internal virtual void Govern(TableArrays account)
     {
     }
 
     /// <summary>
-    /// Gives the slot's own arrays back to the shelf they grew from (<see cref="Govern"/>), which hands
-    /// them to the process's for the next query: the partition's groups delivered, or held by another.
+    /// Gives the slot's own arrays back to the account they grew from (<see cref="Govern"/>), which gives
+    /// them back to the pool for the next query: the partition's groups delivered, or held by another.
     /// The slot is read no more. Nothing for a slot whose states all lie in records its partition shares.
     /// </summary>
     internal virtual void Release()
@@ -444,7 +445,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
     /// <summary>The bytes of the groups' answers, a run at a time of one part, as <see cref="Results"/> reads them.</summary>
     public void AppendBytes(VarBinStore store, ReadOnlySpan<int> groups)
     {
-        int[] local = ArrayShelf.Rent<int>(groups.Length);
+        Block<int> local = Blocks.Rent<int>(groups.Length);
         try
         {
             int start = 0;
@@ -466,7 +467,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
         }
         finally
         {
-            ArrayShelf.Return(local);
+            Blocks.Return(local);
         }
     }
     internal override TResult Result(int group)
@@ -487,7 +488,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
     /// </summary>
     internal override void Results(ReadOnlySpan<int> groups, Span<TResult> into)
     {
-        int[] local = ArrayShelf.Rent<int>(groups.Length);
+        Block<int> local = Blocks.Rent<int>(groups.Length);
         try
         {
             int start = 0;
@@ -509,14 +510,14 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
         }
         finally
         {
-            ArrayShelf.Return(local);
+            Blocks.Return(local);
         }
     }
 
     /// <summary>The groups' states a run at a time of one part, their numbers in it, as <see cref="Results"/> reads them.</summary>
     internal override void ExportStates(ReadOnlySpan<int> groups, in StateExport into)
     {
-        int[] local = ArrayShelf.Rent<int>(groups.Length);
+        Block<int> local = Blocks.Rent<int>(groups.Length);
         try
         {
             int start = 0;
@@ -538,7 +539,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
         }
         finally
         {
-            ArrayShelf.Return(local);
+            Blocks.Return(local);
         }
     }
 
@@ -551,7 +552,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
     /// <summary>The means a run at a time of one part, as <see cref="Results"/> reads the answers.</summary>
     public void Means(ReadOnlySpan<int> groups, Span<double?> into)
     {
-        int[] local = ArrayShelf.Rent<int>(groups.Length);
+        Block<int> local = Blocks.Rent<int>(groups.Length);
         try
         {
             int start = 0;
@@ -573,7 +574,7 @@ internal sealed class JoinedSlot<TResult>(AggregateSlot[] parts, int[] offsets) 
         }
         finally
         {
-            ArrayShelf.Return(local);
+            Blocks.Return(local);
         }
     }
 
@@ -1012,7 +1013,7 @@ internal sealed class ExistsSlot(bool all) : RecordSlot<bool, bool>
 /// </summary>
 internal struct MaskCache
 {
-    private ulong[]? _words;
+    private ScratchBlock<ulong> _words;
     private long _batch;
     private int _node;
     private byte _source;
@@ -1033,9 +1034,7 @@ internal struct MaskCache
             }
             else
             {
-                ulong[] words = _words ?? [];
-                RowMasks.And(left, right, input.Rows, ref words);
-                _words = words;
+                RowMasks.And(left, right, input.Rows, ref _words);
                 _source = 3;
             }
         }
@@ -1049,14 +1048,10 @@ internal struct MaskCache
         };
     }
 
-    /// <summary>Gives the conjunction's words back to the process's shelf they grew from, its slot done with them.</summary>
+    /// <summary>Gives the conjunction's words back to the pool they grew from, its slot done with them.</summary>
     internal void Release()
     {
-        if (_words is { Length: > 0 } words)
-        {
-            ArrayShelf.Retained.Give(words);
-        }
-
+        Scratch.Return(ref _words);
         this = default;
     }
 }
@@ -1070,8 +1065,8 @@ internal struct MaskCache
 /// </summary>
 internal struct CodeSet
 {
-    private byte[]? _marked;
-    private int[]? _met;
+    private ScratchBlock<byte> _marked;
+    private ScratchBlock<int> _met;
 
     // Whether the table may hold marks: left so by a long range, or by a short one that did not
     // finish unmarking.
@@ -1096,9 +1091,8 @@ internal struct CodeSet
             _marked.AsSpan().Clear();
         }
 
-        int[] met = _met ??= [];
-        Scratch.Grow(ref met, Math.Min(entries, Math.Max(end - start, 0)) + 1);
-        _met = met;
+        Scratch.Grow(ref _met, Math.Min(entries, Math.Max(end - start, 0)) + 1);
+        Block<int> met = _met;
         _dirty = true;
         int count = 0;
         RowCursor cursor = new RowCursor(rows, start, end);
@@ -1135,28 +1129,18 @@ internal struct CodeSet
         return marked;
     }
 
-    /// <summary>Gives the table and the list back to the process's shelf they grew from, the slot done with them.</summary>
+    /// <summary>Gives the table and the list back to the pool they grew from, the slot done with them.</summary>
     internal void Release()
     {
-        if (_marked is { Length: > 0 } marked)
-        {
-            ArrayShelf.Retained.Give(marked);
-        }
-
-        if (_met is { Length: > 0 } met)
-        {
-            ArrayShelf.Retained.Give(met);
-        }
-
+        Scratch.Return(ref _marked);
+        Scratch.Return(ref _met);
         this = default;
     }
 
     private Span<byte> Marks(int entries)
     {
-        byte[] marked = _marked ??= [];
-        Scratch.Grow(ref marked, entries);
-        _marked = marked;
-        return marked.AsSpan(0, entries);
+        Scratch.Grow(ref _marked, entries);
+        return _marked.AsSpan(0, entries);
     }
 }
 

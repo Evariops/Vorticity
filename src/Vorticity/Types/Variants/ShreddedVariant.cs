@@ -66,7 +66,7 @@ internal sealed class ShreddedVariant
     /// assembler is often made for one span of rows, and its buffer, made at 256 bytes and doubled to the batch's values,
     /// was most of what a read of a log's attributes allocated.
     /// </summary>
-    private byte[] _scratch = [];
+    private Block<byte> _scratch;
     private int _used;
 
     /// <summary>The bytes the last batch's values took, which the next one's scratch is rented at.</summary>
@@ -188,8 +188,8 @@ internal sealed class ShreddedVariant
         if (_scratch.Length == 0)
         {
             // As large as the last batch's values, which a plan kept from a batch to the next knows: doubled from 256 bytes,
-            // each batch copied its values eleven times over and took its last array from the shelf.
-            _scratch = WorkArrays.Rent<byte>(Math.Max(256, _lastUsed));
+            // each batch copied its values eleven times over and took its last array from the pool.
+            _scratch = Blocks.Rent<byte>(Math.Max(256, _lastUsed));
         }
     }
 
@@ -259,8 +259,8 @@ internal sealed class ShreddedVariant
     {
         int rows = shred.Length;
         int words = (rows + 63) >> 6;
-        int[] starts = WorkArrays.Rent<int>(rows + 1);
-        starts.AsSpan(0, rows + 1).Clear();
+        Block<int> startBlock = Blocks.RentCleared<int>(rows + 1);
+        Span<int> starts = startBlock;
         int total = 0;
         foreach (Shred field in shred.Fields)
         {
@@ -280,7 +280,8 @@ internal sealed class ShreddedVariant
         }
 
         // Each slot's fields at its start, which moves to the next slot's start as they are laid; then moved back.
-        int[] defined = WorkArrays.Rent<int>(Math.Max(total, 1));
+        Block<int> definedBlock = Blocks.Rent<int>(Math.Max(total, 1));
+        Span<int> defined = definedBlock;
         for (int f = 0; f < shred.Fields.Length; f++)
         {
             Shred field = shred.Fields[f];
@@ -299,8 +300,8 @@ internal sealed class ShreddedVariant
         }
 
         starts[0] = 0;
-        shred.DefinedStarts = starts;
-        shred.DefinedFields = defined;
+        shred.DefinedStarts = startBlock;
+        shred.DefinedFields = definedBlock;
         shred.Listed = true;
     }
 
@@ -316,10 +317,10 @@ internal sealed class ShreddedVariant
     {
         if (shred.Listed)
         {
-            WorkArrays.Return(shred.DefinedStarts);
-            WorkArrays.Return(shred.DefinedFields);
-            shred.DefinedStarts = [];
-            shred.DefinedFields = [];
+            Blocks.Return(shred.DefinedStarts);
+            Blocks.Return(shred.DefinedFields);
+            shred.DefinedStarts = default;
+            shred.DefinedFields = default;
             shred.Listed = false;
         }
 
@@ -385,12 +386,8 @@ internal sealed class ShreddedVariant
     /// <summary>Gives back the scratch the slices' values were written in.</summary>
     internal void EndSlices()
     {
-        if (_scratch.Length != 0)
-        {
-            WorkArrays.Return(_scratch);
-        }
-
-        _scratch = [];
+        Blocks.Return(_scratch);
+        _scratch = default;
         _lastUsed = _used;
         _used = 0;
         _busy = false;
@@ -1132,14 +1129,7 @@ internal sealed class ShreddedVariant
         int needed = checked(_used + bytes);
         if (needed > _scratch.Length)
         {
-            byte[] larger = WorkArrays.Rent<byte>(Math.Max(needed, 2 * _scratch.Length));
-            _scratch.AsSpan(0, _used).CopyTo(larger);
-            if (_scratch.Length > 0)
-            {
-                WorkArrays.Return(_scratch);
-            }
-
-            _scratch = larger;
+            Blocks.Grow(ref _scratch, Math.Max(needed, 2 * _scratch.Length));
         }
     }
 
@@ -1544,8 +1534,8 @@ internal sealed class ShreddedVariant
         /// <see cref="DefinedFields"/> from <see cref="DefinedStarts"/> at the slot to it at the next, rented for a slice.
         /// </summary>
         internal bool Listed;
-        internal int[] DefinedStarts = [];
-        internal int[] DefinedFields = [];
+        internal Block<int> DefinedStarts;
+        internal Block<int> DefinedFields;
 
         /// <summary>Whether an object's fields are all leaves, which hold no object and no array.</summary>
         internal bool Leaves;

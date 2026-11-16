@@ -1,6 +1,7 @@
 using System;
 using System.Threading;
 using Vorticity.Aggregating;
+using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Keys;
 using Vorticity.Serialization;
@@ -384,7 +385,7 @@ internal sealed class GranuleStats
 
     /// <summary>
     /// Reads the values each granule lists, their numbers and each one's rows, into lists of their exact lengths: gathered
-    /// first into arrays the process's shelf lends, as long as the bytes they come from at most, a value taking a byte at
+    /// first into blocks the pool lends, as long as the bytes they come from at most, a value taking a byte at
     /// least. Grown a value at a time, then copied, the lists cost three times their length: the statistics of a week of
     /// S2's requests (T2), read at a question's first asking, came to some 700 MB an ask. False for lists the granules'
     /// rows do not account for.
@@ -395,8 +396,8 @@ internal sealed class GranuleStats
         (ids, valueRows) = ([], []);
         int granules = rows.Length;
         int most = (int)Math.Min((long)granules * ListedValues, Math.Max(bytes, 1));
-        int[] listed = ArrayShelf.Rent<int>(most);
-        long[] listedRows = ArrayShelf.Rent<long>(most);
+        Block<int> listed = Blocks.Rent<int>(most);
+        Block<long> listedRows = Blocks.Rent<long>(most);
         try
         {
             int count = 0;
@@ -456,8 +457,8 @@ internal sealed class GranuleStats
         }
         finally
         {
-            ArrayShelf.Return(listed);
-            ArrayShelf.Return(listedRows);
+            Blocks.Return(listed);
+            Blocks.Return(listedRows);
         }
     }
 

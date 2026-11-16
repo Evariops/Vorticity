@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO.Hashing;
@@ -8,6 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Indexes;
 using Vorticity.Types;
@@ -163,8 +163,8 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// </summary>
     private const int RecentTrigramBits = 16;
 
-    // The trigrams met lately and their ids, made at the first trigram; null for a builder of other keys.
-    private ulong[]? _recentTrigrams;
+    // The trigrams met lately and their ids, made at the first trigram; empty for a builder of other keys.
+    private Block<ulong> _recentTrigrams;
 
     // A view's bytes, and the most of a value's it holds inside it.
     private const int ViewBytes = 16;
@@ -286,7 +286,12 @@ internal sealed class KeyIndexBuilder : IndexBuilder
             // kept for the trigrams met lately: a value's words recur, and each recurring trigram was copied and looked up
             // in the chunk's keys again.
             Span<byte> trigram = stackalloc byte[Trigrams.Length];
-            Span<ulong> recent = _recentTrigrams ??= Aggregating.ArrayShelf.Retained.Take<ulong>(1 << RecentTrigramBits, zeroed: true);
+            if (_recentTrigrams.IsEmpty)
+            {
+                _recentTrigrams = Blocks.RentCleared<ulong>(1 << RecentTrigramBits);
+            }
+
+            Span<ulong> recent = _recentTrigrams;
             for (int row = start; row < start + count; row++)
             {
                 if (allValid || (own.IsValid(row) && wrapper.IsValid(row)))
@@ -547,7 +552,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         _table.Cut(end, chunk);
 
         // The carried keys are interned again under new ids: the trigrams met lately name the old ones.
-        _recentTrigrams?.AsSpan().Clear();
+        _recentTrigrams.Clear();
         try
         {
             RunScratch scratch = Scratch ?? throw new InvalidOperationException("A locating builder needs the writer's scratch.");
@@ -697,7 +702,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         }
         finally
         {
-            // Every sort has ended either way: the buffers go back to the shelf, for the next file's buckets.
+            // Every sort has ended either way: the buffers go back to the pool, for the next file's buckets.
             foreach (BucketBuffers? held in buffers)
             {
                 held?.Release();
@@ -762,8 +767,8 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     private static void Feed(BucketBuffers buffers, int count, uint split, HashedRunSink? main, HashedRunSink? last)
     {
         Span<byte> key = stackalloc byte[sizeof(ulong)];
-        ulong[] hashes = buffers.Hashes;
-        uint[] blocks = buffers.Blocks;
+        ReadOnlySpan<ulong> hashes = buffers.Hashes;
+        ReadOnlySpan<uint> blocks = buffers.Blocks;
         for (int at = 0; at < count;)
         {
             ulong hash = hashes[at];
@@ -784,14 +789,14 @@ internal sealed class KeyIndexBuilder : IndexBuilder
             if (cut > at)
             {
                 main!.BeginKey(key);
-                main.AddBlocks(blocks.AsSpan(at, cut - at));
+                main.AddBlocks(blocks.Slice(at, cut - at));
                 main.EndKey();
             }
 
             if (end > cut)
             {
                 last!.BeginKey(key);
-                last.AddBlocks(blocks.AsSpan(cut, end - cut));
+                last.AddBlocks(blocks.Slice(cut, end - cut));
                 last.EndKey();
             }
 
@@ -922,15 +927,15 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     private async ValueTask<RawRun> PostingsRawAsync(
         RunScratch scratch, ChunkKeys chunk, int firstBlock, int blocks, CancellationToken cancellationToken)
     {
-        (int distinct, int[] ranked, int[] starts, uint[] lists) = SortPostings(chunk);
+        (int distinct, Block<int> ranked, Block<int> starts, Block<uint> lists) = SortPostings(chunk);
         int entries = chunk.Log.Count;
         int keyBytes = KeyBytesOf(chunk, ranked, distinct);
         long held = RawRun.HeldBytes(distinct, keyBytes, hasRows: false, entries);
         RawRun run;
         if (await scratch.AdmitAsync(held, cancellationToken).ConfigureAwait(false))
         {
-            // Held: the arrays are the run, and the merge reads them in place.
-            (byte[] keys, int[]? offsets) = Gather(chunk, ranked, distinct, keyBytes);
+            // Held: the blocks are the run, and the merge reads them in place.
+            (Block<byte> keys, Block<int> offsets) = Gather(chunk, ranked, distinct, keyBytes);
             run = new RawRun
             {
                 HasRows = false,
@@ -944,7 +949,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
                 HeldBlocks = lists,
                 Admitted = held,
             };
-            ArrayPool<int>.Shared.Return(ranked);
+            Blocks.Return(ranked);
             return run;
         }
 
@@ -962,40 +967,43 @@ internal sealed class KeyIndexBuilder : IndexBuilder
             run = await writer.FinishAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        ArrayPool<uint>.Shared.Return(lists);
-        ArrayPool<int>.Shared.Return(starts);
-        ArrayPool<int>.Shared.Return(ranked);
+        Blocks.Return(lists);
+        Blocks.Return(starts);
+        Blocks.Return(ranked);
         return run;
     }
 
     /// <summary>
     /// The chunk's distinct keys in key order, and each one's block list: <c>Starts</c> says where
-    /// each list starts in <c>Lists</c>, and one past the last. The arrays are rented.
+    /// each list starts in <c>Lists</c>, and one past the last. The blocks are rented.
     /// </summary>
-    private (int Distinct, int[] Ranked, int[] Starts, uint[] Lists) SortPostings(ChunkKeys chunk)
+    private (int Distinct, Block<int> Ranked, Block<int> Starts, Block<uint> Lists) SortPostings(ChunkKeys chunk)
     {
-        int distinct = chunk.Ranked(_layout, out int[] ranked);
-        int[] rank = RankOf(ranked, distinct, chunk);
+        int distinct = chunk.Ranked(_layout, out Block<int> ranked);
+        Block<int> rank = RankOf(ranked, distinct, chunk);
         int entries = chunk.Log.Count;
 
         // Filling in log order is what makes each block list come out sorted.
-        int[] starts = Counts(chunk, rank, distinct);
-        uint[] lists = ArrayPool<uint>.Shared.Rent(Math.Max(entries, 1));
-        int[] cursor = ArrayPool<int>.Shared.Rent(distinct + 1);
+        Block<int> starts = Counts(chunk, rank, distinct);
+        Block<uint> lists = Blocks.Rent<uint>(Math.Max(entries, 1));
+        Block<int> cursorBlock = Blocks.Rent<int>(distinct + 1);
+        Span<int> cursor = cursorBlock;
+        Span<uint> listed = lists;
+        ReadOnlySpan<int> ranks = rank;
         starts.AsSpan(0, distinct + 1).CopyTo(cursor);
         foreach ((int key, long block) in chunk.Log)
         {
-            lists[cursor[rank[key]]++] = checked((uint)block);
+            listed[cursor[ranks[key]]++] = checked((uint)block);
         }
 
-        ArrayPool<int>.Shared.Return(cursor);
-        ArrayPool<int>.Shared.Return(rank);
+        Blocks.Return(cursorBlock);
+        Blocks.Return(rank);
         return (distinct, ranked, starts, lists);
     }
 
     /// <summary>Lays keys from <paramref name="from"/> on, until the window is full or they end; returns where it stopped.</summary>
     private static int LayPostings(
-        RawRunWriter writer, ChunkKeys chunk, int[] ranked, int[] starts, uint[] lists, int from, int distinct)
+        RawRunWriter writer, ChunkKeys chunk, Block<int> ranked, Block<int> starts, Block<uint> lists, int from, int distinct)
     {
         for (int i = from; i < distinct; i++)
         {
@@ -1010,7 +1018,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         return distinct;
     }
 
-    private int KeyBytesOf(ChunkKeys chunk, int[] ids, int count)
+    private int KeyBytesOf(ChunkKeys chunk, Block<int> ids, int count)
     {
         if (_layout.Shape != KeyShape.Bytes)
         {
@@ -1027,15 +1035,16 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     }
 
     /// <summary>The keys <paramref name="ids"/> names, end to end, and for byte keys their offsets; rented.</summary>
-    private (byte[] Keys, int[]? Offsets) Gather(ChunkKeys chunk, int[] ids, int count, int keyBytes)
+    private (Block<byte> Keys, Block<int> Offsets) Gather(ChunkKeys chunk, Block<int> ids, int count, int keyBytes)
     {
-        byte[] keys = ArrayPool<byte>.Shared.Rent(Math.Max(keyBytes, 1));
-        int[]? offsets = _layout.Shape == KeyShape.Bytes ? ArrayPool<int>.Shared.Rent(count + 1) : null;
+        Block<byte> keys = Blocks.Rent<byte>(Math.Max(keyBytes, 1));
+        bool offsetted = _layout.Shape == KeyShape.Bytes;
+        Block<int> offsets = offsetted ? Blocks.Rent<int>(count + 1) : default;
         int at = 0;
         for (int i = 0; i < count; i++)
         {
             ReadOnlySpan<byte> key = chunk.KeyBytes(ids[i]);
-            if (offsets is not null)
+            if (offsetted)
             {
                 offsets[i] = at;
             }
@@ -1044,7 +1053,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
             at += key.Length;
         }
 
-        if (offsets is not null)
+        if (offsetted)
         {
             offsets[count] = at;
         }
@@ -1056,14 +1065,14 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     private async ValueTask<RawRun> SortedRawAsync(
         RunScratch scratch, ChunkKeys chunk, int firstBlock, int blocks, CancellationToken cancellationToken)
     {
-        (int[] entryIds, long[] rows) = SortRows(chunk);
+        (Block<int> entryIds, Block<long> rows) = SortRows(chunk);
         int entries = chunk.Log.Count;
         int keyBytes = KeyBytesOf(chunk, entryIds, entries);
         long held = RawRun.HeldBytes(entries, keyBytes, hasRows: true, 0);
         RawRun run;
         if (await scratch.AdmitAsync(held, cancellationToken).ConfigureAwait(false))
         {
-            (byte[] keys, int[]? offsets) = Gather(chunk, entryIds, entries, keyBytes);
+            (Block<byte> keys, Block<int> offsets) = Gather(chunk, entryIds, entries, keyBytes);
             run = new RawRun
             {
                 HasRows = true,
@@ -1090,40 +1099,44 @@ internal sealed class KeyIndexBuilder : IndexBuilder
             }
 
             run = await writer.FinishAsync(cancellationToken).ConfigureAwait(false);
-            ArrayPool<long>.Shared.Return(rows);
+            Blocks.Return(rows);
         }
 
-        ArrayPool<int>.Shared.Return(entryIds);
+        Blocks.Return(entryIds);
         return run;
     }
 
     /// <summary>The chunk's entries in key order, each as its key's id and its row; both rented.</summary>
-    private (int[] EntryIds, long[] Rows) SortRows(ChunkKeys chunk)
+    private (Block<int> EntryIds, Block<long> Rows) SortRows(ChunkKeys chunk)
     {
-        int distinct = chunk.Ranked(_layout, out int[] ranked);
-        int[] rank = RankOf(ranked, distinct, chunk);
+        int distinct = chunk.Ranked(_layout, out Block<int> ranked);
+        Block<int> rank = RankOf(ranked, distinct, chunk);
         List<(int Key, long Position)> log = chunk.Log;
         int entries = log.Count;
 
         // A stable counting sort of the rows by their key's rank.
-        int[] cursor = Counts(chunk, rank, distinct);
-        int[] entryIds = ArrayPool<int>.Shared.Rent(Math.Max(entries, 1));
-        long[] rows = ArrayPool<long>.Shared.Rent(Math.Max(entries, 1));
+        Block<int> cursorBlock = Counts(chunk, rank, distinct);
+        Block<int> entryIds = Blocks.Rent<int>(Math.Max(entries, 1));
+        Block<long> rows = Blocks.Rent<long>(Math.Max(entries, 1));
+        Span<int> cursor = cursorBlock;
+        Span<int> ids = entryIds;
+        Span<long> places = rows;
+        ReadOnlySpan<int> ranks = rank;
         foreach ((int key, long row) in log)
         {
-            int slot = cursor[rank[key]]++;
-            entryIds[slot] = key;
-            rows[slot] = row;
+            int slot = cursor[ranks[key]]++;
+            ids[slot] = key;
+            places[slot] = row;
         }
 
-        ArrayPool<int>.Shared.Return(cursor);
-        ArrayPool<int>.Shared.Return(rank);
-        ArrayPool<int>.Shared.Return(ranked);
+        Blocks.Return(cursorBlock);
+        Blocks.Return(rank);
+        Blocks.Return(ranked);
         return (entryIds, rows);
     }
 
     /// <summary>Lays entries from <paramref name="from"/> on, until the window is full or they end; returns where it stopped.</summary>
-    private static int LayRows(RawRunWriter writer, ChunkKeys chunk, int[] entryIds, long[] rows, int from, int entries)
+    private static int LayRows(RawRunWriter writer, ChunkKeys chunk, Block<int> entryIds, Block<long> rows, int from, int entries)
     {
         for (int i = from; i < entries; i++)
         {
@@ -1139,13 +1152,14 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     /// <summary>
     /// Where each rank's entries start: <c>[0]</c> is zero and <c>[distinct]</c> the log's length.
     /// </summary>
-    private static int[] Counts(ChunkKeys chunk, int[] rank, int distinct)
+    private static Block<int> Counts(ChunkKeys chunk, Block<int> rank, int distinct)
     {
-        int[] starts = ArrayPool<int>.Shared.Rent(distinct + 1);
-        starts.AsSpan(0, distinct + 1).Clear();
+        Block<int> block = Blocks.RentCleared<int>(distinct + 1);
+        Span<int> starts = block;
+        ReadOnlySpan<int> ranks = rank;
         foreach ((int key, _) in chunk.Log)
         {
-            starts[rank[key] + 1]++;
+            starts[ranks[key] + 1]++;
         }
 
         for (int i = 0; i < distinct; i++)
@@ -1153,10 +1167,10 @@ internal sealed class KeyIndexBuilder : IndexBuilder
             starts[i + 1] += starts[i];
         }
 
-        return starts;
+        return block;
     }
 
-    private static int[] RankOf(int[] ranked, int distinct, ChunkKeys chunk)
+    private static Block<int> RankOf(Block<int> ranked, int distinct, ChunkKeys chunk)
     {
         int maxId = 0;
         foreach ((int key, _) in chunk.Log)
@@ -1165,7 +1179,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         }
 
         // Only the ids the log uses are read, and every one of them is ranked.
-        int[] rank = ArrayPool<int>.Shared.Rent(maxId + 1);
+        Block<int> rank = Blocks.Rent<int>(maxId + 1);
         for (int i = 0; i < distinct; i++)
         {
             rank[ranked[i]] = i;
@@ -1180,10 +1194,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         _spare.Dispose();
         _buckets?.Dispose();
         _buckets = null;
-        if (_recentTrigrams is { } recent)
-        {
-            Aggregating.ArrayShelf.Retained.Give(recent);
-            _recentTrigrams = null;
-        }
+        Blocks.Return(_recentTrigrams);
+        _recentTrigrams = default;
     }
 }

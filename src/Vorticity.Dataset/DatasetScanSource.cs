@@ -317,7 +317,23 @@ internal sealed partial class DatasetScanSource
     }
 
     public IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
-        spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>() : Builder(spec, metrics).ExecuteAsync();
+        spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>()
+        : spec.Memory is null ? QuestionAsync(spec, metrics)
+        : Builder(spec, metrics).ExecuteAsync();
+
+    /// <summary>
+    /// The batches of a scan that is a question of its own: its objects' scans and their reads ahead under one memory, made
+    /// as it starts and given back as it ends, where each object's scan held an account and each read ahead a memory.
+    /// </summary>
+    private async IAsyncEnumerable<RecordBatch> QuestionAsync(
+        ScanSpec spec, ScanCounters metrics, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        using Aggregating.QueryMemory.Lease lease = Aggregating.QueryMemory.For(spec, Session);
+        await foreach (RecordBatch batch in Builder(spec.Under(lease.Memory), metrics).ExecuteAsync(cancellationToken).ConfigureAwait(false))
+        {
+            yield return batch;
+        }
+    }
 
     /// <summary>A form of the question, answered by the count, the proof of a row, or the extreme the version works out.</summary>
     public async ValueTask<FormAnswer> AnswerAsync(ScanSpec spec, LogicalShape form, ScanCounters metrics, CancellationToken cancellationToken) => form switch
@@ -806,7 +822,8 @@ internal sealed partial class DatasetScanSource
     internal DatasetScanBuilder Builder(ScanSpec spec, ScanCounters? counters)
     {
         DatasetScanBuilder builder = new DatasetScanBuilder(_dataset, _version)
-            .WithVariantKeys(spec.VariantKeys).WithZoneKeys(spec.ZoneKeys).WithReadAhead(spec.ReadAhead).WithShape(spec.Query?.Shape).OfQuestion(this);
+            .WithVariantKeys(spec.VariantKeys).WithZoneKeys(spec.ZoneKeys).WithReadAhead(spec.ReadAhead).WithShape(spec.Query?.Shape).OfQuestion(this)
+            .OfMemory(spec.Memory, spec.Account);
         if (spec.Projection is { } mask)
         {
             builder.Project(in mask);

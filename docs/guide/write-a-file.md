@@ -41,7 +41,7 @@ record can hold.
 
 * `CreateWriter<Reading>` starts the file and binds the record. The file replaces whatever is at the
   path once it is complete. `Builder<Reading>()` returns the writer's single builder, whose buffers
-  come from the session's pool, and every call returns the same builder.
+  come from the library's pool, and every call returns the same builder.
 * `GetSpan(count)` follows the `IBufferWriter` pattern. It hands you exactly `count` slots of the
   buffer the encoder will read, you fill them, and `Advance` commits them. A primitive column is
   encoded from those bytes where they lie, without a copy.

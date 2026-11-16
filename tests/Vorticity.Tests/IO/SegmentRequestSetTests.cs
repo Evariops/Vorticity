@@ -12,8 +12,8 @@ namespace Vorticity.Tests.IO;
 /// </summary>
 public sealed class SegmentRequestSetTests
 {
-    private static PinnedArraySegmentOwner OwnerOf(int length, int alignment = 1) =>
-        PinnedArraySegmentOwner.CopyOf(Pattern(length), alignment);
+    private static BlockOwner OwnerOf(int length, int alignment = 1) =>
+        BlockOwner.CopyOf(Pattern(length), alignment);
 
     // ---- registration and deduplication -----------------------------------------------------
 
@@ -204,7 +204,7 @@ public sealed class SegmentRequestSetTests
         using SegmentRequestSet set = new SegmentRequestSet();
 
         int slot = set.Add(Spec(64, 32, 5));
-        PinnedArraySegmentOwner owner = OwnerOf(32, 32);
+        BlockOwner owner = OwnerOf(32, 32);
         set.SetResult(slot, owner);
         set.Complete();
 
@@ -257,7 +257,7 @@ public sealed class SegmentRequestSetTests
         using SegmentRequestSet set = new SegmentRequestSet();
 
         int slot = set.Add(Spec(0, 32));
-        PinnedArraySegmentOwner owner = OwnerOf(31);
+        BlockOwner owner = OwnerOf(31);
 
         Assert.Throws<VortexFormatException>(() => set.SetResult(slot, owner));
 
@@ -273,7 +273,7 @@ public sealed class SegmentRequestSetTests
         using SegmentRequestSet set = new SegmentRequestSet();
 
         int slot = set.Add(Spec(0, 32));
-        PinnedArraySegmentOwner block = OwnerOf(128, 64);
+        BlockOwner block = OwnerOf(128, 64);
 
         Assert.Throws<VortexFormatException>(
             () => set.SetSharedResult(slot, block, block.Buffer.Slice(0, 31)));
@@ -346,7 +346,7 @@ public sealed class SegmentRequestSetTests
     {
         using SegmentRequestSet set = new SegmentRequestSet();
 
-        PinnedArraySegmentOwner block = OwnerOf(256, 64);
+        BlockOwner block = OwnerOf(256, 64);
 
         int a = set.Add(Spec(0, 16, 4));
         int b = set.Add(Spec(64, 16, 6));
@@ -372,8 +372,8 @@ public sealed class SegmentRequestSetTests
     {
         using SegmentRequestSet set = new SegmentRequestSet();
 
-        PinnedArraySegmentOwner one = OwnerOf(16);
-        PinnedArraySegmentOwner two = OwnerOf(16);
+        BlockOwner one = OwnerOf(16);
+        BlockOwner two = OwnerOf(16);
 
         set.SetResult(set.Add(Spec(0, 16)), one);
         set.SetResult(set.Add(Spec(64, 16)), two);
@@ -393,7 +393,7 @@ public sealed class SegmentRequestSetTests
     public void Release_is_idempotent()
     {
         SegmentRequestSet set = new SegmentRequestSet();
-        PinnedArraySegmentOwner owner = OwnerOf(16);
+        BlockOwner owner = OwnerOf(16);
 
         set.SetResult(set.Add(Spec(0, 16)), owner);
         set.Complete();
@@ -413,7 +413,7 @@ public sealed class SegmentRequestSetTests
         int a = set.Add(Spec(0, 16));
         int b = set.Add(Spec(64, 16));
 
-        PinnedArraySegmentOwner first = OwnerOf(16);
+        BlockOwner first = OwnerOf(16);
         set.SetResult(a, first);
 
         // ... and then the second range fails.
@@ -424,8 +424,8 @@ public sealed class SegmentRequestSetTests
         Assert.False(set.IsFilled(a));
         Assert.Equal(2, set.Count);
 
-        PinnedArraySegmentOwner retryA = OwnerOf(16);
-        PinnedArraySegmentOwner retryB = OwnerOf(16);
+        BlockOwner retryA = OwnerOf(16);
+        BlockOwner retryB = OwnerOf(16);
         set.SetResult(a, retryA);
         set.SetResult(b, retryB);
         set.Complete();
@@ -439,7 +439,7 @@ public sealed class SegmentRequestSetTests
     {
         using SegmentRequestSet set = new SegmentRequestSet();
 
-        PinnedArraySegmentOwner owner = OwnerOf(16);
+        BlockOwner owner = OwnerOf(16);
         set.SetResult(set.Add(Spec(0, 16)), owner);
         set.Complete();
 

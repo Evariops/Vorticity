@@ -92,9 +92,10 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IValueTaskSource<int>
 
     /// <summary>
     /// A pipeline of <paramref name="readers"/>, a field each, on <paramref name="lanes"/> lanes at most,
-    /// which run the pages <paramref name="pages"/> queues ahead before each field.
+    /// which run the pages <paramref name="pages"/> queues ahead before each field, their contexts' blocks counted for
+    /// <paramref name="account"/>, the scan's.
     /// </summary>
-    internal FieldPipeline(ColumnChunkReader[] readers, VortexReadOptions options, int lanes, PageLanes? pages)
+    internal FieldPipeline(ColumnChunkReader[] readers, VortexReadOptions options, int lanes, PageLanes? pages, Buffers.MemoryAccount account)
     {
         _readers = readers;
         _pages = pages;
@@ -102,7 +103,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IValueTaskSource<int>
         _contexts = new ScanContext[readers.Length * Slots];
         for (int i = 0; i < _contexts.Length; i++)
         {
-            _contexts[i] = DetachedContexts.Shared.RentDetached(options);
+            _contexts[i] = DetachedContexts.Shared.RentDetached(options, account);
         }
 
         _nodes = new int[readers.Length * Slots];

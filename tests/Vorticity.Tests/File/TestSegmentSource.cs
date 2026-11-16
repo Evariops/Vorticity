@@ -73,7 +73,7 @@ internal sealed class TestSegmentSource : ISegmentReader
         }
 
         Ranges?.Add(((long)spec.Offset, spec.Length));
-        return new ValueTask<SegmentOwner>(PinnedArraySegmentOwner.CopyOf(
+        return new ValueTask<SegmentOwner>(BlockOwner.CopyOf(
             _bytes.AsSpan((int)spec.Offset, (int)spec.Length),
             1 << spec.AlignmentExponent));
     }
@@ -115,7 +115,7 @@ internal sealed class TestSegmentSource : ISegmentReader
         int available = (int)Math.Min(length, _bytes.Length - offset);
         Ranges?.Add((offset, available));
         return new ValueTask<SegmentOwner>(
-            PinnedArraySegmentOwner.CopyOf(_bytes.AsSpan((int)offset, available), alignment));
+            BlockOwner.CopyOf(_bytes.AsSpan((int)offset, available), alignment));
     }
 
     /// <inheritdoc/>

@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
@@ -200,7 +199,7 @@ internal sealed class SigV4Signer
     /// <summary>ASCII text in a pooled array.</summary>
     private struct Buffer(int capacity) : IDisposable
     {
-        private byte[] _bytes = ArrayPool<byte>.Shared.Rent(capacity);
+        private byte[] _bytes = VortexBytePool.Instance.Rent(capacity);
 
         internal int Length { get; private set; }
 
@@ -249,7 +248,7 @@ internal sealed class SigV4Signer
 
         public void Dispose()
         {
-            ArrayPool<byte>.Shared.Return(_bytes);
+            VortexBytePool.Instance.Return(_bytes);
             _bytes = [];
         }
 
@@ -257,9 +256,9 @@ internal sealed class SigV4Signer
         {
             if (Length + more > _bytes.Length)
             {
-                byte[] larger = ArrayPool<byte>.Shared.Rent(Math.Max(_bytes.Length * 2, Length + more));
+                byte[] larger = VortexBytePool.Instance.Rent(Math.Max(_bytes.Length * 2, Length + more));
                 _bytes.AsSpan(0, Length).CopyTo(larger);
-                ArrayPool<byte>.Shared.Return(_bytes);
+                VortexBytePool.Instance.Return(_bytes);
                 _bytes = larger;
             }
         }

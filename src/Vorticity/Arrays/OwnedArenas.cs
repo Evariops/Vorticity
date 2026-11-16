@@ -28,25 +28,24 @@ internal static class OwnedArenas
         }
     }
 
-    /// <summary>An arena a batch gave back that rents from <paramref name="pool"/>, or a new one of <paramref name="capacity"/> records.</summary>
-    internal static CanonicalArena Rent(int capacity, AlignedBufferPool pool)
+    /// <summary>
+    /// An arena a batch gave back, or a new one of <paramref name="capacity"/> records, its blocks counted for
+    /// <paramref name="account"/> from now on.
+    /// </summary>
+    internal static CanonicalArena Rent(int capacity, MemoryAccount account)
     {
         lock (Gate)
         {
-            for (int i = _count - 1; i >= 0; i--)
+            if (_count > 0)
             {
-                CanonicalArena kept = Kept[i]!;
-                if (ReferenceEquals(kept.Pool, pool))
-                {
-                    _count--;
-                    Kept[i] = Kept[_count];
-                    Kept[_count] = null;
-                    return kept;
-                }
+                CanonicalArena kept = Kept[--_count]!;
+                Kept[_count] = null;
+                kept.Account = account;
+                return kept;
             }
         }
 
-        return new CanonicalArena(capacity, pool);
+        return new CanonicalArena(capacity, account);
     }
 
     /// <summary>Keeps <paramref name="arena"/>, reset, for the next batch a caller owns, or leaves it past the bound.</summary>

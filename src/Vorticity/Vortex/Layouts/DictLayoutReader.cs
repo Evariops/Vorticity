@@ -97,7 +97,7 @@ internal sealed class DictLayoutReader : LayoutReader
 
         if (wholeLayout)
         {
-            ScanContext.SavedSelection once = context.ExchangeSelection(null, 0);
+            ScanContext.SavedSelection once = context.ExchangeSelection(default, 0);
             try
             {
                 valuesIndex = ExecuteChild(
@@ -112,7 +112,7 @@ internal sealed class DictLayoutReader : LayoutReader
         {
             if (!context.TryGetRetained(valuesKey, out CanonicalArena held, out int retainedValues))
             {
-                ScanContext.SavedSelection saved = context.ExchangeSelection(null, 0);
+                ScanContext.SavedSelection saved = context.ExchangeSelection(default, 0);
                 held = context.BeginRetainedDecode();
                 retainedValues = -1;
                 try
@@ -254,7 +254,7 @@ internal sealed class DictLayoutReader : LayoutReader
         }
 
         int length = NodeLength(in valuesLayout);
-        ScanContext.SavedSelection saved = context.ExchangeSelection(null, 0);
+        ScanContext.SavedSelection saved = context.ExchangeSelection(default, 0);
         int values;
         try
         {
@@ -265,7 +265,7 @@ internal sealed class DictLayoutReader : LayoutReader
             context.RestoreSelection(in saved);
         }
 
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(2 * length, 1));
+        Block<byte> rented = Blocks.Rent<byte>(2 * length);
         try
         {
             Span<byte> states = rented.AsSpan(0, length);
@@ -297,7 +297,7 @@ internal sealed class DictLayoutReader : LayoutReader
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 
@@ -391,11 +391,11 @@ internal sealed class DictLayoutReader : LayoutReader
 
         int rows = codesNode.Length;
         ValidityReader validity = ValidityReader.Of(arena, codesNode.Validity);
-        byte[] rented = System.Buffers.ArrayPool<byte>.Shared.Rent(Math.Max(rows, 1));
-        ulong[] words = System.Buffers.ArrayPool<ulong>.Shared.Rent(2 * Compute.PredicateBits.WordsOf(Math.Max(rows, 1)));
+        Block<byte> rented = Blocks.Rent<byte>(rows);
+        Block<ulong> words = Blocks.Rent<ulong>(2 * Compute.PredicateBits.WordsOf(Math.Max(rows, 1)));
         try
         {
-            Span<byte> spread = rented.AsSpan(0, rows);
+            Span<byte> spread = rented;
             int bad = Compute.CodeAnswers.Expand(
                 states, codesNode.Values.Span, codesNode.PType, validity.Bits, validity.BitOffset, validity.IsAllValid, spread);
             if (bad >= 0)
@@ -411,8 +411,8 @@ internal sealed class DictLayoutReader : LayoutReader
         }
         finally
         {
-            System.Buffers.ArrayPool<byte>.Shared.Return(rented);
-            System.Buffers.ArrayPool<ulong>.Shared.Return(words);
+            Blocks.Return(rented);
+            Blocks.Return(words);
         }
     }
 

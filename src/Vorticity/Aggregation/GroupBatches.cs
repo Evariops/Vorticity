@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Layouts;
@@ -274,7 +275,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     private readonly CancellationToken _cancellationToken;
     private readonly int _batchRows;
     private AggregationOutcome? _outcome;
-    private int[] _groups = [];
+    private Block<int> _groups;
     private int _count;
     private int _next;
     private StructStore? _store;
@@ -538,7 +539,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
 
             _cancellationToken.ThrowIfCancellationRequested();
             _current?.Dispose();
-            CanonicalArena cut = _cut ??= new CanonicalArena(64, _query.Session.Options.EnginePool);
+            CanonicalArena cut = _cut ??= new CanonicalArena(64, QueryMemory.AccountOf(_outcome?.Memory));
             cut.ResetKeepingBlocks();
             int root = CanonicalSlice.SliceAcross(batch.Arena, cut, batch.RootIndex, from, until - from);
             _current = RecordBatch.Over(cut, root, first + from - _sortSkip, _current);
@@ -628,7 +629,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         }
 
         // A batch the window cuts: its records cut into an arena of the result's, over the store's buffers.
-        CanonicalArena cut = _cut ??= new CanonicalArena(64, _query.Session.Options.EnginePool);
+        CanonicalArena cut = _cut ??= new CanonicalArena(64, QueryMemory.AccountOf(_outcome?.Memory));
         cut.ResetKeepingBlocks();
         int root = CanonicalSlice.SliceAcross(slate.Arena, cut, slate.Root, from, until - from);
         _current = RecordBatch.Over(cut, root, start, _current);
@@ -649,7 +650,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
     private bool Next()
     {
         AggregationOutcome outcome = _outcome!;
-        int[] order = _groups;
+        Block<int> order = _groups;
         if (_next == 0 && _query.Skip > 0)
         {
             _next = (int)Math.Min(_query.Skip, _count);
@@ -688,7 +689,7 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         return false;
     }
 
-    /// <summary>The stores of the result's columns, made once per stream from the session's pool.</summary>
+    /// <summary>The stores of the result's columns, made once per stream, their blocks counted in the query until it is delivered.</summary>
     private StructStore Store()
     {
         if (_store is not null)
@@ -697,9 +698,10 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         }
 
         VortexSessionOptions options = _query.Host.Source.Session.Options;
+        MemoryAccount account = QueryMemory.AccountOf(_outcome?.Memory);
         DType dtype = VortexTypes.ToDType(_query.Schema, new DTypeArena());
-        _store = (StructStore)ColumnStores.Create(dtype, options.EnginePool, options.Extensions);
-        _arena = new CanonicalArena(ResultNodes(dtype.FieldCount), options.EnginePool);
+        _store = (StructStore)ColumnStores.Create(dtype, account, options.Extensions);
+        _arena = new CanonicalArena(ResultNodes(dtype.FieldCount), account);
         return _store;
     }
 
@@ -898,12 +900,12 @@ internal static class GroupSelection
     /// The operators applied, the first ones; every one by default. A part of a result sorted in runs
     /// applies those before the order alone.
     /// </param>
-    internal static async ValueTask<(int[] Groups, int Count)> ApplyAsync(
+    internal static async ValueTask<(Block<int> Groups, int Count)> ApplyAsync(
         AggregationQuery query, AggregationOutcome outcome, ScanSpec spec, CancellationToken cancellationToken, bool windowed = true, int? until = null)
     {
         int operators = until ?? query.Operators.Length;
         int degree = spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : query.Session.Options.MaxDegreeOfParallelism;
-        (int[] groups, int count) = (outcome.Order, outcome.Count);
+        (Block<int> groups, int count) = (outcome.Order, outcome.Count);
         int done = 0;
 
         // The growths settled for the groups the first operator that reads one is given, or else for those delivered.
@@ -912,7 +914,7 @@ internal static class GroupSelection
         if (growing && grower < operators)
         {
             (groups, count) = await OperatorsAsync(query, outcome, 0, grower, groups, count, degree, cancellationToken).ConfigureAwait(false);
-            await GrowthReads.SettleAsync(outcome, query.Host.Source, spec, query.Host.Counters, groups.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
+            await GrowthReads.SettleAsync(outcome, query.Host.Source, spec, query.Host.Counters, new BlockSlice<int>(groups, 0, count), cancellationToken).ConfigureAwait(false);
             done = grower;
         }
 
@@ -926,7 +928,7 @@ internal static class GroupSelection
             bool all = (chosen && reader < operators) || !windowed;
             int first = all ? 0 : (int)Math.Min(query.Skip, count);
             int last = all ? count : (int)Math.Min(count, Saturated(query.Skip, query.Take));
-            await GrowthReads.SettleAsync(outcome, query.Host.Source, spec, query.Host.Counters, groups.AsMemory(first, last - first), cancellationToken).ConfigureAwait(false);
+            await GrowthReads.SettleAsync(outcome, query.Host.Source, spec, query.Host.Counters, new BlockSlice<int>(groups, first, last - first), cancellationToken).ConfigureAwait(false);
         }
 
         if (!chosen)
@@ -936,14 +938,14 @@ internal static class GroupSelection
 
         if (reader < operators)
         {
-            await ChosenFetch.FetchAsync(outcome, query.Host.Source, spec, query.Host.Counters, groups.AsMemory(0, count), cancellationToken).ConfigureAwait(false);
+            await ChosenFetch.FetchAsync(outcome, query.Host.Source, spec, query.Host.Counters, new BlockSlice<int>(groups, 0, count), cancellationToken).ConfigureAwait(false);
             return await OperatorsAsync(query, outcome, reader, operators, groups, count, degree, cancellationToken).ConfigureAwait(false);
         }
 
         // No operator reads them: the result's window alone is read.
         int from = windowed ? (int)Math.Min(query.Skip, count) : 0;
         int to = windowed ? (int)Math.Min(count, Saturated(query.Skip, query.Take)) : count;
-        await ChosenFetch.FetchAsync(outcome, query.Host.Source, spec, query.Host.Counters, groups.AsMemory(from, to - from), cancellationToken).ConfigureAwait(false);
+        await ChosenFetch.FetchAsync(outcome, query.Host.Source, spec, query.Host.Counters, new BlockSlice<int>(groups, from, to - from), cancellationToken).ConfigureAwait(false);
         return (groups, count);
     }
 
@@ -952,8 +954,8 @@ internal static class GroupSelection
     /// first <paramref name="count"/> of <paramref name="groups"/>; a top-k on up to <paramref name="degree"/>
     /// tasks.
     /// </summary>
-    private static async ValueTask<(int[] Groups, int Count)> OperatorsAsync(
-        AggregationQuery query, AggregationOutcome outcome, int start, int end, int[] groups, int count, int degree, CancellationToken cancellationToken)
+    private static async ValueTask<(Block<int> Groups, int Count)> OperatorsAsync(
+        AggregationQuery query, AggregationOutcome outcome, int start, int end, Block<int> groups, int count, int degree, CancellationToken cancellationToken)
     {
         GroupOperator[] operators = query.Operators;
         for (int o = start; o < end; o++)
@@ -985,7 +987,7 @@ internal static class GroupSelection
                 {
                     int from = (int)Math.Min(window.Skip, count);
                     int kept = (int)Math.Min(count - from, window.Take);
-                    int[] windowed = Lent(outcome.Memory, kept, counted: 0);
+                    Block<int> windowed = Lent(outcome.Memory, kept, counted: 0);
                     groups.AsSpan(from, kept).CopyTo(windowed);
                     groups = windowed;
                     count = kept;
@@ -1002,39 +1004,36 @@ internal static class GroupSelection
     }
 
     /// <summary>
-    /// An array of the process's shelf for <paramref name="length"/> groups an operator leaves, a power of two long, as the
-    /// whole order is (<see cref="AggregationEngine.LentOrder"/>): the result holds it until it is delivered
+    /// A block of the pool for <paramref name="length"/> groups an operator leaves, a power of two long, as the whole order
+    /// is (<see cref="AggregationEngine.LentOrder"/>): the result holds it until it is delivered
     /// (<see cref="AggregationOutcome.HoldOperated"/>). An array a question was 4 MB for a million groups ordered. Its
     /// bytes, its whole length's, are measured under <paramref name="memory"/> beyond the <paramref name="counted"/> the
     /// caller reserved for it, until the operator after it gives it back or the result is delivered: what the process's
     /// budget tells its queries' memory by. Measured, not reserved: counted against the query's ceiling, a filter's array
     /// of the groups in memory took the room a spilled order's sort then asked for, and failed the question.
     /// </summary>
-    private static int[] Lent(QueryMemory? memory, int length, long counted)
+    private static Block<int> Lent(QueryMemory? memory, int length, long counted)
     {
         if (length == 0)
         {
-            return [];
+            return default;
         }
 
-        int[] lent = ArrayShelf.Retained.Take<int>(Scratch.Capacity(length, 0), zeroed: false, overdraw: true);
+        Block<int> lent = Blocks.Rent<int>(Scratch.Capacity(length, 0));
         memory?.Measure(((long)lent.Length * sizeof(int)) - counted);
         return lent;
     }
 
-    /// <summary>Gives back an array of groups an operator made (<see cref="Order"/>, <see cref="Filter"/>) once read, when no result holds it.</summary>
-    internal static void GiveBack(int[] groups)
-    {
-        if (groups.Length > 0)
-        {
-            ArrayShelf.Retained.Give(groups);
-        }
-    }
+    /// <summary>Gives back a block of groups an operator made (<see cref="Order"/>, <see cref="Filter"/>) once read, when no result holds it.</summary>
+    internal static void GiveBack(Block<int> groups) => Blocks.Return(groups);
 
     private static long Saturated(long skip, long take) => take == long.MaxValue || skip > long.MaxValue - take ? long.MaxValue : skip + take;
 
-    /// <summary>The groups a chunk of a top-k ranks at least: fewer, its task costs more than it shares.</summary>
-    private const int TopChunk = 65_536;
+    /// <summary>
+    /// The groups a chunk of a top-k ranks at least: fewer, its task costs more than it shares. The plan's
+    /// <see cref="AggregationPlan.TopChunkGroups"/>, fewer only where a test ranks a few groups in chunks.
+    /// </summary>
+    internal const int TopChunk = 65_536;
 
     /// <summary>
     /// The chunks a top-k of <paramref name="keep"/> among <paramref name="count"/> groups ranks on tasks
@@ -1050,7 +1049,7 @@ internal static class GroupSelection
             return 1;
         }
 
-        int chunks = (int)Math.Clamp(Math.Min(count / TopChunk, count / (16 * keep)), 1, Math.Max(1, degree));
+        int chunks = (int)Math.Clamp(Math.Min(count / query.Plan.TopChunkGroups, count / (16 * keep)), 1, Math.Max(1, degree));
         if (chunks == 1 || order.Keys.Length == 0 || outcome.Keys is not { } index)
         {
             return 1;
@@ -1082,11 +1081,11 @@ internal static class GroupSelection
     /// candidates ranked once. Every group of the first k is among the first k of its chunk, ties broken
     /// by the key in both: the groups and their order are those of one ranking.
     /// </summary>
-    private static async ValueTask<(int[] Groups, int Count)> TopInChunksAsync(
-        AggregationQuery query, AggregationOutcome outcome, GroupOrder order, int[] groups, int count, int keep, int chunks, CancellationToken cancellationToken)
+    private static async ValueTask<(Block<int> Groups, int Count)> TopInChunksAsync(
+        AggregationQuery query, AggregationOutcome outcome, GroupOrder order, Block<int> groups, int count, int keep, int chunks, CancellationToken cancellationToken)
     {
         int size = (count + chunks - 1) / chunks;
-        Task<(int[] Groups, int Count)>[] ranking = new Task<(int[] Groups, int Count)>[chunks];
+        Task<(Block<int> Groups, int Count)>[] ranking = new Task<(Block<int> Groups, int Count)>[chunks];
         using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         CancellationToken token = failed.Token;
         for (int c = 0; c < chunks; c++)
@@ -1098,17 +1097,17 @@ internal static class GroupSelection
 
         await AggregationEngine.GuardedAsync(ranking, failed).ConfigureAwait(false);
         int candidates = 0;
-        foreach (Task<(int[] Groups, int Count)> chunk in ranking)
+        foreach (Task<(Block<int> Groups, int Count)> chunk in ranking)
         {
             candidates += (await chunk.ConfigureAwait(false)).Count;
         }
 
-        int[] best = Lent(null, candidates, counted: 0);
+        Block<int> best = Lent(null, candidates, counted: 0);
         int at = 0;
         long rounded = 0;
-        foreach (Task<(int[] Groups, int Count)> chunk in ranking)
+        foreach (Task<(Block<int> Groups, int Count)> chunk in ranking)
         {
-            (int[] kept, int n) = await chunk.ConfigureAwait(false);
+            (Block<int> kept, int n) = await chunk.ConfigureAwait(false);
             kept.AsSpan(0, n).CopyTo(best.AsSpan(at));
             at += n;
             rounded += (long)(kept.Length - n) * sizeof(int);
@@ -1128,11 +1127,11 @@ internal static class GroupSelection
         }
     }
 
-    /// <summary>The first <paramref name="keep"/> of a chunk of <paramref name="groups"/>, in order, its groups in an array of the pool while it ranks.</summary>
-    private static (int[] Groups, int Count) TopOfChunk(
-        AggregationQuery query, AggregationOutcome outcome, GroupOrder order, int[] groups, int first, int length, int keep, CancellationToken cancellationToken)
+    /// <summary>The first <paramref name="keep"/> of a chunk of <paramref name="groups"/>, in order, its groups in a block of the pool while it ranks.</summary>
+    private static (Block<int> Groups, int Count) TopOfChunk(
+        AggregationQuery query, AggregationOutcome outcome, GroupOrder order, Block<int> groups, int first, int length, int keep, CancellationToken cancellationToken)
     {
-        int[] chunk = QueryArrays.Rent<int>(outcome.Memory, length, "top of a group by");
+        Block<int> chunk = Blocks.Rent<int>(outcome.Memory, length, "top of a group by");
         try
         {
             groups.AsSpan(first, length).CopyTo(chunk);
@@ -1140,7 +1139,7 @@ internal static class GroupSelection
         }
         finally
         {
-            QueryArrays.Return(outcome.Memory, chunk);
+            Blocks.Return(outcome.Memory, chunk);
         }
     }
 
@@ -1156,8 +1155,8 @@ internal static class GroupSelection
     /// text key whose groups share their count, that is every comparison, which would otherwise
     /// copy a million keys to keep a hundred.
     /// </remarks>
-    internal static (int[] Groups, int Count) Order(
-        AggregationQuery query, AggregationOutcome outcome, GroupOrder order, int[] groups, int count, long keep, CancellationToken cancellationToken)
+    internal static (Block<int> Groups, int Count) Order(
+        AggregationQuery query, AggregationOutcome outcome, GroupOrder order, Block<int> groups, int count, long keep, CancellationToken cancellationToken)
     {
         ColumnShape[] keys = query.Keys;
         GroupKeys? index = outcome.Keys;
@@ -1165,7 +1164,7 @@ internal static class GroupSelection
         ReadOnlySpan<int> all = groups.AsSpan(0, count);
         ColumnOrder?[] ready = new ColumnOrder?[width];
         QueryMemory? memory = outcome.Memory;
-        int[] positions = QueryArrays.Rent<int>(memory, count, "order of a group by");
+        Block<int> positions = Blocks.Rent<int>(memory, count, "order of a group by");
         StructStore? store = null;
         CanonicalArena? arena = null;
         try
@@ -1209,8 +1208,9 @@ internal static class GroupSelection
                 }
 
                 VortexSessionOptions options = query.Session.Options;
-                store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), options.EnginePool, options.Extensions);
-                arena = new CanonicalArena(GroupBatches.ResultNodes(built.Count), options.EnginePool);
+                MemoryAccount account = QueryMemory.AccountOf(memory);
+                store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), account, options.Extensions);
+                arena = new CanonicalArena(GroupBatches.ResultNodes(built.Count), account);
                 for (int c = 0; c < built.Count; c++)
                 {
                     built[c].Append(outcome, store.Children[c], all);
@@ -1259,7 +1259,7 @@ internal static class GroupSelection
 
             // The groups in their order, the result's until it is delivered.
             memory?.Hold((long)kept * sizeof(int), "order of a group by");
-            int[] ordered = Lent(memory, kept, counted: (long)kept * sizeof(int));
+            Block<int> ordered = Lent(memory, kept, counted: (long)kept * sizeof(int));
             for (int i = 0; i < kept; i++)
             {
                 ordered[i] = groups[positions[i]];
@@ -1275,18 +1275,18 @@ internal static class GroupSelection
                 read?.Release();
             }
 
-            QueryArrays.Return(memory, positions);
+            Blocks.Return(memory, positions);
             store?.Release();
             arena?.Reset();
         }
     }
 
     /// <summary>The groups the filter keeps, evaluated on the columns of the results it reads, a window of groups at a time.</summary>
-    internal static (int[] Groups, int Count) Filter(
-        AggregationQuery query, AggregationOutcome outcome, GroupFilter filter, int[] groups, int count, CancellationToken cancellationToken)
+    internal static (Block<int> Groups, int Count) Filter(
+        AggregationQuery query, AggregationOutcome outcome, GroupFilter filter, Block<int> groups, int count, CancellationToken cancellationToken)
     {
-        using GroupFilterRun run = new GroupFilterRun(query, filter);
-        int[] kept = Lent(outcome.Memory, count, counted: 0);
+        using GroupFilterRun run = new GroupFilterRun(query, filter, outcome.Memory);
+        Block<int> kept = Lent(outcome.Memory, count, counted: 0);
         groups.AsSpan(0, count).CopyTo(kept);
         return (kept, run.Keep(outcome, kept, count, cancellationToken));
     }
@@ -1301,9 +1301,9 @@ internal static class GroupSelection
         private readonly StructStore _store;
         private readonly CanonicalArena _arena;
         private readonly FilterEvaluator _evaluator;
-        private byte[] _states = [];
+        private ScratchBlock<byte> _states;
 
-        internal GroupFilterRun(AggregationQuery query, GroupFilter filter)
+        internal GroupFilterRun(AggregationQuery query, GroupFilter filter, QueryMemory? memory)
         {
             _columns = new ResultColumn[filter.Fields.Length];
             VortexField[] fields = new VortexField[_columns.Length];
@@ -1314,13 +1314,14 @@ internal static class GroupSelection
             }
 
             VortexSessionOptions options = query.Session.Options;
-            _store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), options.EnginePool, options.Extensions);
-            _arena = new CanonicalArena(GroupBatches.ResultNodes(fields.Length), options.EnginePool);
+            MemoryAccount account = QueryMemory.AccountOf(memory);
+            _store = (StructStore)ColumnStores.Create(VortexTypes.ToDType(VortexSchema.Create(fields), new DTypeArena()), account, options.Extensions);
+            _arena = new CanonicalArena(GroupBatches.ResultNodes(fields.Length), account);
             _evaluator = new FilterEvaluator(filter.Predicate);
         }
 
         /// <summary>Keeps in place, in their order, the first <paramref name="count"/> of <paramref name="groups"/> the filter keeps; their number.</summary>
-        internal int Keep(AggregationOutcome outcome, int[] groups, int count, CancellationToken cancellationToken)
+        internal int Keep(AggregationOutcome outcome, Block<int> groups, int count, CancellationToken cancellationToken)
         {
             Scratch.Grow(ref _states, Math.Min(Window, Math.Max(count, 1)));
             int kept = 0;
@@ -1356,6 +1357,7 @@ internal static class GroupSelection
         {
             _store.Release();
             _arena.Reset();
+            Scratch.Return(ref _states);
         }
     }
 }

@@ -49,6 +49,22 @@ internal sealed record ScanSpec
 
     internal ScanOptions Options { get; init; } = ScanOptions.Default;
 
+    /// <summary>
+    /// Whom the scan's blocks are counted for, its reads' and its batches': the question it serves, whose account the engine
+    /// sets with the question's memory; null for a scan that counts under an account of its own.
+    /// </summary>
+    internal Buffers.MemoryAccount? Account { get; init; }
+
+    /// <summary>
+    /// The memory of the question the scan serves, made once where the question starts and carried down with the spec: the
+    /// sources, tops, sorts and unions below reserve in it rather than make their own, so that a budget counts one query
+    /// for one question, whatever its shape. Null at the question's start.
+    /// </summary>
+    internal Aggregating.QueryMemory? Memory { get; init; }
+
+    /// <summary>This spec, of the question whose memory is <paramref name="memory"/>: its scans' blocks counted in its account.</summary>
+    internal ScanSpec Under(Aggregating.QueryMemory memory) => this with { Memory = memory, Account = memory.Account };
+
     /// <summary>Whether the decoders may deliver dictionary and run-end columns in their encoded form, for a consumer that reads it.</summary>
     internal bool KeepEncodings { get; init; }
 
@@ -378,7 +394,7 @@ internal sealed class FileScanSource : ScanSource, IRowsCapability, IStatisticsC
     /// <summary>The engine's builder for <paramref name="spec"/>.</summary>
     internal ScanBuilder Builder(ScanSpec spec, ScanCounters metrics)
     {
-        ScanBuilder builder = _file.ScanBuilder().WithMetrics(metrics).WithVariantKeys(spec.VariantKeys).WithZoneKeys(spec.ZoneKeys);
+        ScanBuilder builder = _file.ScanBuilder().WithMetrics(metrics).WithVariantKeys(spec.VariantKeys).WithZoneKeys(spec.ZoneKeys).WithAccount(spec.Account);
         if (spec.Projection is { } mask)
         {
             builder.ProjectMask(in mask);

@@ -192,10 +192,13 @@ jobs:
               --filter-not-namespace Vorticity.Tests.Keys*
               --filter-not-namespace Vorticity.Tests.ObjectStorage*
               --filter-not-namespace Vorticity.Tests.Sealing*
+          # Built with -p:Measure=true, which keeps the runtime's tiers the ceilings were set under: the build
+          # of the other runners turns them off, as a plain local run does.
           - name: Vorticity, the tests that run alone
             key: alone
             projects: tests/Vorticity.Tests
             runs-alone: true
+            build-args: -p:Measure=true
           - name: the conformance corpus
             key: conformance
             projects: tests/Vorticity.Conformance
@@ -228,9 +231,11 @@ jobs:
       - name: Build
         env:
           PROJECTS: ${{ matrix.projects }}
+          BUILD_ARGS: ${{ matrix.build-args }}
         run: |
           for project in $PROJECTS; do
-            dotnet build "$project" -c Release -p:RunAnalyzers=false
+            # shellcheck disable=SC2086
+            dotnet build "$project" -c Release -p:RunAnalyzers=false $BUILD_ARGS
           done
 
       # The filters are words, their wildcards xunit's own: the shell expands no file name. Every

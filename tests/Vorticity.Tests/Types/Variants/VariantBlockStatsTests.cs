@@ -93,12 +93,9 @@ public sealed partial class VariantBlockStatsTests
         }
     }
 
-    /// <summary>
-    /// Statistics read lend their blocks from rented arrays, given back when they are disposed: read again after, the same
-    /// blocks, whatever the arrays held before; disposed twice, given back once.
-    /// </summary>
+    /// <summary>Statistics read again give the same blocks, each its count, bounds and texts.</summary>
     [Fact]
-    public async Task StatisticsGiveTheirBlocksBackAndReadTheSameAgain()
+    public async Task StatisticsReadAgainGiveTheSameBlocks()
     {
         await using VortexFile file = await OpenAsync(await WriteAsync(Rows()));
         int field = file.DType.IndexOfField(nameof(Doc.Attributes));
@@ -130,9 +127,6 @@ public sealed partial class VariantBlockStatsTests
                     }
                 }
             }
-
-            stats.Dispose();
-            stats.Dispose();
         }
     }
 

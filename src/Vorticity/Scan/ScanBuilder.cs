@@ -150,6 +150,18 @@ internal sealed class ScanBuilder
     private ZoneKeyReads.Request? _zoneKeys;
 
     /// <summary>
+    /// Counts the scan's blocks, its reads' and its batches', for <paramref name="account"/>: the question the scan serves.
+    /// Null, the scan counts under an account of its own, under its session's memory budget, closed when it ends.
+    /// </summary>
+    internal ScanBuilder WithAccount(Buffers.MemoryAccount? account)
+    {
+        _account = account;
+        return this;
+    }
+
+    private Buffers.MemoryAccount? _account;
+
+    /// <summary>
     /// Reads a part of a chunk by its granules alone (spec C, 2), where <paramref name="geometry"/> knows the chunk's tree
     /// and marks: what a dataset's object, whose table of contents names them, gives a read of a few of its granules. Null
     /// reads every chunk whole.
@@ -778,6 +790,7 @@ internal sealed class ScanBuilder
         batches = new BatchAsyncEnumerable(
             _file, tree, read, keep, plan, _reverse ? 1 : _degree, _filter, _take, _metrics, _reverse && _orderPath is null, _question)
         {
+            Account = _account,
             Prefetch = _prefetch,
             Compact = _compact,
             KeepEncodings = _keepEncodings,
@@ -1830,7 +1843,10 @@ internal sealed class ScanBuilder
             ? _variantKeys ?? Indexes.VariantKeyReads.Of([], _filter)
             : null;
         return new TerminalScan(
-            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded, keys, _granules, _degree);
+            _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded, keys, _granules, _degree)
+        {
+            Account = _account ?? QueryMemoryBudget.Process.Account,
+        };
     }
 
     /// <summary>The projection of exactly the fields a filter reads, plus one.</summary>
@@ -1896,7 +1912,7 @@ internal sealed class ScanBuilder
         return _descending
             ? ReversedAsync(tree, rows, read, keep, plan, filter)
             : new FilteredBatches(
-                new BatchAsyncEnumerable(_file, tree, read, keep, plan, _degree, filter, null, _metrics),
+                new BatchAsyncEnumerable(_file, tree, read, keep, plan, _degree, filter, null, _metrics) { Account = _account },
                 filter, _prune, _indexes, rows);
     }
 
@@ -1909,7 +1925,7 @@ internal sealed class ScanBuilder
         // batch, since both are cut to the same row cap -- which dwarfs the per-batch allocation
         // every other scan is held to.
         IAsyncEnumerable<RecordBatch> scan = new FilteredBatches(
-            new BatchAsyncEnumerable(_file, tree, read, keep, plan, 1, filter, null, _metrics, reverse: true),
+            new BatchAsyncEnumerable(_file, tree, read, keep, plan, 1, filter, null, _metrics, reverse: true) { Account = _account },
             filter, _prune, _indexes, rows);
 
         // The permutation of a batch of n rows is n-1 … 0 and depends on nothing else, so it is

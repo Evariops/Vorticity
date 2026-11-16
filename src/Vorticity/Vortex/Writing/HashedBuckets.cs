@@ -1,10 +1,10 @@
 using System;
-using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 
 namespace Vorticity.Writing;
 
@@ -44,11 +44,11 @@ internal sealed class HashedBuckets : IDisposable
 
     private readonly int _bits;
     private readonly long _bucketPairs;
-    private readonly ulong[][] _hashes;
-    private readonly uint[][] _blocks;
+    private readonly Block<ulong>[] _hashes;
+    private readonly Block<uint>[] _blocks;
     private readonly int[] _fill;
     private readonly List<long>[] _pages;
-    private readonly List<(int Bucket, ulong[] Hashes, uint[] Blocks)> _full = [];
+    private readonly List<(int Bucket, Block<ulong> Hashes, Block<uint> Blocks)> _full = [];
 
     // The buckets the end sorts, in the hashes' order, once those past twice their aim are cut again (RefineAsync); null
     // before, the buckets noted then being those.
@@ -83,8 +83,8 @@ internal sealed class HashedBuckets : IDisposable
 
         _bits = Math.Min(bits, MostBits);
         int buckets = 1 << _bits;
-        _hashes = new ulong[buckets][];
-        _blocks = new uint[buckets][];
+        _hashes = new Block<ulong>[buckets];
+        _blocks = new Block<uint>[buckets];
         _fill = new int[buckets];
         _pages = new List<long>[buckets];
         for (int b = 0; b < buckets; b++)
@@ -144,11 +144,11 @@ internal sealed class HashedBuckets : IDisposable
         }
 
         int bucket = _bits == 0 ? 0 : (int)(hash >> (64 - _bits));
-        ulong[]? hashes = _hashes[bucket];
-        if (hashes is null)
+        Block<ulong> hashes = _hashes[bucket];
+        if (hashes.IsEmpty)
         {
-            hashes = _hashes[bucket] = ArrayPool<ulong>.Shared.Rent(PagePairs);
-            _blocks[bucket] = ArrayPool<uint>.Shared.Rent(PagePairs);
+            hashes = _hashes[bucket] = Blocks.Rent<ulong>(PagePairs);
+            _blocks[bucket] = Blocks.Rent<uint>(PagePairs);
         }
 
         int at = _fill[bucket];
@@ -158,8 +158,8 @@ internal sealed class HashedBuckets : IDisposable
         if (++at == PagePairs)
         {
             _full.Add((bucket, hashes, _blocks[bucket]));
-            _hashes[bucket] = null!;
-            _blocks[bucket] = null!;
+            _hashes[bucket] = default;
+            _blocks[bucket] = default;
             at = 0;
         }
 
@@ -181,21 +181,21 @@ internal sealed class HashedBuckets : IDisposable
     /// <summary>Lays every full page in <paramref name="scratch"/>, its bucket noting where.</summary>
     internal async ValueTask SpillAsync(RunScratch scratch, CancellationToken cancellationToken)
     {
-        byte[] page = ArrayPool<byte>.Shared.Rent(PageBytes);
+        Block<byte> page = Blocks.Rent<byte>(PageBytes);
         try
         {
-            foreach ((int bucket, ulong[] hashes, uint[] blocks) in _full)
+            foreach ((int bucket, Block<ulong> hashes, Block<uint> blocks) in _full)
             {
-                MemoryMarshal.AsBytes(hashes.AsSpan(0, PagePairs)).CopyTo(page);
-                MemoryMarshal.AsBytes(blocks.AsSpan(0, PagePairs)).CopyTo(page.AsSpan(PagePairs * sizeof(ulong)));
-                _pages[bucket].Add(await scratch.AppendAsync(page.AsMemory(0, PageBytes), cancellationToken).ConfigureAwait(false));
-                ArrayPool<ulong>.Shared.Return(hashes);
-                ArrayPool<uint>.Shared.Return(blocks);
+                MemoryMarshal.AsBytes(hashes.AsSpan()).CopyTo(page);
+                MemoryMarshal.AsBytes(blocks.AsSpan()).CopyTo(page.AsSpan(PagePairs * sizeof(ulong)));
+                _pages[bucket].Add(await scratch.AppendAsync(page.AsMemory(), cancellationToken).ConfigureAwait(false));
+                Blocks.Return(hashes);
+                Blocks.Return(blocks);
             }
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(page);
+            Blocks.Return(page);
             _full.Clear();
         }
     }
@@ -208,18 +208,18 @@ internal sealed class HashedBuckets : IDisposable
     internal async ValueTask<int> SortedAsync(
         int bucket, RunScratch scratch, BucketBuffers buffers, CancellationToken cancellationToken)
     {
-        (List<long> pages, ulong[]? openHashes, uint[]? openBlocks, int open, int bits) = _parts is { } parts
+        (List<long> pages, Block<ulong> openHashes, Block<uint> openBlocks, int open, int bits) = _parts is { } parts
             ? (parts[bucket].Pages, parts[bucket].Hashes, parts[bucket].Blocks, parts[bucket].Fill, parts[bucket].Bits)
             : (_pages[bucket], _hashes[bucket], _blocks[bucket], _fill[bucket], _bits);
         int count = checked((pages.Count * PagePairs) + open);
         buffers.Reserve(count);
-        byte[] page = ArrayPool<byte>.Shared.Rent(PageBytes);
+        Block<byte> page = Blocks.Rent<byte>(PageBytes);
         try
         {
             int at = 0;
             foreach (long offset in pages)
             {
-                await scratch.ReadAsync(offset, page.AsMemory(0, PageBytes), cancellationToken).ConfigureAwait(false);
+                await scratch.ReadAsync(offset, page.AsMemory(), cancellationToken).ConfigureAwait(false);
                 MemoryMarshal.Cast<byte, ulong>(page.AsSpan(0, PagePairs * sizeof(ulong))).CopyTo(buffers.Hashes.AsSpan(at));
                 MemoryMarshal.Cast<byte, uint>(page.AsSpan(PagePairs * sizeof(ulong), PagePairs * sizeof(uint))).CopyTo(buffers.Blocks.AsSpan(at));
                 at += PagePairs;
@@ -233,7 +233,7 @@ internal sealed class HashedBuckets : IDisposable
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(page);
+            Blocks.Return(page);
         }
 
         RadixSort(buffers, count, 64 - bits);
@@ -254,8 +254,8 @@ internal sealed class HashedBuckets : IDisposable
         for (int b = 0; b < _hashes.Length; b++)
         {
             Part whole = new Part(_pages[b], _bits) { Hashes = _hashes[b], Blocks = _blocks[b], Fill = _fill[b] };
-            _hashes[b] = null!;
-            _blocks[b] = null!;
+            _hashes[b] = default;
+            _blocks[b] = default;
             long count = ((long)whole.Pages.Count * PagePairs) + whole.Fill;
             int extra = 0;
             while (count > 2 * _bucketPairs && (count >> extra) > _bucketPairs && extra < MostSplitBits && _bits + extra < 64)
@@ -284,13 +284,13 @@ internal sealed class HashedBuckets : IDisposable
             parts[p] = new Part([], whole.Bits + extra);
         }
 
-        List<(Part Part, ulong[] Hashes, uint[] Blocks)> full = [];
-        byte[] page = ArrayPool<byte>.Shared.Rent(PageBytes);
+        List<(Part Part, Block<ulong> Hashes, Block<uint> Blocks)> full = [];
+        Block<byte> page = Blocks.Rent<byte>(PageBytes);
         try
         {
             foreach (long offset in whole.Pages)
             {
-                await scratch.ReadAsync(offset, page.AsMemory(0, PageBytes), cancellationToken).ConfigureAwait(false);
+                await scratch.ReadAsync(offset, page.AsMemory(), cancellationToken).ConfigureAwait(false);
                 Route(
                     MemoryMarshal.Cast<byte, ulong>(page.AsSpan(0, PagePairs * sizeof(ulong))),
                     MemoryMarshal.Cast<byte, uint>(page.AsSpan(PagePairs * sizeof(ulong), PagePairs * sizeof(uint))));
@@ -305,12 +305,12 @@ internal sealed class HashedBuckets : IDisposable
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(page);
+            Blocks.Return(page);
             whole.Return();
-            foreach ((Part _, ulong[] hashes, uint[] blocks) in full)
+            foreach ((Part _, Block<ulong> hashes, Block<uint> blocks) in full)
             {
-                ArrayPool<ulong>.Shared.Return(hashes);
-                ArrayPool<uint>.Shared.Return(blocks);
+                Blocks.Return(hashes);
+                Blocks.Return(blocks);
             }
         }
 
@@ -322,15 +322,19 @@ internal sealed class HashedBuckets : IDisposable
             for (int i = 0; i < hashes.Length; i++)
             {
                 Part part = parts[(int)((hashes[i] << whole.Bits) >> (64 - extra))];
-                part.Hashes ??= ArrayPool<ulong>.Shared.Rent(PagePairs);
-                part.Blocks ??= ArrayPool<uint>.Shared.Rent(PagePairs);
+                if (part.Hashes.IsEmpty)
+                {
+                    part.Hashes = Blocks.Rent<ulong>(PagePairs);
+                    part.Blocks = Blocks.Rent<uint>(PagePairs);
+                }
+
                 part.Hashes[part.Fill] = hashes[i];
                 part.Blocks[part.Fill] = blocks[i];
                 if (++part.Fill == PagePairs)
                 {
                     full.Add((part, part.Hashes, part.Blocks));
-                    part.Hashes = null;
-                    part.Blocks = null;
+                    part.Hashes = default;
+                    part.Blocks = default;
                     part.Fill = 0;
                 }
             }
@@ -339,23 +343,23 @@ internal sealed class HashedBuckets : IDisposable
         // The pages filled, laid in the scratch, each its part noting where.
         async ValueTask SpillPartsAsync()
         {
-            byte[] bytes = ArrayPool<byte>.Shared.Rent(PageBytes);
+            Block<byte> bytes = Blocks.Rent<byte>(PageBytes);
             try
             {
                 while (full.Count > 0)
                 {
-                    (Part part, ulong[] hashes, uint[] blocks) = full[^1];
+                    (Part part, Block<ulong> hashes, Block<uint> blocks) = full[^1];
                     full.RemoveAt(full.Count - 1);
-                    MemoryMarshal.AsBytes(hashes.AsSpan(0, PagePairs)).CopyTo(bytes);
-                    MemoryMarshal.AsBytes(blocks.AsSpan(0, PagePairs)).CopyTo(bytes.AsSpan(PagePairs * sizeof(ulong)));
-                    ArrayPool<ulong>.Shared.Return(hashes);
-                    ArrayPool<uint>.Shared.Return(blocks);
-                    part.Pages.Add(await scratch.AppendAsync(bytes.AsMemory(0, PageBytes), cancellationToken).ConfigureAwait(false));
+                    MemoryMarshal.AsBytes(hashes.AsSpan()).CopyTo(bytes);
+                    MemoryMarshal.AsBytes(blocks.AsSpan()).CopyTo(bytes.AsSpan(PagePairs * sizeof(ulong)));
+                    Blocks.Return(hashes);
+                    Blocks.Return(blocks);
+                    part.Pages.Add(await scratch.AppendAsync(bytes.AsMemory(), cancellationToken).ConfigureAwait(false));
                 }
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(bytes);
+                Blocks.Return(bytes);
             }
         }
     }
@@ -398,19 +402,16 @@ internal sealed class HashedBuckets : IDisposable
     {
         for (int b = 0; b < _hashes.Length; b++)
         {
-            if (_hashes[b] is { } hashes)
-            {
-                ArrayPool<ulong>.Shared.Return(hashes);
-                ArrayPool<uint>.Shared.Return(_blocks[b]);
-                _hashes[b] = null!;
-                _blocks[b] = null!;
-            }
+            Blocks.Return(_hashes[b]);
+            Blocks.Return(_blocks[b]);
+            _hashes[b] = default;
+            _blocks[b] = default;
         }
 
-        foreach ((int _, ulong[] hashes, uint[] blocks) in _full)
+        foreach ((int _, Block<ulong> hashes, Block<uint> blocks) in _full)
         {
-            ArrayPool<ulong>.Shared.Return(hashes);
-            ArrayPool<uint>.Shared.Return(blocks);
+            Blocks.Return(hashes);
+            Blocks.Return(blocks);
         }
 
         _full.Clear();
@@ -427,91 +428,72 @@ internal sealed class HashedBuckets : IDisposable
 
         internal int Bits { get; } = bits;
 
-        internal ulong[]? Hashes { get; set; }
+        internal Block<ulong> Hashes { get; set; }
 
-        internal uint[]? Blocks { get; set; }
+        internal Block<uint> Blocks { get; set; }
 
         internal int Fill { get; set; }
 
         /// <summary>Gives its open page back to the pool.</summary>
         internal void Return()
         {
-            if (Hashes is { } hashes)
-            {
-                ArrayPool<ulong>.Shared.Return(hashes);
-                Hashes = null;
-            }
-
-            if (Blocks is { } blocks)
-            {
-                ArrayPool<uint>.Shared.Return(blocks);
-                Blocks = null;
-            }
+            Vorticity.Buffers.Blocks.Return(Hashes);
+            Vorticity.Buffers.Blocks.Return(Blocks);
+            Hashes = default;
+            Blocks = default;
         }
     }
 }
 
 /// <summary>
-/// The arrays a bucket is read back and sorted in, two of each, kept from one bucket to the next: from the process's shelf
-/// at a power of two, which the next file's buckets take again, and given back by <see cref="Release"/>. Made new for every
-/// file, they were a hashed index's most allocated bytes, 24 a pair.
+/// The blocks a bucket is read back and sorted in, two of each, kept from one bucket to the next at a power of two, which
+/// the next file's buckets take again from the pool, and given back by <see cref="Release"/>. Made new for every file, they
+/// were a hashed index's most allocated bytes, 24 a pair.
 /// </summary>
 internal sealed class BucketBuffers
 {
     private int[] _starts = new int[Compute.RadixSort.Counts];
 
     /// <summary>The sorted pairs' hashes, valid up to the count the sort returned.</summary>
-    internal ulong[] Hashes { get; private set; } = [];
+    internal Block<ulong> Hashes { get; private set; }
 
     /// <summary>The sorted pairs' blocks.</summary>
-    internal uint[] Blocks { get; private set; } = [];
+    internal Block<uint> Blocks { get; private set; }
 
-    internal ulong[] OtherHashes { get; private set; } = [];
+    internal Block<ulong> OtherHashes { get; private set; }
 
-    internal uint[] OtherBlocks { get; private set; } = [];
+    internal Block<uint> OtherBlocks { get; private set; }
 
     internal Span<int> Starts => _starts;
 
-    /// <summary>Room for <paramref name="count"/> pairs in every array.</summary>
+    /// <summary>Room for <paramref name="count"/> pairs in every block.</summary>
     internal void Reserve(int count)
     {
         if (Hashes.Length < count)
         {
-            int size = Aggregating.ArrayShelf.Grown(count, Hashes.Length);
+            int size = Vorticity.Buffers.Blocks.Grown(count, Hashes.Length);
             Release();
-            Hashes = Aggregating.ArrayShelf.Retained.Take<ulong>(size, zeroed: false);
-            Blocks = Aggregating.ArrayShelf.Retained.Take<uint>(size, zeroed: false);
-            OtherHashes = Aggregating.ArrayShelf.Retained.Take<ulong>(size, zeroed: false);
-            OtherBlocks = Aggregating.ArrayShelf.Retained.Take<uint>(size, zeroed: false);
+            Hashes = Vorticity.Buffers.Blocks.Rent<ulong>(size);
+            Blocks = Vorticity.Buffers.Blocks.Rent<uint>(size);
+            OtherHashes = Vorticity.Buffers.Blocks.Rent<ulong>(size);
+            OtherBlocks = Vorticity.Buffers.Blocks.Rent<uint>(size);
         }
     }
 
-    /// <summary>Gives the arrays back to the process's shelf; the buffers hold none after.</summary>
+    /// <summary>Gives the blocks back to the pool; the buffers hold none after.</summary>
     internal void Release()
     {
-        foreach (ulong[] hashes in (ReadOnlySpan<ulong[]>)[Hashes, OtherHashes])
-        {
-            if (hashes.Length > 0)
-            {
-                Aggregating.ArrayShelf.Retained.Give(hashes);
-            }
-        }
-
-        foreach (uint[] blocks in (ReadOnlySpan<uint[]>)[Blocks, OtherBlocks])
-        {
-            if (blocks.Length > 0)
-            {
-                Aggregating.ArrayShelf.Retained.Give(blocks);
-            }
-        }
-
-        (Hashes, Blocks, OtherHashes, OtherBlocks) = ([], [], [], []);
+        Vorticity.Buffers.Blocks.Return(Hashes);
+        Vorticity.Buffers.Blocks.Return(OtherHashes);
+        Vorticity.Buffers.Blocks.Return(Blocks);
+        Vorticity.Buffers.Blocks.Return(OtherBlocks);
+        (Hashes, Blocks, OtherHashes, OtherBlocks) = (default, default, default, default);
     }
 
-    /// <summary>Takes the arrays the sort ended in as the sorted ones, the others as its scratch.</summary>
-    internal void Settle(ulong[] hashes, uint[] blocks)
+    /// <summary>Takes the blocks the sort ended in as the sorted ones, the others as its scratch.</summary>
+    internal void Settle(Block<ulong> hashes, Block<uint> blocks)
     {
-        if (!ReferenceEquals(hashes, Hashes))
+        if (!hashes.SameBytes(Hashes))
         {
             (OtherHashes, Hashes) = (Hashes, hashes);
             (OtherBlocks, Blocks) = (Blocks, blocks);

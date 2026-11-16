@@ -52,7 +52,7 @@ public sealed class ArrayBlobCorpusTests
         for (int i = 0; i < expected.Count; i++)
         {
             FlatLeaf leaf = blobs.Leaves[i];
-            using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf(leaf.Segment, 64);
+            using BlockOwner owner = BlockOwner.CopyOf(leaf.Segment, 64);
 
             if (leaf.InlinedArrayTree is null)
             {
@@ -87,7 +87,7 @@ public sealed class ArrayBlobCorpusTests
             }
 
             inlinedLeaves++;
-            using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf(leaf.Segment, 64);
+            using BlockOwner owner = BlockOwner.CopyOf(leaf.Segment, 64);
             ArrayBlobReader.Load(viaSegment, owner.Buffer, encodings);
             ArrayBlobReader.Load(viaMetadata, leaf.InlinedArrayTree, owner.Buffer, encodings);
 
@@ -146,7 +146,7 @@ public sealed class ArrayBlobCorpusTests
         {
             foreach (FlatLeaf leaf in blobs.Leaves)
             {
-                using PinnedArraySegmentOwner owner = PinnedArraySegmentOwner.CopyOf(leaf.Segment, 64);
+                using BlockOwner owner = BlockOwner.CopyOf(leaf.Segment, 64);
                 ArrayBlobReader.Load(arena, owner.Buffer, encodings);
                 if (firstNodeCount < 0)
                 {

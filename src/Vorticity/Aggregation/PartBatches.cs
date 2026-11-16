@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Writing;
 
@@ -70,7 +71,7 @@ internal sealed class PartBuilder
     {
         // The result's window is the reader's, over every part: each part's chosen rows are read for
         // every group its operators keep.
-        (int[] groups, int count) = await GroupSelection.ApplyAsync(_query, outcome, _spec, cancellationToken, windowed: false, until: _until).ConfigureAwait(false);
+        (Block<int> groups, int count) = await GroupSelection.ApplyAsync(_query, outcome, _spec, cancellationToken, windowed: false, until: _until).ConfigureAwait(false);
         PartResult result = new PartResult(outcome.Keys?.Count ?? 0);
         ResultColumn[]? columns;
         lock (_gate)
@@ -85,7 +86,7 @@ internal sealed class PartBuilder
             for (int from = 0; from < count; from += _batchRows)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                PartSlate slate = Take();
+                PartSlate slate = Take(QueryMemory.AccountOf(outcome.Memory));
                 result.Slates.Add(slate);
                 slate.Build(columns, outcome, groups.AsSpan(from, Math.Min(_batchRows, count - from)));
             }
@@ -134,7 +135,7 @@ internal sealed class PartBuilder
         slate.Release();
     }
 
-    /// <summary>Every store in the pool let go, their buffers back in the session's pool: the result is done.</summary>
+    /// <summary>Every store in the pool let go, their buffers back in the library's pool: the result is done.</summary>
     internal void Release()
     {
         lock (_gate)
@@ -143,7 +144,7 @@ internal sealed class PartBuilder
         }
 
         // Past the flag, no store comes back to the pool: the ones on it are the last. The workers are done
-        // building: their columns' scratch goes back to the process's shelf.
+        // building: their columns' scratch goes back to the pool.
         foreach (PartSlate slate in _slates)
         {
             slate.Release();
@@ -161,8 +162,8 @@ internal sealed class PartBuilder
         _columns.Clear();
     }
 
-    /// <summary>A store of the pool, or a new one.</summary>
-    private PartSlate Take()
+    /// <summary>A store of the pool, or a new one under <paramref name="account"/>: the question's, which its result's batches count in until it is delivered.</summary>
+    private PartSlate Take(MemoryAccount account)
     {
         DType dtype;
         lock (_gate)
@@ -181,7 +182,7 @@ internal sealed class PartBuilder
         }
 
         VortexSessionOptions options = _query.Session.Options;
-        return new PartSlate((StructStore)ColumnStores.Create(dtype, options.EnginePool, options.Extensions), new CanonicalArena(64, options.EnginePool));
+        return new PartSlate((StructStore)ColumnStores.Create(dtype, account, options.Extensions), new CanonicalArena(64, account));
     }
 }
 

@@ -29,7 +29,7 @@ public sealed class AllocationTests
     /// reads of a scalar list with intrinsics disabled, which no per-call allocation adds up to.
     /// Anything allocated on every call still raises the floor.
     /// </remarks>
-    private static long Measure(Action body)
+    internal static long Measure(Action body)
     {
         for (int i = 0; i < Warmup; i++)
         {
@@ -203,9 +203,9 @@ public sealed class AllocationTests
     /// <summary>
     /// A 100-field struct: wide enough that the pooled scratch the codecs use for the parallel
     /// name/dtype vectors actually has to grow, which is where a <c>List&lt;T&gt;</c> or an
-    /// intermediate <c>string</c> per field would show up.
+    /// intermediate <c>string</c> per field would show up. <see cref="CodecAllocationTests"/> reads it.
     /// </summary>
-    private static DType WideStruct(DTypeArena arena)
+    internal static DType WideStruct(DTypeArena arena)
     {
         const int Fields = 100;
         string[] names = new string[Fields];
@@ -219,65 +219,6 @@ public sealed class AllocationTests
         }
 
         return arena.Struct(names, fields, Nullability.NonNullable);
-    }
-
-    /// <summary>
-    /// No managed allocation per batch in steady state is a rule about the decode path above all,
-    /// and the three decoders are exactly where it is easy to break: the FlatBuffers reader
-    /// depends on two <c>ArrayPool</c> rentals plus interning names straight from the file bytes,
-    /// and both Protobuf readers depend on <c>ProtoScratchList</c> staying a pooled rental. Every
-    /// one of those regressions round-trips correctly, so nothing else in the suite would notice.
-    /// </summary>
-    [Fact]
-    public void DTypeFlatBuffersReadAllocatesNothing()
-    {
-        byte[] buffer = DTypeFlatBuffers.Serialize(WideStruct(new DTypeArena()));
-
-        // The arena is deliberately reused rather than reconstructed: node dedup makes the re-read
-        // free, which is the steady state of a chunked scan re-reading one schema per chunk.
-        // `new DTypeArena()` per call allocates its backing arrays by design (~9 KB) and would
-        // measure the arena instead of the codec - do not "fix" this test that way.
-        DTypeArena arena = new();
-        long bytes = Measure(() => Consume(DTypeFlatBuffers.Read(buffer, arena).NodeIndex));
-        Assert.Equal(0, bytes);
-    }
-
-    [Fact]
-    public void DTypeProtobufReadAllocatesNothing()
-    {
-        byte[] message = DTypeProtobuf.Serialize(WideStruct(new DTypeArena()));
-
-        DTypeArena arena = new();
-        long bytes = Measure(() => Consume(DTypeProtobuf.Read(message, arena).NodeIndex));
-        Assert.Equal(0, bytes);
-    }
-
-    [Theory]
-    [InlineData(5)]
-    [InlineData(100)]
-    public void ScalarProtobufReadValueAllocatesNothing(int elements)
-    {
-        ScalarStore source = new();
-        ScalarValue[] values = new ScalarValue[elements];
-        for (int i = 0; i < elements; i++)
-        {
-            values[i] = source.Int64(i);
-        }
-
-        byte[] message = ScalarProtobuf.SerializeValue(source.List(values));
-
-        ScalarStore store = new();
-        DTypeArena dtypes = new();
-        long bytes = Measure(() =>
-        {
-            // Clearing is mandatory here, not tidiness: unlike DTypeArena the store does not
-            // deduplicate, so every read appends fresh nodes and its arrays keep doubling. A store
-            // left to grow measures its own resizes, not the codec.
-            store.Clear();
-            Consume(ScalarProtobuf.ReadValue(message, store, dtypes).Kind);
-        });
-
-        Assert.Equal(0, bytes);
     }
 
     /// <summary>
@@ -381,7 +322,7 @@ public sealed class AllocationTests
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void Consume<T>(T value) => _ = value;
+    internal static void Consume<T>(T value) => _ = value;
 
     [Fact]
     public void MeasureItselfDetectsAnAllocation()

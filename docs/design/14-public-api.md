@@ -62,13 +62,13 @@ implement its interface by hand without referencing the generator.
 
 | owned | why |
 |---|---|
-| the memory pool, 64-byte aligned by default (`AlignedMemoryPool`) | every batch, segment and builder buffer comes from it, and disposing the session returns everything |
+| the memory budgets, `MemoryBudget` and `JobMemoryBudget` | every block a query, a scan or a writer of the session rents from the process's one pool is counted in the account of its work, under one of them, and refused past it with a `VortexMemoryException` |
 | the segment cache | one budget for every file of the session, for sources that do I/O; by default the process's, which every session given none shares, but a session that holds keys, whose plaintext stays its own |
 | the bound on reads in flight, `MaxConcurrentReads` | an object store sees at most that many requests from the process |
 | the degree of parallelism, `MaxDegreeOfParallelism`, 1 by default | where every scan and writer of the session starts (see [parallelism](09-contracts.md#2-parallelism)) |
-| the query memory and scratch budgets, `MemoryBudget` and `ScratchBudget` | what the session's group bys may hold in memory and spill to disk, shared with every session given the same budget |
-| the jobs' memory budget, `JobMemoryBudget` | what the session's background work holds, its datasets' merges and consolidations and the stores of their appends, shared with every session given the same budget; half the process's limit by default, the queries having the rest |
-| the index cache, `IndexCacheBytes` | how much of the decoded index runs each open file keeps |
+| the query memory and scratch budgets, `MemoryBudget` and `ScratchBudget` | what the session's queries and scans may hold in memory, the segments a scan reads included, and what its group bys spill to disk, shared with every session given the same budget |
+| the jobs' memory budget, `JobMemoryBudget` | what the session's background work holds, its datasets' merges and consolidations and the stores of their appends, shared with every session given the same budget; by default the process's budget, which the queries share, a host setting a share of its own where the jobs must leave the queries room |
+| the index cache, `IndexCacheBytes` | how much of the decoded index runs each open file keeps, in blocks of the pool it gives back when it is disposed |
 | the files kept mapped once closed, `MappedFileCacheCount` | opening a file again takes over its mapping and every page already mapped in it |
 | whether a path is mapped at all, `MapFiles`, true by default | a service that reads files others may truncate reads them positionally, so a truncated file fails a read rather than the process |
 | the extension registry | dtype ids this process knows beyond the editions, so a registered type binds to a record member or a `Column<T>`. Binding checks the storage type the registration declares |
@@ -303,7 +303,8 @@ guide's writing pages show each form.
 | `ScanPlan`, `PruningStep`, `CountPlan`, `OrderPlan`, `GroupPlan`, `GroupKeyPlan`, `GroupOrdering` | the plan before a read: blocks, live blocks, segments and bytes to read, what each structure pruned and what consulting it cost, and how a count, an order and a group by will be answered (see [plan and metrics](16-queries.md#10-plan-and-metrics)) |
 | `ScanMetrics`, `GroupMetrics` | the same quantities, measured after the scan, and for a group by its groups, the most held at once and their bytes, what its core did, how each key block was grouped, and the time to its first batch |
 | `WriteReport` | what the writer chose, per column and per chunk, and every index built or abandoned |
-| `VortexDiagnostics` | the names of the meter and the activity source (see [observability](09-contracts.md#5-observability)) |
+| `VortexDiagnostics` | the names of the meter and the activity source (see [observability](09-contracts.md#5-observability)), and `GetMemoryReport()`, a `MemoryReport` of what the process holds now: reserved, rented, kept by holder, and the library's ceiling and limit |
+| `VortexMemory` | the memory the host holds the process to, set in code or by `VORTICITY_MEMORY_LIMIT`, taken as a container's limit would be (see [the governor](16-queries.md#the-governor)). The variable is read at the first need of a limit, and a value that is no size fails each need with the same message. Its `LimitBytes` is the limit the host set, null when it set none, where `MemoryReport.LimitBytes` is the library's own: seven eighths of the collector's heap, less in a container whose limit is less |
 | `VortexException` and its four kinds | a malformed file, an unsupported component with its id and `ComponentKind`, a schema that does not fit, and a query that outgrows its memory or scratch budget (see [error handling](03-architecture.md#5-error-handling)) |
 | `VortexEditions` | the default, newest and floor editions, and the Rust version that reads each |
 
@@ -320,6 +321,8 @@ described in [I/O](03-architecture.md#35-io), and a writer's sink is any `PipeWr
 its source that a segment is requested at most once per scan, and the session's cache adds reuse
 across scans. [object-store.md](../guide/object-store.md) implements the interface for a remote
 store.
+
+A dataset's `IObjectStore` copies an object to a stream in one call, `CopyToAsync`, which a compaction's scratch asks for: one request to an HTTP store, and a default made of reads for a store that has nothing better. A store, a sink or a transport rents its buffers from `VortexBytePool.Instance`, an `ArrayPool<byte>` over the pool every block of the library comes from, so that what it holds is kept and let go as the library's is.
 
 ## 9. The performance contract, and the gates that hold it
 
@@ -440,3 +443,5 @@ The members these rules renamed, for a caller moving to the current names:
 | `CompactionJob.Objects`, `GroupKeyPlan.Values` | `ObjectKeys`, `ValueRange` |
 | `DatasetOptions.ClusteringKey`, `DatasetOptions.Clustering` (`ClusteringOptions`, `ClusteringValue`), `VortexDataset.ClusteringKeyPaths` | `DatasetOptions.Layout` (`DatasetLayout`: `SortKey`, `Partition`, `IndexedPrefix`, `LayoutValue`), `VortexDataset.Layout` |
 | `CompactionPlan.IsClustered` | `CompactionPlan.IsKeyed` |
+| `DatasetOptions.MaxOpenObjectBytes`, `DatasetOptions.PageCacheBytes`, ceilings a process of many handles had to lower | `OpenObjectFloorBytes`, `PageFloorBytes`, floors: what a handle keeps whatever the process asks |
+| `VortexSessionOptions.MemoryPool`, `AlignedMemoryPool` | none: every block comes from the library's one pool, and a store rents its buffers from `VortexBytePool.Instance` |

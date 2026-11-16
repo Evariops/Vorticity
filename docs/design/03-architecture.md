@@ -10,7 +10,7 @@ itself is described in [14-public-api.md](14-public-api.md), and what each colum
 | constraint | consequence |
 |---|---|
 | no third-party dependency | FlatBuffers and Protobuf are read and written by runtimes in this repository, hand-written against the five schemas. There is no `Google.FlatBuffers`, `protobuf-net` or `Apache.Arrow`. Three packages are referenced: `System.IO.Hashing` from `dotnet/runtime`, for XXH3, which the shared framework does not carry, and `ManagedCompressions.Zstd` and `ManagedCompressions.Lz4`, the managed Zstandard and LZ4 of a sibling Evariops project, rather than the libzstd the runtime ships |
-| no allocation on the hot path | no LINQ, no `foreach` over interfaces, no capturing closures, no boxing, no `params` array (only `params ReadOnlySpan<T>`). Aligned native buffers, pools for transient memory, `ref struct` views |
+| no allocation on the hot path | no LINQ, no `foreach` over interfaces, no capturing closures, no boxing, no `params` array (only `params ReadOnlySpan<T>`). Aligned buffers on managed arrays the runtime pins, pools for transient memory, `ref struct` views. The library allocates no native memory: the collector counts every byte it holds |
 | SIMD with a scalar twin | `System.Runtime.Intrinsics`: `Vector128` everywhere, `Vector256` and `Vector512` where the hardware has them, and a scalar path that the suite runs under `DOTNET_EnableHWIntrinsic=0` and compares bit for bit |
 | async only where there is I/O | `ValueTask` and `ConfigureAwait(false)` throughout, with no blocking public call and no synchronous twin of an asynchronous one. A source whose reads complete at once (a mapped file, bytes in memory) pays for a completed `ValueTask`, not for a second code path. Pure CPU work stays synchronous: filling a builder, row encoding, decode kernels, a merge or a sort split into parts the caller awaits. A builder never reads |
 | streaming, bounded | every source, operator and sink exchanges batches, pulled by its consumer. The async boundary is the batch, and every loop inside one is synchronous. Read-ahead is a bounded window, an operator holds its open state and never its input, a result is a stream of batches like a file's, and a consumer that stops also stops the reads. What a query costs before its first answer, and what it holds while it runs, is measured ([the flow](16-queries.md#2-the-flow)) |
@@ -19,7 +19,7 @@ The library has one target framework, `net11.0`. A single target means no `#if`,
 by target, no test matrix, and no kernel that could diverge between targets. The price is reach:
 .NET 11 is not a long-term-support release, and a consumer pinned to .NET 10 cannot reference the
 library. `netstandard2.1` is out of the question, because it lacks `Vector512`, static abstract
-members, `INumber<T>`, `SearchValues` and aligned native allocation, which is to say the whole
+members, `INumber<T>`, `SearchValues` and the pinned object heap, which is to say the whole
 performance model. `global.json` pins the SDK, so a build never silently changes compiler under a
 library whose code generation is measured.
 
@@ -68,8 +68,9 @@ in the API. [14-public-api.md](14-public-api.md) builds the public API on top of
 
 ### 3.1 Buffers
 
-A segment is a view over aligned bytes, whatever their origin: a mapped file (zero-copy), pooled
-native memory (a positional or remote read), or memory the caller already holds. A `SegmentLease`
+A segment is a view over aligned bytes, whatever their origin: a mapped file (zero-copy), a pooled
+block, a managed array the runtime keeps pinned (a positional or remote read), or memory the caller
+already holds. A `SegmentLease`
 owns the bytes and releases them when the batch that borrowed them is done.
 
 ### 3.2 Types

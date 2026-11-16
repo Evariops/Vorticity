@@ -49,7 +49,7 @@ public class AuditSegmentCacheBenchmarks
         _owners = new SegmentOwner[Segments];
         for (int i = 0; i < Segments; i++)
         {
-            _owners[i] = AlignedBufferPool.Shared.Rent(SegmentBytes, 64);
+            _owners[i] = QueryMemoryBudget.Process.Account.Rent(SegmentBytes, 64);
             _cache.Add(_source, (long)i * SegmentBytes, _owners[i], _owners[i].Buffer);
         }
     }

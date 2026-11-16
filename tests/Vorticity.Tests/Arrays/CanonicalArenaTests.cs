@@ -332,10 +332,10 @@ public sealed class CanonicalArenaTests
     [Fact]
     public void AllocateReturnsZeroedMemoryEvenAfterTheBlockHasBeenRecycled()
     {
-        // The pool hands back recycled NATIVE memory. A decoder that writes only part of a buffer
-        // would otherwise publish whatever the previous batch left there.
-        AlignedBufferPool pool = new AlignedBufferPool();
-        CanonicalArena arena = new CanonicalArena(8, pool);
+        // The pool hands back recycled blocks, never cleared. A decoder that writes only part of a
+        // buffer would otherwise publish whatever the previous batch left there.
+        BlockPool pool = new BlockPool();
+        CanonicalArena arena = new CanonicalArena(8, TestAccount.Shared, pool);
 
         VortexBuffer first = arena.Allocate(256, 64, out Span<byte> firstSpan);
         Assert.Equal(256, first.Length);
@@ -373,8 +373,8 @@ public sealed class CanonicalArenaTests
     [Fact]
     public void ResetClearsTheNodesAndReleasesTheRentedBlocks()
     {
-        AlignedBufferPool pool = new AlignedBufferPool();
-        CanonicalArena arena = new CanonicalArena(8, pool);
+        BlockPool pool = new BlockPool();
+        CanonicalArena arena = new CanonicalArena(8, TestAccount.Shared, pool);
         arena.Allocate(128, 8);
         arena.AddNull(_types.Null(Nullability.Nullable), 1);
         Assert.Equal(1, arena.NodeCount);
@@ -390,13 +390,13 @@ public sealed class CanonicalArenaTests
     [Fact]
     public void ReusingOneArenaAcrossBatchesAllocatesNothingAfterWarmUp()
     {
-        // A dedicated pool with room for every block this test rents. AlignedBufferPool's default
+        // A dedicated pool with room for every block this test rents. BlockPool's default
         // MaxPerBucket is 8, so a batch that materializes more than eight buffers of one size class
-        // makes the pool free the surplus and allocate a fresh NativeSegmentOwner next time round -
+        // makes the pool free the surplus and allocate a fresh BlockOwner next time round -
         // a real, if small, per-batch allocation that belongs to the pool's policy and not to the
         // arena. This asserts the arena's own contribution, which is zero.
-        AlignedBufferPool pool = new AlignedBufferPool(maxPooledLength: 1 << 20, maxPerBucket: 32);
-        CanonicalArena arena = new CanonicalArena(64, pool);
+        BlockPool pool = new BlockPool(maxPooledLength: 1 << 20, maxPerBucket: 32);
+        CanonicalArena arena = new CanonicalArena(64, TestAccount.Shared, pool);
         DType i32 = _types.Primitive(PType.I32, Nullability.NonNullable);
 
         for (int warm = 0; warm < 8; warm++)

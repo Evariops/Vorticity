@@ -1,7 +1,7 @@
 using System;
-using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Types.Numerics;
 
@@ -195,16 +195,16 @@ internal sealed class ZonePruner : IBlockPruner
     public void Refine(BlockMask live)
     {
         ReadOnlySpan<ulong> scope = live.Words;
-        ulong[] rented = ArrayPool<ulong>.Shared.Rent(scope.Length);
+        Block<ulong> rented = Blocks.Rent<ulong>(scope.Length);
         try
         {
-            Span<ulong> may = rented.AsSpan(0, scope.Length);
+            Span<ulong> may = rented;
             MayWords(_filter, negated: false, live, scope, may);
             live.Keep(may);
         }
         finally
         {
-            ArrayPool<ulong>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 
@@ -267,7 +267,7 @@ internal sealed class ZonePruner : IBlockPruner
                 LogicalExpr logical = (LogicalExpr)expr;
                 bool isAnd = logical.IsAnd != negated;
                 MayWords(logical.Left, negated, live, scope, words);
-                ulong[] rented = ArrayPool<ulong>.Shared.Rent(2 * words.Length);
+                Block<ulong> rented = Blocks.Rent<ulong>(2 * words.Length);
                 try
                 {
                     Span<ulong> rightScope = rented.AsSpan(0, words.Length);
@@ -286,7 +286,7 @@ internal sealed class ZonePruner : IBlockPruner
                 }
                 finally
                 {
-                    ArrayPool<ulong>.Shared.Return(rented);
+                    Blocks.Return(rented);
                 }
 
                 return;
@@ -319,10 +319,10 @@ internal sealed class ZonePruner : IBlockPruner
     /// </summary>
     private static bool MayWordsIn(ZoneColumn column, FilterLiteral[] literals, ReadOnlySpan<ulong> scope, Span<ulong> words)
     {
-        ulong[] rented = ArrayPool<ulong>.Shared.Rent(words.Length);
+        Block<ulong> rented = Blocks.Rent<ulong>(words.Length);
         try
         {
-            Span<ulong> one = rented.AsSpan(0, words.Length);
+            Span<ulong> one = rented;
             words.Clear();
             foreach (FilterLiteral literal in literals)
             {
@@ -346,7 +346,7 @@ internal sealed class ZonePruner : IBlockPruner
         }
         finally
         {
-            ArrayPool<ulong>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 

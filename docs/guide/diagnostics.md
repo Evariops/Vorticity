@@ -57,7 +57,7 @@ column, `columns.ToOwned()` for the whole batch. See [scan-a-table.md](scan-a-ta
 
 An owned batch is never disposed. This is a warning.
 
-A `RecordBatch` from `ToBatchesAsync()` or `ToOwned()` holds buffers from the session's pool until it
+A `RecordBatch` from `ToBatchesAsync()` or `ToOwned()` holds buffers from the library's pool until it
 is disposed. The analyzer flags a batch that nothing disposes: no `using`, no `Dispose`, and it is not
 returned, passed to a method, stored in a field or a collection, or captured by a lambda, any of which
 hands it to a new owner.

@@ -130,7 +130,7 @@ public sealed class SegmentCacheTests
             using SegmentRequestSet set = new SegmentRequestSet();
             int held = set.Add(Spec(0, 1_000));
             set.Add(Spec(8_192, 1_000));
-            using (SegmentOwner owner = PinnedArraySegmentOwner.CopyOf(content.AsSpan(0, 1_000), 64))
+            using (SegmentOwner owner = BlockOwner.CopyOf(content.AsSpan(0, 1_000), 64))
             {
                 set.SetSharedResult(held, owner, owner.Buffer);
             }
@@ -250,7 +250,7 @@ public sealed class SegmentCacheTests
             int at = model.FindIndex(entry => ReferenceEquals(entry.File, file) && entry.Offset == offset);
             if (what < 5)
             {
-                NativeSegmentOwner owner = AlignedBufferPool.Shared.Rent(64, 64);
+                BlockOwner owner = MemoryAccount.Pool.Rent(TestAccount.Shared, 64, 64);
                 cache.Add(file, offset, owner, owner.Buffer);
                 owner.Release();
                 if (at < 0)

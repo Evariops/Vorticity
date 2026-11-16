@@ -1,11 +1,12 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
 using Vorticity.Keys;
@@ -25,15 +26,16 @@ internal sealed partial class DatasetScanBuilder
     /// then decoding a batch ahead as before. The reservation, held while the scan reads; null when it reads none ahead:
     /// an aggregation's lane, granted its own, a scan of several lanes, of a take, or of a file that costs no round trip.
     /// </summary>
-    private QueryMemory? ReadsAhead(ScanBuilder scan, VortexFile file)
+    private QueryMemory.Reservation ReadsAhead(ScanBuilder scan, VortexFile file)
     {
         if (_readAheadGranted || ScanDegree > 1 || _options.Prefetch > 1 || _take is not null || _orderPaths is not null
             || file.Source.CostsNoRoundTrip || scan.LargestSplitBytes() is not (> 0 and var split))
         {
-            return null;
+            return default;
         }
 
-        QueryMemory memory = new QueryMemory(_dataset.Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
+        // In the question's memory: a memory of its own only for a scan asked of no question.
+        QueryMemory memory = _memory ?? QueryMemory.Start(_dataset.Session);
         int ahead = AggregationEngine.TotalAhead(split);
         while (ahead >= BatchAsyncEnumerator.ReadAheadSplits && !memory.TryGrow(ahead * split))
         {
@@ -42,12 +44,16 @@ internal sealed partial class DatasetScanBuilder
 
         if (ahead < BatchAsyncEnumerator.ReadAheadSplits)
         {
-            memory.Dispose();
-            return null;
+            if (_memory is null)
+            {
+                memory.Dispose();
+            }
+
+            return default;
         }
 
         scan.WithReadAhead(ahead);
-        return memory;
+        return new QueryMemory.Reservation(memory, (long)ahead * split, owned: _memory is null);
     }
 
     /// <summary>
@@ -311,10 +317,12 @@ internal sealed partial class DatasetScanBuilder
     private async IAsyncEnumerable<RecordBatch> LookedUpAsync(VortexExpr lookup, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         LookupColumns(out int[]? columns);
-        // The objects the walk keeps, in a rented array that grows by renting: a list of them grew by copies into new arrays,
-        // 160 KB a lookup over 600 objects. Until its read is chosen, an object's slot says whether its partition's index may
-        // answer for it, in place of whether it is looked up.
-        (PositionedObject Held, Task<List<RecordBatch>?>? Found, bool Looked)[] objects = ArrayPool<(PositionedObject, Task<List<RecordBatch>?>?, bool)>.Shared.Rent(64);
+        // The objects the walk keeps and how each is read, in arrays the dataset keeps for its next lookup, which a lookup
+        // beside this one makes its own of: they hold references, which no block of the pool holds, and a list of them grew
+        // by copies into new arrays, 160 KB a lookup over 600 objects. Until its read is chosen, an object's slot says
+        // whether its partition's index may answer for it, in place of whether it is looked up.
+        LookupArrays arrays = Interlocked.Exchange(ref _dataset.KeptLookupArrays, null) ?? new LookupArrays();
+        (PositionedObject Held, Task<List<RecordBatch>?>? Found, bool Looked)[] objects = arrays.Objects;
         int count = 0;
         using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         SemaphoreSlim? reading = null;
@@ -349,8 +357,8 @@ internal sealed partial class DatasetScanBuilder
             int kept = 0;
             long ahead = 0;
 
-            // How each object kept is read, and the rows it may hold while it waits for its turn; rented, given back at the end.
-            reads = ArrayPool<Read>.Shared.Rent(Math.Max(count, 1));
+            // How each object kept is read, and the rows it may hold while it waits for its turn; cleared at the end.
+            reads = arrays.Reads.Length >= count ? arrays.Reads : arrays.Reads = new Read[(int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(count, 1))];
             for (int o = 0; o < count; o++)
             {
                 (PositionedObject held, _, bool indexed) = objects[o];
@@ -511,25 +519,41 @@ internal sealed partial class DatasetScanBuilder
             reading?.Dispose();
             if (reads is not null)
             {
-                ArrayPool<Read>.Shared.Return(reads, clearArray: true);
+                Array.Clear(reads);
             }
 
+            // Kept for the dataset's next lookup, holding none of this one's objects, unless a lookup beside it kept its own.
             Array.Clear(objects, 0, count);
-            ArrayPool<(PositionedObject, Task<List<RecordBatch>?>?, bool)>.Shared.Return(objects);
+            arrays.Objects = objects;
+            if (objects.Length <= LookupArrays.MostKept)
+            {
+                Interlocked.CompareExchange(ref _dataset.KeptLookupArrays, arrays, null);
+            }
         }
     }
 
-    /// <summary>
-    /// Makes <paramref name="array"/>, rented and full to <paramref name="count"/>, one rented twice as long holding the same,
-    /// the first given back cleared.
-    /// </summary>
+    /// <summary>Makes <paramref name="array"/>, full to <paramref name="count"/>, one twice as long holding the same.</summary>
     private static void Grown<T>(ref T[] array, int count)
     {
-        T[] larger = ArrayPool<T>.Shared.Rent(2 * array.Length);
+        T[] larger = new T[2 * array.Length];
         Array.Copy(array, larger, count);
-        Array.Clear(array, 0, count);
-        ArrayPool<T>.Shared.Return(array);
         array = larger;
+    }
+
+    /// <summary>
+    /// The arrays a lookup's walk keeps its objects and their reads in, which the dataset keeps between its lookups
+    /// (<see cref="VortexDataset.KeptLookupArrays"/>): grown to the most objects a lookup kept, below <see cref="MostKept"/>.
+    /// </summary>
+    internal sealed class LookupArrays
+    {
+        /// <summary>The most objects a dataset keeps the arrays of: a wider lookup's go to the collector with it.</summary>
+        internal const int MostKept = 1 << 16;
+
+        /// <summary>The objects the walk kept, each with its lookup started and whether it was looked up.</summary>
+        internal (PositionedObject Held, Task<List<RecordBatch>?>? Found, bool Looked)[] Objects = new (PositionedObject, Task<List<RecordBatch>?>?, bool)[64];
+
+        /// <summary>How each object kept is read.</summary>
+        internal Read[] Reads = [];
     }
 
     /// <summary>
@@ -550,7 +574,7 @@ internal sealed partial class DatasetScanBuilder
     private const int LookupReads = 16;
 
     /// <summary>How a lookup's scan reads an object it keeps.</summary>
-    private enum ReadKind : byte
+    internal enum ReadKind : byte
     {
         /// <summary>As a scan reads any, at its turn: the one object a lookup does not take.</summary>
         Rows,
@@ -569,7 +593,7 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>How a lookup's scan reads an object it keeps: by what, the units its partition's index placed, and the rows it may hold.</summary>
-    private readonly record struct Read(ReadKind Kind, uint[]? Blocks, int BlockRows, long Rows);
+    internal readonly record struct Read(ReadKind Kind, uint[]? Blocks, int BlockRows, long Rows);
 
     /// <summary>
     /// The objects a lookup's scan looks up or reads ahead of the one it gives, at most: each holds what it found until its
@@ -914,7 +938,7 @@ internal sealed partial class DatasetScanBuilder
                         ?? throw new InvalidOperationException($"The granules of '{held.Entry.Key}' its statistics leave are not the blocks of its scan."));
                 }
 
-                using QueryMemory? ahead = ReadsAhead(scan, lease.File);
+                using QueryMemory.Reservation ahead = ReadsAhead(scan, lease.File);
                 await foreach (RecordBatch batch in scan.ExecuteAsync()
                     .WithCancellation(cancellationToken).ConfigureAwait(false))
                 {
@@ -985,12 +1009,13 @@ internal sealed partial class DatasetScanBuilder
     private async IAsyncEnumerable<RecordBatch> SettledAsync(
         VortexFile file, PositionedObject held, ZoneSettling settling, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        ZoneSettling.Scratch scratch = settling.NewScratch();
+        // Under the question's account, which ends with it: the scratch is let go with the walk.
+        ZoneSettling.Scratch scratch = settling.NewScratch(_account ?? Vorticity.Buffers.MemoryAccount.Caller);
         DeletionVector deletions = held.Entry.Deletions;
         ScanBuilder? scan = held.Entry.HasDeletions
             ? null
             : Of(file, held).WithPruned(settling.Live).WithMaxBatchRows(BlockBatch(settling.Live)).WithGranules(GeometryOf(file));
-        using QueryMemory? ahead = scan is null ? null : ReadsAhead(scan, file);
+        using QueryMemory.Reservation ahead = scan is null ? default : ReadsAhead(scan, file);
         IAsyncEnumerable<RecordBatch> rows = scan?.ExecuteAsync()
             ?? LiveAsync(file, held, _filter, _mask, held.FirstRow, _options.Compact, reshaped: false, cancellationToken, pruned: settling.Live);
         RecordBatch? view = null;
@@ -1119,7 +1144,7 @@ internal sealed partial class DatasetScanBuilder
             ScanBuilder second = first.ByPlaces
                 ? Configure(file.ScanBuilder(), null, _mask, canonical: false).Take(first.Rows).WithGranules(GeometryOf(file))
                 : Of(file, held).WithGranuleMask(Masked(file, first.Granules)).WithGranules(GeometryOf(file));
-            using QueryMemory? reads = ReadsAhead(second, file);
+            using QueryMemory.Reservation reads = ReadsAhead(second, file);
             await foreach (RecordBatch batch in second.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
             {
                 yield return InDataset(batch, held.FirstRow, ref view);
@@ -1135,7 +1160,7 @@ internal sealed partial class DatasetScanBuilder
         ulong[]? blocked = notes ? new ulong[(blocks + 63) / 64] : null;
         long keptBlocks = 0;
         long selected = 0;
-        using QueryMemory? ahead = ReadsAhead(scan, file);
+        using QueryMemory.Reservation ahead = ReadsAhead(scan, file);
         await foreach (RecordBatch batch in scan.ExecuteAsync().WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             if (noted is not null)
@@ -1296,7 +1321,7 @@ internal sealed partial class DatasetScanBuilder
         long blocks = (rows + TwoPhaseReads.BlockRows - 1) / TwoPhaseReads.BlockRows;
         ulong[] granuleBits = new ulong[(granules + 63) / 64];
         ulong[] blockBits = new ulong[(blocks + 63) / 64];
-        long[] places = [];
+        Block<long> places = default;
         int count = 0;
         bool placed = true;
         long kept = 0;
@@ -1346,10 +1371,7 @@ internal sealed partial class DatasetScanBuilder
                         if (kept > places.Length)
                         {
                             // Rented at the first kept row, for an object that keeps one, and grown from the pool.
-                            long[] grown = ArrayPool<long>.Shared.Rent((int)Math.Min(blocks, Math.Max(Math.Max(places.Length * 2L, 1_024), kept)));
-                            places.AsSpan(0, count).CopyTo(grown);
-                            Returned(places);
-                            places = grown;
+                            Blocks.Grow(ref places, (int)Math.Min(blocks, Math.Max(Math.Max(places.Length * 2L, 1_024), kept)));
                         }
 
                         count = Append(words, batch.StartRow, batch.RowCount, places, count);
@@ -1370,19 +1392,11 @@ internal sealed partial class DatasetScanBuilder
             }
 
             bool byPlaces = placed && TwoPhaseReads.ByPlaces(keptBlocks, blocks);
-            return new FirstPass(kept, granuleBits, byPlaces, byPlaces ? places[..count] : []);
+            return new FirstPass(kept, granuleBits, byPlaces, byPlaces ? places.AsSpan(0, count).ToArray() : []);
         }
         finally
         {
-            Returned(places);
-        }
-
-        static void Returned(long[] rented)
-        {
-            if (rented.Length > 0)
-            {
-                ArrayPool<long>.Shared.Return(rented);
-            }
+            Blocks.Return(places);
         }
     }
 
@@ -1430,7 +1444,7 @@ internal sealed partial class DatasetScanBuilder
     /// Appends to <paramref name="into"/> from <paramref name="at"/> the places of the rows <paramref name="selection"/> keeps of
     /// the batch of <paramref name="rows"/> rows from row <paramref name="start"/>, every row when it is empty; where it ends.
     /// </summary>
-    private static int Append(ReadOnlySpan<ulong> selection, long start, int rows, long[] into, int at)
+    private static int Append(ReadOnlySpan<ulong> selection, long start, int rows, Span<long> into, int at)
     {
         if (selection.IsEmpty)
         {
@@ -1681,8 +1695,8 @@ internal sealed partial class DatasetScanBuilder
         }
 
         // The question's reads: what its scans read of a variant's directories a filter may refute, and the schema they
-        // project, each read or made once.
-        scan.WithQuestionReads(Reads);
+        // project, each read or made once; and its account, which every object's scan counts its blocks in.
+        scan.WithQuestionReads(Reads).WithAccount(_account);
 
         if (projection is { } mask)
         {

@@ -73,16 +73,16 @@ internal static class MaskProjection
             }
         }
 
-        // A DType is a managed type and cannot be stackalloc'd, so both scratch buffers come from
-        // the pool; Scratch returns them in its finally.
+        // The children, the names' handles and the fields' types as their nodes in the scan's arena, in blocks of the
+        // pool; Scratch gives them back in its finally.
         Scratch<int> children = new Scratch<int>(selected, default);
         Scratch<int> names = new Scratch<int>(selected, default);
-        Scratch<DType> fieldTypes = new Scratch<DType>(selected, default);
+        Scratch<int> fieldTypes = new Scratch<int>(selected, default);
         try
         {
             Span<int> childSpan = children.Span;
             Span<int> nameSpan = names.Span;
-            Span<DType> typeSpan = fieldTypes.Span;
+            Span<int> typeSpan = fieldTypes.Span;
 
             for (int s = 0; s < selected; s++)
             {
@@ -95,10 +95,10 @@ internal static class MaskProjection
 
                 childSpan[s] = projected;
                 nameSpan[s] = context.Types.InternName(dtype.GetFieldNameUtf8(i));
-                typeSpan[s] = DTypeImport.Into(context.Types, arena.GetNode(projected).DType);
+                typeSpan[s] = DTypeImport.Into(context.Types, arena.GetNode(projected).DType).NodeIndex;
             }
 
-            DType projectedType = context.Types.Struct(nameSpan, typeSpan, dtype.Nullability);
+            DType projectedType = context.Types.StructOfNodes(nameSpan, typeSpan, dtype.Nullability);
             return arena.AddStruct(projectedType, length, validity, childSpan);
         }
         finally

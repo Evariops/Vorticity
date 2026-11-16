@@ -184,7 +184,7 @@ changing.
 ## 4. The store interface, revised
 
 The interface is the seam every store implements, the ones this package ships and any other a
-caller writes. It changes in five places, each for a request saved, a copy avoided or a correctness
+caller writes. It changes in six places, each for a request saved, a copy avoided or a correctness
 gap closed:
 
 | change | before | revised | what it buys |
@@ -194,6 +194,7 @@ gap closed:
 | a condition on the token | a range's token is compared with the first one after the bytes arrived (`ObjectStoreSource.cs`, `Note`) | the token travels with the read as a condition, and the store answers 412 rather than bytes of another object | an object replaced under a reader fails the next read, and its bytes are never downloaded |
 | a put says its condition | `PutIfAbsentAsync` only, and an object is never overwritten | `PutAsync(key, content, length, condition)`, where the condition is absent, matching a token, or none, and `PutOutcome` gains `Changed` for a token that no longer matches | a file written to a location replaces the object as a path's rename does, and a caller that read an object replaces it only if nothing else did in between |
 | a listing says what it knows | keys only, so vacuum asks for a head per candidate (`DatasetVacuum.cs`, one awaited after another) | `ListAsync` yields each key with its length, token and creation time, and the lock when the store's listing reports it | vacuum stops asking for heads, except for the locks that S3 and the clouds speaking its API report only in a head |
+| a copy streams | a compaction's scratch copied an input 4 MiB at a time, a read each (`JobInputs.cs`) | `CopyToAsync(key, offset, length, stream, ifToken)` writes a range to a stream as it arrives, a body cut short asked again from where it stopped, of the same object. Its default reads 4 MiB at a time, so a store written before it still works | one request an input, where an object of a gigabyte cost 256 |
 
 `GetRangeAsync` and `PutIfAbsentAsync` remain as extension methods over the new members, the first
 internal to the dataset, so the dataset's code changes only where it gains something. A store also declares what it can do, so that
@@ -426,6 +427,7 @@ hashed with SHA-256. The small XML bodies the client builds itself are signed.
 | `ReadAsync` | `GET` with `Range: bytes=a-b`, and `If-Match` when the token is known. S3 serves one range per request, so a coalesced range is one request |
 | `ReadIfPresentAsync` | the same `GET`, its `404` answered `null` without an exception; so on Azure and Cloud Storage |
 | `ReadTailAsync` | `GET` with `Range: bytes=-n`, whose `Content-Range` says the object's length in the same answer, on a service whose suffix reads are proven. Elsewhere a `HEAD`, then the range |
+| `CopyToAsync` | one `GET` of the whole range, its body written to the stream as it arrives, a mebibyte at a time. A body cut short is asked again from the first byte not written, with `If-Match` set to the ETag of the first answer, so the copy is of one object or fails with the error a changed object gives |
 | `HeadAsync` | `HEAD`, which also says the Object Lock retention date and the legal hold |
 | `PutAsync`, up to the part threshold | `PUT` with `If-None-Match: *` when the key must be absent, `If-Match` when the token must match, and the content's checksum in a header (see [writing](#11-writing)) |
 | `PutAsync`, above it | `CreateMultipartUpload` with the checksum algorithm, `UploadPart` in parallel, then `CompleteMultipartUpload` with the condition and the whole object's checksum |
@@ -543,6 +545,7 @@ emulator and for accounts that still use it.
 |---|---|
 | `ReadAsync` | `Get Blob` with `x-ms-range: bytes=a-b`, and `If-Match` when the token is known |
 | `ReadTailAsync` | Azure accepts `bytes=a-` and `bytes=a-b` only, never a suffix, so `Get Blob Properties` then `Get Blob`, unless the caller gives the length |
+| `CopyToAsync` | one `Get Blob` of the whole range, a body cut short asked again from the first byte not written with `If-Match` on the ETag of the first answer |
 | `HeadAsync` | `Get Blob Properties`, which also says `x-ms-immutability-policy-until-date` and `x-ms-legal-hold` |
 | `PutAsync`, up to the part threshold | `Put Blob` with `If-None-Match: *` or `If-Match`, and `x-ms-content-crc64`, or `Content-MD5` or nothing as the store's options say |
 | `PutAsync`, above it | `Put Block` in parallel, then `Put Block List` with the condition |
@@ -588,6 +591,7 @@ pinned to it with `x-goog-if-generation-match` is refused with 412 if the object
 |---|---|
 | `ReadAsync` | XML `GET` with `Range: bytes=a-b`, and `x-goog-if-generation-match` once the generation is known |
 | `ReadTailAsync` | XML `GET` with `Range: bytes=-n` once the contract tests prove it, and until then the object's metadata, then the range |
+| `CopyToAsync` | one XML `GET` of the whole range, a body cut short asked again from the first byte not written with `x-goog-if-generation-match` on the generation of the first answer |
 | `HeadAsync` | the JSON API's metadata, limited by `fields` to the size, the generation, the creation time, the retention and the holds |
 | `PutAsync`, up to the part threshold | XML `PUT` with `x-goog-if-generation-match: 0` when the key must be absent, or the generation when it must match, and `x-goog-hash: crc32c=…`, which the service verifies |
 | `PutAsync`, above it | an XML multipart upload, its parts in parallel. The service takes no precondition on it, so a put that must be conditional goes whole, as one XML `PUT` with its precondition, which Cloud Storage takes up to its 5 TiB limit on an object |

@@ -7,6 +7,7 @@ using System.IO.Pipelines;
 using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 using Vorticity.IO;
 using Vorticity.Sealing;
 
@@ -78,9 +79,16 @@ internal sealed class SealedObjectStore : IObjectStore
     private readonly LinkedList<CommitLayout> _clock = new LinkedList<CommitLayout>();
 
     // The trailers of the data objects read with no open of them, by key, which the next such read opens from with no read
-    // of the envelope's end: a few hundred bytes each, what the object's envelope says, no plaintext; the most bytes kept.
-    private readonly ClockMemo<string, byte[]> _trailers = new ClockMemo<string, byte[]>(TrailerBytes, StringComparer.Ordinal);
-    private const long TrailerBytes = 4L << 20;
+    // of the envelope's end: a few hundred bytes each, what the object's envelope says, no plaintext; a mebibyte of them kept
+    // whatever the registry of kept memory asks, some three thousand objects.
+    private readonly ClockMemo<string, byte[]> _trailers = ClockMemo<string, byte[]>.Kept(TrailerFloorBytes, StringComparer.Ordinal);
+    private const long TrailerFloorBytes = 1L << 20;
+
+    /// <summary>The bytes of the trailers the store keeps now.</summary>
+    internal long HeldBytes => _trailers.Held;
+
+    /// <summary>Lets go of up to <paramref name="bytes"/> of the trailers above the floor, only what no read took since the timer's turn before when <paramref name="stale"/>.</summary>
+    internal long LetGo(long bytes, bool stale) => _trailers.LetGo(bytes, stale);
 
     // What a trailer kept costs beyond its bytes: its array, its key and its slot.
     private const int TrailerOverhead = 128;
@@ -100,6 +108,18 @@ internal sealed class SealedObjectStore : IObjectStore
 
     /// <summary>The store under this one.</summary>
     internal IObjectStore Inner => _inner;
+
+    /// <summary>
+    /// This dataset's objects read from <paramref name="copy"/>, a store that holds copies of them as this one's inner store
+    /// holds them: sealed as this one knows them to be, opened with its keys. What a compaction reads its inputs through
+    /// once it copied them to its scratch.
+    /// </summary>
+    internal SealedObjectStore ReadingFrom(IObjectStore copy)
+    {
+        SealedObjectStore over = new SealedObjectStore(copy, _keys);
+        Volatile.Write(ref over._kind, Volatile.Read(ref _kind));
+        return over;
+    }
 
     /// <summary>Whether the dataset is encrypted, which the first commit object read, or the creation, decides.</summary>
     internal bool Seals => Volatile.Read(ref _kind) == Sealed;
@@ -440,11 +460,15 @@ internal sealed class SealedObjectStore : IObjectStore
         PipeWriter sealedBytes, PipeReader content, long length, SealParameters parameters, DataKey dataKey, CancellationToken cancellationToken)
     {
         bool handedOver = false;
+        // Released in the finally below whatever happens: the process's account.
         SealingSegmentSink sink = new SealingSegmentSink(sealedBytes, parameters, _ =>
         {
             handedOver = true;
             return new ValueTask<DataKey>(dataKey);
-        });
+        })
+        {
+            Account = QueryMemoryBudget.Process.Account,
+        };
         Exception? failure = null;
         long taken = 0;
         try
@@ -1224,7 +1248,7 @@ internal sealed class SealedObjectStore : IObjectStore
         }
     }
 
-    /// <summary>An array from the shared pool, wiped as it goes back: a commit object's plaintext does not outlive its lease there.</summary>
+    /// <summary>The array of a block of the pool, wiped as it goes back: a commit object's plaintext does not outlive its lease there.</summary>
     private sealed class WipedBuffer : IDisposable
     {
         private byte[]? _array;
@@ -1233,13 +1257,14 @@ internal sealed class SealedObjectStore : IObjectStore
 
         internal byte[] Array => _array ?? throw new ObjectDisposedException(nameof(WipedBuffer));
 
-        internal static WipedBuffer Rent(int length) => new WipedBuffer(ArrayPool<byte>.Shared.Rent(Math.Max(length, 1)));
+        internal static WipedBuffer Rent(int length) => new WipedBuffer(Blocks.Rent<byte>(Math.Max(length, 1)).Array());
 
         public void Dispose()
         {
             if (Interlocked.Exchange(ref _array, null) is { } array)
             {
-                ArrayPool<byte>.Shared.Return(array, clearArray: true);
+                CryptographicOperations.ZeroMemory(array);
+                Blocks.ReturnBytes(array);
             }
         }
     }

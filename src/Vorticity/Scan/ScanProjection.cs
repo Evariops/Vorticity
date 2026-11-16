@@ -1,8 +1,8 @@
 using System;
-using System.Buffers;
 using System.Text;
 
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Layouts;
 using Vorticity.Types;
 
@@ -145,10 +145,10 @@ internal readonly struct ScanProjection
         Span<int> indices = stackalloc int[VortexLimits.MaxDTypeDepth];
         int count = 0;
 
-        // One rented byte buffer for the whole path: DType.IndexOfField matches UTF-8, and
+        // One block of bytes for the whole path: DType.IndexOfField matches UTF-8, and
         // transcoding a substring per segment would allocate a string per segment.
         int maxBytes = Encoding.UTF8.GetMaxByteCount(path.Length);
-        byte[] rented = ArrayPool<byte>.Shared.Rent(maxBytes == 0 ? 1 : maxBytes);
+        Block<byte> rented = Blocks.Rent<byte>(maxBytes);
         try
         {
             DType current = schema;
@@ -165,7 +165,7 @@ internal readonly struct ScanProjection
                 }
 
                 int written = Encoding.UTF8.GetBytes(segment, rented);
-                int field = current.IndexOfField(new ReadOnlySpan<byte>(rented, 0, written));
+                int field = current.IndexOfField(rented.AsSpan(0, written));
                 if (field < 0)
                 {
                     ScanThrow.UnknownPath(path, parameterName);
@@ -191,7 +191,7 @@ internal readonly struct ScanProjection
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(rented);
+            Blocks.Return(rented);
         }
     }
 

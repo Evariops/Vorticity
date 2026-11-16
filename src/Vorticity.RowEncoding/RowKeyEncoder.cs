@@ -65,8 +65,9 @@ public static partial class RowEncoder
     {
         VortexSessionOptions options = VortexSession.Default.Options;
         DType dtype = VortexTypes.ToDType(TKey.Schema, new DTypeArena());
-        StructStore store = (StructStore)ColumnStores.Create(dtype, options.EnginePool, options.Extensions);
-        CanonicalArena arena = new CanonicalArena(8, options.EnginePool);
+        // Given back in the finally below whatever happens: the process's account.
+        StructStore store = (StructStore)ColumnStores.Create(dtype, QueryMemoryBudget.Process.Account, options.Extensions);
+        CanonicalArena arena = new CanonicalArena(8, QueryMemoryBudget.Process.Account);
         try
         {
             ColumnsBuilder<TKey> builder = new ColumnsBuilder<TKey>(store, WriteBinding.Map(typeof(TKey), TKey.Schema, store.Type.FieldArray), null);

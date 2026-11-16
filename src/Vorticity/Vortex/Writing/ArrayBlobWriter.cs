@@ -121,16 +121,15 @@ internal static class ArrayBlobWriter
         long flatStart = Align(offset, 8);
         long total = flatStart + flatBuffer.Length + sizeof(uint);
 
-        // Rented, not allocated. The rental is longer than `total` and its tail holds whatever the
-        // last renter wrote, so the padding between buffers has to be cleared rather than assumed
-        // zero the way a fresh array allowed -- a file is byte-exact or it is wrong.
+        // Rented, not allocated. The block holds whatever its last renter wrote, so the padding
+        // between buffers has to be cleared rather than assumed zero the way a fresh array allowed
+        // -- a file is byte-exact or it is wrong.
         //
         // The blob is assembled here rather than handed to the sink buffer by buffer and padding
         // run by padding run: the copy below is not what a write costs, while streaming it would
-        // mean many small writes to a FileStream and a native view that is only memory through a
-        // manager.
+        // mean many small writes to a FileStream.
         int exact = checked((int)total);
-        byte[] bytes = WorkArrays.Rent<byte>(exact);
+        Block<byte> bytes = Blocks.Rent<byte>(exact);
         long cursor = 0;
         for (int i = 0; i < buffers.Count; i++)
         {
@@ -155,7 +154,7 @@ internal static class ArrayBlobWriter
         BinaryPrimitives.WriteUInt32LittleEndian(
             bytes.AsSpan((int)(total - sizeof(uint))), (uint)flatBuffer.Length);
 
-        return new BlobLease(bytes, exact);
+        return new BlobLease(bytes);
     }
 
     /// <summary>
@@ -406,7 +405,7 @@ internal static class ArrayBlobWriter
         // The values are gathered: the first rows a walked dictionary rented go back.
         if (plan.Scheme == ColumnScheme.Dict && plan.GatherRented)
         {
-            WorkArrays.Return(plan.Gather);
+            Blocks.Return(plan.Gather);
         }
 
         if (plan.Scheme == ColumnScheme.RunEnd)
@@ -479,39 +478,33 @@ internal static class ArrayBlobWriter
         // written so that the blob's `finally` hands them back whatever happens next. The patches
         // are rented at the count the chooser priced and handed back once their buffers hold them.
         int packedBytes = PackedBytes(length, plan.BitWidth);
-        byte[] packed = WorkArrays.Rent<byte>(packedBytes);
+        Block<byte> packed = Blocks.Rent<byte>(packedBytes);
         Span<ushort> packedBuffer = stackalloc ushort[1];
         packedBuffer[0] = (ushort)Add(blob, new PendingBuffer(packed, packedBytes, Exponent(width), rented: true));
 
         int exceptions = checked((int)plan.Exceptions);
-        int[] patchIndices = exceptions == 0 ? [] : WorkArrays.Rent<int>(exceptions);
-        ulong[] patchValues = exceptions == 0 ? [] : WorkArrays.Rent<ulong>(exceptions);
+        Block<int> patchIndices = Blocks.Rent<int>(exceptions);
+        Block<ulong> patchValues = Blocks.Rent<ulong>(exceptions);
         Span<int> children = stackalloc int[3];
         int childCount = 0;
         PatchesMetadata patches = default;
         bool patched = exceptions > 0;
         try
         {
-            Pack(
-                arena, node, plan, ptype, length, packed.AsSpan(0, packedBytes),
-                patchIndices.AsSpan(0, exceptions), patchValues.AsSpan(0, exceptions));
+            Pack(arena, node, plan, ptype, length, packed, patchIndices, patchValues);
             if (patched)
             {
                 PType indicesPType = FsstPlan.IndexPType(length);
                 patches = PatchesMetadata.Create((ulong)exceptions, 0, indicesPType);
-                children[0] = WriteIndexArray(blob, encodings, patchIndices.AsSpan(0, exceptions), indicesPType);
-                children[1] = WriteRawPrimitive(
-                    blob, encodings, LittleEndian(patchValues.AsSpan(0, exceptions), width));
+                children[0] = WriteIndexArray(blob, encodings, patchIndices, indicesPType);
+                children[1] = WriteRawPrimitive(blob, encodings, LittleEndian(patchValues, width));
                 childCount = 2;
             }
         }
         finally
         {
-            if (patched)
-            {
-                WorkArrays.Return(patchIndices);
-                WorkArrays.Return(patchValues);
-            }
+            Blocks.Return(patchIndices);
+            Blocks.Return(patchValues);
         }
 
         childCount += Validity(blob, arena, node, encodings, children[childCount..]);
@@ -529,7 +522,7 @@ internal static class ArrayBlobWriter
     private static PendingBuffer LittleEndian(ReadOnlySpan<ulong> values, int width)
     {
         int length = values.Length * width;
-        byte[] bytes = WorkArrays.Rent<byte>(length);
+        Block<byte> bytes = Blocks.Rent<byte>(length);
         for (int i = 0; i < values.Length; i++)
         {
             Span<byte> destination = bytes.AsSpan(i * width, width);
@@ -572,15 +565,14 @@ internal static class ArrayBlobWriter
         int exceptions = checked((int)plan.Exceptions);
         int[] indices = new int[exceptions];
         ulong[] values = new ulong[exceptions];
-        int bytes = PackedBytes(node.Length, plan.BitWidth);
-        byte[] packed = WorkArrays.Rent<byte>(bytes);
+        Block<byte> packed = Blocks.Rent<byte>(PackedBytes(node.Length, plan.BitWidth));
         try
         {
-            Pack(arena, node, plan, node.PType, node.Length, packed.AsSpan(0, bytes), indices, values);
+            Pack(arena, node, plan, node.PType, node.Length, packed, indices, values);
         }
         finally
         {
-            WorkArrays.Return(packed);
+            Blocks.Return(packed);
         }
 
         return (indices, values);
@@ -690,11 +682,11 @@ internal static class ArrayBlobWriter
         T largest = patching ? T.CreateTruncating((1UL << bitWidth) - 1) : T.AllBitsSet;
 
         // One block of the element's own type, rented once for the column.
-        T[] rented = WorkArrays.Rent<T>(FastLanes.BlockSize);
+        Block<T> rented = Blocks.Rent<T>(FastLanes.BlockSize);
         int found = 0;
         try
         {
-            Span<T> block = rented.AsSpan(0, FastLanes.BlockSize);
+            Span<T> block = rented;
             for (int b = 0; b < blocks; b++)
             {
                 int start = b * FastLanes.BlockSize;
@@ -734,7 +726,7 @@ internal static class ArrayBlobWriter
         }
         finally
         {
-            WorkArrays.Return(rented);
+            Blocks.Return(rented);
         }
 
         return found;
@@ -1020,9 +1012,9 @@ internal static class ArrayBlobWriter
         CanonicalNode node = arena.GetNode(nodeIndex);
         FsstSymbols table = plan.Table;
         int symbolBytes = table.Count * 8;
-        byte[] symbols = WorkArrays.Rent<byte>(symbolBytes);
+        Block<byte> symbols = Blocks.Rent<byte>(symbolBytes);
         int symbolBuffer = Add(blob, new PendingBuffer(symbols, symbolBytes, Exponent(8), rented: true));
-        byte[] symbolLengths = WorkArrays.Rent<byte>(table.Count);
+        Block<byte> symbolLengths = Blocks.Rent<byte>(table.Count);
         int lengthBuffer = Add(blob, new PendingBuffer(symbolLengths, table.Count, 0, rented: true));
         for (int i = 0; i < table.Count; i++)
         {
@@ -1201,7 +1193,7 @@ internal static class ArrayBlobWriter
                 PType indicesPType = FsstPlan.IndexPType(rows);
                 patches = PatchesMetadata.Create((ulong)patchCount, 0, indicesPType);
                 children[1] = WriteIndexArray(blob, encodings, plan.PatchIndices, indicesPType);
-                (byte[] values, int length) = plan.PatchValueRental;
+                (Block<byte> values, int length) = plan.PatchValueRental;
                 valuesHanded = true;
                 children[2] = WriteRawPrimitive(
                     blob, encodings,
@@ -1289,7 +1281,7 @@ internal static class ArrayBlobWriter
                 PType indicesPType = FsstPlan.IndexPType(rows);
                 patches = PatchesMetadata.Create((ulong)exceptions, 0, indicesPType);
                 children[2] = WriteIndexArray(blob, encodings, plan.ExceptionRows, indicesPType);
-                (byte[] values, int length) = plan.TakeExceptionValues();
+                (Block<byte> values, int length) = plan.TakeExceptionValues();
                 children[3] = WriteRawPrimitive(
                     blob, encodings, new PendingBuffer(values, length, Exponent(sizeof(ushort)), rented: true));
                 childCount = 4;
@@ -1424,9 +1416,9 @@ internal static class ArrayBlobWriter
         CanonicalNode node = arena.GetNode(nodeIndex);
         int buffers = plan.ChunkCount + plan.PageCount;
 
-        // The buffers are cut from one rental whose ownership moves here, as zstd's frames are: only
-        // the last says it is rented, so the array goes back once, after the blob has taken all.
-        byte[] data = plan.TakeData();
+        // The buffers are cut from one block whose ownership moves here, as zstd's frames are: only
+        // the last says it is rented, so the block goes back once, after the blob has taken all.
+        Block<byte> data = plan.TakeData();
         Span<ushort> stack = stackalloc ushort[64];
         using Scratch<ushort> scratch = new Scratch<ushort>(buffers, stack);
         Span<ushort> indices = scratch.Span;
@@ -1438,7 +1430,7 @@ internal static class ArrayBlobWriter
 
         if (buffers == 0)
         {
-            WorkArrays.Return(data);
+            Blocks.Return(data);
         }
 
         Span<int> children = stackalloc int[1];
@@ -1493,7 +1485,7 @@ internal static class ArrayBlobWriter
         VortexBuffer lengths;
         try
         {
-            byte[] dictionary = WorkArrays.Rent<byte>(plan.DictionaryBytes);
+            Block<byte> dictionary = Blocks.Rent<byte>(plan.DictionaryBytes);
             plan.Dictionary.CopyTo(dictionary);
             dictionaryBuffer = Add(blob, new PendingBuffer(dictionary, plan.DictionaryBytes, Exponent(8), rented: true));
             dictionaryOffsetsPType = FsstPlan.IndexPType(plan.DictionaryOffsets[tokens]);
@@ -1556,10 +1548,12 @@ internal static class ArrayBlobWriter
         PType indicesPType = FsstPlan.IndexPType(rows - 1);
         int width = indicesPType.ByteWidth();
         VortexBuffer indices = arena.AllocateUninitialized(valid * width, width, out Span<byte> into);
-        int[] positions = WorkArrays.Rent<int>(Math.Max(valid, 1));
+        Block<int> rented = Blocks.Rent<int>(Math.Max(valid, 1));
         int values;
         try
         {
+            Span<int> positions = rented;
+
             // The positions a word at a time, each set bit one valid row.
             ReadOnlySpan<byte> bits = mask.Bits;
             int offset = mask.BitOffset;
@@ -1595,11 +1589,11 @@ internal static class ArrayBlobWriter
                 }
             }
 
-            values = CanonicalFilter.Apply(arena, nodeIndex, positions.AsSpan(0, valid));
+            values = CanonicalFilter.Apply(arena, nodeIndex, positions[..valid]);
         }
         finally
         {
-            WorkArrays.Return(positions);
+            Blocks.Return(rented);
         }
 
         Span<int> children = stackalloc int[2];
@@ -1627,7 +1621,7 @@ internal static class ArrayBlobWriter
         ref ProtoWriter writer = ref blob.Metadata();
         ScalarProtobuf.WriteValue(ref writer, value);
         ReadOnlySpan<byte> scalar = writer.WrittenSpan;
-        byte[] bytes = WorkArrays.Rent<byte>(scalar.Length);
+        Block<byte> bytes = Blocks.Rent<byte>(scalar.Length);
         scalar.CopyTo(bytes);
         return Add(blob, new PendingBuffer(bytes, scalar.Length, alignmentExponent: 0, rented: true));
     }
@@ -1801,7 +1795,7 @@ internal static class ArrayBlobWriter
         // chooser handed over goes back to the pool rather than becoming a row vector of garbage.
         if (plan.CodesRented)
         {
-            WorkArrays.Return(plan.Codes);
+            Blocks.Return(plan.Codes);
         }
         int valuesNode = WriteCompressed(blob, arena, values, encodings, cascade: Cascade.ValuesChild(owner));
 
@@ -1916,12 +1910,12 @@ internal static class ArrayBlobWriter
     {
         int width = ptype.ByteWidth();
         int length = values.Length * width;
-        byte[] bytes = WorkArrays.Rent<byte>(length);
+        Block<byte> bytes = Blocks.Rent<byte>(length);
         Span<ushort> indices = stackalloc ushort[1];
         indices[0] = (ushort)Add(blob, new PendingBuffer(bytes, length, Exponent(width), rented: true));
 
-        // Every byte of the slice, which is what makes the rental's leftovers safe to leave.
-        WriteIndices(values, width, bytes.AsSpan(0, length));
+        // Every byte of the block, which is what makes its leftovers safe to leave.
+        WriteIndices(values, width, bytes);
         return Node(blob, encodings, "vortex.primitive"u8, default, [], indices);
     }
 
@@ -2030,7 +2024,7 @@ internal static class ArrayBlobWriter
         Span<byte> flat = bytes.Slice(bytes.Length - sizeof(uint) - flatLength, flatLength);
         int budget = VortexLimits.MaxFlatBufferTables;
         FlatBufferTable array = FlatBufferTable.Root(flat, ref budget);
-        int[] seen = WorkArrays.Rent<int>(64);
+        Block<int> seen = Blocks.Rent<int>(64);
         try
         {
             int count = 0;
@@ -2038,12 +2032,12 @@ internal static class ArrayBlobWriter
         }
         finally
         {
-            WorkArrays.Return(seen);
+            Blocks.Return(seen);
         }
     }
 
     private static void Renumber(
-        Span<byte> flat, FlatBufferTable node, ReadOnlySpan<ushort> map, ref int[] seen, ref int count, int depth)
+        Span<byte> flat, FlatBufferTable node, ReadOnlySpan<ushort> map, ref Block<int> seen, ref int count, int depth)
     {
         VortexLimits.CheckDepth(depth, VortexLimits.MaxArrayDepth, "Array");
         int position = node.Position;
@@ -2054,10 +2048,7 @@ internal static class ArrayBlobWriter
 
         if (count == seen.Length)
         {
-            int[] grown = WorkArrays.Rent<int>(count * 2);
-            seen.AsSpan(0, count).CopyTo(grown);
-            WorkArrays.Return(seen);
-            seen = grown;
+            Blocks.Grow(ref seen, count * 2);
         }
 
         seen[count++] = position;
@@ -2242,14 +2233,14 @@ internal static class ArrayBlobWriter
         // offsets stay monotone and the reader never looks at the bytes, because validity already
         // told it not to. The values are then gathered by `ViewHeap`, each view's start in the
         // heap being the row's offset.
-        int[] lengths = WorkArrays.Rent<int>(Math.Max(rows, 1));
-        int[]? offsets = null;
+        Block<int> lengths = Blocks.Rent<int>(rows);
+        Block<int> offsets = default;
         VortexBuffer offsetBuffer;
         PType offsetsPType;
         int heapBuffer;
         try
         {
-            long heapBytes = ViewHeap.Lengths(node, mask, lengths.AsSpan(0, rows));
+            long heapBytes = ViewHeap.Lengths(node, mask, lengths);
             if (heapBytes > int.MaxValue - ViewHeap.Slack)
             {
                 return false;
@@ -2268,22 +2259,19 @@ internal static class ArrayBlobWriter
             // rental queued before the gather so that the blob's `finally` hands it back. The
             // offsets are copied into the arena at their own width and go back at once.
             int heapLength = (int)heapBytes;
-            byte[] heap = WorkArrays.Rent<byte>(heapLength + ViewHeap.Slack);
+            Block<byte> heap = Blocks.Rent<byte>(heapLength + ViewHeap.Slack);
             heapBuffer = Add(blob, new PendingBuffer(heap, heapLength, 0, rented: true));
             int width = offsetsPType.ByteWidth();
             offsetBuffer = arena.AllocateUninitialized((rows + 1) * width, width, out Span<byte> offsetBytes);
-            offsets = WorkArrays.Rent<int>(rows + 1);
-            ViewHeap.Gather(node, lengths.AsSpan(0, rows), heap, offsets.AsSpan(0, rows));
+            offsets = Blocks.Rent<int>(rows + 1);
+            ViewHeap.Gather(node, lengths, heap, offsets.AsSpan(0, rows));
             offsets[rows] = heapLength;
-            WriteIndices(offsets.AsSpan(0, rows + 1), width, offsetBytes);
+            WriteIndices(offsets, width, offsetBytes);
         }
         finally
         {
-            WorkArrays.Return(lengths);
-            if (offsets is not null)
-            {
-                WorkArrays.Return(offsets);
-            }
+            Blocks.Return(lengths);
+            Blocks.Return(offsets);
         }
 
         Span<int> children = stackalloc int[2];
@@ -2966,47 +2954,28 @@ internal static class ArrayBlobWriter
     private static long Align(long offset, int alignment) =>
         (offset + alignment - 1) & ~((long)alignment - 1);
 
-    /// <summary>One serialized array, in a buffer the caller gives back.</summary>
+    /// <summary>One serialized array, in a block the caller gives back.</summary>
     /// <remarks>
-    /// <para>
     /// The blob is rented rather than allocated: there is one per column per chunk, and none of
     /// them survives the <c>WriteAsync</c> that consumes it, so none of them needs to be allocated.
-    /// </para>
-    /// <para>
-    /// The length is separate from the array, for the same reason
-    /// <see cref="PendingBuffer.Length"/> is: a rented array is at least as long as asked for and
-    /// usually longer, so <c>Bytes.Length</c> is not the number of bytes that belong in the file.
-    /// Every consumer takes <see cref="Memory"/> or <see cref="Length"/> and never the array's own.
-    /// </para>
     /// </remarks>
     internal readonly struct BlobLease : IDisposable
     {
-        private readonly byte[]? _bytes;
+        private readonly Block<byte> _bytes;
 
-        internal BlobLease(byte[] bytes, int length)
-        {
-            _bytes = bytes;
-            Length = length;
-        }
+        internal BlobLease(Block<byte> bytes) => _bytes = bytes;
 
-        /// <summary>Bytes of the rental that belong in the file.</summary>
-        internal int Length { get; }
+        /// <summary>Bytes that belong in the file.</summary>
+        internal int Length => _bytes.Length;
 
         /// <summary>The blob, exactly <see cref="Length"/> bytes of it.</summary>
-        internal ReadOnlyMemory<byte> Memory =>
-            _bytes is null ? default : _bytes.AsMemory(0, Length);
+        internal ReadOnlyMemory<byte> Memory => _bytes.AsMemory();
 
         /// <summary>The blob's bytes, writable, for the one rewrite a blob takes once assembled: its encodings renumbered.</summary>
-        internal Span<byte> Bytes => _bytes is null ? default : _bytes.AsSpan(0, Length);
+        internal Span<byte> Bytes => _bytes.AsSpan();
 
-        /// <summary>Hands the rental back. Safe on a default lease, and safe twice.</summary>
-        public void Dispose()
-        {
-            if (_bytes is not null)
-            {
-                WorkArrays.Return(_bytes);
-            }
-        }
+        /// <summary>Hands the block back. Safe on a default lease; once only otherwise.</summary>
+        public void Dispose() => Blocks.Return(_bytes);
     }
 
     /// <summary>One buffer waiting to be placed in the blob: bytes, a view onto them, or zeros.</summary>
@@ -3018,13 +2987,14 @@ internal static class ArrayBlobWriter
     /// construction.
     /// <para>
     /// The bytes form stays for the buffers a scheme actually produces — a packed block, an FSST
-    /// symbol table, a zstd frame — which have no home but their own array. A run of zeros has no
+    /// symbol table, a zstd frame — which have no home but their own block. A run of zeros has no
     /// home at all: the blob clears it in place, as it clears padding.
     /// </para>
     /// <para>
-    /// The length is separate from the array because of <see cref="Rented"/>: an array from
-    /// <c>ArrayPool</c> is at least as long as asked for and usually longer, so <c>Bytes.Length</c>
-    /// stops being the number of bytes that belong in the file the moment one of these is pooled.
+    /// The length is separate from the block's because several buffers may be cut from one block,
+    /// and a scheme's block may hold more than the bytes it wrote. So the buffer keeps the block's
+    /// bytes alone, beside its own offset and length: a writer queues many of them in a list it
+    /// makes new, and a whole block a buffer would grow that list for nothing.
     /// </para>
     /// </remarks>
     internal readonly struct PendingBuffer
@@ -3033,19 +3003,19 @@ internal static class ArrayBlobWriter
         private readonly VortexBuffer _view;
         private readonly bool _zeros;
 
-        internal PendingBuffer(byte[] bytes, int length, int alignmentExponent, bool rented)
+        internal PendingBuffer(Block<byte> bytes, int length, int alignmentExponent, bool rented)
             : this(bytes, offset: 0, length, alignmentExponent, rented)
         {
         }
 
         /// <summary>
         /// <paramref name="length"/> bytes of <paramref name="bytes"/> from <paramref name="offset"/>:
-        /// several buffers cut from one rental, of which exactly one says it is rented, so that the
-        /// array goes back to the pool once, after the blob has taken them all.
+        /// several buffers cut from one block, of which exactly one says it is rented, so that the
+        /// block goes back to the pool once, after the blob has taken them all.
         /// </summary>
-        internal PendingBuffer(byte[] bytes, int offset, int length, int alignmentExponent, bool rented)
+        internal PendingBuffer(Block<byte> bytes, int offset, int length, int alignmentExponent, bool rented)
         {
-            _bytes = bytes;
+            _bytes = bytes.Bytes;
             Offset = offset;
             Length = length;
             AlignmentExponent = alignmentExponent;
@@ -3070,7 +3040,7 @@ internal static class ArrayBlobWriter
         /// <summary><paramref name="length"/> zero bytes, byte-aligned.</summary>
         internal static PendingBuffer Zeros(int length) => new PendingBuffer(length);
 
-        /// <summary>The pooled array to hand back, or <see langword="null"/> for a view or zeros.</summary>
+        /// <summary>The bytes of the block to hand back, or null for a view or zeros.</summary>
         internal byte[]? Bytes => _bytes;
 
         /// <summary>Whether the buffer is a view onto bytes an arena owns.</summary>
@@ -3129,6 +3099,29 @@ internal static class ArrayBlobWriter
         private ZstdCompressor? _columnZstd;
         private Workspace? _measure;
         private EncodingDictionary? _measureEncodings;
+        private MemoryAccount _account = null!;
+
+        /// <summary>
+        /// Whom the workspace's leaves are counted for: the writer or the indexer it serves, set again when a lane kept from
+        /// one writer serves the next. A block rented before keeps the account it was rented under.
+        /// </summary>
+        internal required MemoryAccount Account
+        {
+            get => _account;
+            set
+            {
+                _account = value;
+                if (_leaves is not null)
+                {
+                    _leaves.Account = value;
+                }
+
+                if (_measure is not null)
+                {
+                    _measure.Account = value;
+                }
+            }
+        }
 
         /// <summary>The builder, cleared by each blob as it starts.</summary>
         internal FlatBufferBuilder Builder { get; } = new FlatBufferBuilder();
@@ -3273,7 +3266,7 @@ internal static class ArrayBlobWriter
             // Never size first: what it measures is the plan every other profile writes.
             _measure ??= new Workspace
             {
-                FrameRows = FrameRows, GranuleRows = GranuleRows, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel,
+                FrameRows = FrameRows, GranuleRows = GranuleRows, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel, Account = Account,
             };
             _measure.ColumnLevel = ColumnLevel;
             if (_measureEncodings is null || _measureEncodings.Target != target)
@@ -3291,7 +3284,7 @@ internal static class ArrayBlobWriter
         /// The arena a shredded chunk lays each of its typed columns out in, alone, while the blob writes it, and empties
         /// before the next (<see cref="VariantShredder"/>).
         /// </summary>
-        internal CanonicalArena Leaves => _leaves ??= new CanonicalArena();
+        internal CanonicalArena Leaves => _leaves ??= new CanonicalArena(64, Account);
 
         /// <summary>
         /// The nodes of shredding <paramref name="plan"/>, which the workspace keeps from one chunk it shreds to the next
@@ -3323,8 +3316,8 @@ internal static class ArrayBlobWriter
                 PendingBuffer pending = _buffers[i];
                 if (pending.IsView && pending.Length > 0)
                 {
-                    byte[] bytes = WorkArrays.Rent<byte>(pending.Length);
-                    pending.CopyTo(bytes.AsSpan(0, pending.Length));
+                    Block<byte> bytes = Blocks.Rent<byte>(pending.Length);
+                    pending.CopyTo(bytes);
                     _buffers[i] = new PendingBuffer(bytes, pending.Length, pending.AlignmentExponent, rented: true);
                 }
             }
@@ -3335,9 +3328,9 @@ internal static class ArrayBlobWriter
         {
             foreach (PendingBuffer pending in _buffers)
             {
-                if (pending.Rented && pending.Bytes is byte[] rented)
+                if (pending.Rented)
                 {
-                    WorkArrays.Return(rented);
+                    Blocks.ReturnBytes(pending.Bytes);
                 }
             }
 

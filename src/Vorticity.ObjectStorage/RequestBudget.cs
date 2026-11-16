@@ -69,6 +69,12 @@ public sealed class RequestBudget
     {
     }
 
+    /// <summary>A shared budget on the clock <paramref name="time"/>, which paces its requests.</summary>
+    internal RequestBudget(int maxInFlight, double requestsPerSecond, TimeProvider time)
+        : this(maxInFlight, requestsPerSecond, time, adapts: false)
+    {
+    }
+
     private RequestBudget(int maxInFlight, double requestsPerSecond, TimeProvider time, bool adapts)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxInFlight);

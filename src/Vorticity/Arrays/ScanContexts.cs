@@ -17,15 +17,12 @@ namespace Vorticity.Arrays;
 /// each; or, up to its ceiling, as many as the scans took at once since it last let them go, which
 /// many questions side by side, a lane each, take past the first bound; a context past what it
 /// keeps is disposed. A context keeps the arrays its widest batch grew,
-/// a few hundred bytes a column, so what a swept pool keeps goes after a collection of the oldest
-/// generation once no scan has taken a context over a minute, and when the machine's memory load
-/// is high.
+/// a few hundred bytes a column, so a swept pool lets go, after each collection of the oldest
+/// generation, of the contexts that sat kept since the one before, and of every context when the
+/// machine's memory load is high.
 /// </remarks>
 internal sealed class ScanContexts : ISweptAfterCollections
 {
-    /// <summary>How long no scan takes a context before a sweep lets the kept ones go.</summary>
-    internal const long IdleMilliseconds = 60_000;
-
     private ScanContext?[] _contexts;
     private readonly Lock _gate = new Lock();
     private int _count;
@@ -40,11 +37,8 @@ internal sealed class ScanContexts : ISweptAfterCollections
     private int _lent;
     private int _mostLent;
 
-    /// <summary>Whether a scan took a context since the last sweep.</summary>
-    private bool _taken;
-
-    /// <summary>When the sweep that last found a context taken ran.</summary>
-    private long _idleSince;
+    /// <summary>The fewest contexts the pool kept since it was last asked what it did not use: none of them was taken.</summary>
+    private int _fewest;
 
     private int _sweeps;
 
@@ -143,9 +137,13 @@ internal sealed class ScanContexts : ISweptAfterCollections
     /// <summary>The sweeps run so far, for tests.</summary>
     internal int Sweeps => Volatile.Read(ref _sweeps);
 
-    /// <summary>A context an earlier scan gave back, bound to <paramref name="file"/>, or a new one.</summary>
+    /// <summary>
+    /// A context an earlier scan gave back, bound to <paramref name="file"/>, or a new one, its blocks and its reads counted
+    /// for <paramref name="account"/> until it is given back.
+    /// </summary>
     /// <param name="file">The file the scan reads.</param>
-    internal ScanContext Rent(VortexFile file)
+    /// <param name="account">Whom the scan's blocks are counted for: its query's, its own, or the file's kept memory for metadata.</param>
+    internal ScanContext Rent(VortexFile file, MemoryAccount account)
     {
         ScanContext? context = null;
         lock (_gate)
@@ -155,10 +153,14 @@ internal sealed class ScanContexts : ISweptAfterCollections
 
         if (context is null)
         {
-            return _metadata ? new ScanContext(file, ScanContext.MetadataCapacity) : ScanContext.Pooled(file);
+            context = _metadata ? new ScanContext(file, ScanContext.MetadataCapacity) : ScanContext.Pooled(file);
+        }
+        else
+        {
+            context.Rebind(file);
         }
 
-        context.Rebind(file);
+        context.Account = account;
         return context;
     }
 
@@ -168,7 +170,8 @@ internal sealed class ScanContexts : ISweptAfterCollections
     /// detached or bound to files, never both.
     /// </summary>
     /// <param name="options">The read options the scan decodes under.</param>
-    internal ScanContext RentDetached(VortexReadOptions options)
+    /// <param name="account">Whom the scan's blocks are counted for.</param>
+    internal ScanContext RentDetached(VortexReadOptions options, MemoryAccount account)
     {
         ScanContext? context = null;
         lock (_gate)
@@ -178,10 +181,14 @@ internal sealed class ScanContexts : ISweptAfterCollections
 
         if (context is null)
         {
-            return new ScanContext([], options);
+            context = new ScanContext([], options);
+        }
+        else
+        {
+            context.RebindDetached(options);
         }
 
-        context.RebindDetached(options);
+        context.Account = account;
         return context;
     }
 
@@ -212,7 +219,6 @@ internal sealed class ScanContexts : ISweptAfterCollections
     /// <summary>A context kept, or null for none; the takings counted. Under the gate.</summary>
     private ScanContext? Take()
     {
-        _taken = true;
         if (++_lent > _mostLent)
         {
             _mostLent = Math.Min(_lent, _ceiling);
@@ -225,6 +231,11 @@ internal sealed class ScanContexts : ISweptAfterCollections
 
         ScanContext context = _contexts[--_count]!;
         _contexts[_count] = null;
+        if (_count < _fewest)
+        {
+            _fewest = _count;
+        }
+
         return context;
     }
 
@@ -237,52 +248,37 @@ internal sealed class ScanContexts : ISweptAfterCollections
     }
 
     /// <summary>
-    /// Disposes the contexts kept when no scan has taken one over <see cref="IdleMilliseconds"/>
-    /// before <paramref name="now"/>, or when <paramref name="everything"/>. A pool a scan took
-    /// from since the last sweep starts its idle time at <paramref name="now"/>.
+    /// Disposes the contexts that sat kept since the pool was last asked, the fewest it kept in between, which no scan
+    /// took; every context kept when <paramref name="everything"/>. The takings of before the contexts let go are
+    /// forgotten: the pool keeps what is lent now and what was taken of late, until scans take more at once again.
     /// </summary>
-    /// <param name="now">The time of the sweep, in the milliseconds of <see cref="Environment.TickCount64"/>.</param>
     /// <param name="everything">Whether the contexts go however recently one was taken: the machine's memory load is high.</param>
-    internal void TrimIdle(long now, bool everything)
+    internal void LetGoUnused(bool everything)
     {
         lock (_gate)
         {
-            if (!everything)
-            {
-                if (_taken)
-                {
-                    _taken = false;
-                    _idleSince = now;
-                    return;
-                }
-
-                if (now - _idleSince < IdleMilliseconds)
-                {
-                    return;
-                }
-            }
-
-            while (_count > 0)
+            int gone = everything ? _count : Math.Min(_fewest, _count);
+            for (; gone > 0; gone--)
             {
                 ScanContext context = _contexts[--_count]!;
                 _contexts[_count] = null;
                 context.Dispose();
             }
 
-            // The takings of before forgotten: the pool keeps its floor until scans take more at once again.
-            _mostLent = _lent;
-            if (_contexts.Length > _floor)
+            _fewest = _count;
+            _mostLent = Math.Min(_ceiling, _lent + _count);
+            if (_count == 0 && _contexts.Length > _floor)
             {
                 _contexts = new ScanContext?[_floor];
             }
         }
     }
 
-    /// <summary>A sweep after a collection: the contexts no scan wanted of late, or all of them when the machine's memory load is high.</summary>
+    /// <summary>A sweep after a collection: the contexts no scan took since the one before, or all of them when the machine's memory load is high.</summary>
     void ISweptAfterCollections.Sweep()
     {
         GCMemoryInfo memory = GC.GetGCMemoryInfo();
-        TrimIdle(Environment.TickCount64, memory.MemoryLoadBytes >= memory.HighMemoryLoadThresholdBytes);
+        LetGoUnused(memory.MemoryLoadBytes >= memory.HighMemoryLoadThresholdBytes);
         Interlocked.Increment(ref _sweeps);
     }
 }

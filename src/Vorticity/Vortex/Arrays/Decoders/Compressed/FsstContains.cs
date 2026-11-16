@@ -1,6 +1,6 @@
 using System;
-using System.Buffers;
 using System.Runtime.CompilerServices;
+using Vorticity.Buffers;
 
 namespace Vorticity.Arrays.Decoders.Compressed;
 
@@ -26,7 +26,7 @@ internal sealed class FsstContains : IDisposable
     /// <summary>The longest pattern matched on codes: its states fit a byte.</summary>
     internal const int MostBytes = 254;
 
-    // Per state, the next state after each byte, and after each code; rented, 256 a state.
+    // Per state, the next state after each byte, and after each code; blocks of the pool, 256 a state.
     private readonly byte[] _bytes;
     private readonly byte[] _codes;
     private readonly int _length;
@@ -48,8 +48,8 @@ internal sealed class FsstContains : IDisposable
         }
 
         int states = length + 1;
-        byte[] bytes = ArrayPool<byte>.Shared.Rent(states * 256);
-        byte[] codes = ArrayPool<byte>.Shared.Rent(states * 256);
+        byte[] bytes = Blocks.Rent<byte>(states * 256).Array();
+        byte[] codes = Blocks.Rent<byte>(states * 256).Array();
 
         // The automaton over bytes: from a state, the pattern's next byte moves on, and any other falls back as far as the
         // pattern's longest border allows, the state it reaches from there.
@@ -136,7 +136,7 @@ internal sealed class FsstContains : IDisposable
     /// <summary>Gives the tables back.</summary>
     public void Dispose()
     {
-        ArrayPool<byte>.Shared.Return(_bytes);
-        ArrayPool<byte>.Shared.Return(_codes);
+        Blocks.ReturnBytes(_bytes);
+        Blocks.ReturnBytes(_codes);
     }
 }

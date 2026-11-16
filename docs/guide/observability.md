@@ -123,8 +123,24 @@ rows whole under that filter would have been spared had the dataset's rows been 
 the figure `VortexDataset.RecommendLayoutAsync` ranks for one handle (see
 [the layout](datasets.md#the-layout)). Summed over the processes, it
 says which column the questions keep paying for. A dataset's compaction lag has no counter, since
-the library keeps no list of the handles a process holds, so export `VortexDataset.Lag` for the
-datasets you care about.
+a tag per dataset would make a series per dataset, so export `VortexDataset.Lag` for the datasets you
+care about.
+
+### The memory
+
+The memory the library holds is on the same meter as gauges, read when a listener collects, one per sort of memory:
+
+| gauge | what it says |
+|---|---|
+| `vortex.memory.limit` | the limit the process is held to, the collector's, the container's or the one the host set ([threads.md](threads.md#the-memory-limit)), less a margin |
+| `vortex.memory.ceiling` | what the reservations of questions and jobs may reach now: the limit, less the rest of the process |
+| `vortex.memory.reserved` | what the questions and the jobs reserved, every budget's together |
+| `vortex.memory.rented` | the bytes of the blocks in use |
+| `vortex.memory.retained`, tagged by `holder` | the bytes kept for the next operations: the pool's (`pool`), its blocks and what its slabs hold free between their pieces, the segment caches' (`segments`), the dataset handles' caches (`datasets`) |
+| `vortex.memory.rest` | the rest of the process, as the library measures it |
+| `vortex.dataset.handles` | the dataset handles open |
+
+`VortexDiagnostics.GetMemoryReport()` returns the same numbers at one instant, for a log line or a health page, with no listener. A handle's caches count from the moment it opens and leave the count when it is disposed. Each number is read on its own, so two of them can disagree by what moved between the reads.
 
 ## The activities
 

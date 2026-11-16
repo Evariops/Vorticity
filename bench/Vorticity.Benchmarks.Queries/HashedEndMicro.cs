@@ -33,8 +33,8 @@ internal static class HashedEndMicro
             Random random = new Random(17);
             HashedId[] batch = new HashedId[1 << 20];
             long begin = Stopwatch.GetTimestamp();
-            (long First, long Peak, long Native, long Committed) writing;
-            (long First, long Peak, long Native, long Committed) ending;
+            (long First, long Peak, long Blocks, long Committed) writing;
+            (long First, long Peak, long Blocks, long Committed) ending;
             double written;
             long allocated;
             WriteReport report;
@@ -59,7 +59,7 @@ internal static class HashedEndMicro
                         }
                     }
 
-                    writing = (memory.First, memory.Peak, memory.PeakNative, memory.PeakCommitted);
+                    writing = (memory.First, memory.Peak, memory.PeakBlocks, memory.PeakCommitted);
                 }
 
                 written = Stopwatch.GetElapsedTime(begin).TotalSeconds;
@@ -67,7 +67,7 @@ internal static class HashedEndMicro
                 using (PeakMemory memory = new PeakMemory())
                 {
                     report = await writer.CompleteAsync();
-                    ending = (memory.First, memory.Peak, memory.PeakNative, memory.PeakCommitted);
+                    ending = (memory.First, memory.Peak, memory.PeakBlocks, memory.PeakCommitted);
                 }
 
                 allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
@@ -80,10 +80,10 @@ internal static class HashedEndMicro
                 $"{rows:N0} random ids, hashed postings of {index / 1e6:F1} MB, written in {written:F1} s and completed in {seconds - written:F1} s"));
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"  writing:    {writing.First / 1e9:F2} GB private at the start, {writing.Peak / 1e9:F2} GB at most (+{(writing.Peak - writing.First) / 1e9:F2}), of which {writing.Native / 1e9:F2} GB native blocks and {writing.Committed / 1e9:F2} GB the collector's"));
+                $"  writing:    {writing.First / 1e9:F2} GB private at the start, {writing.Peak / 1e9:F2} GB at most (+{(writing.Peak - writing.First) / 1e9:F2}), of which {writing.Committed / 1e9:F2} GB the collector's, {writing.Blocks / 1e9:F2} GB of them blocks"));
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"  completing: {ending.First / 1e9:F2} GB private at the start, {ending.Peak / 1e9:F2} GB at most (+{(ending.Peak - ending.First) / 1e9:F2}), of which {ending.Native / 1e9:F2} GB native blocks and {ending.Committed / 1e9:F2} GB the collector's, {allocated / 1e6:F0} MB allocated"));
+                $"  completing: {ending.First / 1e9:F2} GB private at the start, {ending.Peak / 1e9:F2} GB at most (+{(ending.Peak - ending.First) / 1e9:F2}), of which {ending.Committed / 1e9:F2} GB the collector's, {ending.Blocks / 1e9:F2} GB of them blocks, {allocated / 1e6:F0} MB allocated"));
         }
         finally
         {

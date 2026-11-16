@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Vorticity.Aggregating;
+using Vorticity.Buffers;
 using Xunit;
 
 namespace Vorticity.Tests.Aggregation;
@@ -87,7 +88,7 @@ public sealed class CustomAggregatorTests
             mask[row >> 6] |= 1UL << (row & 63);
         }
 
-        ulong[] scratch = [];
+        ScratchBlock<ulong> scratch = default;
         Selection window = RowMasks.Window(mask, rows, start, end, ref scratch);
         List<int> seen = [];
         foreach (int row in window)
@@ -99,7 +100,8 @@ public sealed class CustomAggregatorTests
         Assert.Equal(expected, seen);
         Assert.Equal(expected.Length, window.Count);
         RowMasks.Unclip(scratch, start, end);
-        Assert.All(scratch, word => Assert.Equal(0UL, word));
+        Assert.All(scratch.AsSpan().ToArray(), word => Assert.Equal(0UL, word));
+        Scratch.Return(ref scratch);
     }
 
     private static void AssertFolds(IEnumerable<double?> values, SumCount folded)

@@ -90,6 +90,17 @@ internal sealed class LatencyObjectStore(IObjectStore inner) : IObjectStore
         return read;
     }
 
+    /// <summary>One request, as a store that streams its answer serves a copy: one wait, then the bytes over the link.</summary>
+    public async ValueTask<long> CopyToAsync(string key, long offset, long length, System.IO.Stream destination, string? ifToken, CancellationToken cancellationToken)
+    {
+        long answered = Answered(key, read: true);
+        Task answer = PreciseDelay.Until(answered);
+        long copied = await inner.CopyToAsync(key, offset, length, destination, ifToken, cancellationToken).ConfigureAwait(false);
+        await answer.ConfigureAwait(false);
+        await TransferAsync(answered, copied).ConfigureAwait(false);
+        return copied;
+    }
+
     public async ValueTask<ObjectRead> ReadTailAsync(string key, Memory<byte> destination, CancellationToken cancellationToken)
     {
         Trace?.WriteLine(string.Create(CultureInfo.InvariantCulture, $"{key}\ttail\t{destination.Length}\t{Stopwatch.GetElapsedTime(_traced).TotalMilliseconds:F1}"));
@@ -186,7 +197,7 @@ internal sealed class LatencyObjectStore(IObjectStore inner) : IObjectStore
     /// Waits for a read's bytes, its first one arriving at <paramref name="first"/>: their turn on the link, which carries
     /// the reads' bytes one after another at its rate, and their time on the read's connection, whichever ends last.
     /// </summary>
-    private Task TransferAsync(long first, int bytes)
+    private Task TransferAsync(long first, long bytes)
     {
         if (bytes <= 0 || (LinkBitsPerSecond <= 0 && BytesPerSecond <= 0))
         {

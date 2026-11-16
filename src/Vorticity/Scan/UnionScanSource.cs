@@ -112,8 +112,22 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
 
     public IAsyncEnumerable<RecordBatch> BatchesAsync(ScanSpec spec, ScanCounters metrics) =>
         spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>()
-        : spec.OrderPath is null ? ConcatAsync(spec, metrics)
-        : SortedAsync(spec, metrics);
+        : spec.OrderPath is not null ? SortedAsync(spec, metrics)
+        : spec.Memory is null ? QuestionAsync(spec, metrics)
+        : ConcatAsync(spec, metrics);
+
+    /// <summary>
+    /// The batches of a scan of the set that is a question of its own: every member's scan under one memory, made as it
+    /// starts and given back as it ends, where each member's made its own.
+    /// </summary>
+    private async IAsyncEnumerable<RecordBatch> QuestionAsync(ScanSpec spec, ScanCounters metrics, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        using QueryMemory.Lease lease = QueryMemory.For(spec, Session);
+        await foreach (RecordBatch batch in ConcatAsync(spec.Under(lease.Memory), metrics, cancellationToken).ConfigureAwait(false))
+        {
+            yield return batch;
+        }
+    }
 
     /// <summary>
     /// The batches of each member <paramref name="spec"/> keeps rows of, the members in their order, the last first for a
@@ -179,7 +193,7 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
         int asked = 0;
         for (int m = 0; m < _members.Length; m++)
         {
-            asked += MemberSpec(m, spec) is null ? 0 : 1;
+            asked += Asks(m, spec) ? 1 : 0;
         }
 
         if (asked <= 1)
@@ -195,7 +209,11 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
         string path = spec.OrderPath!;
         FieldMask mask = new FieldMaskBuilder().Include(spec.Projection ?? FieldMask.All).Include(ToolPaths.Resolve(Schema, path)).Build();
         VortexSchema schema = mask.IsAll ? Schema : ToolPaths.Project(Schema, mask);
-        ScanSpec kept = spec with
+
+        // One question over every member: their rows and the sort under one memory.
+        using QueryMemory.Lease lease = QueryMemory.For(spec, Session);
+        QueryMemory memory = lease.Memory;
+        ScanSpec kept = spec.Under(memory) with
         {
             Backward = false,
             Projection = mask,
@@ -213,7 +231,6 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
             delivered[c] = c;
         }
 
-        using QueryMemory memory = new QueryMemory(Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
         SortKey key = new SortKey(new ColumnFieldExpr(path), TopRows.TypeOf(this, path), spec.Descending);
         ExternalSort sort = new ExternalSort(Session, schema, [key], delivered, memory, GroupBatches.BatchRows);
         await using (sort.ConfigureAwait(false))
@@ -275,10 +292,12 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
                 return null;
             }
 
-            // The first member reads its places where they lie; another one a copy counted from its first row.
+            // The first member reads its places where they lie; another one a copy counted from its first row, held in the
+            // question's memory until the question ends.
             ReadOnlyMemory<long> own = take.Slice(first, last - first);
             if (start != 0)
             {
+                spec.Memory?.Hold((long)(last - first) * sizeof(long), "a union member's places");
                 long[] moved = new long[last - first];
                 for (int i = 0; i < moved.Length; i++)
                 {
@@ -292,6 +311,19 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
         }
 
         return asked;
+    }
+
+    /// <summary>Whether <paramref name="spec"/> asks any of member <paramref name="m"/>'s rows, as <see cref="MemberSpec"/> says, with no copy made.</summary>
+    private bool Asks(int m, ScanSpec spec)
+    {
+        long start = _starts[m];
+        long end = _starts[m + 1];
+        if (end == start || (spec.Rows is { } rows && Math.Max(rows.Start, start) >= Math.Min(rows.End, end)))
+        {
+            return false;
+        }
+
+        return spec.Take is not { } take || LowerBound(take.Span, start) != LowerBound(take.Span, end);
     }
 
     /// <summary>The first of <paramref name="places"/>, which ascend, at or past <paramref name="row"/>.</summary>
@@ -515,6 +547,10 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
     /// </summary>
     public async ValueTask<long[]?> TopPositionsAsync(ScanSpec spec, string path, bool descending, long keep, ScanCounters metrics, CancellationToken cancellationToken)
     {
+        // One question over every member: their tops side by side, the candidates and the top among them under one memory.
+        using QueryMemory.Lease lease = QueryMemory.For(spec, Session);
+        QueryMemory memory = lease.Memory;
+        spec = spec.Under(memory);
         long[]?[] found = await EachAsync<long[]?>(
             spec,
             async (member, asked) =>
@@ -527,7 +563,9 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
             total += places?.Length ?? 0;
         }
 
-        // The members' places at their places in the whole: each member's ascend, and the members follow one another.
+        // The members' places at their places in the whole: each member's ascend, and the members follow one another. Held in
+        // the question's memory, which bounds how many candidates the members may bring.
+        memory.Hold((long)total * sizeof(long), "a union's candidate places");
         long[] candidates = new long[total];
         int at = 0;
         for (int m = 0; m < found.Length; m++)
@@ -568,7 +606,6 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
         };
 
         // The candidates' values, numbered as the candidates are: the top keeps the numbers of the best, a tie to the lower.
-        using QueryMemory memory = new QueryMemory(Session.Options.MemoryBudget ?? QueryMemoryBudget.Process);
         using TopKeep top = new TopKeep(Session, TopRows.TypeOf(this, path), descending, TopRows.Kept(keep), memory);
         FieldExpr column = new ColumnFieldExpr(path);
         long read = 0;

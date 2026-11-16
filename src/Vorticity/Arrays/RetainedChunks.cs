@@ -376,7 +376,8 @@ internal class RetainedChunks : IDisposable
                 for (int i = 0; i < retained; i++)
                 {
                     RetainedChunk spare = RetainedChunkPool.Shared.Rent();
-                    spare.Arena ??= new RetainingArena();
+                    // Kept until a context claims the spare and names its scan's account.
+                    spare.Arena ??= new RetainingArena(MemoryAccount.Kept);
                     Recycle(spare);
                 }
             }

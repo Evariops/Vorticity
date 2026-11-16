@@ -1,8 +1,8 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using Vorticity.Buffers;
 using Vorticity.Serialization.FlatBuffers;
 
 namespace Vorticity.Types.Serialization;
@@ -301,12 +301,13 @@ internal static class DTypeFlatBuffers
             ThrowParallelLengths("Struct_", names.Count, count);
         }
 
-        // Rent at least one element: a zero-length rental is legal but the Math.Max keeps the
-        // "the span is a prefix of the rented array" reasoning uniform for every count.
-        int[] nameHandles = ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
-        DType[] fields = ArrayPool<DType>.Shared.Rent(Math.Max(count, 1));
+        // The names' handles, then the fields' nodes in the arena: integers, which a block holds,
+        // where dtypes would hold a reference to the arena.
+        Block<int> scratch = Blocks.Rent<int>(2 * count);
         try
         {
+            Span<int> nameHandles = scratch.AsSpan(0, count);
+            Span<int> fields = scratch.AsSpan(count, count);
             long nameBytes = 0;
             for (int i = 0; i < count; i++)
             {
@@ -326,21 +327,14 @@ internal static class DTypeFlatBuffers
             for (int i = 0; i < count; i++)
             {
                 FlatBufferTable child = dtypes.GetTable(i);
-                fields[i] = ReadTableCore(in child, arena, depth + 1, ref walk);
+                fields[i] = ReadTableCore(in child, arena, depth + 1, ref walk).NodeIndex;
             }
 
-            return arena.Struct(
-                new ReadOnlySpan<int>(nameHandles, 0, count),
-                new ReadOnlySpan<DType>(fields, 0, count),
-                ToNullability(nullable));
+            return arena.StructOfNodes(nameHandles, fields, ToNullability(nullable));
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(nameHandles);
-
-            // Cleared: a DType holds an arena reference that would otherwise stay rooted by the
-            // pool for as long as the bucket lives.
-            ArrayPool<DType>.Shared.Return(fields, clearArray: true);
+            Blocks.Return(scratch);
         }
     }
 
@@ -422,10 +416,11 @@ internal static class DTypeFlatBuffers
             ThrowTypeIdLength(typeIds.Length, count);
         }
 
-        int[] nameHandles = ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
-        DType[] fields = ArrayPool<DType>.Shared.Rent(Math.Max(count, 1));
+        Block<int> scratch = Blocks.Rent<int>(2 * count);
         try
         {
+            Span<int> nameHandles = scratch.AsSpan(0, count);
+            Span<int> fields = scratch.AsSpan(count, count);
             long nameBytes = 0;
             for (int i = 0; i < count; i++)
             {
@@ -442,19 +437,14 @@ internal static class DTypeFlatBuffers
             for (int i = 0; i < count; i++)
             {
                 FlatBufferTable child = dtypes.GetTable(i);
-                fields[i] = ReadTableCore(in child, arena, depth + 1, ref walk);
+                fields[i] = ReadTableCore(in child, arena, depth + 1, ref walk).NodeIndex;
             }
 
-            return arena.Union(
-                new ReadOnlySpan<int>(nameHandles, 0, count),
-                new ReadOnlySpan<DType>(fields, 0, count),
-                typeIds,
-                ToNullability(nullable));
+            return arena.UnionOfNodes(nameHandles, fields, typeIds, ToNullability(nullable));
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(nameHandles);
-            ArrayPool<DType>.Shared.Return(fields, clearArray: true);
+            Blocks.Return(scratch);
         }
     }
 
@@ -660,9 +650,9 @@ internal static class DTypeFlatBuffers
     {
         int count = dtype.FieldCount;
 
-        // One scratch array serves both vectors in turn: the name offsets are consumed by
+        // One scratch block serves both vectors in turn: the name offsets are consumed by
         // CreateOffsetVector before the child offsets overwrite them.
-        int[] offsets = ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
+        Block<int> offsets = Blocks.Rent<int>(count);
         try
         {
             for (int i = 0; i < count; i++)
@@ -670,14 +660,14 @@ internal static class DTypeFlatBuffers
                 offsets[i] = builder.CreateStringUtf8(dtype.GetFieldNameUtf8(i));
             }
 
-            int namesVector = builder.CreateOffsetVector(new ReadOnlySpan<int>(offsets, 0, count));
+            int namesVector = builder.CreateOffsetVector(offsets);
 
             for (int i = 0; i < count; i++)
             {
                 offsets[i] = WriteCore(builder, dtype.GetField(i), depth + 1);
             }
 
-            int dtypesVector = builder.CreateOffsetVector(new ReadOnlySpan<int>(offsets, 0, count));
+            int dtypesVector = builder.CreateOffsetVector(offsets);
 
             builder.StartTable();
             builder.AddOffset(StructNames, namesVector);
@@ -687,15 +677,15 @@ internal static class DTypeFlatBuffers
         }
         finally
         {
-            ArrayPool<int>.Shared.Return(offsets);
+            Blocks.Return(offsets);
         }
     }
 
     private static int WriteUnion(FlatBufferBuilder builder, DType dtype, int depth)
     {
         int count = dtype.FieldCount;
-        int[] offsets = ArrayPool<int>.Shared.Rent(Math.Max(count, 1));
-        byte[] typeIds = ArrayPool<byte>.Shared.Rent(Math.Max(count, 1));
+        Block<int> offsets = Blocks.Rent<int>(count);
+        Block<byte> typeIds = Blocks.Rent<byte>(count);
         try
         {
             for (int i = 0; i < count; i++)
@@ -703,14 +693,14 @@ internal static class DTypeFlatBuffers
                 offsets[i] = builder.CreateStringUtf8(dtype.GetFieldNameUtf8(i));
             }
 
-            int namesVector = builder.CreateOffsetVector(new ReadOnlySpan<int>(offsets, 0, count));
+            int namesVector = builder.CreateOffsetVector(offsets);
 
             for (int i = 0; i < count; i++)
             {
                 offsets[i] = WriteCore(builder, dtype.GetField(i), depth + 1);
             }
 
-            int dtypesVector = builder.CreateOffsetVector(new ReadOnlySpan<int>(offsets, 0, count));
+            int dtypesVector = builder.CreateOffsetVector(offsets);
 
             for (int i = 0; i < count; i++)
             {
@@ -719,7 +709,7 @@ internal static class DTypeFlatBuffers
 
             // `[byte]` and `[ubyte]` share the same one-byte-per-element encoding, so the byte
             // vector writer produces exactly the signed vector the schema declares.
-            int typeIdsVector = builder.CreateByteVector(new ReadOnlySpan<byte>(typeIds, 0, count));
+            int typeIdsVector = builder.CreateByteVector(typeIds);
 
             builder.StartTable();
             builder.AddOffset(UnionNames, namesVector);
@@ -730,8 +720,8 @@ internal static class DTypeFlatBuffers
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(typeIds);
-            ArrayPool<int>.Shared.Return(offsets);
+            Blocks.Return(typeIds);
+            Blocks.Return(offsets);
         }
     }
 

@@ -120,6 +120,183 @@ public sealed partial class GroupSpillTests
             .ToDictionary(g => g.Key, g => new SixCount(g.Key.Name, g.Key.Key, g.Key.Small, g.Key.Text, g.Key.Wide, g.Key.Value, g.Count()));
     });
 
+    // A key of each kind of index, a column of it null now and then, spilled under a tenth of its peak: an index writes its null
+    // group once among the groups of a run and reads it back at its place, and a part of a packed key its values once
+    // (d12e6f70, found with a text's nulls the data had not). Each scenario checks the index its plan makes, so that each kind
+    // keeps one.
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task ANullableIntegerKeySpillsAndEndsExact(int degree)
+    {
+        Dictionary<ValueTuple<int?>, MaybeKeyTotal> expected = await SharedAsync("maybe keys", async () =>
+        {
+            (_, Row[] rows) = await Fixture.Async;
+            return rows.GroupBy(r => r.MaybeKey).ToDictionary(g => ValueTuple.Create(g.Key), g => new MaybeKeyTotal(g.Key, g.Count(), g.Sum(r => r.Value)));
+        });
+        await ExactAsync(
+            degree,
+            10,
+            "maybe keys",
+            file => Indexed(file.Scan<Row>().GroupBy(r => r.MaybeKey).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value))), "FixedKeys"),
+            (MaybeKeyTotal total) => ValueTuple.Create(total.Key),
+            expected);
+    }
+
+    [Theory]
+    [InlineData(4)]
+    public async Task ANullableShortTextKeySpillsAndEndsExact(int degree)
+    {
+        Dictionary<ValueTuple<string?>, MaybeTextTotal> expected = await SharedAsync("maybe texts", async () =>
+        {
+            (_, Row[] rows) = await Fixture.Async;
+            return rows.GroupBy(r => r.MaybeText).ToDictionary(g => ValueTuple.Create(g.Key), g => new MaybeTextTotal(g.Key, g.Count(), g.Sum(r => r.Value)));
+        });
+        await ExactAsync(
+            degree,
+            10,
+            "maybe texts",
+            file => Indexed(file.Scan<Row>().GroupBy(r => r.MaybeText).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value))), "ShortTextKeys"),
+            (MaybeTextTotal total) => ValueTuple.Create(total.Text),
+            expected);
+    }
+
+    /// <summary>Texts of 27 bytes, past a short text's word: the index holds them as bytes, which write the null's place as theirs.</summary>
+    [Theory]
+    [InlineData(4)]
+    public async Task ANullableLongTextKeySpillsAndEndsExact(int degree)
+    {
+        Dictionary<ValueTuple<string?>, MaybeTextTotal> expected = await SharedAsync("maybe names", async () =>
+        {
+            (_, Row[] rows) = await Fixture.Async;
+            return rows.GroupBy(r => r.MaybeName).ToDictionary(g => ValueTuple.Create(g.Key), g => new MaybeTextTotal(g.Key, g.Count(), g.Sum(r => r.Value)));
+        });
+        await ExactAsync(
+            degree,
+            10,
+            "maybe names",
+            file => Indexed(file.Scan<Row>().GroupBy(r => r.MaybeName).Select(g => (g.Key, g.Count(), g.Sum(x => x.Value))), "ShortTextKeys"),
+            (MaybeTextTotal total) => ValueTuple.Create(total.Text),
+            expected);
+    }
+
+    /// <summary>Two integers in one word, one of them null now and then, its null a bit of the word.</summary>
+    [Theory]
+    [InlineData(4)]
+    public async Task ANullableIntegerAndAnIntegerSpillAsAWordAndEndExact(int degree)
+    {
+        Dictionary<(int?, int), MaybeKeySmall> expected = await SharedAsync("maybe keys and smalls", async () =>
+        {
+            (_, Row[] rows) = await Fixture.Async;
+            return rows.GroupBy(r => (r.MaybeKey, r.Small)).ToDictionary(g => g.Key, g => new MaybeKeySmall(g.Key.MaybeKey, g.Key.Small, g.Count()));
+        });
+        await ExactAsync(
+            degree,
+            10,
+            "maybe keys and smalls",
+            file => Indexed(file.Scan<Row>().GroupBy(r => (r.MaybeKey, r.Small)).Select(g => (g.Key.MaybeKey, g.Key.Small, g.Count())), "RawKeys"),
+            (MaybeKeySmall count) => (count.Key, count.Small),
+            expected);
+    }
+
+    /// <summary>A text and an integer, both null now and then: their numbers packed into a word of 64 bits.</summary>
+    [Theory]
+    [InlineData(4)]
+    public async Task ANullableTextAndANullableIntegerSpillAsPartsAndEndExact(int degree)
+    {
+        Dictionary<(string?, int?), TextKeyCount> expected = await SharedAsync("maybe texts and keys", async () =>
+        {
+            (_, Row[] rows) = await Fixture.Async;
+            return rows.GroupBy(r => (r.MaybeText, r.MaybeKey)).ToDictionary(g => g.Key, g => new TextKeyCount(g.Key.MaybeText, g.Key.MaybeKey, g.Count()));
+        });
+        await ExactAsync(
+            degree,
+            10,
+            "maybe texts and keys",
+            file => Indexed(file.Scan<Row>().GroupBy(r => (r.MaybeText, r.MaybeKey)).Select(g => (g.Key.MaybeText, g.Key.MaybeKey, g.Count())), "PackedKeys"),
+            (TextKeyCount count) => (count.Text, count.Key),
+            expected);
+    }
+
+    /// <summary>Three columns null now and then: their numbers packed into a word of 128 bits.</summary>
+    [Theory]
+    [InlineData(4)]
+    public async Task ThreeNullableColumnsSpillAsPartsAndEndExact(int degree)
+    {
+        Dictionary<(string?, int?, int?), TextKeySmallCount> expected = await SharedAsync("maybe texts, keys and smalls", async () =>
+        {
+            (_, Row[] rows) = await Fixture.Async;
+            return rows.GroupBy(r => (r.MaybeText, r.MaybeKey, r.MaybeSmall))
+                .ToDictionary(g => g.Key, g => new TextKeySmallCount(g.Key.MaybeText, g.Key.MaybeKey, g.Key.MaybeSmall, g.Count()));
+        });
+        await ExactAsync(
+            degree,
+            10,
+            "maybe texts, keys and smalls",
+            file => Indexed(file.Scan<Row>().GroupBy(r => (r.MaybeText, r.MaybeKey, r.MaybeSmall)).Select(g => (g.Key.MaybeText, g.Key.MaybeKey, g.Key.MaybeSmall, g.Count())), "PackedKeys"),
+            (TextKeySmallCount count) => (count.Text, count.Key, count.Small),
+            expected);
+    }
+
+    /// <summary>Six columns, three of them null now and then, as the tuple of their values and as their parts' numbers.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SixColumnsWithNullsSpillAndEndExact(bool tuples)
+    {
+        Dictionary<(string, int?, int, string?, int, int?), SixMaybeCount> expected = await SharedAsync("six columns with nulls", async () =>
+        {
+            (_, Row[] rows) = await Fixture.Async;
+            return rows.GroupBy(r => (r.Name, r.MaybeKey, r.Small, r.MaybeText, r.Wide, r.MaybeSmall))
+                .ToDictionary(g => g.Key, g => new SixMaybeCount(g.Key.Name, g.Key.MaybeKey, g.Key.Small, g.Key.MaybeText, g.Key.Wide, g.Key.MaybeSmall, g.Count()));
+        });
+        await ExactAsync(
+            4,
+            10,
+            $"six columns with nulls, {(tuples ? "tuples" : "parts")}",
+            file =>
+            {
+                Vorticity.Aggregation grouped = file.Scan<Row>().GroupBy(r => (r.Name, r.MaybeKey, r.Small, r.MaybeText, r.Wide, r.MaybeSmall))
+                    .Select(g => (g.Key.Name, g.Key.MaybeKey, g.Key.Small, g.Key.MaybeText, g.Key.Wide, g.Key.MaybeSmall, g.Count()));
+                grouped.Plan.Tuples = tuples;
+                return Indexed(grouped, tuples ? "TupleKeys" : "PackedKeys");
+            },
+            (SixMaybeCount count) => (count.Name, count.Key, count.Small, count.Text, count.Wide, count.MaybeSmall),
+            expected);
+    }
+
+    /// <summary>Nine columns, three of them null now and then, past what a word packs: each tuple's values encoded into bytes.</summary>
+    [Fact]
+    public async Task NineColumnsWithNullsSpillAsBytesAndEndExact()
+    {
+        Dictionary<(string, int, int, long, string, int, int?, string?, int?), NineMaybeCount> expected = await SharedAsync("nine columns with nulls", async () =>
+        {
+            (_, Row[] rows) = await Fixture.Async;
+            return rows.GroupBy(r => (r.Name, r.Key, r.Small, r.Value, r.Text, r.Wide, r.MaybeKey, r.MaybeText, r.MaybeSmall))
+                .ToDictionary(
+                    g => g.Key,
+                    g => new NineMaybeCount(g.Key.Name, g.Key.Key, g.Key.Small, g.Key.Value, g.Key.Text, g.Key.Wide, g.Key.MaybeKey, g.Key.MaybeText, g.Key.MaybeSmall, g.Count()));
+        });
+        await ExactAsync(
+            4,
+            10,
+            "nine columns with nulls",
+            file => Indexed(
+                file.Scan<Row>().GroupBy(r => (r.Name, r.Key, r.Small, r.Value, r.Text, r.Wide, r.MaybeKey, r.MaybeText, r.MaybeSmall))
+                    .Select(g => (g.Key.Name, g.Key.Key, g.Key.Small, g.Key.Value, g.Key.Text, g.Key.Wide, g.Key.MaybeKey, g.Key.MaybeText, g.Key.MaybeSmall, g.Count())),
+                "CompositeKeys"),
+            (NineMaybeCount count) => (count.Name, count.Key, count.Small, count.Value, count.Text, count.Wide, count.MaybeKey, count.MaybeText, count.MaybeSmall),
+            expected);
+    }
+
+    /// <summary><paramref name="grouped"/>, once its plan is shown to hold its groups in an index whose type's name starts with <paramref name="index"/>.</summary>
+    private static Vorticity.Aggregation Indexed(Vorticity.Aggregation grouped, string index)
+    {
+        Assert.StartsWith(index, grouped.Plan.CreateKeys(sorted: false).GetType().Name, StringComparison.Ordinal);
+        return grouped;
+    }
+
     [Theory]
     [MemberData(nameof(Budgets))]
     public async Task ATextsExtremesByAnIntegerSpillAndEndExact(int degree, int percent)
@@ -755,11 +932,15 @@ public sealed partial class GroupSpillTests
             await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
             Vorticity.Aggregation grouped = query(file);
             Dictionary<TKey, TResult> read = [];
+            long overdrawn = QueryMemory.OverdrawnBytes;
             await foreach (TResult record in grouped.As<TResult>().ToRecordsAsync(Ct))
             {
                 read.Add(keyOf(record), record);
             }
 
+            // No step gave back what the query no longer held: the spill's parts were given back twice, and the budget
+            // counted less than the query held until it ended. The class runs alone, so the process's count is its own.
+            Assert.Equal(overdrawn, QueryMemory.OverdrawnBytes);
             Assert.Equal(expected.Count, read.Count);
             foreach ((TKey key, TResult answer) in expected)
             {
@@ -835,7 +1016,10 @@ public sealed partial class GroupSpillTests
     /// <summary>
     /// The rows, written once for the class: 300 000 names of twelve bytes, 150 000 integer keys, a small
     /// integer, a value of a thousand, texts of seven bytes among 50 000, a price over forty binades,
-    /// of both signs, NaN one row in 97, and integers over a span of 10⁶.
+    /// of both signs, NaN one row in 97, and integers over a span of 10⁶. Then four columns null now and
+    /// then: an integer among 150 000, null one row in 5; a text of seven bytes among 40 000, one in 7; a
+    /// text of 27 bytes among 60 000, past what a short text's word holds, one in 6; a small integer, one
+    /// in 3.
     /// </summary>
     private static class Fixture
     {
@@ -857,7 +1041,11 @@ public sealed partial class GroupSpillTests
                     (long)((mix >> 44) % 1_000),
                     $"t-{(mix >> 8) % 50_000:D5}",
                     price,
-                    (int)((mix >> 24) % 1_000_000));
+                    (int)((mix >> 24) % 1_000_000),
+                    mix % 5 == 0 ? null : (int)((mix >> 28) % 150_000),
+                    mix % 7 == 1 ? null : $"u-{(mix >> 16) % 40_000:D5}",
+                    mix % 6 == 2 ? null : $"a-long-nullable-name-{(mix >> 4) % 60_000:D6}",
+                    mix % 3 == 0 ? null : (int)((mix >> 36) % 5));
             }
 
             string directory = System.IO.Path.Combine(AppContext.BaseDirectory, "group-spill");
@@ -882,7 +1070,8 @@ public sealed partial class GroupSpillTests
     }
 
     [VortexRecord]
-    public partial record struct Row(string Name, int Key, int Small, long Value, string Text, double Price, int Wide);
+    public partial record struct Row(
+        string Name, int Key, int Small, long Value, string Text, double Price, int Wide, int? MaybeKey, string? MaybeText, string? MaybeName, int? MaybeSmall);
 
     [VortexRecord]
     public partial record struct NamePrice(string Name, double Sum, double? Mean);
@@ -928,4 +1117,25 @@ public sealed partial class GroupSpillTests
 
     [VortexRecord]
     public partial record struct KeyCount(int Key, long Count);
+
+    [VortexRecord]
+    public partial record struct MaybeKeyTotal(int? Key, long Count, long Total);
+
+    [VortexRecord]
+    public partial record struct MaybeTextTotal(string? Text, long Count, long Total);
+
+    [VortexRecord]
+    public partial record struct MaybeKeySmall(int? Key, int Small, long Count);
+
+    [VortexRecord]
+    public partial record struct TextKeyCount(string? Text, int? Key, long Count);
+
+    [VortexRecord]
+    public partial record struct TextKeySmallCount(string? Text, int? Key, int? Small, long Count);
+
+    [VortexRecord]
+    public partial record struct SixMaybeCount(string Name, int? Key, int Small, string? Text, int Wide, int? MaybeSmall, long Count);
+
+    [VortexRecord]
+    public partial record struct NineMaybeCount(string Name, int Key, int Small, long Value, string Text, int Wide, int? MaybeKey, string? MaybeText, int? MaybeSmall, long Count);
 }

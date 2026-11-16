@@ -1,10 +1,10 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Vorticity.Compute;
 
 namespace Vorticity.Expressions;
@@ -982,30 +982,16 @@ internal static class Expr
     /// Appends the operands of <paramref name="expr"/>'s run of one operator, in order, or
     /// <paramref name="expr"/> itself when it is not one, to a pooled array.
     /// </summary>
-    internal static void Flatten(bool isAnd, VortexExpr expr, ref VortexExpr[] operands, ref int count)
+    internal static void Flatten(bool isAnd, VortexExpr expr, List<VortexExpr> operands)
     {
         if (expr is LogicalExpr run && run.IsAnd == isAnd)
         {
-            Flatten(isAnd, run.Left, ref operands, ref count);
-            Flatten(isAnd, run.Right, ref operands, ref count);
+            Flatten(isAnd, run.Left, operands);
+            Flatten(isAnd, run.Right, operands);
             return;
         }
 
-        Append(ref operands, ref count, expr);
-    }
-
-    /// <summary>Appends <paramref name="item"/> to a pooled array, which grows from the pool when full.</summary>
-    internal static void Append<T>(ref T[] array, ref int count, T item)
-    {
-        if (count == array.Length)
-        {
-            T[] next = ArrayPool<T>.Shared.Rent(array.Length * 2);
-            array.AsSpan(0, count).CopyTo(next);
-            ArrayPool<T>.Shared.Return(array, clearArray: RuntimeHelpers.IsReferenceOrContainsReferences<T>());
-            array = next;
-        }
-
-        array[count++] = item;
+        operands.Add(expr);
     }
 
     private static bool InBalancedRun(bool isAnd, VortexExpr side) =>
@@ -1022,31 +1008,25 @@ internal static class Expr
             return side;
         }
 
-        VortexExpr[] operands = ArrayPool<VortexExpr>.Shared.Rent(128);
-        int count = 0;
-        try
+        // A list of its own: the operands are references, which no block of the pool holds, and a run is rebuilt
+        // once, as its expression is made.
+        List<VortexExpr> flattened = [];
+        Flatten(isAnd, leaning, flattened);
+        ReadOnlySpan<VortexExpr> operands = CollectionsMarshal.AsSpan(flattened);
+        if (Balance(isAnd, operands) is { } balanced)
         {
-            Flatten(isAnd, leaning, ref operands, ref count);
-            if (Balance(isAnd, operands.AsSpan(0, count)) is { } balanced)
-            {
-                return balanced;
-            }
-
-            // A deep operand would put the balanced tree past the depth: joined one operand at a
-            // time, a tall operand stays near the root.
-            VortexExpr joined = operands[0];
-            for (int i = 1; i < count; i++)
-            {
-                joined = Join(isAnd, joined, operands[i]);
-            }
-
-            return joined;
+            return balanced;
         }
-        finally
+
+        // A deep operand would put the balanced tree past the depth: joined one operand at a
+        // time, a tall operand stays near the root.
+        VortexExpr joined = operands[0];
+        for (int i = 1; i < operands.Length; i++)
         {
-            Array.Clear(operands, 0, count);
-            ArrayPool<VortexExpr>.Shared.Return(operands);
+            joined = Join(isAnd, joined, operands[i]);
         }
+
+        return joined;
     }
 
     private static VortexExpr Chain(bool isAnd, ReadOnlySpan<VortexExpr> operands)

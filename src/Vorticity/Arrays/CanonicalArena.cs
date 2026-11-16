@@ -538,7 +538,7 @@ internal partial class CanonicalArena
     // looks a few blocks further before it goes to the pool: a rent never walks the blocks already
     // handed out. While small allocations are carved from a slab, the field holds the slab, outside
     // the ring, and the slab's next is the cursor.
-    private NativeSegmentOwner? _owned;
+    private BlockOwner? _owned;
 
     // How much of the slab small allocations have carved, or -1 when none has been made since the
     // slab was put back in the ring. The pool's smallest block is 4 KiB, which a buffer of one row
@@ -556,32 +556,53 @@ internal partial class CanonicalArena
     // arena of every scan and every write.
     private VortexBuffer[]? _words;
 
-    private readonly AlignedBufferPool _pool;
+    private readonly BlockPool _pool;
 
-    /// <summary>The pool the arena rents its blocks from.</summary>
-    internal AlignedBufferPool Pool => _pool;
+    /// <summary>The pool the arena rents its blocks from: the library's, or a test's that observes its rents.</summary>
+    internal BlockPool Pool => _pool;
 
-    /// <summary>Creates an arena backed by <see cref="AlignedBufferPool.Shared"/>.</summary>
+    /// <summary>
+    /// Whom the arena's blocks are counted for from now on: the work its nodes are built for, a scan's, a query's, a
+    /// writer's. A block rented before keeps the account it was rented under until it is given back.
+    /// </summary>
+    internal MemoryAccount Account { get; set; }
+
+    /// <summary>
+    /// Creates an arena whose blocks are its caller's, counted nowhere: for the tests, the benchmarks and the tools. Banned in
+    /// the library (<c>BannedSymbols.txt</c>), whose arenas name the account of their work.
+    /// </summary>
     /// <param name="initialCapacity">Hint for the record array's initial size. Must be positive.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="initialCapacity"/> is not positive.</exception>
     public CanonicalArena(int initialCapacity = 64)
-        : this(initialCapacity, AlignedBufferPool.Shared)
+        : this(initialCapacity, MemoryAccount.Caller, MemoryAccount.Pool)
+    {
+    }
+
+    /// <summary>Creates an arena whose blocks come from the library's pool, counted for <paramref name="account"/>.</summary>
+    /// <param name="initialCapacity">Hint for the record array's initial size. Must be positive.</param>
+    /// <param name="account">Whom the arena's blocks are counted for.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="initialCapacity"/> is not positive.</exception>
+    public CanonicalArena(int initialCapacity, MemoryAccount account)
+        : this(initialCapacity, account, MemoryAccount.Pool)
     {
     }
 
     /// <summary>Creates an arena backed by an explicit pool. Tests use this to observe rentals.</summary>
     /// <param name="initialCapacity">Hint for the record array's initial size. Must be positive.</param>
+    /// <param name="account">Whom the arena's blocks are counted for.</param>
     /// <param name="pool">The pool <see cref="Allocate(int, int)"/> rents from.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="initialCapacity"/> is not positive.</exception>
-    /// <exception cref="ArgumentNullException"><paramref name="pool"/> is null.</exception>
-    public CanonicalArena(int initialCapacity, AlignedBufferPool pool)
+    /// <exception cref="ArgumentNullException"><paramref name="account"/> or <paramref name="pool"/> is null.</exception>
+    public CanonicalArena(int initialCapacity, MemoryAccount account, BlockPool pool)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(initialCapacity);
+        ArgumentNullException.ThrowIfNull(account);
         ArgumentNullException.ThrowIfNull(pool);
         _records = new CanonicalRecord[initialCapacity];
         _children = new int[initialCapacity];
         _dataBuffers = new VortexBuffer[8];
         _pool = pool;
+        Account = account;
     }
 
     /// <summary>
@@ -650,23 +671,15 @@ internal partial class CanonicalArena
     /// </summary>
     public void Reset()
     {
-        long held = 0;
-        NativeSegmentOwner? owner = Unchain();
+        BlockOwner? owner = Unchain();
         while (owner is not null)
         {
             // Unlinked before it goes back, because the pool may hand it to another arena at once.
-            NativeSegmentOwner? next = owner.NextOwned;
+            BlockOwner? next = owner.NextOwned;
             owner.NextOwned = null;
             owner.Idle = false;
-            held += owner.InOwnedBatch ? owner.Capacity : 0;
-            owner.InOwnedBatch = false;
             _pool.Return(owner);
             owner = next;
-        }
-
-        if (held != 0)
-        {
-            OwnedBatchBytes.Count(_pool, -held);
         }
 
         Clear();
@@ -686,7 +699,7 @@ internal partial class CanonicalArena
         Span<long> byClass = stackalloc long[32];
         byClass.Clear();
         long held = 0;
-        NativeSegmentOwner? cursor = _owned;
+        BlockOwner? cursor = _owned;
         if (_slabUsed >= 0)
         {
             held += cursor!.Capacity;
@@ -696,7 +709,7 @@ internal partial class CanonicalArena
 
         if (cursor is not null)
         {
-            NativeSegmentOwner owner = cursor;
+            BlockOwner owner = cursor;
             do
             {
                 owner = owner.NextOwned!;
@@ -719,40 +732,6 @@ internal partial class CanonicalArena
     }
 
     /// <summary>
-    /// Counts the blocks of this arena, which a batch its caller owns holds, in
-    /// <see cref="OwnedBatchBytes"/> until <see cref="Reset"/> gives them back or their finalizers
-    /// free them.
-    /// </summary>
-    internal void HoldBlocks()
-    {
-        long held = 0;
-        NativeSegmentOwner? cursor = _owned;
-        if (_slabUsed >= 0)
-        {
-            cursor!.InOwnedBatch = true;
-            held += cursor.Capacity;
-            cursor = cursor.NextOwned;
-        }
-
-        if (cursor is not null)
-        {
-            NativeSegmentOwner owner = cursor;
-            do
-            {
-                owner = owner.NextOwned!;
-                owner.InOwnedBatch = true;
-                held += owner.Capacity;
-            }
-            while (owner != cursor);
-        }
-
-        if (held != 0)
-        {
-            OwnedBatchBytes.Count(_pool, held);
-        }
-    }
-
-    /// <summary>
     /// Clears the counts and keeps the blocks this batch used in the ring, idle, in the order it
     /// rented them, for the next batch's allocations of the same size classes, returning those the
     /// batch before kept and this one did not take.
@@ -766,12 +745,12 @@ internal partial class CanonicalArena
     /// </remarks>
     internal void ResetKeepingBlocks()
     {
-        NativeSegmentOwner? owner = Unchain();
-        NativeSegmentOwner? first = null;
-        NativeSegmentOwner? last = null;
+        BlockOwner? owner = Unchain();
+        BlockOwner? first = null;
+        BlockOwner? last = null;
         while (owner is not null)
         {
-            NativeSegmentOwner? next = owner.NextOwned;
+            BlockOwner? next = owner.NextOwned;
             if (!owner.Idle && owner.RefCount == 1)
             {
                 owner.Idle = true;
@@ -809,35 +788,35 @@ internal partial class CanonicalArena
     /// Every block of the arena in one chain, from the cursor's next to the cursor, the slab put
     /// behind the cursor first; the arena holds none of them after it.
     /// </summary>
-    private NativeSegmentOwner? Unchain()
+    private BlockOwner? Unchain()
     {
-        NativeSegmentOwner? cursor = Settle();
+        BlockOwner? cursor = Settle();
         _owned = null;
         if (cursor is null)
         {
             return null;
         }
 
-        NativeSegmentOwner head = cursor.NextOwned!;
+        BlockOwner head = cursor.NextOwned!;
         cursor.NextOwned = null;
         return head;
     }
 
     /// <summary>Puts the slab, while there is one, in the ring behind the cursor, as the block rented last, and returns the cursor.</summary>
-    private NativeSegmentOwner? Settle()
+    private BlockOwner? Settle()
     {
         if (_slabUsed < 0)
         {
             return _owned;
         }
 
-        NativeSegmentOwner slab = _owned!;
+        BlockOwner slab = _owned!;
         _slabUsed = -1;
         return _owned = Behind(slab.NextOwned, slab);
     }
 
     /// <summary>Links <paramref name="owner"/> into the ring behind <paramref name="cursor"/>, and returns it as the new cursor.</summary>
-    private static NativeSegmentOwner Behind(NativeSegmentOwner? cursor, NativeSegmentOwner owner)
+    private static BlockOwner Behind(BlockOwner? cursor, BlockOwner owner)
     {
         if (cursor is null)
         {
@@ -884,15 +863,15 @@ internal partial class CanonicalArena
     /// of the cursor, or one rented from the pool. A block to hand out goes behind the cursor and
     /// becomes it; a slab leaves the ring.
     /// </summary>
-    private NativeSegmentOwner Rent(int length, int alignment, bool slab)
+    private BlockOwner Rent(int length, int alignment, bool slab)
     {
-        NativeSegmentOwner? cursor = _slabUsed < 0 ? _owned : _owned!.NextOwned;
+        BlockOwner? cursor = _slabUsed < 0 ? _owned : _owned!.NextOwned;
         if (cursor is not null && cursor.NextOwned!.Idle)
         {
-            NativeSegmentOwner.CheckLengthAndAlignment(length, alignment);
+            BlockOwner.CheckLengthAndAlignment(length, alignment);
             int capacity = _pool.CapacityFor(length);
-            NativeSegmentOwner previous = cursor;
-            NativeSegmentOwner owner = cursor.NextOwned;
+            BlockOwner previous = cursor;
+            BlockOwner owner = cursor.NextOwned;
             for (int reach = IdleReach; ;)
             {
                 if (owner.Capacity == capacity)
@@ -944,7 +923,7 @@ internal partial class CanonicalArena
             }
         }
 
-        NativeSegmentOwner rented = _pool.Rent(length, alignment);
+        BlockOwner rented = _pool.Rent(Account, length, alignment);
         if (!slab)
         {
             SetCursor(Behind(cursor, rented));
@@ -953,7 +932,7 @@ internal partial class CanonicalArena
         return rented;
     }
 
-    private void SetCursor(NativeSegmentOwner? cursor)
+    private void SetCursor(BlockOwner? cursor)
     {
         if (_slabUsed < 0)
         {
@@ -1405,7 +1384,7 @@ internal partial class CanonicalArena
     /// <param name="alignment">A power of two in <c>[1, VortexLimits.MaxAlignment]</c>.</param>
     /// <returns>A non-owning view over the block, valid until the next <see cref="Reset"/> call.</returns>
     /// <remarks>
-    /// The block is zero-filled. The pool hands back recycled native memory, and letting a decoder that
+    /// The block is zero-filled. The pool hands back recycled blocks, and letting a decoder that
     /// writes only part of a buffer - a bitmap's trailing bits, a short last FastLanes block -
     /// publish the rest would leak whatever the previous batch, or the previous process activity,
     /// left there.
@@ -1450,7 +1429,7 @@ internal partial class CanonicalArena
             return Carve(byteLength, alignment, out destination);
         }
 
-        NativeSegmentOwner owner = Rent(byteLength, alignment, slab: false);
+        BlockOwner owner = Rent(byteLength, alignment, slab: false);
         destination = owner.WritableSpan;
         return owner.Buffer;
     }
@@ -1492,9 +1471,9 @@ internal partial class CanonicalArena
     /// </summary>
     private unsafe VortexBuffer Carve(int byteLength, int alignment, out Span<byte> destination)
     {
-        int exponent = NativeSegmentOwner.CheckLengthAndAlignment(byteLength, alignment);
+        int exponent = BlockOwner.CheckLengthAndAlignment(byteLength, alignment);
         int start = (_slabUsed + alignment - 1) & -alignment;
-        NativeSegmentOwner? slab = _slabUsed < 0 ? null : _owned;
+        BlockOwner? slab = _slabUsed < 0 ? null : _owned;
         if (slab is null || start + byteLength > slab.Length)
         {
             int slabBytes = slab is null ? FirstSlabBytes : Math.Min(slab.Length * 2, LargestSlabBytes);

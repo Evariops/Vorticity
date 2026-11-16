@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Buffers;
 using Vorticity.Writing;
 
 namespace Vorticity.Aggregating;
@@ -692,7 +693,7 @@ internal ref struct SpillReader(ReadOnlySpan<byte> bytes) : IWordSource
 /// <summary>
 /// The parts of a group by whose lanes wrote their tables to the scratch, read back from the runs: a part
 /// is a stretch of every run's sections, each section's groups made into slots of their own and merged
-/// into the part's table as a lane's table merges into a part's. The table grows from a shelf of its own
+/// into the part's table as a lane's table merges into a part's. The table grows from an account of its own
 /// under the query's memory, each array reserved before it comes: runs that share keys count more
 /// entries than the part holds groups. The files go once the last part is merged.
 /// </summary>
@@ -742,9 +743,9 @@ internal sealed class RunMerge(
 
         // Each array reserved alone, nothing ahead: a quarter of a megabyte ahead a part outweighs the
         // small parts of a small budget.
-        ArrayShelf shelf = new ArrayShelf(memory) { Exact = true };
-        GroupKeys keys = kind.ForSpill(shelf);
-        AggregateSlot[] slots = AggregationPartition.NewSlots(plan, settled, source, out _, shelf);
+        TableArrays account = new TableArrays(memory) { Exact = true };
+        GroupKeys keys = kind.ForSpill(account);
+        AggregateSlot[] slots = AggregationPartition.NewSlots(plan, settled, source, out _, account);
         SpillBuffer? buffer = null;
         long room = 0;
         try
@@ -792,20 +793,27 @@ internal sealed class RunMerge(
             buffer.Release();
             buffer = null;
 
-            // The table as its shelf counts it, and as much again for the batches its builder makes of it.
-            room = shelf.Out;
+            // The table as its account counts it, and as much again for the batches its builder makes of it.
+            room = account.Out;
             if (!memory.TryGrow(room))
             {
                 room = 0;
-                throw memory.Exceeded("merge of a spilled group by", keys.Count, shelf.Out);
+                throw memory.Exceeded("merge of a spilled group by", keys.Count, account.Out);
             }
 
-            return (keys, slots, shelf.Reserved + room, shelf.Out);
+            // What the account holds goes to the part, which gives it back once its batches are done with: the account
+            // forgets it, and the part's arrays go back to the pool counted nowhere. Kept by both, each part was given
+            // back twice, its arrays when built and its reservation when read, and the query's memory fell below zero
+            // in every spilled group by, the budget counting less than the query held until it ended.
+            long reserved = account.Reserved + room;
+            long measured = account.Out;
+            account.Forget();
+            return (keys, slots, reserved, measured);
         }
         catch
         {
             buffer?.Release();
-            shelf.LetGo();
+            account.LetGo();
             memory.Shrink(room);
             throw;
         }
@@ -819,7 +827,19 @@ internal sealed class RunMerge(
     private void MergeSections(SpillRun run, int first, int past, ReadOnlySpan<byte> bytes, GroupKeys keys, AggregateSlot[] slots, PairPass pass)
     {
         SpillReader reader = new SpillReader(bytes);
-        int[] map = [];
+        ScratchBlock<int> map = default;
+        try
+        {
+            MergeSections(run, first, past, ref reader, keys, slots, pass, ref map);
+        }
+        finally
+        {
+            Scratch.Return(ref map);
+        }
+    }
+
+    private void MergeSections(SpillRun run, int first, int past, ref SpillReader reader, GroupKeys keys, AggregateSlot[] slots, PairPass pass, ref ScratchBlock<int> map)
+    {
         for (int section = first; section < past; section++)
         {
             int count = run.Counts[section];
@@ -857,6 +877,13 @@ internal sealed class RunMerge(
 
     /// <summary>The runs' files closed and gone.</summary>
     internal override void Release() => spill.Dispose();
+
+    /// <summary>The part's keys and slots back to the pool, counted nowhere: what they held is the part's to give back.</summary>
+    internal override void LetPartGo(GroupKeys keys, AggregateSlot[] slots)
+    {
+        keys.Release();
+        AggregationPartition.ReleaseSlots(slots);
+    }
 
     internal override AggregationRun Finished(AggregationRun run) => run.Spilled(spill);
 }

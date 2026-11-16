@@ -448,8 +448,8 @@ internal static class RatioCheck
         ["rewritten high card, reference's"] = new(0.890, 29, 0.004),   // 3 passes, spread 0.886-0.890; REBASED UP from 0.875 (a new reference binary): +1.7%
         ["rewritten high card, ours"] = new(0.948, 23, 0.033),   // 3 passes, spread 0.916-0.948; REBASED UP from 0.920 (a new reference binary): +3.0%
         ["key order, sorted column, 1% band"] = new(0.849, 14, 0.024),   // 3 passes, spread 0.829-0.849; REBASED UP from 0.767 (a new reference binary): +10.7%
-        ["key order, uncorrelated, 64 rows"] = new(1.036, 7, 0.036),   // 3 passes, spread 0.999-1.036; REBASED UP from 0.875 (k 8->7): +18.4%
-        ["count, exact cover, 1% band"] = new(1.005, 10, 0.056),   // 3 passes, spread 0.949-1.005; REBASED UP from 0.919 (a new reference binary): +9.4%
+        ["key order, uncorrelated, 64 rows"] = new(0.837, 6, 0.042),   // 3 passes, spread 0.802-0.837; was 1.036, -19.2%: a file's index runs are blocks of the pool
+        ["count, exact cover, 1% band"] = new(0.729, 9, 0.048),   // 3 passes, spread 0.694-0.729; was 1.005, -27.4%: a file's index runs are blocks of the pool
         ["key order, uncorrelated, against a take"] = new(1.418, 8, 0.065),   // 3 passes, spread 1.326-1.418; REBASED UP from 1.209 (k 7->8): +17.3%
         ["filtered scan, string equality, fsst"] = new(0.871, 4, 0.059),   // 3 passes, spread 0.819-0.871; REBASED UP from 0.791 (k 5->4): +10.1%
         ["filtered scan, string prefix, fsst"] = new(1.183, 2, 0.047),   // 3 passes, spread 1.127-1.183; REBASED UP from 1.115 (a new reference binary): +6.1%

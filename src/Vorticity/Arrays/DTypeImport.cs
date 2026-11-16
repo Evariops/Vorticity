@@ -125,22 +125,23 @@ internal static class DTypeImport
     {
         int count = source.FieldCount;
 
-        Scratch<DType> fields = new Scratch<DType>(count, default);
+        // The fields as their nodes in the target arena, which a block holds where dtypes would hold the arena.
+        Scratch<int> fields = new Scratch<int>(count, default);
         Scratch<int> names = new Scratch<int>(count, default);
         Scratch<byte> typeIds = new Scratch<byte>(union ? count : 0, default);
         try
         {
-            Span<DType> fieldSpan = fields.Span;
+            Span<int> fieldSpan = fields.Span;
             Span<int> nameSpan = names.Span;
             for (int i = 0; i < count; i++)
             {
-                fieldSpan[i] = Copy(target, source.GetField(i), ref walk, depth + 1);
+                fieldSpan[i] = Copy(target, source.GetField(i), ref walk, depth + 1).NodeIndex;
                 nameSpan[i] = target.InternName(source.GetFieldNameUtf8(i));
             }
 
             if (!union)
             {
-                return target.Struct(nameSpan, fieldSpan, source.Nullability);
+                return target.StructOfNodes(nameSpan, fieldSpan, source.Nullability);
             }
 
             Span<byte> typeIdSpan = typeIds.Span;
@@ -149,7 +150,7 @@ internal static class DTypeImport
                 typeIdSpan[i] = source.GetTypeId(i);
             }
 
-            return target.Union(nameSpan, fieldSpan, typeIdSpan, source.Nullability);
+            return target.UnionOfNodes(nameSpan, fieldSpan, typeIdSpan, source.Nullability);
         }
         finally
         {

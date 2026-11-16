@@ -63,12 +63,7 @@ A `RecordBatch` has a `Schema`, a `RowCount` and a `StartRow`, and two ways in:
 * `batch.View` gives a `BatchView`, with columns by index or by name, for code that has no record
   type ([untyped-files.md](untyped-files.md)).
 
-After `Dispose`, both throw `ObjectDisposedException`, as does every other member. A batch that is
-never disposed keeps its buffers until a collection finalizes it, and they then go back to the system
-rather than to the pool. To keep such batches from piling up, the library requests a background
-collection once the batches held by callers reach 256 MiB, or an eighth of the memory the GC may use
-when that is less, and again each time that amount doubles. Analyzer VX1002 flags a batch that
-nothing disposes ([diagnostics.md](diagnostics.md)).
+After `Dispose`, both throw `ObjectDisposedException`, as does every other member. A batch's buffers are managed arrays, so a batch that is never disposed is garbage like any other object: the collector takes its buffers back, but to the system rather than to the pool, and the next batch allocates its own again. Such a batch also stays counted in the `vortex.memory.rented` gauge ([observability.md](observability.md#the-memory)), which shows how much callers left undisposed. Analyzer VX1002 flags a batch that nothing disposes ([diagnostics.md](diagnostics.md)).
 
 ## Keeping one batch of many
 
@@ -92,7 +87,7 @@ to keep. `BatchView.ToOwned()` does the same on the tool path.
 
 ## What the copy costs
 
-The batch is copied once, into buffers from the session's pool. The decoded buffers are not handed
+The batch is copied once, into buffers from the library's pool. The decoded buffers are not handed
 over directly because they live alongside the chunks the scan keeps across batches: a batch that took
 them would take the chunk with it, and the next batch of that chunk would have to decode it again.
 

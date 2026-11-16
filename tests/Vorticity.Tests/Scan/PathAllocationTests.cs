@@ -15,7 +15,7 @@
 // quantity that is deterministic: the same build allocates the same bytes on any machine, so it can
 // be a hard barrier rather than a barrier with margin. (With one clause, recorded on
 // AllocationCollection below: deterministic for a process that is not contending on
-// ArrayPool<T>.Shared.) A hard barrier is only worth having where it runs, and what CI runs is
+// its shared pools.) A hard barrier is only worth having where it runs, and what CI runs is
 // `dotnet test`, not BenchmarkDotNet. So the ceilings live here, next to WrittenSizeTests, whose
 // shape this copies deliberately:
 //
@@ -59,9 +59,9 @@ namespace Vorticity.Tests.Scan;
 /// `take 64 rows from 64 splits` gains 576 B.
 ///
 /// The ones that move are the ones that decode the most, and the decode path takes its transients
-/// from <c>ArrayPool&lt;T&gt;.Shared</c> (see <c>Arrays/Kernels/Scratch.cs</c>). That pool
-/// is process-global: when neighbouring test classes have drained its per-core stacks, a Rent that
-/// would have been free allocates a fresh array instead, and the bytes are charged to whoever
+/// from the library's pool (see <c>Buffers/Blocks.cs</c>). That pool is process-global, one
+/// stack a size class: when neighbouring test classes have drained a class, a Rent that would
+/// have been free allocates a fresh array instead, and the bytes are charged to whoever
 /// rented. Nothing regressed and nothing is non-deterministic about the library - the process is
 /// simply a shared resource, the same reason <c>SegmentOwnerTests</c> runs alone.
 ///
@@ -215,7 +215,7 @@ public sealed class PathAllocationTests
         // scan whose reads waited on 2 MiB opens.
         //
         // A file keeps how many bytes of its structures the open parsed, which a dataset weighs the
-        // objects it keeps open by (ObjectCache, MaxOpenObjectBytes): an int, 8 bytes an open on the
+        // objects it keeps open by (ObjectCache, OpenObjectFloorBytes): an int, 8 bytes an open on the
         // axes whose file had no spare room for it (2026-11-10). A question over many small objects
         // opens each again no more, some 18 KB and 11 µs an object.
         ("open, footer only", File, 3_960, FooterOnly),
@@ -390,7 +390,12 @@ public sealed class PathAllocationTests
         //
         // The pushed predicate's plan notes whether an encoding declined it, which the scans of its filter share: 8 bytes on
         // both filtered axes (2026-11-02).
-        ("selective filter, pruning on", File, 35_152, PrunedFilter),
+        //
+        // A scan names the account its blocks count in (decision 1 of the memory plan): the builder, the enumerable and the
+        // enumerator each hold it, and a scan of no question is its own account, the enumerator carrying its budget, its name
+        // and what it holds, where an account of its own took 72 bytes: 56 bytes on this axis, which had 16 to spare
+        // (2026-11-15).
+        ("selective filter, pruning on", File, 35_192, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
@@ -423,16 +428,19 @@ public sealed class PathAllocationTests
         // rather than 39: version 2 of FoR, of bit-packing and of decimal byte parts joined, and
         // fastlanes.transposed_bool left. The open resolves each declared id into two tables, a
         // ushort and an 8-byte location: 24 bytes more, the file's and not the path's.
-        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 3_024, FullScan),
+        //
+        // A scan names the account its blocks count in, and a scan of no question is its own: 48 bytes on each of the three
+        // axes below that had none to spare, as on the pruned filter above (2026-11-15).
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 3_072, FullScan),
         // The page sizes are read in place from the node's metadata rather than into a list a
         // chunk, and the chunk metadata with its ANS tables and the latent states are kept from one
         // decode to the next rather than built by each: 1 536 bytes less on this file's one chunk,
         // and on a column of many chunks of many-bin tables a few hundred kilobytes a chunk.
-        ("scan, vortex.pco", "encodings/pco", 2_952, FullScan),
+        ("scan, vortex.pco", "encodings/pco", 3_000, FullScan),
         // A node's frames go through one ManagedCompressions.Zstd decompressor rather than one each,
         // and the decompressor is the process's, taken for each decode and given back after it,
         // so a warm scan builds none: its tables and buffers are 160 KB at least.
-        ("scan, vortex.zstd", "encodings/zstd", 2_952, FullScan),
+        ("scan, vortex.zstd", "encodings/zstd", 3_000, FullScan),
         // The tail an open reads is 64 KiB, which puts this file's tail at an offset the mapping can
         // lend as it is: the open holds a 48-byte owner of the view where it would copy the tail.
         // The walk of the reads along is behind a reference of the enumerator, 8 bytes, as on every

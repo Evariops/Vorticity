@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Types.Numerics;
 using Vorticity.Writing;
 
@@ -27,44 +28,37 @@ internal sealed class CompositeKeys : GroupKeys
 
     private readonly ColumnShape[] _parts;
     private readonly ByteKeyTable _table;
-    private readonly Int128[][] _decimals;
-    private readonly Int256[][] _wides;
-    private readonly ulong[][] _bits;
-    private readonly ulong[][] _validity;
+    private readonly ScratchBlock<Int128>[] _decimals;
+    private readonly ScratchBlock<Int256>[] _wides;
+    private readonly ScratchBlock<ulong>[] _bits;
+    private readonly ScratchBlock<ulong>[] _validity;
     private readonly bool[] _widened;
     private readonly int[] _lengthsOf;
 
     // The length a part adds to every row when it holds no null and has a fixed width, or 0: such a
     // part is not measured row by row.
     private readonly int[] _uniform;
-    private byte[] _key = new byte[64];
-    private int[] _lengths = [];
-    private int[] _offsets = [];
-    private int[] _cursors = [];
+    private ScratchBlock<byte> _key;
+    private ScratchBlock<int> _lengths;
+    private ScratchBlock<int> _offsets;
+    private ScratchBlock<int> _cursors;
 
     /// <param name="parts">The key's columns.</param>
-    /// <param name="shelf">The lane's shelf the table grows from, under its query's memory; null for a table nothing counts.</param>
-    internal CompositeKeys(ColumnShape[] parts, ArrayShelf? shelf = null)
+    /// <param name="account">The lane's account the table grows from, under its query's memory; null for a table nothing counts.</param>
+    internal CompositeKeys(ColumnShape[] parts, TableArrays? account = null)
     {
         _parts = parts;
-        _table = new ByteKeyTable(shelf);
-        _decimals = new Int128[parts.Length][];
-        _wides = new Int256[parts.Length][];
-        _bits = new ulong[parts.Length][];
-        _validity = new ulong[parts.Length][];
+        _table = new ByteKeyTable(account);
+        _decimals = new ScratchBlock<Int128>[parts.Length];
+        _wides = new ScratchBlock<Int256>[parts.Length];
+        _bits = new ScratchBlock<ulong>[parts.Length];
+        _validity = new ScratchBlock<ulong>[parts.Length];
         _widened = new bool[parts.Length];
         _lengthsOf = new int[parts.Length];
         _uniform = new int[parts.Length];
-        for (int i = 0; i < parts.Length; i++)
-        {
-            _decimals[i] = [];
-            _wides[i] = [];
-            _bits[i] = [];
-            _validity[i] = [];
-        }
     }
 
-    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, int[] rowGroups, GroupRanges ranges)
+    internal override bool Assign(CanonicalArena arena, ReadOnlySpan<int> nodes, int rows, ReadOnlySpan<ulong> selection, Block<int> rowGroups, GroupRanges ranges)
     {
         int uniform = 0;
         for (int p = 0; p < _parts.Length; p++)
@@ -129,16 +123,27 @@ internal sealed class CompositeKeys : GroupKeys
 
     internal override GroupKeys Fresh() => new CompositeKeys(_parts);
 
-    internal override GroupKeys ForPart(ArrayShelf? shelf = null) => new CompositeKeys(_parts, shelf);
+    internal override GroupKeys ForPart(TableArrays? account = null) => new CompositeKeys(_parts, account);
 
     /// <summary>The table of the encoded tuples, the groups' keys.</summary>
     internal override long Footprint => _table.Footprint;
 
-    /// <summary>The table's pages and arrays back to the shelf, as a key of one text column gives its own.</summary>
+    /// <summary>The table's pages and arrays back to the account, as a key of one text column gives its own, and the scratch back to the pool.</summary>
     internal override void Release()
     {
         _table.Release();
         Count = 0;
+        Scratch.Return(ref _key);
+        Scratch.Return(ref _lengths);
+        Scratch.Return(ref _offsets);
+        Scratch.Return(ref _cursors);
+        for (int i = 0; i < _parts.Length; i++)
+        {
+            Scratch.Return(ref _decimals[i]);
+            Scratch.Return(ref _wides[i]);
+            Scratch.Return(ref _bits[i]);
+            Scratch.Return(ref _validity[i]);
+        }
     }
 
     internal override void Keep(ReadOnlySpan<int> groups)
@@ -173,7 +178,7 @@ internal sealed class CompositeKeys : GroupKeys
 
     internal override bool Spills => true;
 
-    internal override GroupKeys ForSpill(ArrayShelf? shelf) => new CompositeKeys(_parts, shelf);
+    internal override GroupKeys ForSpill(TableArrays? account) => new CompositeKeys(_parts, account);
 
     internal override long GrowthFor(int more) => _table.GrowthFor(more);
 

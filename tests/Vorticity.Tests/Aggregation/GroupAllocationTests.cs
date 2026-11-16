@@ -36,7 +36,7 @@ public sealed partial class GroupAllocationTests
     /// <summary>The rows of the file: enough for four lanes to judge their first rows (<see cref="AggregationPartition.LaneRows"/>).</summary>
     private const int Rows = 1_000_000;
 
-    /// <summary>Queries before any measurement: the JIT, its tiers, the pools' first rents and the process's shelf.</summary>
+    /// <summary>Queries before any measurement: the JIT, its tiers and the pools' first rents.</summary>
     private const int WarmUp = 4;
 
     /// <summary>Queries measured, of which the floor is the answer.</summary>
@@ -56,15 +56,15 @@ public sealed partial class GroupAllocationTests
     /// <remarks>
     /// <para>
     /// At one lane a ceiling is the highest floor seen and 512 bytes, rounded up to 512 bytes: what the
-    /// process's shelf holds moves it by a hundred bytes or so; at four, the lanes' schedule moves
+    /// pool holds moves it by a hundred bytes or so; at four, the lanes' schedule moves
     /// the core's splits and batches by a few hundred kilobytes from one run to the next, and the
-    /// process's shelf holds what the suite's other tests left, so a ceiling of the core is the highest
+    /// pool holds what the suite's other tests left, so a ceiling of the core is the highest
     /// floor seen and 256 KiB, rounded up to 64 KiB; four lanes without the core move by a few
     /// kilobytes: the highest floor seen and 16 KiB, rounded up to 4 KiB.
     /// </para>
     /// <para>
     /// Measured without the shuffle of every result's order the tests make: 3 to 4 MB less on the
-    /// core's axes. A lane's arrays come from the process's shelf and go back to it, as they grow and
+    /// core's axes. A lane's arrays come from the pool and go back to it, as they grow and
     /// when its tables die, its cache's and the partition it bypasses it with, where they were left to
     /// the next collection: the core's axes 8 to 17 times lower; a lane alone's a quarter to two fifths
     /// lower, the rest its table, which is the result; and the group of each row is no longer rented
@@ -73,11 +73,11 @@ public sealed partial class GroupAllocationTests
     /// </para>
     /// <para>
     /// A sub-table makes no array before its first group, and lays its records out as its core does; the
-    /// scratch of keys and of the core's appliers comes from the process's shelf and goes back to it:
+    /// scratch of keys and of the core's appliers comes from the pool and goes back to it:
     /// the core's axes a half to a third lower again.
     /// </para>
     /// <para>
-    /// What each query made once goes back to a shelf too: a merge's map of numbers is borrowed, a
+    /// What each query made once goes back to the pool too: a merge's map of numbers is borrowed, a
     /// partition gives the group of each row back once it folds no more, a key's page slabs and a
     /// result column's values are given back, a key's ranges and the core's spread map are made at
     /// their first use or on the stack: a lane alone's small axes three to five times lower, the core's
@@ -85,7 +85,7 @@ public sealed partial class GroupAllocationTests
     /// </para>
     /// <para>
     /// The table a lane alone holds as the result, or the largest a merge in series kept, goes back to
-    /// the process's shelf once delivered, and its order is lent by it: a lane alone no longer grows a
+    /// the pool once delivered, and its order is lent by it: a lane alone no longer grows a
     /// table of its own at every query, its axes 2 to 1 000 times lower (six keys 105 MB to 108 KB).
     /// </para>
     /// </remarks>
@@ -102,7 +102,7 @@ public sealed partial class GroupAllocationTests
         // A long integer a row, hashed: at four lanes, a lane's first rows are all new groups.
         ("hashed integers", 1, GroupCoreReason.None, 101_376, WideAsync),
         //
-        // On this axis and the core's two others, each part is built in an order its shelf lends: 3 to
+        // On this axis and the core's two others, each part is built in an order the pool lends: 3 to
         // 4 MB less, four bytes a group.
         ("hashed integers", 4, GroupCoreReason.FirstRows, 1_245_184, WideAsync),
 
@@ -119,30 +119,30 @@ public sealed partial class GroupAllocationTests
         // its storage and not through a literal, and the instant's zone is no longer decoded to learn
         // whether it has one: 154 MB to 2.2 MB at one lane, 170 MB to 18 MB at four. The decimal's and
         // the uuid's batches, widened to 128 bits, are copied into buffers each slot and each key now
-        // gives back to the process's shelf with the rest of its scratch, where every query took them
+        // gives back to the pool with the rest of its scratch, where every query took them
         // new, 1 MiB a reader: 2.2 MB to 109 KB at one lane, 18 MB to 1.35 MB at four.
         ("typed extremes", 1, GroupCoreReason.None, 109_568, ExtremesAsync),
         ("typed extremes", 4, GroupCoreReason.FirstRows, 1_638_400, ExtremesAsync),
 
         // The hashed integers' groups, with the price of the row of each group's largest value and the
         // day of its first row: the rows chosen are read after the pass, in one take of the file. The
-        // fetch's positions and the values it reads come from the process's shelf and go back to it, the
+        // fetch's positions and the values it reads come from the pool and go back to it, the
         // take reads the sorted positions where they lie rather than two copies of them, and a column of
         // chosen values gives its scratch back: 89 MB to 117 KB at one lane. At four lanes, 97 MB to 9 to
-        // 12 MB, most of it the merge's key tables, which the shelf hands back or not depending on what the
+        // 12 MB, most of it the merge's key tables, which the pool hands back or not depending on what the
         // tests before it left: not held to a ceiling until it does.
         ("chosen rows", 1, GroupCoreReason.None, 117_248, ChosenAsync),
 
         // The hashed integers' groups ordered by their count: the groups in their order, and the copies a filter or a
-        // window of them makes, are arrays of the process's shelf the result holds until it is delivered, where every
+        // window of them makes, are arrays of the pool the result holds until it is delivered, where every
         // query made them new, four bytes a group.
         ("ordered integers", 1, GroupCoreReason.None, 101_376, OrderedAsync),
 
         // The hashed integers' distinct values, a million, told by the core as they enter its sub-tables, which are the
-        // result read whole and go back to the process's shelf once it is delivered: left to the collector, every query
+        // result read whole and go back to the pool once it is delivered: left to the collector, every query
         // made them again, 53.7 MB against 1.6. Its appliers copy values through one outcome each, pointed at each
         // sub-table, where they made one a copy: 1.6 MB to 0.68. Its ceiling is the runner's highest floor (2026-11-12): the
-        // same code reads 0.81 MB or 1.0 to 1.26 MB there from one process to the next, the shelf the tests before it left,
+        // same code reads 0.81 MB or 1.0 to 1.26 MB there from one process to the next, the pool the tests before it left,
         // and 0.62 to 0.69 MB here.
         ("distinct integers", 4, GroupCoreReason.Asked, 1_572_864, DistinctAsync),
     ];

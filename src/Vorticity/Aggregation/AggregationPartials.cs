@@ -7,9 +7,9 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Expressions;
 using Vorticity.Keys;
-using Vorticity.Parquet.Writing;
 using Vorticity.Scanning;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -118,12 +118,12 @@ internal static class AggregationPartials
 
     /// <summary>
     /// Runs <paramref name="query"/>, the partial's (<see cref="AggregationQuery.Partial"/>), and writes its rows of states to
-    /// a file in memory: a block of the engine's pool, which the partial copies once into its own memory and gives back. A
-    /// memory stream behind a pipe made 58.5 MB of a partial of 8.8 MB (a million groups), copying it four times.
+    /// a file in memory: a block of the pool, which the partial copies once into its own memory and gives back. A memory
+    /// stream behind a pipe made 58.5 MB of a partial of 8.8 MB (a million groups), copying it four times.
     /// </summary>
     internal static async ValueTask<AggregationPartial> ExportAsync(AggregationQuery query, CancellationToken cancellationToken)
     {
-        using PooledBytes file = new PooledBytes(query.Session.Options.EnginePool);
+        using BlockBytes file = new BlockBytes();
         VortexFileWriter writer = query.Session.CreateWriter(new BufferPipeWriter(file), query.Schema, VortexWriteOptions.Partial);
         await using (writer.ConfigureAwait(false))
         {

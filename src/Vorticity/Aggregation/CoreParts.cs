@@ -92,8 +92,8 @@ internal sealed class CoreParts : ResultParts
                 }
             }
 
-            // Every part applied: the core's counts are final, and what the parts delivered left on the
-            // shelf goes before the parts spilled come back.
+            // Every part applied: the core's counts are final, and what the parts delivered left in the
+            // core's account goes back to the query before the parts spilled come back.
             _built = null;
             _core.AppliedAll();
             _spilled = _core.SpilledList();
@@ -179,7 +179,7 @@ internal sealed class CoreParts : ResultParts
         _built = null;
     }
 
-    /// <summary>Every part done with, delivered or not: the scratch closed, its file gone, the core's shelf handed on.</summary>
+    /// <summary>Every part done with, delivered or not: the scratch closed, its file gone, the core's account cleared.</summary>
     internal override void Close()
     {
         if (_closed)

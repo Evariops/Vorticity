@@ -3,65 +3,9 @@ using System.Globalization;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using Vorticity.Buffers;
 
 namespace Vorticity.Aggregating;
-
-/// <summary>
-/// The scratch arrays of the steps that grow with the groups — the order of a result, its top, the
-/// sort of the rows a fetch reads, a lane's top — rented from the process's shelf under the query's
-/// memory: reserved before they are rented, at the length
-/// the shelf hands out, and given back with them. What the shelf keeps of them afterwards is the rest
-/// of the process's memory, which the process's budget reads at its next full collection. An array
-/// under a page goes uncounted both ways, as a shelf's.
-/// </summary>
-internal static class QueryArrays
-{
-    /// <summary>The least array counted: a page.</summary>
-    private const long LeastCounted = 4096;
-
-    /// <summary>An array of <paramref name="length"/> elements at least, from the process's shelf (<see cref="ArrayShelf.Rent{T}"/>), reserved first under <paramref name="memory"/> for <paramref name="what"/>.</summary>
-    /// <exception cref="VortexMemoryException">The query's budget does not grant the array.</exception>
-    internal static T[] Rent<T>(QueryMemory? memory, int length, string what) =>
-        TryRent(memory, length, out T[] array) ? array : throw memory!.Exceeded(what, -1, Bytes<T>(Pooled(length)));
-
-    /// <summary>
-    /// <see cref="Rent{T}"/> for a caller that has a way of its own when the query's budget does not grant the array:
-    /// false then, nothing reserved and <paramref name="array"/> empty.
-    /// </summary>
-    internal static bool TryRent<T>(QueryMemory? memory, int length, out T[] array)
-    {
-        if (memory is not null && Bytes<T>(Pooled(length)) is long bytes and >= LeastCounted)
-        {
-            if (!memory.TryGrow(bytes))
-            {
-                array = [];
-                return false;
-            }
-
-            memory.Measure(bytes);
-        }
-
-        array = ArrayShelf.Rent<T>(length);
-        return true;
-    }
-
-    /// <summary>An array <see cref="Rent{T}"/> handed out, back to the process's shelf, its bytes given back to <paramref name="memory"/>.</summary>
-    internal static void Return<T>(QueryMemory? memory, T[] array)
-    {
-        if (memory is not null && Bytes<T>(array.Length) is long bytes and >= LeastCounted)
-        {
-            memory.Shrink(bytes);
-            memory.Measure(-bytes);
-        }
-
-        ArrayShelf.Return(array);
-    }
-
-    /// <summary>The length the shelf hands out for <paramref name="length"/>: its power of two from sixteen, past a gigabyte of elements the length itself.</summary>
-    private static int Pooled(int length) => length <= 1 << 30 ? (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(length, 16)) : length;
-
-    private static long Bytes<T>(int length) => (long)length * Unsafe.SizeOf<T>();
-}
 
 /// <summary>
 /// What one query holds of its <see cref="QueryMemoryBudget"/>: reserved at
@@ -97,8 +41,169 @@ internal sealed class QueryMemory : IDisposable
         budget.Enter();
     }
 
-    /// <summary>When the query began, in <see cref="System.Diagnostics.Stopwatch"/> ticks: what the process's shelf held from before it is another query's.</summary>
-    internal long Started { get; } = System.Diagnostics.Stopwatch.GetTimestamp();
+    /// <summary>The memory of a question that starts here, under <paramref name="session"/>'s budget, the process's when it gives none.</summary>
+    internal static QueryMemory Start(VortexSession session) => new QueryMemory(QueryMemoryBudget.Of(session));
+
+    /// <summary>
+    /// The memory of the question <paramref name="spec"/> serves, or, for a question that starts here, one made under
+    /// <paramref name="session"/>'s budget: the lease gives back only what it made.
+    /// </summary>
+    internal static Lease For(ScanSpec spec, VortexSession session) =>
+        spec.Memory is { } memory ? new Lease(memory, owned: false) : new Lease(Start(session), owned: true);
+
+    /// <summary>
+    /// What a step that reads ahead reserved: <paramref name="bytes"/> of the question's memory, given back when the step
+    /// ends; or a memory of its own, for a step of no question, given back whole. The default reserves nothing.
+    /// </summary>
+    internal readonly struct Reservation(QueryMemory? memory, long bytes, bool owned) : IDisposable
+    {
+        /// <summary>Whether it reserved anything.</summary>
+        internal bool Holds => memory is not null;
+
+        public void Dispose()
+        {
+            if (memory is null)
+            {
+                return;
+            }
+
+            if (owned)
+            {
+                memory.Dispose();
+            }
+            else
+            {
+                memory.Shrink(bytes);
+            }
+        }
+    }
+
+    /// <summary>A question's memory as a step of it holds it: given back when the step ends only when the step started the question.</summary>
+    internal readonly struct Lease(QueryMemory memory, bool owned) : IDisposable
+    {
+        /// <summary>The question's memory.</summary>
+        internal QueryMemory Memory => memory;
+
+        /// <summary>Whether the step started the question, and gives its memory back.</summary>
+        internal bool Owned => owned;
+
+        public void Dispose()
+        {
+            if (owned)
+            {
+                memory.Dispose();
+            }
+        }
+    }
+
+    // The account the query's blocks are counted in, made at the first block it rents.
+    private QuestionAccount? _account;
+
+    /// <summary>
+    /// The account the query's blocks are counted in, its scans' reads and batches, its result's batches and what its sorts
+    /// and tops build: under its budget, given back whole with the rest of the query's memory, whatever a caller still holds
+    /// of its result.
+    /// </summary>
+    internal MemoryAccount Account
+    {
+        get
+        {
+            if (Volatile.Read(ref _account) is { } account)
+            {
+                return account;
+            }
+
+            QuestionAccount made = new QuestionAccount(this);
+            return Interlocked.CompareExchange(ref _account, made, null) ?? made;
+        }
+    }
+
+    /// <summary>
+    /// The account of a question's blocks. What the question reserved already, its lanes' working memory admitted, its
+    /// sorts' and tops' rows, its result, models what its blocks hold: the blocks draw on it first, and only what they hold
+    /// past it is reserved, in the process's budget, where the limit lives, and past its ceiling as a lane's growth is when
+    /// it must be. Without it, a block would be reserved twice, once by the model and once as it is rented, and a question
+    /// would run out at half its budget. A host's budget governs its questions through their models, which give way, spill
+    /// or turn to the core when it refuses them: their blocks past the models, which cannot, would leave those no room.
+    /// </summary>
+    private sealed class QuestionAccount(QueryMemory memory) : MemoryAccount
+    {
+        // What the question's blocks hold now, -1 once its memory is given back; and what they reserved past its own.
+        private long _held;
+        private long _reserved;
+
+        internal override bool TryTake(long bytes)
+        {
+            long held = Interlocked.Add(ref _held, bytes);
+            if (held < bytes)
+            {
+                // Given back: a block rented now is the caller's, counted nowhere.
+                return true;
+            }
+
+            long extra = Math.Max(0, held - memory.Held) - Volatile.Read(ref _reserved);
+            if (extra <= 0)
+            {
+                return true;
+            }
+
+            QueryMemoryBudget budget = memory._budget.Root;
+            if (!budget.TryReserve(extra) && !budget.Force(extra))
+            {
+                Interlocked.Add(ref _held, -bytes);
+                return false;
+            }
+
+            budget.Measure(extra);
+            Interlocked.Add(ref _reserved, extra);
+            return true;
+        }
+
+        internal override void Give(long bytes)
+        {
+            long held = Interlocked.Add(ref _held, -bytes);
+            if (held < 0)
+            {
+                return;
+            }
+
+            // What the blocks reserved past what they still need is given back.
+            long need = Math.Max(0, held - memory.Held);
+            long reserved = Volatile.Read(ref _reserved);
+            while (reserved > need)
+            {
+                long seen = Interlocked.CompareExchange(ref _reserved, need, reserved);
+                if (seen == reserved)
+                {
+                    memory._budget.Root.Release(reserved - need);
+                    memory._budget.Root.Returned(reserved - need);
+                    return;
+                }
+
+                reserved = seen;
+            }
+        }
+
+        /// <summary>Gives back what the blocks reserved: what comes back after is ignored.</summary>
+        internal void Close()
+        {
+            Interlocked.Exchange(ref _held, long.MinValue / 2);
+            long reserved = Interlocked.Exchange(ref _reserved, 0);
+            if (reserved > 0)
+            {
+                memory._budget.Root.Release(reserved);
+                memory._budget.Root.Returned(reserved);
+            }
+        }
+
+        internal override VortexMemoryException Refused(long bytes) => memory.Exceeded("query's block", -1, bytes);
+    }
+
+    /// <summary>
+    /// The account the blocks of the work <paramref name="memory"/> counts are rented under; for work of no question, an
+    /// estimate's sample folded, the caller's, counted nowhere: what it builds may reach a caller, whom no account outlives.
+    /// </summary>
+    internal static MemoryAccount AccountOf(QueryMemory? memory) => memory?.Account ?? MemoryAccount.Caller;
 
     /// <summary>The bytes the query holds of its budget.</summary>
     internal long Held => Volatile.Read(ref _held);
@@ -232,12 +337,61 @@ internal sealed class QueryMemory : IDisposable
         Raise(Interlocked.Add(ref _held, bytes));
     }
 
-    /// <summary>Gives back <paramref name="bytes"/> the query held.</summary>
+    /// <summary>
+    /// Gives back <paramref name="bytes"/> the query held, what it holds at most: past that, the bytes were given back
+    /// already, and giving them back again would have the budget count less than the query holds.
+    /// </summary>
+    /// <remarks>
+    /// The spill's parts were given back twice, their arrays as they were built and their reservation as they were read,
+    /// and a core's small batches gave back bytes no one had reserved: the query's memory fell below zero in every spilled
+    /// group by, to −1.8 MB under a process held to 8 GiB, and the budget counted that much less than the query held
+    /// until it ended (2026-11-15). Both are fixed; what a step still gives back past what the query holds is counted
+    /// (<see cref="OverdrawnBytes"/>) and told (<see cref="Overdrawn"/>), never given back.
+    /// </remarks>
     internal void Shrink(long bytes)
     {
-        Interlocked.Add(ref _held, -bytes);
-        _budget.Release(bytes);
+        long held = Volatile.Read(ref _held);
+        while (true)
+        {
+            long given = Math.Min(bytes, Math.Max(0, held));
+            long seen = Interlocked.CompareExchange(ref _held, held - given, held);
+            if (seen != held)
+            {
+                held = seen;
+                continue;
+            }
+
+            if (given < bytes)
+            {
+                Interlocked.Add(ref _overdrawn, bytes - given);
+                Interlocked.Add(ref s_overdrawn, bytes - given);
+                Overdrawn?.Invoke(this, held, bytes);
+            }
+
+            if (given > 0)
+            {
+                _budget.Release(given);
+            }
+
+            return;
+        }
     }
+
+    // The bytes the queries of the process gave back past what they held, since it started; and this query's.
+    private static long s_overdrawn;
+    private long _overdrawn;
+
+    /// <summary>The bytes this query gave back past what it held: zero, unless a step gives back twice.</summary>
+    internal long Overdraft => Interlocked.Read(ref _overdrawn);
+
+    /// <summary>The bytes the queries of the process gave back past what they held, since it started: zero, unless a step gives back twice.</summary>
+    internal static long OverdrawnBytes => Interlocked.Read(ref s_overdrawn);
+
+    /// <summary>
+    /// What a tool is told of each time a query gives back more than it holds, the query's memory, the bytes it held and
+    /// those it gave back; null, and nothing is.
+    /// </summary>
+    internal static Action<QueryMemory, long, long>? Overdrawn;
 
     /// <summary>Its tables hold <paramref name="delta"/> bytes more, or less: what they let go stays in the heap until a collection takes it.</summary>
     internal void Measure(long delta)
@@ -316,12 +470,12 @@ internal sealed class QueryMemory : IDisposable
             _budget.Measure(-measured);
         }
 
+        // The blocks' account closed: a result's batches are the caller's from now on, counted nowhere.
+        Volatile.Read(ref _account)?.Close();
+
         if (Interlocked.Exchange(ref _left, 1) == 0)
         {
             _budget.Leave();
-
-            // The next query of its kind will hold as much: the process's shelf keeps up to that, for it.
-            ArrayShelf.Retained.Expect(Peak);
         }
     }
 

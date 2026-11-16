@@ -30,8 +30,11 @@ internal static class ResultValues
             return;
         }
 
-        ElementWriter.Append(store.Leaf, new ReadOnlySpan<T>(values, 0, count));
+        Append(store, new ReadOnlySpan<T>(values, 0, count));
     }
+
+    /// <summary>Appends <paramref name="values"/>, which are no records, to <paramref name="store"/>, each converted to the column's storage.</summary>
+    internal static void Append<T>(ColumnStore store, ReadOnlySpan<T> values) => ElementWriter.Append(store.Leaf, values);
 
     /// <summary>Copies every row of column <paramref name="node"/> into <paramref name="destination"/>, a null or the default for a null row.</summary>
     /// <param name="batch">The batch the column belongs to.</param>
@@ -43,24 +46,29 @@ internal static class ResultValues
     /// <param name="record">How to read a record, when <typeparamref name="T"/> is one.</param>
     internal static void Copy<T>(RecordBatch? batch, CanonicalArena arena, int node, VortexType type, VortexExtensionRegistry? extensions, T[] destination, IVortexRecord? record)
     {
-        // A date, a time, a timestamp or a uuid is its storage plus a label, as a column reads it.
-        while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
+        if (record is null)
         {
-            node = arena.GetNode(node).StorageIndex;
-        }
-
-        int rows = arena.RecordRef(node).Length;
-        Span<T> into = destination.AsSpan(0, rows);
-        if (record is not null)
-        {
-            CopyRecords(batch, arena, node, type, extensions, destination, rows, record);
+            Copy(arena, node, type, destination.AsSpan());
             return;
         }
 
+        node = Storage(arena, node);
+        CopyRecords(batch, arena, node, type, extensions, destination, arena.RecordRef(node).Length, record);
+    }
+
+    /// <summary>Copies every row of column <paramref name="node"/>, which holds no records, into <paramref name="destination"/>, a null or the default for a null row.</summary>
+    /// <param name="arena">The batch's arena.</param>
+    /// <param name="node">The column's node.</param>
+    /// <param name="type">The column's type.</param>
+    /// <param name="destination">At least the column's rows.</param>
+    internal static void Copy<T>(CanonicalArena arena, int node, VortexType type, Span<T> destination)
+    {
+        node = Storage(arena, node);
+        Span<T> into = destination[..arena.RecordRef(node).Length];
         if (IsPrimitive<T>())
         {
             ReadOnlySpan<byte> bytes = ColumnData.Values(arena, node);
-            MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<byte, T>(ref MemoryMarshal.GetReference(bytes)), rows).CopyTo(into);
+            MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<byte, T>(ref MemoryMarshal.GetReference(bytes)), into.Length).CopyTo(into);
             return;
         }
 
@@ -185,6 +193,17 @@ internal static class ResultValues
         {
             throw new NotSupportedException($"A result of {ClrFit.Name(typeof(T))} is not read as a value; read it through a record, As<TRecord>().");
         }
+    }
+
+    /// <summary>The node a date, a time, a timestamp or a uuid keeps its values in: its storage, the label aside, as a column reads it.</summary>
+    private static int Storage(CanonicalArena arena, int node)
+    {
+        while (arena.RecordRef(node).Kind == CanonicalKind.Extension)
+        {
+            node = arena.GetNode(node).StorageIndex;
+        }
+
+        return node;
     }
 
     private static void CopyRecords<T>(RecordBatch? batch, CanonicalArena arena, int structure, VortexType type, VortexExtensionRegistry? extensions, T[] destination, int rows, IVortexRecord record)

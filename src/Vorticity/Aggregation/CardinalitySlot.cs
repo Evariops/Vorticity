@@ -6,6 +6,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 
 namespace Vorticity.Aggregating;
 
@@ -22,8 +23,8 @@ internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
     // generation, 645 ms and 146 MB a question.
     private const int Firsts = 4;
     private const byte InSketch = Firsts + 1;
-    private ulong[] _firsts = [];
-    private byte[] _held = [];
+    private Block<ulong> _firsts;
+    private Block<byte> _held;
 
     /// <summary>What a value may add at most: a register entry, or a hash kept exactly.</summary>
     private protected override long ValueBytes => sizeof(ulong);
@@ -101,8 +102,8 @@ internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
         if (groups > _held.Length)
         {
             int capacity = Capacity(groups);
-            ArrayShelf.Resize(Shelf, ref _held, capacity);
-            ArrayShelf.Resize(Shelf, ref _firsts, capacity * Firsts);
+            TableArrays.Resize(Account, ref _held, capacity);
+            TableArrays.Resize(Account, ref _firsts, capacity * Firsts);
         }
     }
 
@@ -144,8 +145,8 @@ internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
     internal override void Keep(ReadOnlySpan<int> groups)
     {
         // The kept groups' first hashes taken aside in their order, then put first, as the sketches are.
-        byte[] held = ArrayPool<byte>.Shared.Rent(Math.Max(groups.Length, 1));
-        ulong[] firsts = ArrayPool<ulong>.Shared.Rent(Math.Max(groups.Length * Firsts, 1));
+        Block<byte> held = Blocks.Rent<byte>(groups.Length);
+        Block<ulong> firsts = Blocks.Rent<ulong>(groups.Length * Firsts);
         try
         {
             for (int i = 0; i < groups.Length; i++)
@@ -155,14 +156,14 @@ internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
             }
 
             base.Keep(groups);
-            held.AsSpan(0, groups.Length).CopyTo(_held);
-            firsts.AsSpan(0, groups.Length * Firsts).CopyTo(_firsts);
+            held.CopyTo(_held);
+            firsts.CopyTo(_firsts);
             _held.AsSpan(groups.Length).Clear();
         }
         finally
         {
-            ArrayPool<byte>.Shared.Return(held);
-            ArrayPool<ulong>.Shared.Return(firsts);
+            Blocks.Return(held);
+            Blocks.Return(firsts);
         }
     }
 
@@ -171,16 +172,16 @@ internal abstract class CardinalitySlot : SketchSlot<CardinalitySketch, long>
         base.Release();
         if (_held.Length > 0)
         {
-            Shelf?.Give(_held);
-            Shelf?.Give(_firsts);
-            (_held, _firsts) = ([], []);
+            Account.Return(_held);
+            Account.Return(_firsts);
+            (_held, _firsts) = (default, default);
         }
     }
 
     internal override long Footprint => base.Footprint + ((long)_firsts.Length * sizeof(ulong)) + _held.Length;
 
     /// <remarks>
-    /// The arrays of first hashes grow by doubling, which takes their whole new length from the shelf: asked as such. Asked
+    /// The arrays of first hashes grow by doubling, which takes their whole new length from the account: asked as such. Asked
     /// as a few bytes a group more, a doubling of a lane's arrays went past the budget by a megabyte, overdrawn at a
     /// tenth of the peak.
     /// </remarks>
@@ -396,11 +397,11 @@ internal static class ShortHash
 internal sealed class FixedCardinalitySlot<TValue>(StorageKind kind) : CardinalitySlot
     where TValue : unmanaged
 {
-    private TValue[] _values = [];
+    private ScratchBlock<TValue> _values;
     private MaskCache _rows;
-    private ulong[] _clip = [];
+    private ScratchBlock<ulong> _clip;
 
-    /// <summary>The sketches, then the values widened, the masks joined and the window's words, back to the process's shelf.</summary>
+    /// <summary>The sketches, then the values widened, the masks joined and the window's words, back to the pool.</summary>
     internal override void Release()
     {
         base.Release();
@@ -489,11 +490,11 @@ internal sealed class BytesCardinalitySlot : CardinalitySlot
     private CodeSet _distinct;
 
     // A batch's dictionary entries hashed at their first row: each code's hash, and the batch it was hashed in.
-    private ulong[] _hashes = [];
-    private int[] _hashedIn = [];
+    private ScratchBlock<ulong> _hashes;
+    private ScratchBlock<int> _hashedIn;
     private int _batch;
 
-    /// <summary>The sketches, then the masks joined, the codes met and the entries' hashes, back to the process's shelf.</summary>
+    /// <summary>The sketches, then the masks joined, the codes met and the entries' hashes, back to the pool.</summary>
     internal override void Release()
     {
         base.Release();
@@ -540,13 +541,13 @@ internal sealed class BytesCardinalitySlot : CardinalitySlot
         }
         else if (_batch == int.MaxValue)
         {
-            Array.Clear(_hashedIn);
+            _hashedIn.Clear();
             _batch = 0;
         }
 
         int batch = ++_batch;
-        ulong[] hashes = _hashes;
-        int[] hashedIn = _hashedIn;
+        Span<ulong> hashes = _hashes.AsSpan();
+        Span<int> hashedIn = _hashedIn.AsSpan();
         RowCursor rows = new RowCursor(_rows.And(input, input.Selection, ArenaWords.Validity(arena, input.Node)), input.Start, input.End);
         while (rows.Next(out int row))
         {

@@ -6,6 +6,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Unicode;
+using Vorticity.Buffers;
 
 namespace Vorticity.Types.Variants;
 
@@ -711,39 +712,40 @@ internal static class VariantEncoding
         }
     }
 
-    /// <summary>The scratch of a JSON document's two passes, rented and given back whole.</summary>
+    /// <summary>
+    /// The scratch of a JSON document's two passes, blocks of the pool given back whole. A block that grows is seen at its
+    /// whole capacity, so its length is the room it has, as an array's is.
+    /// </summary>
     private struct JsonWriting
     {
         /// <summary>The value's bytes as far as they are written.</summary>
-        private byte[] _value;
+        private Block<byte> _value;
         private int _length;
 
         /// <summary>Each key's bytes, in the order the text names them, then each occurrence's place and id.</summary>
-        private byte[] _keys;
-        private Occurrence[] _occurrences;
-        private int[] _ids;
+        private Block<byte> _keys;
+        private Block<Occurrence> _occurrences;
+        private Block<int> _ids;
 
         /// <summary>The occurrence the second pass meets next.</summary>
         private int _next;
 
         /// <summary>The members of the containers open, the innermost last.</summary>
-        private Member[] _members;
+        private Block<Member> _members;
         private int _open;
 
         /// <summary>An object's values while they are put in its keys' order.</summary>
-        private byte[] _moved;
+        private Block<byte> _moved;
 
         /// <summary>The dictionary, which names a key an object repeats.</summary>
         private byte[]? _metadata;
 
         internal JsonWriting(int textBytes)
         {
-            _value = ArrayPool<byte>.Shared.Rent(Math.Max(256, textBytes + 64));
-            _keys = ArrayPool<byte>.Shared.Rent(Math.Max(16, textBytes));
-            _occurrences = ArrayPool<Occurrence>.Shared.Rent(32);
-            _ids = [];
-            _members = ArrayPool<Member>.Shared.Rent(32);
-            _moved = [];
+            _value = Whole<byte>(Math.Max(256, textBytes + 64));
+            _keys = Whole<byte>(Math.Max(16, textBytes));
+            _occurrences = Whole<Occurrence>(32);
+            _members = Whole<Member>(32);
         }
 
         internal readonly ReadOnlySpan<byte> Written => _value.AsSpan(0, _length);
@@ -771,7 +773,7 @@ internal static class VariantEncoding
                         {
                             if (count == _occurrences.Length)
                             {
-                                Grow(ref _occurrences, count, count * 2);
+                                Grow(ref _occurrences, count * 2);
                             }
 
                             int length = Unescaped(ref reader, _keys.AsSpan(bytes));
@@ -820,10 +822,10 @@ internal static class VariantEncoding
             }
             else
             {
-                sorted.Sort(new KeyBytes(_keys));
+                sorted.Sort(new KeyBytes(_keys.Array()));
             }
 
-            _ids = ArrayPool<int>.Shared.Rent(count);
+            _ids = Blocks.Rent<int>(count);
             int unique = 0;
             int uniqueBytes = 0;
             for (int i = 0; i < count; i++)
@@ -889,21 +891,14 @@ internal static class VariantEncoding
             }
         }
 
-        internal void Return()
+        internal readonly void Return()
         {
-            ArrayPool<byte>.Shared.Return(_value);
-            ArrayPool<byte>.Shared.Return(_keys);
-            ArrayPool<Occurrence>.Shared.Return(_occurrences);
-            ArrayPool<Member>.Shared.Return(_members);
-            if (_ids.Length > 0)
-            {
-                ArrayPool<int>.Shared.Return(_ids);
-            }
-
-            if (_moved.Length > 0)
-            {
-                ArrayPool<byte>.Shared.Return(_moved);
-            }
+            Blocks.Return(_value);
+            Blocks.Return(_keys);
+            Blocks.Return(_occurrences);
+            Blocks.Return(_members);
+            Blocks.Return(_ids);
+            Blocks.Return(_moved);
         }
 
         private readonly ReadOnlySpan<byte> Key(Occurrence occurrence) => _keys.AsSpan(occurrence.Start, occurrence.Length);
@@ -960,12 +955,8 @@ internal static class VariantEncoding
             {
                 if (_moved.Length < size)
                 {
-                    if (_moved.Length > 0)
-                    {
-                        ArrayPool<byte>.Shared.Return(_moved);
-                    }
-
-                    _moved = ArrayPool<byte>.Shared.Rent(size);
+                    Blocks.Return(_moved);
+                    _moved = Whole<byte>(size);
                 }
 
                 value.Slice(start, size).CopyTo(_moved);
@@ -1088,7 +1079,7 @@ internal static class VariantEncoding
         {
             if (_value.Length - _length < bytes)
             {
-                Grow(ref _value, _length, Math.Max(_value.Length * 2, _length + bytes));
+                Grow(ref _value, Math.Max(_value.Length * 2, _length + bytes));
             }
         }
 
@@ -1096,7 +1087,7 @@ internal static class VariantEncoding
         {
             if (_open == _members.Length)
             {
-                Grow(ref _members, _open, _open * 2);
+                Grow(ref _members, _open * 2);
             }
 
             _members[_open++] = member;
@@ -1131,12 +1122,20 @@ internal static class VariantEncoding
             return length;
         }
 
-        private static void Grow<T>(ref T[] array, int kept, int size)
+        /// <summary>A block of <paramref name="length"/> elements at least, seen at its whole capacity.</summary>
+        private static Block<T> Whole<T>(int length)
+            where T : unmanaged
         {
-            T[] grown = ArrayPool<T>.Shared.Rent(size);
-            array.AsSpan(0, kept).CopyTo(grown);
-            ArrayPool<T>.Shared.Return(array);
-            array = grown;
+            Block<T> block = Blocks.Rent<T>(length);
+            return block.WithLength(block.Capacity);
+        }
+
+        /// <summary><paramref name="block"/> grown to <paramref name="size"/> elements at least, what it held kept, seen at its whole capacity.</summary>
+        private static void Grow<T>(ref Block<T> block, int size)
+            where T : unmanaged
+        {
+            Blocks.Grow(ref block, size);
+            block = block.WithLength(block.Capacity);
         }
     }
 

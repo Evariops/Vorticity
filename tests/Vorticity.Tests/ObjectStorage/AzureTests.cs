@@ -77,6 +77,42 @@ public sealed class AzureTests
     }
 
     [Fact]
+    public async Task ACopyIsOneRangeAndACopyCutShortAsksForWhatIsLeftOfTheSameBlob()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using AzureEmulator emulator = new AzureEmulator();
+        byte[] content = Encoding.ASCII.GetBytes("0123456789");
+        emulator.Seed(Lake, "f", content);
+        string etag = emulator.ETagOf(Lake, "f");
+        List<string?> matched = [];
+        emulator.Intercept = (request, index) =>
+        {
+            matched.Add(S3ReadTests.IfMatch(request));
+            return index == 1 ? Short(content, 4, etag) : null;
+        };
+        await using AzureBlobObjectStore store = Store(emulator);
+
+        using System.IO.MemoryStream part = new System.IO.MemoryStream();
+        Assert.Equal(5, await store.CopyToAsync("f", 2, 5, part, null, ct));
+        Assert.Equal("23456", Encoding.ASCII.GetString(part.ToArray()));
+
+        using System.IO.MemoryStream copy = new System.IO.MemoryStream();
+        Assert.Equal(10, await store.CopyToAsync("f", 0, 10, copy, null, ct));
+        Assert.Equal(content, copy.ToArray());
+        Assert.Equal(["GET /lake/f bytes=2-6", "GET /lake/f bytes=0-9", "GET /lake/f bytes=4-9"], emulator.Log);
+        Assert.Equal([null, null, etag], matched);
+    }
+
+    /// <summary>A partial answer that announces the whole content and sends <paramref name="sent"/> bytes of it.</summary>
+    private static HttpResponseMessage Short(byte[] content, int sent, string etag)
+    {
+        HttpResponseMessage response = new HttpResponseMessage(System.Net.HttpStatusCode.PartialContent) { Content = new FaultyContent(content, sent, stall: false) };
+        response.Content.Headers.TryAddWithoutValidation("Content-Range", $"bytes 0-{content.Length - 1}/{content.Length}");
+        response.Headers.TryAddWithoutValidation("ETag", etag);
+        return response;
+    }
+
+    [Fact]
     public async Task AHeadAndAListingSayTheLocks()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Layouts;
 using Vorticity.Scanning;
@@ -11,7 +12,7 @@ using Vorticity.Columns;
 namespace Vorticity;
 
 /// <summary>
-/// A batch of rows the caller owns: its buffers come from the session's pool and go back when the
+/// A batch of rows the caller owns: its buffers come from the library's pool and go back when the
 /// batch is disposed. Both the typed and the tool paths hand one out.
 /// </summary>
 /// <remarks>
@@ -38,7 +39,7 @@ public sealed class RecordBatch : IDisposable
     private CanonicalArena _arena;
 
     /// <summary>The arena a disposed copy points at in place of the one it gave back: empty, and never written.</summary>
-    private static readonly CanonicalArena Released = new CanonicalArena(1);
+    private static readonly CanonicalArena Released = new CanonicalArena(1, MemoryAccount.Caller);
     private int _root;
     private DType _schema;
     private int _rowCount;
@@ -252,8 +253,9 @@ public sealed class RecordBatch : IDisposable
         CanonicalArena source, int node, long startRow, VortexSchema? schema, VortexSession? session, ReadOnlySpan<ulong> selection, int selected)
     {
         // As many records as the source holds, which a batch's copy takes about, up to the 64 a wide
-        // batch would grow to anyway: a narrow batch of many, a scan's, then costs a few hundred bytes.
-        CanonicalArena owned = OwnedArenas.Rent(Math.Clamp(source.NodeCount, 8, 64), (session ?? VortexSession.Default).Options.EnginePool);
+        // batch would grow to anyway: a narrow batch of many, a scan's, then costs a few hundred bytes. The copy is the
+        // caller's, counted nowhere, as a delivered result is.
+        CanonicalArena owned = OwnedArenas.Rent(Math.Clamp(source.NodeCount, 8, 64), MemoryAccount.Caller);
         try
         {
             int root = owned.CopyFrom(source, node);
@@ -265,7 +267,6 @@ public sealed class RecordBatch : IDisposable
                 batch.Select(words, selected);
             }
 
-            owned.HoldBlocks();
             return batch;
         }
         catch
@@ -721,8 +722,8 @@ public sealed class RecordBatch : IDisposable
             else
             {
                 // A copy's arena, the only batch that owns one with no context: kept for the next copy, which this batch,
-                // disposed but perhaps still held, no longer reaches; held, it kept the next copy's blocks from their
-                // finalizers when that copy was dropped undisposed.
+                // disposed but perhaps still held, no longer reaches; held, it kept the next copy's blocks from the
+                // collector when that copy was dropped undisposed.
                 CanonicalArena arena = _arena;
                 arena.Reset();
                 _arena = Released;

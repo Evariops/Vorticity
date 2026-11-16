@@ -1,5 +1,4 @@
 using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading;
@@ -358,11 +357,6 @@ public sealed partial class Scan<TRecord>
         }
         finally
         {
-            if (rows.Length > 0)
-            {
-                ArrayPool<TRecord>.Shared.Return(rows, clearArray: RuntimeHelpers.IsReferenceOrContainsReferences<TRecord>());
-            }
-
             End();
         }
     }
@@ -506,17 +500,17 @@ public sealed partial class Scan<TRecord>
     private RecordBatch Own(RecordBatch borrowed) =>
         RecordBatch.Own(borrowed.Arena, borrowed.RootIndex, borrowed.StartRow, Schema, _source.Session, borrowed.SelectionWords, borrowed.SelectedRows);
 
+    /// <remarks>
+    /// The rows lie in an array the enumeration owns, made at its first batch and made again only for a longer one: a
+    /// record may hold references, which no block of the pool holds, and the collector takes the array when the
+    /// enumeration ends.
+    /// </remarks>
     private static int Fill(RecordBatch batch, RecordBinding binding, ref TRecord[] rows)
     {
         int count = batch.RowCount;
         if (rows.Length < count)
         {
-            if (rows.Length > 0)
-            {
-                ArrayPool<TRecord>.Shared.Return(rows, clearArray: RuntimeHelpers.IsReferenceOrContainsReferences<TRecord>());
-            }
-
-            rows = ArrayPool<TRecord>.Shared.Rent(count);
+            rows = new TRecord[count];
         }
 
         Columns<TRecord> columns = new Columns<TRecord>(batch, batch.Arena, batch.RootIndex, binding, batch.StartRow, batch.SelectionWords, batch.SelectedRows, projected: true);

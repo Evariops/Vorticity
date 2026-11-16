@@ -1,10 +1,10 @@
 using System;
-using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Buffers;
 using Vorticity.Types;
 
 namespace Vorticity.Writing;
@@ -33,17 +33,18 @@ internal sealed class DateTimePartsPlan
     /// <summary>A part's node in the tree besides its buffers, in bytes.</summary>
     private const long PartFraming = 48;
 
-    private int[]? _days;
-    private int[]? _seconds;
-    private int[]? _subseconds;
+    // The parts' blocks are held by their bytes, the rows giving their length: a plan a chunk pays for its parts' lengths once.
+    private byte[]? _days;
+    private byte[]? _seconds;
+    private byte[]? _subseconds;
 
     private DateTimePartsPlan(
-        int[] days, int[] seconds, int[] subseconds, int rows, PType daysPType, PType secondsPType, PType subsecondsPType,
+        Block<int> days, Block<int> seconds, Block<int> subseconds, int rows, PType daysPType, PType secondsPType, PType subsecondsPType,
         long encodedSize, Ranges ranges)
     {
-        _days = days;
-        _seconds = seconds;
-        _subseconds = subseconds;
+        _days = days.Bytes;
+        _seconds = seconds.Bytes;
+        _subseconds = subseconds.Bytes;
         Rows = rows;
         DaysPType = daysPType;
         SecondsPType = secondsPType;
@@ -79,13 +80,13 @@ internal sealed class DateTimePartsPlan
     internal long EncodedSize { get; }
 
     /// <summary>Each row's day.</summary>
-    internal ReadOnlySpan<int> Days => _days.AsSpan(0, Rows);
+    internal ReadOnlySpan<int> Days => MemoryMarshal.Cast<byte, int>(_days.AsSpan())[..Rows];
 
     /// <summary>Each row's second within its day.</summary>
-    internal ReadOnlySpan<int> Seconds => _seconds.AsSpan(0, Rows);
+    internal ReadOnlySpan<int> Seconds => MemoryMarshal.Cast<byte, int>(_seconds.AsSpan())[..Rows];
 
     /// <summary>Each row's units within its second.</summary>
-    internal ReadOnlySpan<int> Subseconds => _subseconds.AsSpan(0, Rows);
+    internal ReadOnlySpan<int> Subseconds => MemoryMarshal.Cast<byte, int>(_subseconds.AsSpan())[..Rows];
 
     /// <summary>
     /// The split of an <c>i64</c> chunk of instants in units of <c>1 / unitsPerSecond</c> seconds,
@@ -107,9 +108,9 @@ internal sealed class DateTimePartsPlan
             return null;
         }
 
-        int[] days = ArrayPool<int>.Shared.Rent(rows);
-        int[] seconds = ArrayPool<int>.Shared.Rent(rows);
-        int[] subseconds = ArrayPool<int>.Shared.Rent(rows);
+        Block<int> days = Blocks.Rent<int>(rows);
+        Block<int> seconds = Blocks.Rent<int>(rows);
+        Block<int> subseconds = Blocks.Rent<int>(rows);
         Ranges ranges = default;
         bool split = unitsPerSecond switch
         {
@@ -126,9 +127,9 @@ internal sealed class DateTimePartsPlan
             : long.MaxValue;
         if (cost > ceiling - (ceiling / 10))
         {
-            ArrayPool<int>.Shared.Return(days);
-            ArrayPool<int>.Shared.Return(seconds);
-            ArrayPool<int>.Shared.Return(subseconds);
+            Blocks.Return(days);
+            Blocks.Return(seconds);
+            Blocks.Return(subseconds);
             return null;
         }
 
@@ -190,9 +191,9 @@ internal sealed class DateTimePartsPlan
     {
         if (_days is not null)
         {
-            ArrayPool<int>.Shared.Return(_days);
-            ArrayPool<int>.Shared.Return(_seconds!);
-            ArrayPool<int>.Shared.Return(_subseconds!);
+            Blocks.ReturnBytes(_days);
+            Blocks.ReturnBytes(_seconds);
+            Blocks.ReturnBytes(_subseconds);
             _days = null;
             _seconds = null;
             _subseconds = null;

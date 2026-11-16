@@ -300,7 +300,8 @@ internal sealed partial class DatasetScanBuilder
         (RollupChoice? rollups, List<Planned> units) = await UnitsAsync(answer, explain: false, read: true, shelf, cancellationToken).ConfigureAwait(false);
         using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         int width = Math.Max(1, _dataset.Session.Options.MaxConcurrentReads);
-        CanonicalArena arena = new CanonicalArena(answer.Nodes);
+        // Under the question's account; the process's for states asked of no question, which the arena's reset gives back.
+        CanonicalArena arena = new CanonicalArena(answer.Nodes, _account ?? QueryMemoryBudget.Process.Account);
 
         // The objects that read their rows next, opened ahead, a few at a time, so that each one's open is not a round trip
         // after the reads of the one before; left open in the handle's cache for the read that comes to them.

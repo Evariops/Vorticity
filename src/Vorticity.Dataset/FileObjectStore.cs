@@ -10,6 +10,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
+using Vorticity.Buffers;
 using Vorticity.IO;
 
 namespace Vorticity.Dataset;
@@ -643,7 +644,7 @@ public sealed class FileObjectStore : IObjectStore
         // A piece of the content of some size goes to the file as it lies; smaller ones, which a pipe of small
         // segments hands over, are gathered into one write, so that an object costs a write a megabyte, where a
         // pipe of 4 KiB segments cost one every 4 KiB, half a million for an object of 2 GB.
-        byte[]? gathered = null;
+        Block<byte> gathered = default;
         int held = 0;
         long written = 0;
         try
@@ -674,7 +675,11 @@ public sealed class FileObjectStore : IObjectStore
                         continue;
                     }
 
-                    gathered ??= ArrayPool<byte>.Shared.Rent(GatheredBytes);
+                    if (gathered.IsDefault)
+                    {
+                        gathered = Blocks.Rent<byte>(GatheredBytes);
+                    }
+
                     ReadOnlyMemory<byte> rest = segment;
                     while (!rest.IsEmpty)
                     {
@@ -712,10 +717,7 @@ public sealed class FileObjectStore : IObjectStore
         }
         finally
         {
-            if (gathered is not null)
-            {
-                ArrayPool<byte>.Shared.Return(gathered);
-            }
+            Blocks.Return(gathered);
         }
 
         if (length >= 0 && written != length)
@@ -889,14 +891,14 @@ public sealed class FileObjectStore : IObjectStore
         }
     }
 
-    /// <summary>Two paths in UTF-8, each ended by a zero as C reads a path, one after the other in a rented array.</summary>
+    /// <summary>Two paths in UTF-8, each ended by a zero as C reads a path, one after the other in a block of the pool.</summary>
     private readonly struct CNames : IDisposable
     {
         public CNames(string first, string second)
         {
             int firstBytes = Encoding.UTF8.GetByteCount(first) + 1;
             int secondBytes = Encoding.UTF8.GetByteCount(second) + 1;
-            Bytes = ArrayPool<byte>.Shared.Rent(firstBytes + secondBytes);
+            Bytes = Blocks.Rent<byte>(firstBytes + secondBytes).Array();
             Encoding.UTF8.GetBytes(first, Bytes);
             Bytes[firstBytes - 1] = 0;
             Encoding.UTF8.GetBytes(second, Bytes.AsSpan(firstBytes));
@@ -910,7 +912,7 @@ public sealed class FileObjectStore : IObjectStore
         /// <summary>Where the second path starts.</summary>
         public int Second { get; }
 
-        public void Dispose() => ArrayPool<byte>.Shared.Return(Bytes);
+        public void Dispose() => Blocks.ReturnBytes(Bytes);
     }
 
     /// <inheritdoc/>
