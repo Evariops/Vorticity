@@ -117,7 +117,7 @@ for bench in ${only//,/ }; do
       wait $pid
       line=$(python3 -I "$repo/bench/profile/samples.py" "$sample_file" "$map" "$summary" 2>/dev/null || printf -- '-\t-')
       cores=${line%%	*}; roles=${line#*	}
-      rm -f "$sample_file"
+      gzip -f "$sample_file"
     else
       (cd "$repo" && dotnet "${exe[@]}" "${args[@]}" > "$log" 2>&1) || { echo "$bench at $degree failed, see $log" >&2; tail -5 "$log" >&2; continue; }
     fi

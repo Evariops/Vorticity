@@ -91,6 +91,15 @@ public sealed partial class VortexFileWriter
         CanonicalArena arena, int rootIndex, long rows, int blocks, CancellationToken cancellationToken)
     {
         int firstBlock = _emittedBlocks;
+
+        // Columns that gathered in the ingest's pass (IngestThenEmitAsync): a pass over the lanes only when some column's
+        // chunk is due, over those columns alone.
+        if (_gatheredInIngest)
+        {
+            await EmitDueAcrossAsync(arena, rootIndex, rows, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         ChunkColumns columns = _chunkColumns ??= ChunkColumns.Take(this);
         columns.Prepare(_fieldCount, _arrayEncodings);
         columns.Spread(checked((int)rows), firstBlock, blocks);
@@ -126,6 +135,60 @@ public sealed partial class VortexFileWriter
         }
         finally
         {
+            columns.Drop();
+        }
+    }
+
+    /// <summary>
+    /// <see cref="EmitColumnsAcrossAsync"/> for a chunk of the file whose columns gathered in the ingest's pass: the columns
+    /// whose chunk is due, by their target or the ceiling, compressed side by side, and their blobs written in column
+    /// order; nothing at all when none is due.
+    /// </summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask EmitDueAcrossAsync(
+        CanonicalArena arena, int rootIndex, long rows, int firstBlock, int blocks, CancellationToken cancellationToken)
+    {
+        Gathering?[] gathering = _gathering!;
+        int due = 0;
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            if (gathering[field] is { } column && DueOrOver(column))
+            {
+                due++;
+            }
+        }
+
+        if (due == 0)
+        {
+            return;
+        }
+
+        ChunkColumns columns = _chunkColumns ??= ChunkColumns.Take(this);
+        columns.Prepare(_fieldCount, _arrayEncodings);
+        columns.Spread(checked((int)rows), firstBlock, blocks);
+        columns.PreGathered = true;
+        CanonicalNode root = arena.GetNode(rootIndex);
+        WorkFan fan = Fan!;
+        try
+        {
+            Span<int> items = fan.Items(due);
+            int next = 0;
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                columns.Nodes[field] = root.GetFieldIndex(field);
+                columns.Gather(field, gathering[field]!);
+                if (DueOrOver(gathering[field]!))
+                {
+                    items[next++] = field;
+                }
+            }
+
+            await fan.RunAsync(columns, due, arena).ConfigureAwait(false);
+            await WriteColumnBlobsAsync(columns, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            columns.PreGathered = false;
             columns.Drop();
         }
     }
@@ -594,6 +657,9 @@ public sealed partial class VortexFileWriter
         /// </summary>
         internal void Gather(int field, Gathering gathering) => _gathered[field] = gathering;
 
+        /// <summary>Whether the columns of this chunk gathered its rows in the ingest's pass already, and only write what is due.</summary>
+        internal bool PreGathered { get; set; }
+
         /// <summary>The gathering column <paramref name="field"/> was given to in this chunk, or null.</summary>
         internal Gathering? GatheredOf(int field) => _gathered[field];
 
@@ -722,7 +788,12 @@ public sealed partial class VortexFileWriter
             VortexFileWriter writer = _writer!;
             if (!_flushing)
             {
-                writer.Gather(field, gathering, chunk!, _nodes[field], _rows, _blocks);
+                // Gathered already in the ingest's pass, when the writer gathers there (IngestThenEmitAsync).
+                if (!PreGathered)
+                {
+                    writer.Gather(field, gathering, chunk!, _nodes[field], _rows, _blocks);
+                }
+
                 if (!writer.DueOrOver(gathering))
                 {
                     return;
