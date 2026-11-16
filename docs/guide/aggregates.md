@@ -449,6 +449,36 @@ block is handed to `Step` decoded, so the two variants cost the same
 ([encoded-forms.md](encoded-forms.md)). `BlocksDecoded` counts the blocks where a column reached its
 plain form: every block of `Celsius`, and none of `Day`.
 
+An aggregate that reads several columns of a row together, or does work of its own per row that no
+column aggregate expresses, folds whole batches instead. An `IBatchAggregator<TRecord, TState>` gets
+the borrowed `Columns<TRecord>` of each batch in `Step`, on the thread that decoded it:
+
+```csharp
+readonly struct HotCities : IBatchAggregator<Reading, int>
+{
+    public static int Seed() => 0;
+
+    public static void Step(ref int state, Columns<Reading> batch)
+    {
+        Column<double?> celsius = batch.Column<double?>(1);
+        Column<string> city = batch.Column<string>(2);
+        for (int i = 0; i < batch.RowCount; i++)
+        {
+            state += celsius[i] > 30 && city[i].StartsWith("L"u8) ? 1 : 0;
+        }
+    }
+
+    public static void Merge(ref int into, in int other) => into += other;
+}
+
+int hot = await file.Scan<Reading>().AggregateAsync<HotCities, int>();
+```
+
+The scan is cut into parts where every column it reads starts a chunk, each part is read and folded on
+a lane of the scan's degree, and the parts' states are merged in their order. The parts are the
+chunks', not the lanes', so the state is the same, bit for bit, at every degree. The same loop over
+`await foreach` folds every batch on one thread, whatever the degree.
+
 ## On more cores
 
 ```csharp

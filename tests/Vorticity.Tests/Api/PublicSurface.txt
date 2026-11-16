@@ -1111,6 +1111,10 @@ Vorticity: interface Vorticity.IAggregator<T, TState>
 Vorticity:     method TState Seed()
 Vorticity:     method void Merge(ref TState, in TState)
 Vorticity:     method void Step(ref TState, ReadOnlySpan<T>, ReadOnlySpan<ulong>, Selection)
+Vorticity: interface Vorticity.IBatchAggregator<TRecord, TState>
+Vorticity:     method TState Seed()
+Vorticity:     method void Merge(ref TState, in TState)
+Vorticity:     method void Step(ref TState, Columns<TRecord>)
 Vorticity: interface Vorticity.IEncodedAggregator<T, TState> : IAggregator<T, TState>
 Vorticity:     method void StepConstant(ref TState, T, int)
 Vorticity:     method void StepDictionary(ref TState, ReadOnlySpan<uint>, ReadOnlySpan<T>, Selection)
@@ -2028,6 +2032,7 @@ Vorticity:     method Scan<TRecord> Where(Func<Probe<TRecord>, Predicate>)
 Vorticity:     method Scan<TRecord> With(ScanOptions)
 Vorticity:     method Scan<TRecord> WithCancellation(CancellationToken)
 Vorticity:     method Scan<TRecord>.AsyncEnumerator<TRecord> GetAsyncEnumerator(CancellationToken = default)
+Vorticity:     method ValueTask<IReadOnlyList<Scan<TRecord>>> SplitAsync(int, CancellationToken = default)
 Vorticity:     method ValueTask<IReadOnlyList<VariantPaths>> PathsAsync(Func<Probe<TRecord>, ITuple>, PathsOptions = default, CancellationToken = default)
 Vorticity:     method ValueTask<Nullable<double>> AverageAsync<T>(Func<Probe<TRecord>, Sym<Nullable<T>>>, CancellationToken = default)
 Vorticity:     method ValueTask<Nullable<double>> AverageAsync<T>(Func<Probe<TRecord>, Sym<T>>, CancellationToken = default)
@@ -2045,6 +2050,7 @@ Vorticity:     method ValueTask<T> SumAsync<T>(Func<Probe<TRecord>, Sym<T>>, Can
 Vorticity:     method ValueTask<TResult> AggregateAsync<TResult>(Func<Aggregates<TRecord>, ITuple>, CancellationToken = default)
 Vorticity:     method ValueTask<TState> AggregateAsync<T, TAggregator, TState>(Func<Probe<TRecord>, Sym<Nullable<T>>>, CancellationToken = default)
 Vorticity:     method ValueTask<TState> AggregateAsync<T, TAggregator, TState>(Func<Probe<TRecord>, Sym<T>>, CancellationToken = default)
+Vorticity:     method ValueTask<TState> AggregateAsync<TAggregator, TState>(CancellationToken = default)
 Vorticity:     method ValueTask<VariantPaths> PathsAsync(Func<Probe<TRecord>, Sym<Nullable<Variant>>>, PathsOptions = default, CancellationToken = default)
 Vorticity:     method ValueTask<VariantPaths> PathsAsync(Func<Probe<TRecord>, Sym<Variant>>, PathsOptions = default, CancellationToken = default)
 Vorticity:     method ValueTask<bool> AnyAsync(CancellationToken = default)
@@ -2705,6 +2711,8 @@ Vorticity:     method ValueTask WriteAsync<TRecord>(Columns<TRecord>, Cancellati
 Vorticity:     method ValueTask WriteAsync<TRecord>(IAsyncEnumerable<TRecord>, CancellationToken = default)
 Vorticity:     method ValueTask WriteAsync<TRecord>(ReadOnlySpan<TRecord>, CancellationToken = default)
 Vorticity:     method ValueTask WriteAsync<TRecord>(Scan<TRecord>, CancellationToken = default)
+Vorticity:     method ValueTask WriteRecordsAsync<TRecord>(ReadOnlyMemory<TRecord>, CancellationToken = default)
+Vorticity:     method ValueTask<WritePart<TRecord>> CreatePartAsync<TRecord>(CancellationToken = default)
 Vorticity:     method ValueTask<WriteReport> CompleteAsync(CancellationToken = default)
 Vorticity:     method void Abandon()
 Vorticity:     property VortexSchema Schema { get; }
@@ -3031,6 +3039,11 @@ Vorticity:     property long Indexes { get; init; }
 Vorticity:     property long Statistics { get; init; }
 Vorticity:     property long Total { get; init; }
 Vorticity:     property long ZoneMaps { get; init; }
+Vorticity: abstract class Vorticity.WritePart : IDisposable
+Vorticity:     method ValueTask WriteAsync(CancellationToken = default)
+Vorticity:     method void Dispose()
+Vorticity: sealed class Vorticity.WritePart<TRecord> : WritePart
+Vorticity:     property ColumnsBuilder<TRecord> Builder { get; }
 Vorticity: sealed class Vorticity.WriteReport : IEquatable<WriteReport>
 Vorticity:     ctor WriteReport(long, int, ImmutableArray<int>, WriteBytes, ImmutableArray<ColumnWriteReport>, ImmutableArray<IndexWriteReport>)
 Vorticity:     method ImmutableArray<int> ChunkRowsOf(int)

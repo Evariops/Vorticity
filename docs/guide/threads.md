@@ -185,6 +185,29 @@ hands batches to your loop gains little: it still delivers them one at a time an
 (which the sample checks at degree 4), and most of its cost here is walking 123 blocks. Measure on
 your own files. Timings vary from run to run on a busy machine, so read the ratios.
 
+When your loop is the larger part of the work, run it on the lanes too. A fold that keeps a state
+goes through `AggregateAsync<TAggregator, TState>()` with an `IBatchAggregator` of your own
+([aggregates.md](aggregates.md#an-aggregator-of-your-own)). Work that keeps no state, an export or a
+copy into another store, takes the scan in parts: `SplitAsync(n)` cuts it into at most `n` scans of
+disjoint rows, each starting where every column it reads starts a chunk, and each part is a scan you
+enumerate on a task of your own.
+
+```csharp
+IReadOnlyList<Scan<Reading>> parts = await file.Scan<Reading>().SplitAsync(4);
+await Parallel.ForEachAsync(parts, async (part, ct) =>
+{
+    await foreach (Columns<Reading> batch in part.WithCancellation(ct))
+    {
+        Export(batch);   // on this task's thread, beside the other parts'
+    }
+});
+```
+
+A writer has the same limit the other way: you fill its builder on one thread. Fill it in parts
+instead, `writer.CreatePartAsync<TRecord>()`, each a builder of its own on a thread of yours, written
+in the order the parts were created, or hand it records already in memory with
+`writer.WriteRecordsAsync(records)`, which fills a part a lane ([write-rows.md](write-rows.md)).
+
 ## Many questions at once
 
 A process answers as many questions at once as it has cores. Past its physical cores, extra clients

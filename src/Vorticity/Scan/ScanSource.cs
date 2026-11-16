@@ -180,6 +180,45 @@ internal abstract class ScanSource
         ScanPlan plan = await Rows.ExplainAsync(spec, analyze, cancellationToken).ConfigureAwait(false);
         return spec.Query is { } query ? plan with { Logical = query.Text } : plan;
     }
+
+    /// <summary>
+    /// The rows <paramref name="spec"/> reads cut into at most <paramref name="count"/> parts, each starting where every
+    /// column it reads starts a chunk, so that each chunk is read by one part alone; null when the source cannot cut them.
+    /// </summary>
+    internal virtual ValueTask<IReadOnlyList<RowRange>?> PartsAsync(ScanSpec spec, int count, CancellationToken cancellationToken) =>
+        ValueTask.FromResult<IReadOnlyList<RowRange>?>(null);
+
+    /// <summary>
+    /// <paramref name="rows"/> cut at most <paramref name="count"/> - 1 times, at <paramref name="starts"/>, the rows they
+    /// may be cut at, ascending: each cut the start nearest the row an even share would cut at, past the cut before.
+    /// </summary>
+    internal static IReadOnlyList<RowRange> Cut(RowRange rows, ReadOnlySpan<long> starts, int count)
+    {
+        List<RowRange> parts = [];
+        long from = rows.Start;
+        int next = 0;
+        long length = rows.End - rows.Start;
+        for (int part = 1; part < count && next < starts.Length; part++)
+        {
+            long even = rows.Start + (long)((double)length * part / count);
+            while (next < starts.Length && (starts[next] <= from || (next + 1 < starts.Length && Math.Abs(starts[next + 1] - even) <= Math.Abs(starts[next] - even))))
+            {
+                next++;
+            }
+
+            if (next >= starts.Length || starts[next] <= from || starts[next] >= rows.End)
+            {
+                break;
+            }
+
+            parts.Add(new RowRange(from, starts[next]));
+            from = starts[next];
+            next++;
+        }
+
+        parts.Add(new RowRange(from, rows.End));
+        return parts;
+    }
 }
 
 /// <summary>A scan over one open file, compiled to the engine's builder.</summary>
@@ -217,6 +256,21 @@ internal sealed class FileScanSource : ScanSource, IRowsCapability, IStatisticsC
         spec.MatchesNothing ? System.Linq.AsyncEnumerable.Empty<RecordBatch>()
         : Refuted(spec) ? RefusedAsync(spec, metrics)
         : Builder(spec, metrics).ExecuteAsync();
+
+    /// <summary>The rows the pass reads cut at starts of chunks every column it reads shares (<see cref="SplitPlan.CommonStarts"/>).</summary>
+    internal override ValueTask<IReadOnlyList<RowRange>?> PartsAsync(ScanSpec spec, int count, CancellationToken cancellationToken)
+    {
+        RowRange whole = new RowRange(0, _file.RowCount);
+        RowRange rows = spec.Rows is { } asked ? asked.Intersect(whole) : whole;
+        if (rows.IsEmpty)
+        {
+            return ValueTask.FromResult<IReadOnlyList<RowRange>?>([rows]);
+        }
+
+        FieldMask mask = spec.Projection ?? FieldMask.All;
+        long[] starts = SplitPlan.CommonStarts(_file.LayoutTree, rows, in mask);
+        return ValueTask.FromResult<IReadOnlyList<RowRange>?>(Cut(rows, starts, count));
+    }
 
     /// <summary>The file's rows the pass reads as the ranges of one list; none when its statistics refute the filter.</summary>
     public ValueTask<RowRange[][]?> StrataAsync(ScanSpec pass, long rangeBytes, CancellationToken cancellationToken)

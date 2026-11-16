@@ -395,6 +395,7 @@ public sealed partial class VortexFileWriter
     public async ValueTask<WriteReport> CompleteAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDone();
+        RequireNoPartPending();
         Carry();
         if (_root is { } builder && builder.Rows > builder.Committed)
         {

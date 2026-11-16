@@ -49,6 +49,44 @@ The stream costs the enumeration and nothing else. Both calls cut the rows into 
 produce the same bytes, because the writer sizes a chunk by the width of the rows it holds, not by how
 they arrived. [blocks-and-chunks.md](blocks-and-chunks.md) shows where that width comes from.
 
+## Rows on several threads
+
+Both calls fill the writer's builder on the caller's thread. The writer compresses and writes on
+the session's lanes, but the copy of the rows into columns stays on that one thread, and on a wide
+session it is what the write waits for: it cost a seventh of a write of ten million rows on one lane,
+and kept that write under four and a half times its speed on one, whatever the lanes. Two forms move
+it to several threads.
+
+```csharp
+await writer.WriteRecordsAsync<Reading>(readings, ct);
+```
+
+`WriteRecordsAsync` cuts an array already in memory into parts of whole blocks and fills them on the
+session's lanes. The file holds the rows in the array's order, and is the one `WriteAsync` writes.
+
+```csharp
+WritePart<Reading>[] parts = new WritePart<Reading>[4];
+for (int i = 0; i < parts.Length; i++)
+{
+    parts[i] = await writer.CreatePartAsync<Reading>(ct);
+}
+
+await Parallel.ForAsync(0, parts.Length, ct, async (i, token) =>
+{
+    Reading[] page = await ReadPageAsync(i, token);   // a source of your own, read on this task
+    Reading.WriteRows(parts[i].Builder, page);
+    await parts[i].WriteAsync(token);
+});
+```
+
+A part is a builder of its own, filled on any thread, through the record's `WriteRows` or column by
+column as in [write-a-file.md](write-a-file.md). The file takes a part's rows after those of
+every part created before it, so the order of creation is the order of the rows, whatever order the
+parts finish in. A part disposed without being written gives its place up, and `CompleteAsync`
+refuses a file while a part is neither written nor disposed. Creating a part waits while twice the
+session's degree of parts wait to be written, so a source faster than the writer waits there rather
+than in memory.
+
 ## Watch out
 
 * Rows are a convenience, not the fast path for wide numeric data. Filling a column with `GetSpan` or

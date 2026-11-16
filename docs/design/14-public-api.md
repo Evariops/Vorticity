@@ -234,6 +234,8 @@ in no promised order without one.
 | `PathsAsync(r => r.Attributes)`, or several columns, `PathsAsync(r => (r.A, r.B))` | `VariantPaths`: each path and class of a variant column among the rows kept, its rows, whether they are exact, and what was read (`Reading`) | the path directories of the objects a count reads, and the granules the window cuts, read again; the kept rows of an object without one | at the end of the walk |
 | `GroupBy(…).Select(g => r)` | `Aggregation<T>`, one value per group | one state per group, only the open groups on a key that streams, and `k` groups for a top-k | the first group closed on a key that streams, the end of the pass otherwise |
 | `GroupBy(…).Select(g => (…)).As<TRecord>()` | a `Scan<TRecord>` over the groups, its batches borrowed | the same, and nothing per batch or per group | the same |
+| `AggregateAsync<TAggregator, TState>()` with an `IBatchAggregator<TRecord, TState>` of one's own | one state, folded from whole batches | a state per part of the scan, the parts cut where every column it reads starts a chunk, each read and folded on a lane of the scan's degree, merged in the parts' order | at the end of the pass |
+| `SplitAsync(n)` | at most `n` scans of disjoint rows, in the rows' order, each cut where every column it reads starts a chunk | nothing until a part is enumerated | the first split of each part |
 | `writer.WriteAsync(scan)` | the batches of any scan, written as they come | the writer's own work, and a rollup builds no record | |
 | `ExplainAsync()` | the `ScanPlan` | statistics and zone maps, never data | |
 
@@ -284,6 +286,8 @@ whose `ColumnBuilder<T>` gives spans to fill in place (`GetSpan`, `Advance`, as 
 appends values, nulls, text and lists, and is reused after every `WriteAsync`. A primitive column is
 encoded from the caller's bytes without a copy. A list appended in one call that fails part way leaves
 nothing behind. A nullable column costs nothing until its first null.
+
+A caller whose own work to make the columns is the larger part of a write, reading its source and turning records into columns, fills the file in parts. `CreatePartAsync<TRecord>()` hands out a `WritePart<TRecord>`, a builder of its own that any thread fills, and its `WriteAsync` hands its rows to the file, which takes them after those of every part created before it, whatever order the parts are written in: a file written in parts is the file one builder fed the same rows in that order writes. Creating a part waits while twice the session's degree of parts wait to be written, so that a producer faster than the writer waits there. A part disposed unwritten gives its place up, and a file is not completed while a part is neither written nor disposed. `WriteRecordsAsync(ReadOnlyMemory<TRecord>)` does it for records already in memory: a part of whole blocks a lane, filled side by side. A writer is written through its own builder or through parts, not both at once.
 
 `WriteAsync` takes a builder, a span or a stream of records, or a batch read from another file.
 `FlushAsync` seals the whole blocks into a chunk and is the only I/O before `CompleteAsync`, which
@@ -338,6 +342,7 @@ build fails when one stops holding:
 | a question the statistics answer reads nothing | no request after the open for a count, a minimum or a maximum on a file with statistics |
 | a dictionary or run-end aggregate does not decode | `BlocksDecoded` is 0 for a group by on a dictionary column and for a sum over runs |
 | a chunk is decoded once per scan, whatever runs it | the values decoded equal rows × columns at every prefetch and degree, and for a parallel aggregation |
+| a fold of whole batches and a scan cut into parts do not depend on the degree | `PartsContractTests`: a batch aggregator gives the same state, bit for bit, on one lane, four and fourteen; the parts of a scan read every row once and in order; parts written out of order go in the file in the order they were created |
 | a query's answers and order do not depend on its syntax, its degree or how its data is split | method and query syntax build one plan, and every answer, float sums included, is the same bits at every degree, over two row orders, and over a dataset split into several objects, before and after compaction (see [how queries are tested](16-queries.md#13-how-it-is-tested)) |
 | the first batch only waits for the first split | the time to first batch of a scan, a projection, a `Distinct` and a group by that streams stays flat over two files sixteen times apart, locally and over the HTTP source with latency |
 | memory is the window plus the open state | `LiveMemoryTests`: a streaming group by's peak stays flat as its groups grow a hundredfold, a top-k's is proportional to `k`, and a high-cardinality group by's is at most its groups' |
