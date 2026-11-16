@@ -245,10 +245,11 @@ public sealed partial class VortexFileWriter
     {
         for (int field = 0; field < _fieldCount; field++)
         {
-            // A chunk taken to compress ahead goes behind the column's chunk before it, which goes out now.
+            // A chunk taken to compress ahead goes behind the column's chunks before it, the oldest of which goes out now
+            // when as many as compress at once already do.
             if (columns.TakeDetached(field) is { } detached)
             {
-                await LandAheadAsync(field, cancellationToken).ConfigureAwait(false);
+                await LandAheadAsync(field, cancellationToken, keep: AheadDepth - 1).ConfigureAwait(false);
                 CompressAhead(detached);
                 continue;
             }

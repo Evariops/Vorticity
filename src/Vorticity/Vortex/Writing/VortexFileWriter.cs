@@ -459,8 +459,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     // by column, its chunk compressed ahead and not yet written, null when none is; and what Held counts them at, the bytes
     // their columns counted them at when they reached their targets.
     private bool _compressesAhead;
-    private AheadChunk?[]? _compressedAhead;
+    // Each column's chunks compressed ahead, oldest first, at most AheadDepth of them; and the block bounds each may count
+    // into, free for the next, by column.
+    private List<AheadChunk>?[]? _compressedAhead;
+    private List<ChunkBlockBounds>?[]? _aheadBounds;
     private long _aheadBytes;
+
+    /// <summary>
+    /// The chunks of a column compressed ahead at once: two, so that the column's next chunk compresses while the one before
+    /// still does. One at a time, a chunk of a log's attributes took 139 ms to compress, the column gathered the next in 80,
+    /// and the writer waited 1.9 s of a tier merge's 8.4 for the chunk before it, 32 times (2026-11-16).
+    /// </summary>
+    private const int AheadDepth = 2;
 
     /// <summary>The chunks a shredded variant column compressed ahead of their writing.</summary>
     internal int ChunksCompressedAhead { get; private set; }
@@ -2762,7 +2772,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     Gather(field, gathering, arena, node, rows, blocks);
                     if (DueOrOver(gathering) && CompressesAhead(field))
                     {
-                        await LandAheadAsync(field, cancellationToken).ConfigureAwait(false);
+                        await LandAheadAsync(field, cancellationToken, keep: AheadDepth - 1).ConfigureAwait(false);
                         CompressAhead(Detach(field, gathering));
                     }
                     else if (DueOrOver(gathering))
@@ -2923,6 +2933,28 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         _countedKeys?[field] is { } keys
             ? (_chunkBounds![field] ??= new ChunkBlockBounds(keys, _blockRows, _variantTextBound)).Cleared()
             : null;
+
+    /// <summary>
+    /// <see cref="BoundsFor"/> for a chunk compressed ahead, which counts into bounds of its own while the column's other
+    /// chunks in compression count into theirs: one of the column's free ones, or new; given back once its blob is written.
+    /// </summary>
+    private ChunkBlockBounds? AheadBoundsFor(int field)
+    {
+        if (_countedKeys?[field] is not { } keys)
+        {
+            return null;
+        }
+
+        List<ChunkBlockBounds> free = (_aheadBounds ??= new List<ChunkBlockBounds>?[_fieldCount])[field] ??= [];
+        if (free.Count == 0)
+        {
+            return new ChunkBlockBounds(keys, _blockRows, _variantTextBound).Cleared();
+        }
+
+        ChunkBlockBounds bounds = free[^1];
+        free.RemoveAt(free.Count - 1);
+        return bounds.Cleared();
+    }
 
     /// <summary>
     /// The ingest statistics of column <paramref name="field"/> over the chunk, counted for the
@@ -3169,7 +3201,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// Compresses <paramref name="chunk"/>, taken from its column's gathering (<see cref="Detach"/>), on a lane of the
     /// session's of its own when one is free, the blocks after it going through meanwhile, and on the writer's thread
     /// otherwise; its blob is written when its column's next chunk reaches its target, or at a flush, the end of a group or
-    /// the completion (<see cref="LandAheadAsync(int, CancellationToken)"/>). The column's chunk before it is written first.
+    /// the completion (<see cref="LandAheadAsync(int, CancellationToken, int)"/>). The column's chunks before it are written
+    /// first, and <see cref="AheadDepth"/> of them compress at once.
     /// </summary>
     /// <remarks>
     /// A shredded variant's chunk compressed as one item of a chunk of the file across the writer's threads, which every
@@ -3180,7 +3213,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </remarks>
     private void CompressAhead(AheadChunk chunk)
     {
-        (_compressedAhead ??= new AheadChunk?[_fieldCount])[chunk.Field] = chunk;
+        ((_compressedAhead ??= new List<AheadChunk>?[_fieldCount])[chunk.Field] ??= []).Add(chunk);
         _aheadBytes += chunk.Counted;
         ChunksCompressedAhead++;
         int known = _arrayEncodings.Count;
@@ -3191,7 +3224,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         chunk.KnownCount = known;
-        chunk.Bounds = BoundsFor(chunk.Field);
+        chunk.Bounds = AheadBoundsFor(chunk.Field);
         if (_lanes > 1 && _budget is { } budget && budget.TryEnter(out long entered))
         {
             chunk.Compression = Task.Run(
@@ -3259,17 +3292,24 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
-    /// Writes column <paramref name="field"/>'s chunk compressed ahead, once compressed, its new ids made the file's in the
-    /// order it met them and its tree renumbered onto the file's indices; nothing when none waits.
+    /// Writes column <paramref name="field"/>'s chunks compressed ahead, oldest first, but the last <paramref name="keep"/>:
+    /// each once compressed, its new ids made the file's in the order it met them and its tree renumbered onto the file's
+    /// indices; nothing when none waits. A column whose next chunk is due keeps <see cref="AheadDepth"/> less one of them
+    /// compressing, a flush or the end none.
     /// </summary>
-    private async ValueTask LandAheadAsync(int field, CancellationToken cancellationToken)
+    private async ValueTask LandAheadAsync(int field, CancellationToken cancellationToken, int keep = 0)
     {
-        if (_compressedAhead?[field] is not { } chunk)
+        while (_compressedAhead?[field] is { } chunks && chunks.Count > keep)
         {
-            return;
+            AheadChunk chunk = chunks[0];
+            chunks.RemoveAt(0);
+            await LandAheadAsync(field, chunk, cancellationToken).ConfigureAwait(false);
         }
+    }
 
-        _compressedAhead[field] = null;
+    /// <summary>Writes <paramref name="chunk"/>, column <paramref name="field"/>'s oldest chunk compressed ahead (<see cref="LandAheadAsync(int, CancellationToken, int)"/>).</summary>
+    private async ValueTask LandAheadAsync(int field, AheadChunk chunk, CancellationToken cancellationToken)
+    {
         _aheadBytes -= chunk.Counted;
         if (chunk.Compression is { } compression)
         {
@@ -3313,6 +3353,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         gathering.Cut = chunk.Cut;
         await WriteColumnBlobAsync(field, blob, chunk.FirstBlock, chunk.Blocks, cancellationToken, chunk.Bounds).ConfigureAwait(false);
         gathering.ChunkRows.Add(chunk.Rows);
+        if (chunk.Bounds is { } bounds)
+        {
+            _aheadBounds![field]!.Add(bounds);
+        }
     }
 
     /// <summary>Writes every column's chunk compressed ahead, in the columns' order.</summary>
@@ -3329,19 +3373,23 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         for (int field = 0; _compressedAhead is not null && field < _compressedAhead.Length; field++)
         {
-            if (_compressedAhead[field] is not { } chunk)
+            if (_compressedAhead[field] is not { } chunks)
             {
                 continue;
             }
 
-            _compressedAhead[field] = null;
-            if (chunk.Compression is { } compression)
+            foreach (AheadChunk chunk in chunks)
             {
-                await compression.ContinueWith(static done => _ = done.Exception, TaskScheduler.Default).ConfigureAwait(false);
+                if (chunk.Compression is { } compression)
+                {
+                    await compression.ContinueWith(static done => _ = done.Exception, TaskScheduler.Default).ConfigureAwait(false);
+                }
+
+                Release(chunk);
+                chunk.Blob.Dispose();
             }
 
-            Release(chunk);
-            chunk.Blob.Dispose();
+            chunks.Clear();
         }
 
         _aheadBytes = 0;
