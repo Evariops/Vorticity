@@ -67,6 +67,7 @@ internal sealed class ObjectOutput : IAsyncDisposable
     /// <summary>Abandons the object: its writer's buffers released, nothing put.</summary>
     public async ValueTask DisposeAsync()
     {
+        await Writer.SettleAsync().ConfigureAwait(false);
         Writer.Abandon();
         await Writer.DisposeAsync().ConfigureAwait(false);
         Sink.Discard();

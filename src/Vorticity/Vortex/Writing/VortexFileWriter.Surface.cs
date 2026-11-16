@@ -466,6 +466,8 @@ public sealed partial class VortexFileWriter
             return;
         }
 
+        // Only a merge's writer sends rows through on a lane of their own, and its owner settles them before it abandons it.
+        System.Diagnostics.Debug.Assert(_flight is null, "Rows in flight land (SettleAsync) before their writer is abandoned.");
         _completed = true;
         _abandoned = true;
         VortexTelemetry.WriteEnded(_activity, _acceptedRows, _sink.Position, completed: false);
@@ -490,6 +492,8 @@ public sealed partial class VortexFileWriter
     /// <returns>A task that completes when everything is released.</returns>
     public async ValueTask DisposeAsync()
     {
+        // Rows in flight write with what the abandon releases: they land first.
+        await SettleAsync().ConfigureAwait(false);
         if (!_finished)
         {
             Abandon();
@@ -515,6 +519,12 @@ public sealed partial class VortexFileWriter
         {
             TransitContexts.Return(staging.Context);
             _staging = null;
+        }
+
+        if (_landed is { } landed)
+        {
+            TransitContexts.Return(landed.Context);
+            _landed = null;
         }
 
         if (_gathering is { } gathering)

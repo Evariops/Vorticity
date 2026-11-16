@@ -79,6 +79,7 @@ public sealed partial class DatasetGranuleStatsTests
         long[] locateBytes = new long[7];
         int listed = 0;
         int everywhere = 0;
+        int located = 0;
         await foreach (PositionedObject held in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
             if (held.Entry.Contents is not { GranuleStats.Count: > 0 } contents)
@@ -93,7 +94,6 @@ public sealed partial class DatasetGranuleStatsTests
             ColumnLocate?[] locates = await dataset.ReadLocatesAsync(held.Entry, fields, Ct);
             GranuleStats cut = stats[0]!;
             Console.WriteLine($"OBJECT: {held.Entry.Rows} rows, {cut.Count} granules, {store.Requests} requests for every column's statistics and locates");
-
             // An object of fewer than four granules, the last one, whose rows the writer's rolls decide: three granules in four
             // are every one there, each value lies everywhere and keeps a locate all the same, which the index of its partition
             // reads, and its few rows hold no granule of one value. What follows is said of the others.
@@ -116,13 +116,19 @@ public sealed partial class DatasetGranuleStatsTests
             }
 
             // The text and the columns of few values list their values; the instant and the latency, whose values hardly
-            // repeat, are measures alone. The sources and the endpoints lie in a few granules each and keep a locate; every
-            // status and code lies in nearly every granule, which a locate would spare none of, and they keep none.
+            // repeat, are measures alone. The sources and the endpoints lie in a few granules each and keep a locate, but
+            // for an object that holds one source alone, as a large source's may: its rows and its endpoints fill every
+            // granule, and a locate is kept where some value lies in three granules in four at most. Every status and code
+            // lies in nearly every granule, which a locate would spare none of, and they keep none.
+            long most = cut.Count - (cut.Count / 4);
             foreach (int field in (int[])[0, 2, 3, 4])
             {
                 Assert.True(stats[field]!.HoldsValueLists, $"column {field} lists no values");
-                Assert.True(field is 0 or 2 ? locates[field] is not null : locates[field] is null, $"column {field}'s locate");
+                bool spares = field is 0 or 2 && Spares(stored, cut, field, most);
+                Assert.True(spares ? locates[field] is not null : locates[field] is null, $"column {field}'s locate");
             }
+
+            located += locates[0] is null ? 0 : 1;
 
             // The route, of more values than a granule lists and lying everywhere, keeps no locate, and its values only where a
             // granule, a short one, lists them.
@@ -183,12 +189,18 @@ public sealed partial class DatasetGranuleStatsTests
             }
 
             // The shared endpoint lies everywhere, each source's own where its source does.
-            ColumnLocate endpoints = locates[2]!;
-            Assert.True(endpoints.IsEverywhere(endpoints.Find("/health"u8)));
+            if (locates[2] is { } endpoints)
+            {
+                Assert.True(endpoints.IsEverywhere(endpoints.Find("/health"u8)));
+            }
+
             // A source lies everywhere where its rows fill more than three granules in four, as a large one's may.
             // Each source's granules gathered in one pass over the rows, where a pass a source rendered every row in hex.
-            ColumnLocate sources = locates[0]!;
-            long most = sources.Granules - (sources.Granules / 4);
+            if (locates[0] is not { } sources)
+            {
+                continue;
+            }
+
             Dictionary<string, HashSet<long>> granulesOf = [];
             for (int row = 0; row < stored.Length; row++)
             {
@@ -211,6 +223,33 @@ public sealed partial class DatasetGranuleStatsTests
             $"GRANULE STATS: {objects} objects, {granules} granules; bytes a granule, by column: {string.Join(", ", statsBytes.Select(b => $"{(double)b / granules:F1}"))}; " +
             $"locates, bytes a granule: {string.Join(", ", locateBytes.Select(b => $"{(double)b / granules:F1}"))}; {listed} values placed, {everywhere} everywhere");
         Assert.True(objects >= 2, $"{objects} objects keep statistics over their granules");
+        Assert.True(located >= 2, $"{located} objects of {objects} keep a locate of their sources");
+    }
+
+    /// <summary>Whether some value of column <paramref name="field"/> lies in <paramref name="most"/> of the object's granules at most: what keeps it a locate.</summary>
+    private static bool Spares(Event[] stored, GranuleStats cut, int field, long most)
+    {
+        Dictionary<string, HashSet<int>> granulesOf = [];
+        for (int g = 0; g < cut.Count; g++)
+        {
+            for (long row = cut.FirstRow(g); row < cut.FirstRow(g) + cut.Rows[g]; row++)
+            {
+                if (BytesOf(stored[row], field) is not { } value)
+                {
+                    continue;
+                }
+
+                string key = Convert.ToHexString(value);
+                if (!granulesOf.TryGetValue(key, out HashSet<int>? spanned))
+                {
+                    granulesOf[key] = spanned = [];
+                }
+
+                spanned.Add(g);
+            }
+        }
+
+        return granulesOf.Values.Any(spanned => spanned.Count <= most);
     }
 
     /// <summary>Granule <paramref name="granule"/>'s values, numbered by the statistics' dictionary, against its rows' <paramref name="values"/>.</summary>

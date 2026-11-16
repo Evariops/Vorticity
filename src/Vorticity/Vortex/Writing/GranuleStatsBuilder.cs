@@ -411,7 +411,12 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         _state[MeasureLayout.IntegerGreatest] = greatest;
     }
 
-    /// <summary>Ends the open granule: its rows and nulls, its values, its measure.</summary>
+    /// <summary>
+    /// Ends the open granule: its rows and nulls, its values, its measure. The listing on the stack is written before it is
+    /// read, so it is not zeroed first: zeroing its 2 KiB at every granule of every column and shredded key took 4.9 s of a
+    /// backlog's compaction at degree 14.
+    /// </summary>
+    [System.Runtime.CompilerServices.SkipLocalsInit]
     private void End()
     {
         long rows = _row - _granuleStart;

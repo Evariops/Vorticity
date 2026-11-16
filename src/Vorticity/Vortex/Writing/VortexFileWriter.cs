@@ -413,37 +413,57 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private long? _sheetBytes;
 
     /// <summary>
-    /// What the writer holds and has not written, as the bytes it would encode to: what each column that gathers holds, at
-    /// its last rate, and the rows that wait for a chunk of the file, staged or in transit, at the rate of what the columns
-    /// hold, their mean rate when they hold nothing, a first guess with none: what a caller sizing the file adds to the
-    /// bytes its sink took.
+    /// The bytes the file would take were it finished now, for a caller sizing it: those its sink took, and those the writer
+    /// holds and has not written (<see cref="Held"/>). A merge's writer, which stages its runs
+    /// (<see cref="VortexWriteOptions.StagedRows"/>), reads it as it stood when the rows staged last went through, and the
+    /// rows staged since at its rate then: the same whether they went through on a lane of their own or on the caller's, and
+    /// however far along they are, so that a merge's objects end at the same rows at any degree.
     /// </summary>
-    internal long HeldBytes
+    internal long Size => _sized ? _sizedBytes + (long)((_staging?.Bytes ?? 0) * _sizedRate) : _sink.Position + Held(out _);
+
+    /// <summary>
+    /// What the writer holds and has not written, as the bytes it would encode to: what each column that gathers holds, at
+    /// its last rate, and the rows that wait for a chunk of the file, staged or in transit, at <paramref name="rate"/>, the
+    /// rate of what the columns hold, their mean rate when they hold nothing, a first guess with none.
+    /// </summary>
+    private long Held(out double rate)
     {
-        get
+        long canonical = 0;
+        double encoded = 0;
+        double rates = 0;
+        int columns = 0;
+        if (_gathering is { } gathering)
         {
-            long canonical = 0;
-            double encoded = 0;
-            double rates = 0;
-            int columns = 0;
-            if (_gathering is { } gathering)
+            foreach (Gathering? column in gathering)
             {
-                foreach (Gathering? column in gathering)
+                if (column is not null)
                 {
-                    if (column is not null)
-                    {
-                        canonical += column.Bytes;
-                        encoded += column.Bytes * column.Rate;
-                        rates += column.Rate;
-                        columns++;
-                    }
+                    canonical += column.Bytes;
+                    encoded += column.Bytes * column.Rate;
+                    rates += column.Rate;
+                    columns++;
                 }
             }
-
-            double rate = canonical > 0 ? encoded / canonical : columns > 0 ? rates / columns : Gathering.FirstRate;
-            return (long)(encoded + ((_pendingBytes + (_staging?.Bytes ?? 0)) * rate));
         }
+
+        rate = canonical > 0 ? encoded / canonical : columns > 0 ? rates / columns : Gathering.FirstRate;
+        return (long)(encoded + ((_pendingBytes + (_staging?.Bytes ?? 0)) * rate));
     }
+
+    // The rows staged before, going through on a lane of their own while the next ones stage (FlyAsync): their task, null
+    // when none flies, and their staging, which the rows after the next ones stage in once they landed (LandAsync).
+    private Task? _flight;
+    private Staging? _flying;
+    private Staging? _landed;
+
+    // What Size read when the rows staged last went through, and the rate it counted their rows at: read since while _sized
+    // holds, which a write that does not stage ends. Nothing flies while it does not hold.
+    private bool _sized;
+    private long _sizedBytes;
+    private double _sizedRate;
+
+    /// <summary>The staged batches that went through on a lane of their own while the caller staged the next ones.</summary>
+    internal int BatchesFlown { get; private set; }
 
     /// <summary>By column, what a variant column shreds, null for a column written whole; null when none shreds.</summary>
     private VariantShredding?[]? _shredding;
@@ -795,7 +815,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// Whether any batch has waited in the transit arena or with the small batches, which is what
     /// <see cref="PreferredBatchRows"/> exists to avoid.
     /// </summary>
-    internal bool Buffered => _transit is not null || _staging is not null;
+    internal bool Buffered => _transit is not null || _staging is not null || _flying is not null;
 
     /// <summary>How many nodes wait in transit for their chunk.</summary>
     /// <remarks>Nothing in the library asks; the count exists for the tests of the small batches.</remarks>
@@ -1418,6 +1438,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             await counting.ConfigureAwait(false);
         }
+
+        // Nothing flies now, and the size is read as it stands until rows staged next go through.
+        _sized = false;
     }
 
     /// <summary>The rows of a group the paths the writer counts name: a block's, a granule's.</summary>
@@ -1548,9 +1571,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         if (Stages(rows, seal))
         {
             Staging staging = Stage(arena, root, rows);
-            if (_stagedRows > 0
-                ? staging.Rows >= _stagedRows
-                : staging.Rows >= StagedRows || staging.Bytes >= StagedBytes || CompletesABlock(staging))
+            if (_stagedRows > 0 && staging.Rows >= _stagedRows)
+            {
+                await FlyAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else if (_stagedRows == 0 && (staging.Rows >= StagedRows || staging.Bytes >= StagedBytes || CompletesABlock(staging)))
             {
                 await UnstageAsync(cancellationToken).ConfigureAwait(false);
             }
@@ -1870,10 +1895,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private bool CompletesABlock(Staging staging) =>
         !_automaticChunks && _pendingRows + staging.Rows >= _rowBlock && _pendingBytes + staging.Bytes >= _blockBytes;
 
-    /// <summary>Copies a small batch in with the ones waiting before it.</summary>
+    /// <summary>Copies a small batch in with the ones waiting before it: in the staging the rows staged before last left, once landed.</summary>
     private Staging Stage(CanonicalArena arena, int root, int rows)
     {
-        Staging staging = _staging ??= new Staging(TransitContexts.Rent(Account));
+        if (_staging is null)
+        {
+            _staging = _landed ?? new Staging(TransitContexts.Rent(Account));
+            _landed = null;
+        }
+
+        Staging staging = _staging;
         CanonicalArena into = staging.Context.Canonical;
         int owned = Owned(into, arena, root);
         staging.Nodes.Add(owned);
@@ -1882,14 +1913,100 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         return staging;
     }
 
-    /// <summary>Writes the small batches waiting, as one batch of all their rows, and drops them.</summary>
-    private async ValueTask UnstageAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// Sends the rows staged, a merge's batch of <see cref="VortexWriteOptions.StagedRows"/>, through the writer: on a lane
+    /// of the session's of their own when one is free, the caller going on to stage the next ones meanwhile; on the
+    /// caller's otherwise, as any other staged rows. The rows staged before land first, so that the batches go through one
+    /// at a time and in order: the file is the same either way, and so is the size the caller reads (<see cref="Size"/>),
+    /// taken before they go.
+    /// </summary>
+    /// <remarks>
+    /// The merge and the writer took turns on one thread: at degree 14, the merge's thread spent 46 % of the job's processor
+    /// time, and every block the writer's lanes ingested waited for it.
+    /// </remarks>
+    private async ValueTask FlyAsync(CancellationToken cancellationToken)
     {
-        if (_staging is not { Rows: > 0 } staging)
+        await LandAsync().ConfigureAwait(false);
+        _sizedBytes = _sink.Position + Held(out _sizedRate);
+        _sized = true;
+        Staging staging = _staging!;
+        if (_lanes <= 1 || _budget is not { } budget || !budget.TryEnter(out long entered))
+        {
+            await WriteStagedAsync(staging, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        _staging = null;
+        _flying = staging;
+        BatchesFlown++;
+        _flight = Task.Run(
+            async () =>
+            {
+                try
+                {
+                    await WriteStagedAsync(staging, cancellationToken).ConfigureAwait(false);
+                }
+                finally
+                {
+                    budget.Exit(entered);
+                }
+            },
+            CancellationToken.None);
+    }
+
+    /// <summary>
+    /// Waits for the rows in flight to have gone through, throwing what failed them, and keeps their staging for the rows
+    /// staged after the next ones: before anything else changes the writer, a caller's declarations at the end among them.
+    /// </summary>
+    internal async ValueTask LandAsync()
+    {
+        if (_flight is not { } flight)
         {
             return;
         }
 
+        try
+        {
+            await flight.ConfigureAwait(false);
+        }
+        finally
+        {
+            _flight = null;
+            _landed = _flying;
+            _flying = null;
+        }
+    }
+
+    /// <summary>
+    /// Waits for the rows in flight whatever becomes of them, before the writer is given up, which releases what they write
+    /// with: what failed them failed a write the caller abandons, and is observed here rather than thrown.
+    /// </summary>
+    internal async ValueTask SettleAsync()
+    {
+        if (_flight is not { } flight)
+        {
+            return;
+        }
+
+        await flight.ContinueWith(static done => _ = done.Exception, TaskScheduler.Default).ConfigureAwait(false);
+        _flight = null;
+        _landed = _flying;
+        _flying = null;
+    }
+
+    /// <summary>Writes the small batches waiting, as one batch of all their rows, and drops them: the rows in flight land first.</summary>
+    private async ValueTask UnstageAsync(CancellationToken cancellationToken)
+    {
+        await LandAsync().ConfigureAwait(false);
+        if (_staging is { Rows: > 0 } staging)
+        {
+            await WriteStagedAsync(staging, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Writes the small batches <paramref name="staging"/> holds, as one batch of all their rows, and drops them.</summary>
+    private async ValueTask WriteStagedAsync(Staging staging, CancellationToken cancellationToken)
+    {
         ScanContext context = staging.Context;
         int rows = staging.Rows;
         int node = staging.Nodes.Count == 1

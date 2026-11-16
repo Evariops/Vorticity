@@ -88,6 +88,9 @@ public sealed record CompactionResult
 
     /// <summary>Of <see cref="WriterBatches"/>, those the writers ingested on their lanes rather than on the job's thread.</summary>
     internal long WriterBatchesAcross { get; init; }
+
+    /// <summary>The batches the writers staged and sent through on a lane of their own while the merge went on.</summary>
+    internal long WriterBatchesFlown { get; init; }
 }
 
 /// <summary>Runs one compaction: a k-way merge of the inputs on the sort key when there is
@@ -582,6 +585,7 @@ internal static partial class DatasetCompactor
         long scratch = (lateOutputs?.ScratchBytes ?? 0) + (postings?.ScratchBytes ?? 0) + memory.CopiedBytes;
         long batches = lateOutputs?.Batches ?? 0;
         long across = lateOutputs?.BatchesAcross ?? 0;
+        long flown = lateOutputs?.BatchesFlown ?? 0;
         foreach (ObjectStream outputs in streams)
         {
             objectsOut += outputs.Written.Count;
@@ -589,6 +593,7 @@ internal static partial class DatasetCompactor
             scratch += outputs.ScratchBytes;
             batches += outputs.Batches;
             across += outputs.BatchesAcross;
+            flown += outputs.BatchesFlown;
         }
 
         return new CompactionResult
@@ -610,6 +615,7 @@ internal static partial class DatasetCompactor
             Piece = piece is { ToTheEnd: false },
             WriterBatches = batches,
             WriterBatchesAcross = across,
+            WriterBatchesFlown = flown,
         };
     }
 
@@ -1733,8 +1739,11 @@ internal static partial class DatasetCompactor
         /// <summary>Of <see cref="Batches"/>, those the writers of the objects it sealed ingested on their lanes.</summary>
         internal long BatchesAcross { get; private set; }
 
+        /// <summary>The batches the writers of the objects it sealed sent through on a lane of their own while it went on.</summary>
+        internal long BatchesFlown { get; private set; }
+
         /// <summary>Whether the object being written has reached the destination's size.</summary>
-        internal bool WantsRoll => _output is not null && _output.Sink.Position + _output.Writer.HeldBytes >= _target;
+        internal bool WantsRoll => _output is not null && _output.Writer.Size >= _target;
 
         /// <summary>Whether the last row written carries this key, which must not be split.</summary>
         internal bool HoldsKey(ReadOnlySpan<byte> key) =>
@@ -1899,10 +1908,13 @@ internal static partial class DatasetCompactor
             {
                 await using (output.Writer.ConfigureAwait(false))
                 {
+                    // The rows in flight land before the key index is declared to the writer that takes them.
+                    await output.Writer.LandAsync().ConfigureAwait(false);
                     _sorted?.Finish(output.Writer);
                     await output.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
                     ScratchBytes += output.Writer.ScratchBytes;
                     BatchesAcross += output.Writer.BatchesIngestedAcross;
+                    BatchesFlown += output.Writer.BatchesFlown;
                 }
 
                 written = await _dataset.SealAsync(output, _rows, _firstRow, cancellationToken).ConfigureAwait(false);
