@@ -47,6 +47,44 @@ internal static class BacklogBench
 
     private static readonly MeterListener Refusals = Listen();
 
+    // The seconds of each pass of the job running, by its name (plan, unions, ranges, write, index): the activities the
+    // compactor starts for them, summed as they stop, and emptied for each job's line.
+    private static readonly Dictionary<string, double> s_passes = [];
+
+    private static readonly ActivityListener Passes = ListenToPasses();
+
+    private static ActivityListener ListenToPasses()
+    {
+        const string Prefix = "vortex.dataset.compaction.";
+        ActivityListener listener = new ActivityListener
+        {
+            ShouldListenTo = static source => source.Name == VortexDiagnostics.ActivitySourceName,
+            Sample = static (ref ActivityCreationOptions<ActivityContext> created) =>
+                created.Name.StartsWith(Prefix, StringComparison.Ordinal) ? ActivitySamplingResult.AllData : ActivitySamplingResult.None,
+            ActivityStopped = static activity =>
+            {
+                lock (s_passes)
+                {
+                    string pass = activity.OperationName[Prefix.Length..];
+                    s_passes[pass] = s_passes.GetValueOrDefault(pass) + activity.Duration.TotalSeconds;
+                }
+            },
+        };
+        ActivitySource.AddActivityListener(listener);
+        return listener;
+    }
+
+    /// <summary>The seconds of each pass of the job just ended, for its line, the passes then emptied for the next.</summary>
+    private static string PassesOfJob()
+    {
+        lock (s_passes)
+        {
+            string line = string.Join(", ", s_passes.Select(static pass => string.Create(CultureInfo.InvariantCulture, $"{pass.Key} {pass.Value:F1} s")));
+            s_passes.Clear();
+            return line;
+        }
+    }
+
     private static MeterListener Listen()
     {
         MeterListener listener = new MeterListener
@@ -170,7 +208,7 @@ internal static class BacklogBench
             refusals += Interlocked.Read(ref s_refused);
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB, {result.RangesAtOnce} at once, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of write lanes, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {GC.CollectionCount(2) - fullCollections} full collections, {Slabs.Slab.Made - slabsMade} slabs made; {sampler.Peaks()}"));
+                $"job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB, {result.RangesAtOnce} at once, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of write lanes, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {GC.CollectionCount(2) - fullCollections} full collections, {Slabs.Slab.Made - slabsMade} slabs made; passes: {PassesOfJob()}; {sampler.Peaks()}"));
         }
 
         Console.WriteLine(string.Create(
