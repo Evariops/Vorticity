@@ -112,9 +112,8 @@ public sealed class QueryMemoryBudget
     }
 
     /// <summary>
-    /// The budget of the jobs carved out of the process's limit: <paramref name="share"/>, one in this many of the limit, read
-    /// again as the limit moves. The process counts what it reserves, and refuses none of it: what the rest of the process
-    /// holds does not take a job's room, which its share keeps for it.
+    /// The budget of the jobs: <paramref name="share"/>, one in this many of the process's limit, read again as the limit
+    /// moves. What it reserves asks the process too, which weighs it against the rest of its memory.
     /// </summary>
     private QueryMemoryBudget(int share)
         : this(0, Process, share)

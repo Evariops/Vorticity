@@ -93,7 +93,8 @@ public sealed partial class IdentifierPostingsTests
     public async Task ALookupReadsInThreeRoundTripsColdAndTwoWarm()
     {
         await using MemoryObjectStore inner = new MemoryObjectStore();
-        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using RoundStore rounds = new RoundStore(inner);
+        await using CountingObjectStore store = new CountingObjectStore(rounds);
         await using VortexSession session = VortexSession.Create(static options => options.SegmentCache = new SegmentCache(64 << 20));
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Request.Schema, new DatasetOptions
         {
@@ -130,28 +131,24 @@ public sealed partial class IdentifierPostingsTests
         Assert.Equal(3, hours.Count);
         Request needle = appended[1_234];
         VortexExpr filter = VortexExpr.Parse($"RequestId = '{needle.RequestId}'");
-        inner.Latency = TimeSpan.FromMilliseconds(20);
 
-        // Each object alone, so that the steps counted are its own: a step is a request that starts with
-        // the store idle, which another object's requests in flight would hide.
+        // Each object alone, its reads held in rounds, each let go once all of it is in: a round is a round trip, however late
+        // a busy thread sends a read of it, where a latency of 20 ms counted a step more under the load of the whole suite. The
+        // hour that holds the id, the first, reads its block; the others' postings rule every block out, and they read no
+        // chunk at all.
         List<RecordBatch>?[] cold = new List<RecordBatch>?[hours.Count];
         List<RecordBatch>?[] warm = new List<RecordBatch>?[hours.Count];
         for (int h = 0; h < hours.Count; h++)
         {
+            bool holds = h == 0;
             store.Reset();
-            cold[h] = await dataset.LookupAsync(hours[h], filter, null, Ct);
-            long coldSteps = store.DependentSteps;
+            cold[h] = await rounds.RoundsAsync(() => dataset.LookupAsync(hours[h], filter, null, Ct).AsTask(), holds ? [7, 1, 1] : [7, 1], Ct);
             long coldRequests = store.Requests;
             store.Reset();
-            warm[h] = await dataset.LookupAsync(hours[h], filter, null, Ct);
+            warm[h] = await rounds.RoundsAsync(() => dataset.LookupAsync(hours[h], filter, null, Ct).AsTask(), [], Ct);
             Console.Out.Write(FormattableString.Invariant(
-                $"IDENTIFIER LOOKUP: {coldSteps} dependent steps and {coldRequests} requests cold, {store.DependentSteps} steps and {store.Requests} requests warm.\n"));
-
-            // The hour that holds the id reads its block; the other's postings rule every block out, and
-            // it reads no chunk at all.
-            bool holds = cold[h]!.Count > 0;
-            Assert.Equal(holds ? 3 : 2, coldSteps);
-            Assert.InRange(store.DependentSteps, 0, 2);
+                $"IDENTIFIER LOOKUP: {(holds ? 3 : 2)} round trips and {coldRequests} requests cold, none warm.\n"));
+            Assert.Equal(holds, cold[h]!.Count > 0);
         }
 
         Assert.Equal(1, Holding(cold, needle.RequestId));
@@ -174,7 +171,8 @@ public sealed partial class IdentifierPostingsTests
         try
         {
             await using MemoryObjectStore inner = new MemoryObjectStore();
-            await using CountingObjectStore store = new CountingObjectStore(inner);
+            await using RoundStore rounds = new RoundStore(inner);
+            await using CountingObjectStore store = new CountingObjectStore(rounds);
             // No segment cache, which would answer the warm lookup's blocks too: what the synopsis cache spares alone.
             await using VortexSession session = VortexSession.Create(options =>
             {
@@ -221,28 +219,28 @@ public sealed partial class IdentifierPostingsTests
             Assert.Equal(3, hours.Count);
             Request needle = appended[2_345];
             VortexExpr filter = VortexExpr.Parse($"RequestId = '{needle.RequestId}'");
-            inner.Latency = TimeSpan.FromMilliseconds(20);
+            // The rounds of each hour, the first holding the id, cold and warm: a round trip each, counted by holding its reads
+            // until all of them are in. In pages, a run of the postings may need one page more before its segments.
+            int[][] colds = paged ? [[7, 1, 1, 1], [7, 1, 1], [7, 1]] : [[7, 1, 1], [7, 1], [7, 1]];
             List<RecordBatch>?[] warm = new List<RecordBatch>?[hours.Count];
             for (int h = 0; h < hours.Count; h++)
             {
+                bool holds = h == 0;
                 store.Reset();
-                List<RecordBatch>? cold = await dataset.LookupAsync(hours[h], filter, null, Ct);
-                long coldSteps = store.DependentSteps;
+                List<RecordBatch>? cold = await rounds.RoundsAsync(() => dataset.LookupAsync(hours[h], filter, null, Ct).AsTask(), colds[h], Ct);
                 long coldRequests = store.Requests;
                 store.Reset();
-                warm[h] = await dataset.LookupAsync(hours[h], filter, null, Ct);
+                warm[h] = await rounds.RoundsAsync(() => dataset.LookupAsync(hours[h], filter, null, Ct).AsTask(), holds ? [1] : [], Ct);
                 Console.Out.Write(FormattableString.Invariant(
-                    $"IDENTIFIER LOOKUP CACHED{(paged ? ", PAGED" : string.Empty)}: {coldSteps} dependent steps and {coldRequests} requests cold, {store.DependentSteps} steps and {store.Requests} requests warm.\n"));
+                    $"IDENTIFIER LOOKUP CACHED{(paged ? ", PAGED" : string.Empty)}: {colds[h].Length} round trips and {coldRequests} requests cold, {(holds ? 1 : 0)} and {store.Requests} requests warm.\n"));
 
-                bool holds = cold!.Count > 0;
+                Assert.Equal(holds, cold!.Count > 0);
                 foreach (RecordBatch batch in cold)
                 {
                     batch.Dispose();
                 }
 
-                Assert.Equal(holds ? 1 : 0, store.DependentSteps);
                 Assert.Equal(holds, store.Requests > 0);
-                Assert.True(coldSteps > store.DependentSteps);
             }
 
             Assert.Equal(1, Holding(warm, needle.RequestId));
@@ -293,7 +291,8 @@ public sealed partial class IdentifierPostingsTests
     public async Task AnIdentifierAmongTheAttributesIsFoundAsAColumnIs()
     {
         await using MemoryObjectStore inner = new MemoryObjectStore();
-        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using RoundStore rounds = new RoundStore(inner);
+        await using CountingObjectStore store = new CountingObjectStore(rounds);
         await using VortexSession session = VortexSession.Create(static options => options.SegmentCache = new SegmentCache(64 << 20));
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
         {
@@ -340,25 +339,20 @@ public sealed partial class IdentifierPostingsTests
         Assert.Equal(3, hours.Count);
         string needle = users[1_234];
         VortexExpr filter = VortexExpr.Parse($"Attributes['user'].AsString() = '{needle}'");
-        inner.Latency = TimeSpan.FromMilliseconds(20);
-        int holding = 0;
-        foreach (ObjectEntry hour in hours)
+        // Each hour's reads held in rounds, each a round trip: three in the first, which holds the user, two in the others.
+        for (int h = 0; h < hours.Count; h++)
         {
+            bool holds = h == 0;
             store.Reset();
-            List<RecordBatch> cold = (await dataset.LookupAsync(hour, filter, null, Ct))!;
-            long coldSteps = store.DependentSteps;
-            Console.Out.Write(FormattableString.Invariant($"PATH IDENTIFIER LOOKUP: {coldSteps} dependent steps and {store.Requests} requests cold, {cold.Count} batches.\n"));
-            bool holds = cold.Count > 0;
-            holding += holds ? 1 : 0;
-            Assert.Equal(holds ? 3 : 2, coldSteps);
+            List<RecordBatch> cold = (await rounds.RoundsAsync(() => dataset.LookupAsync(hours[h], filter, null, Ct).AsTask(), holds ? [5, 1, 1] : [5, 1], Ct))!;
+            Console.Out.Write(FormattableString.Invariant($"PATH IDENTIFIER LOOKUP: {(holds ? 3 : 2)} round trips and {store.Requests} requests cold, {cold.Count} batches.\n"));
+            Assert.Equal(holds, cold.Count > 0);
             foreach (RecordBatch batch in cold)
             {
                 batch.Dispose();
             }
         }
 
-        Assert.Equal(1, holding);
-        inner.Latency = TimeSpan.Zero;
         Assert.Equal(1, await dataset.Scan<Visit>().Where(r => r.Attributes["user"].AsString() == needle).CountAsync(Ct));
     }
 
@@ -373,7 +367,8 @@ public sealed partial class IdentifierPostingsTests
     public async Task TheRecordsOfAUserAmongTheAttributesAreLookedUp()
     {
         await using MemoryObjectStore inner = new MemoryObjectStore();
-        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using RoundStore rounds = new RoundStore(inner);
+        await using CountingObjectStore store = new CountingObjectStore(rounds);
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Visit.Schema, new DatasetOptions
         {
             Layout = new DatasetLayout
@@ -404,23 +399,23 @@ public sealed partial class IdentifierPostingsTests
         // Each hour's appends consolidated together, with the index of its partition.
         await dataset.ConsolidateAsync(Ct);
 
-        // A store that answers in 20 ms, so that the reads in flight together count one step, and those one after another one each.
-        inner.Latency = TimeSpan.FromMilliseconds(20);
-        List<Visit> found;
-        try
+        // The store holds each round of reads until all of it is in, so that the rounds are counted however late a busy thread
+        // sends a read: timed by a latency of 20 ms, a fourth step came under the load of the whole suite. The indexes of the
+        // two partitions and their pages side by side, then the user's two runs, then the object's rows.
+        store.Reset();
+        rounds.Holding = true;
+        Task<List<Visit>> scan = dataset.Scan<Visit>().Where(r => r.Attributes["user"].AsString() == User).ToRecordsAsync(Ct).ToListAsync(Ct).AsTask();
+        foreach (int reads in (int[])[4, 2, 1])
         {
-            store.Reset();
-            found = await dataset.Scan<Visit>().Where(r => r.Attributes["user"].AsString() == User).ToRecordsAsync(Ct).ToListAsync(Ct);
-        }
-        finally
-        {
-            inner.Latency = TimeSpan.Zero;
+            Assert.Equal(Enumerable.Repeat(ObjectOperation.Read, reads), await rounds.ReleaseAsync(reads, Ct));
         }
 
+        List<Visit> found = await scan.WaitAsync(RoundStore.Patience, Ct);
+        rounds.Holding = false;
         Console.Out.Write(FormattableString.Invariant(
-            $"PATH IDENTIFIER RECORDS: {found.Count} visits, {store.CountOf(ObjectOperation.Read)} reads, {store.DependentSteps} dependent steps, {store.BytesRead} bytes.\n"));
+            $"PATH IDENTIFIER RECORDS: {found.Count} visits, {store.CountOf(ObjectOperation.Read)} reads in 3 rounds, {store.BytesRead} bytes.\n"));
         Assert.Equal(visits[20_000..20_008], found);
-        Assert.InRange(store.DependentSteps, 1, 3);
+        Assert.Equal(7, store.CountOf(ObjectOperation.Read));
 
         static string Body(Random random)
         {

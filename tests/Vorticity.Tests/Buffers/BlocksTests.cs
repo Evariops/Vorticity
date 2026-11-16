@@ -206,11 +206,13 @@ public sealed class BlocksKeptTests
     }
 
     /// <summary>
-    /// A block of 3 MB asked is one of 4 MB, given back on another thread and taken again after a full collection: the
-    /// same bytes, none made new, the class asked for since the last sweep keeping what it holds.
+    /// A block of 3 MB asked is one of 4 MB, given back on another thread and taken again after a collection and a sweep of
+    /// the memory kept: the same bytes, none made new, the class asked for since the last sweep keeping what it holds. The
+    /// sweep is the test's own: the one a full collection runs gives back everything above the floors when the machine's
+    /// memory load is high, as the whole suite makes it, and another may come between the return and the rent.
     /// </summary>
     [Fact]
-    public void A_large_block_given_back_on_another_thread_is_taken_again_past_a_full_collection()
+    public void A_large_block_given_back_on_another_thread_is_taken_again_past_a_collection_and_a_sweep()
     {
         const int Asked = 3 << 20;
         Block<byte> first = Blocks.Rent<byte>(Asked);
@@ -218,8 +220,8 @@ public sealed class BlocksKeptTests
         Thread other = new Thread(() => Blocks.Return(first));
         other.Start();
         other.Join();
-        GC.Collect(2, GCCollectionMode.Forced, blocking: true);
-        GC.WaitForPendingFinalizers();
+        GC.Collect(1, GCCollectionMode.Forced, blocking: true);
+        Blocks.LetGoUnused();
 
         long before = GC.GetAllocatedBytesForCurrentThread();
         Block<byte> again = Blocks.Rent<byte>(Asked);
