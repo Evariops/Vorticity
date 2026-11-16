@@ -54,10 +54,25 @@ internal static partial class DatasetCompactor
     /// <summary>
     /// What the writer of <paramref name="job"/>'s objects holds at most: what its columns gather (<see cref="WriterBytes"/>),
     /// or what the handle's last job measured its writer to hold when that is more. The measure wins over the bound it
-    /// passes: a writer of metric records, priced 192 MiB by its columns, held 691 MiB, shredding included.
+    /// passes: a writer of metric records, priced 192 MiB by its columns, held 691 MiB, shredding included. Before a job of
+    /// the handle measured it, a writer that shreds variants is priced at <see cref="FirstWriterPerCeiling"/> times its
+    /// gathering ceiling at least.
     /// </summary>
     internal static long WriterCost(VortexDataset dataset, DatasetSchema schema, CompactionJob job, IReadOnlyList<ValueShredding>? shreddings) =>
-        Math.Max(dataset.WriterJobBytes, WriterBytes(dataset, schema, job, shreddings));
+        dataset.WriterJobBytes > 0
+            ? Math.Max(dataset.WriterJobBytes, WriterBytes(dataset, schema, job, shreddings))
+            : VariantColumns(schema.DType).Length > 0
+                ? Math.Max(WriterBytes(dataset, schema, job, shreddings), FirstWriterPerCeiling * GatherCeiling(dataset))
+                : WriterBytes(dataset, schema, job, shreddings);
+
+    /// <summary>
+    /// What a job's writer that shreds variants holds over its gathering ceiling, before a job of the handle measured it: its
+    /// gathered columns, and the chunks its variant columns compress ahead, each holding its rows and its leaves as it
+    /// compresses. The first job of a handle priced its writer at the ceiling alone, held 322 MiB in its writer over log
+    /// records and 332 to 368 over metric records, four times the ceiling of 84 MiB under 2 GiB, and was refused, then
+    /// narrowed, twice (2026-11-17).
+    /// </summary>
+    private const int FirstWriterPerCeiling = 4;
 
     /// <summary>
     /// What a range of a consolidation holds, about: <see cref="InputsBytes"/> of the range of the most inputs, in batches
