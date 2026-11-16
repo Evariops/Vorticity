@@ -207,13 +207,41 @@ public sealed class BlocksKeptTests
 
     /// <summary>
     /// A block of 3 MB asked is one of 4 MB, given back on another thread and taken again after a collection and a sweep of
-    /// the memory kept: the same bytes, none made new, the class asked for since the last sweep keeping what it holds. The
-    /// sweep is the test's own: the one a full collection runs gives back everything above the floors when the machine's
-    /// memory load is high, as the whole suite makes it, and another may come between the return and the rent.
+    /// the memory kept: the same bytes, none made new, the class asked for since the last sweep keeping what it holds. In a
+    /// process of its own: in the suite's, a full collection another test ran swept the pool between the return and the
+    /// test's own sweep, which then found the block unused, and the rent made another.
     /// </summary>
     [Fact]
-    public void A_large_block_given_back_on_another_thread_is_taken_again_past_a_collection_and_a_sweep()
+    public async System.Threading.Tasks.Task A_large_block_given_back_on_another_thread_is_taken_again_past_a_collection_and_a_sweep()
     {
+        System.Diagnostics.ProcessStartInfo start = new System.Diagnostics.ProcessStartInfo("dotnet")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        start.ArgumentList.Add("exec");
+        start.ArgumentList.Add(typeof(BlocksKeptTests).Assembly.Location);
+        start.ArgumentList.Add("-method");
+        start.ArgumentList.Add($"{typeof(BlocksKeptTests).FullName}.{nameof(ALargeBlockTakenAgain)}");
+        start.ArgumentList.Add("-noLogo");
+        start.Environment[Child] = "1";
+        using System.Diagnostics.Process child = System.Diagnostics.Process.Start(start)!;
+        System.Threading.Tasks.Task<string> output = child.StandardOutput.ReadToEndAsync(TestContext.Current.CancellationToken);
+        System.Threading.Tasks.Task<string> errors = child.StandardError.ReadToEndAsync(TestContext.Current.CancellationToken);
+        await child.WaitForExitAsync(TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromMinutes(2), TestContext.Current.CancellationToken);
+        string said = await output + await errors;
+        Assert.True(child.ExitCode == 0, said);
+        Assert.Contains("ENDED", said, StringComparison.Ordinal);
+    }
+
+    /// <summary>The variable that tells the process it is the child.</summary>
+    private const string Child = "VORTICITY_BLOCKS_KEPT_CHILD";
+
+    [Fact]
+    public void ALargeBlockTakenAgain()
+    {
+        Assert.SkipWhen(Environment.GetEnvironmentVariable(Child) is null, "The child of A_large_block_given_back_on_another_thread_is_taken_again_past_a_collection_and_a_sweep.");
         const int Asked = 3 << 20;
         Block<byte> first = Blocks.Rent<byte>(Asked);
         Assert.Equal(4 << 20, first.Bytes!.Length);
@@ -229,6 +257,7 @@ public sealed class BlocksKeptTests
         Assert.Same(first.Bytes, again.Bytes);
         Assert.Equal(0, allocated);
         Blocks.Return(again);
+        Console.WriteLine("ENDED");
     }
 
     [Fact]

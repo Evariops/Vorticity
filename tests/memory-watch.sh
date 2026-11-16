@@ -13,6 +13,11 @@
 # both that held the most blocks at each step; heap-NNN.txt, the managed heap by type at each dump step (the dumps, which
 # weigh what the process held, are removed once read unless --keep-dumps); rss.tsv, the resident memory every second. A stack
 # is taken at each block rent counted: the run is slower, its bytes the same.
+#
+# The run is one process for every class, those of the trait Category=RunsAlone with the others. Those read what their whole
+# process does, its allocations, its peaks, its pool: here the other classes' work lands in their counts, and the stacks
+# taken at each rent slow what they time. A failure of theirs in this run says nothing until tests/runs-alone.sh, which
+# gives them processes of their own, fails it too.
 set -euo pipefail
 
 blocks=1024
