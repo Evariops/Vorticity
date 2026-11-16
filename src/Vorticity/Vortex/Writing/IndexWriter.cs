@@ -1098,7 +1098,10 @@ internal sealed class IndexWriter : IDisposable
         }
         finally
         {
-            into.Reset();
+            // Its blocks kept for the group's keys of the next batch, which take the same sizes: given back and rented again,
+            // through the jobs' budget each way, from every lane at once, they took a sixth of a merge of log records at
+            // fourteen lanes (2026-11-16).
+            into.ResetKeepingBlocks();
         }
     }
 
@@ -1108,7 +1111,7 @@ internal sealed class IndexWriter : IDisposable
         if (_variantFeeds?[field] is { } feed)
         {
             feed.Reads?.Release();
-            feed.Rows.Reset();
+            feed.Rows.ResetKeepingBlocks();
         }
     }
 
@@ -2466,7 +2469,7 @@ internal sealed class IndexWriter : IDisposable
         }
         finally
         {
-            rows.Reset();
+            rows.ResetKeepingBlocks();
         }
     }
 
