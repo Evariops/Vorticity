@@ -533,6 +533,15 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         bool numbering = !ids.IsEmpty;
         Span<ulong> rowHashes = _rowHashes;
         bool hashing = !rowHashes.IsEmpty;
+
+        // The longer view taken last in this call, its slot, -1 for none or for a value counted apart, and its hash: a view
+        // that names the same bytes of the same batch is the same value, which a shredded key's rows repeat row after row,
+        // each viewing the first's bytes (VariantFieldExpr.Output.Repeat), and each was hashed again.
+        bool repeats = false;
+        ulong lastLow = 0;
+        ulong lastHigh = 0;
+        int lastAt = -1;
+        ulong lastHash = 0;
         for (int row = start; row < start + count; row++)
         {
             if (!allValid && !(own.IsValid(row) && wrapper.IsValid(row)))
@@ -592,6 +601,32 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 continue;
             }
 
+            // The rows a longer view repeats are counted as Take counts a value it holds: its slot's count, or the rows of
+            // the value counted apart; past the counts, its register was raised already.
+            if (!inline && repeats && low == lastLow && high == lastHigh)
+            {
+                if (lastAt >= 0)
+                {
+                    _slots[lastAt].Count++;
+                }
+                else if (!_slots.IsEmpty)
+                {
+                    _zeroRows++;
+                }
+
+                if (numbering)
+                {
+                    ids[row - start] = lastAt >= 0 ? IdAt(lastAt) : _zeroId;
+                }
+
+                if (hashing)
+                {
+                    rowHashes[row] = lastHash;
+                }
+
+                continue;
+            }
+
             ReadOnlySpan<byte> value = BloomBuilder.ValueAt(views, buffers, row);
             ulong valueHash = SplitBlockBloom.Hash(value, BloomHash.XxHash3);
             if (hashing)
@@ -605,11 +640,17 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 ids[row - start] = at >= 0 ? IdAt(at) : _zeroId;
             }
 
+            // A value taken may have grown the counts, which moves every slot: the longer view taken last is forgotten.
             if (entry >= 0)
             {
                 met[entry] = low;
                 met[entry + 1] = high;
                 met[entry + 2] = at < 0 ? 1 : (ulong)at + 2;
+                repeats = false;
+            }
+            else
+            {
+                (repeats, lastLow, lastHigh, lastAt, lastHash) = (true, low, high, at, valueHash);
             }
         }
     }
