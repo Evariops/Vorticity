@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.CompilerServices;
 using Vorticity.Buffers;
 
 namespace Vorticity.RowEncoding;
@@ -49,13 +51,27 @@ public sealed class RowKeys : IEncodedKeys
     public ReadOnlySpan<int> Sizes => _disposed ? ThrowDisposedInts() : _sizes.AsSpan(0, _rowCount);
 
     /// <summary>The key of the 0-based row <paramref name="index"/>, borrowed from this instance.</summary>
+    /// <remarks>
+    /// The index is checked once against the rows, which the offsets and the sizes hold, and read in them unchecked: a merge
+    /// reads a key at each level of its heap, and the blocks' indexers checked each again, which made a merge of keys
+    /// interleaved row by row 13 % slower than over arrays (2026-11-16). The bytes keep their check.
+    /// </remarks>
     public ReadOnlySpan<byte> Row(int index)
     {
-        ArgumentOutOfRangeException.ThrowIfNegative(index);
-        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(index, _rowCount);
+        if ((uint)index >= (uint)_rowCount)
+        {
+            ThrowRow(index);
+        }
+
         Block<byte> elements = Live();
-        return elements.AsSpan(_offsets[index], _sizes[index]);
+        int start = Unsafe.Add(ref _offsets.GetReference(), index);
+        int size = Unsafe.Add(ref _sizes.GetReference(), index);
+        return elements.AsSpan(start, size);
     }
+
+    [DoesNotReturn]
+    private void ThrowRow(int index) =>
+        throw new ArgumentOutOfRangeException(nameof(index), index, $"A row of the {_rowCount} keys encoded.");
 
     /// <summary>Compares two rows the way a sort would: by their bytes.</summary>
     public int Compare(int left, int right) => Row(left).SequenceCompareTo(Row(right));
