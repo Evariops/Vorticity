@@ -2617,7 +2617,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         try
         {
             // The longest items first, the keys' reads and the columns' gatherings, so that the shortest fill in behind them.
-            Span<int> items = fan.Items((_fieldCount * 6) + 1);
+            // The columns' own index builders go in this first turn too, the variant columns' without their keys: the second
+            // turn holds the groups of keys alone, which wait for their column's read. With the builders in the second, each
+            // block waited for the slowest of them twice (2026-11-17).
+            Span<int> items = fan.Items((_fieldCount * 7) + 1);
             int count = 0;
             for (int field = 0; field < _fieldCount; field++)
             {
@@ -2629,9 +2632,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
             count = GatherItems(items, count);
             count += IngestItems(arena, items[count..]);
+            count = FeedItems(items, count);
+            _keysApart = true;
             await fan.RunAsync(this, count, arena, rows).ConfigureAwait(false);
-            items = fan.Items(_fieldCount + 1 + groups);
-            count = FeedItems(items, 0);
+            items = fan.Items(groups);
+            count = 0;
             for (int field = 0; field < _fieldCount; field++)
             {
                 for (int group = 0; group < indexes.KeyGroups(field); group++)
@@ -2640,7 +2645,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
             }
 
-            _keysApart = true;
             await fan.RunAsync(this, count, arena, rows).ConfigureAwait(false);
             BatchesKeysApart++;
         }
