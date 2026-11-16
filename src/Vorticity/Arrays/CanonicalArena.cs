@@ -1716,6 +1716,50 @@ internal partial class CanonicalArena
         return total;
     }
 
+    /// <summary>
+    /// The heap bytes a compact copy of <paramref name="rows"/> views keeps, and the last row it reads up to: the length of
+    /// each view that is not inline, the views read up to the last row. Sharing repeats, a view that names the bytes the one
+    /// before it that is not inline names counted once, as the copy keeps them once, and the views read up to the last that
+    /// is not inline, -1 for none (<see cref="CompactVarBinView"/>).
+    /// </summary>
+    private static (long Bytes, int Last) GatheredBytes(ReadOnlySpan<byte> views, int rows, bool shareRepeats)
+    {
+        if (!shareRepeats)
+        {
+            return (ViewedBytes(views, rows), rows - 1);
+        }
+
+        const uint MaxInline = Decoders.Canonical.CanonicalSupport.MaxInlineViewLength;
+        ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(views[..(rows * Decoders.Canonical.CanonicalSupport.ViewSize)]);
+        long bytes = 0;
+        int last = -1;
+        uint lastSize = 0;
+        uint lastIndex = uint.MaxValue;
+        uint lastOffset = 0;
+        for (int j = 0; j < rows; j++)
+        {
+            int w = j * 4;
+            uint size = words[w];
+            if (size <= MaxInline)
+            {
+                continue;
+            }
+
+            last = j;
+            if (size == lastSize && words[w + 2] == lastIndex && words[w + 3] == lastOffset)
+            {
+                continue;
+            }
+
+            bytes += size;
+            lastSize = size;
+            lastIndex = words[w + 2];
+            lastOffset = words[w + 3];
+        }
+
+        return (bytes, last);
+    }
+
     /// <summary>The heap bytes <paramref name="rows"/> views name: the length of each that is not inline.</summary>
     /// <remarks>
     /// Every view of a batch's text columns, once per batch: on Arm, four views a load with their
@@ -1904,7 +1948,13 @@ internal partial class CanonicalArena
     /// of them exists is how an interface becomes permanent by accident.
     /// </para>
     /// </remarks>
-    internal int CopyFrom(CanonicalArena source, int sourceIndex)
+    /// <param name="shareRepeats">
+    /// Whether a text whose view names the bytes the buffered view before it names views the copy made for that one
+    /// (<see cref="CompactVarBinView"/>). The copy then holds fewer bytes than its rows name, and only a reader that sizes
+    /// it by what its rows name, never by its buffers, takes it: a merge's runs waiting in its writer
+    /// (<c>VortexFileWriter.Stage</c>), whose rows the writer copies again, each row's bytes, before an encoder sizes them.
+    /// </param>
+    internal int CopyFrom(CanonicalArena source, int sourceIndex, bool shareRepeats = false)
     {
         ArgumentNullException.ThrowIfNull(source);
         if ((uint)sourceIndex >= (uint)source._recordCount)
@@ -1921,7 +1971,7 @@ internal partial class CanonicalArena
         Validity validity = src.Validity;
         if (validity.Kind == ValidityKind.Bitmap)
         {
-            validity = Validity.Bitmap(CopyFrom(source, validity.CanonicalNodeIndex));
+            validity = Validity.Bitmap(CopyFrom(source, validity.CanonicalNodeIndex, shareRepeats));
         }
 
         // A VarBinView is copied compact, and that is not an optimization but the difference
@@ -1932,7 +1982,7 @@ internal partial class CanonicalArena
         // block, would drag the whole heap of every block already emitted along with it.
         if (src.Kind == CanonicalKind.VarBinView)
         {
-            return CompactVarBinView(source, in src, validity);
+            return CompactVarBinView(source, in src, validity, shareRepeats);
         }
 
         // Children next, gathered before anything is committed so the block stays contiguous: a
@@ -1942,7 +1992,7 @@ internal partial class CanonicalArena
         int childStart = ReserveChildren(childCount);
         for (int i = 0; i < childCount; i++)
         {
-            int child = CopyFrom(source, source._children[src.ChildStart + i]);
+            int child = CopyFrom(source, source._children[src.ChildStart + i], shareRepeats);
             _children[childStart + i] = child;
         }
 
@@ -1998,7 +2048,7 @@ internal partial class CanonicalArena
     /// trusting them.
     /// </para>
     /// </remarks>
-    private int CompactVarBinView(CanonicalArena source, in CanonicalRecord src, Validity validity)
+    private int CompactVarBinView(CanonicalArena source, in CanonicalRecord src, Validity validity, bool shareRepeats)
     {
         const int ViewSize = Decoders.Canonical.CanonicalSupport.ViewSize;
         const uint MaxInline = Decoders.Canonical.CanonicalSupport.MaxInlineViewLength;
@@ -2008,7 +2058,7 @@ internal partial class CanonicalArena
 
         // Sized before anything is written: one pass to learn how many bytes the rows name, so the
         // gather below writes into a buffer it never has to grow.
-        long referenced = ViewedBytes(src.BufferA.Span, rows);
+        (long referenced, int lastBuffered) = GatheredBytes(src.BufferA.Span, rows, shareRepeats);
 
         // The views start on a boundary of their own size, as a decoder puts them, whatever the
         // slab holds before them: see CopyBuffer.
@@ -2028,11 +2078,19 @@ internal partial class CanonicalArena
             : AllocateUninitialized(checked((int)referenced + GatherSlack), 1, out into).Slice(0, (int)referenced);
         bool wide = Vector256.IsHardwareAccelerated;
 
-        // The gather ends with the last buffered row, once the bytes counted above are all in:
-        // every view past it is inline, and a column of short strings has no buffered row at all.
+        // The gather ends with the last buffered row: every view past it is inline, and a column of
+        // short strings has no buffered row at all. Sharing repeats, a view that names the bytes the
+        // buffered view before it names views the copy made for that one: a series' rows repeat their
+        // attributes, which a reassembled input views once, and each copy of the merge's runs copied
+        // them again row by row, its comparisons downstream reading them whole where the same address
+        // ends one.
         Span<uint> words = MemoryMarshal.Cast<byte, uint>(writable);
         int at = 0;
-        for (int j = 0; at < referenced; j++)
+        uint lastSize = 0;
+        uint lastIndex = uint.MaxValue;
+        uint lastOffset = 0;
+        int lastAt = 0;
+        for (int j = 0; j <= lastBuffered && (shareRepeats || at < referenced); j++)
         {
             int w = j * 4;
             uint size = words[w];
@@ -2041,6 +2099,17 @@ internal partial class CanonicalArena
                 continue;
             }
 
+            if (shareRepeats && size == lastSize && words[w + 2] == lastIndex && words[w + 3] == lastOffset)
+            {
+                words[w + 2] = 0;
+                words[w + 3] = (uint)lastAt;
+                continue;
+            }
+
+            lastSize = size;
+            lastIndex = words[w + 2];
+            lastOffset = words[w + 3];
+            lastAt = at;
             uint index = words[w + 2];
             if (index >= (uint)src.DataBufferCount)
             {

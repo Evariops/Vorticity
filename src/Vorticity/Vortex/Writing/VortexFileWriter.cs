@@ -1845,7 +1845,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>A copy of the rows of node <paramref name="root"/> in <paramref name="into"/>, owning their bytes.</summary>
-    private int Owned(CanonicalArena into, CanonicalArena arena, int root) =>
+    private int Owned(CanonicalArena into, CanonicalArena arena, int root, bool shareRepeats = false) =>
         // Materialized, not borrowed: the batch's arena is the scan's and is reset as soon as the
         // caller asks for the next batch, so rows that wait must own their bytes. Narrowed before
         // it is owned, since a batch cut from a large list chunk shares that chunk's elements whole
@@ -1853,8 +1853,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // works on views, so the copy pays for the window alone. Narrowing here also keeps the
         // concatenation tight, because rebasing uses each chunk's whole child length.
         _mayShareChildren
-            ? into.CopyFrom(into, ChunkCompactor.Compact(into, into.ReferenceFrom(arena, root)))
-            : into.CopyFrom(arena, root);
+            ? into.CopyFrom(into, ChunkCompactor.Compact(into, into.ReferenceFrom(arena, root)), shareRepeats)
+            : into.CopyFrom(arena, root, shareRepeats);
 
     /// <summary>
     /// The rows below which a batch waits with the next ones rather than going through the writer
@@ -1918,10 +1918,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         Staging staging = _staging;
         CanonicalArena into = staging.Context.Canonical;
-        int owned = Owned(into, arena, root);
+        // A text that repeats the row before's is copied once: the rows staged are sized by the bytes they name, and the
+        // writer copies each row's bytes again as it gathers them, before any encoder sizes them.
+        int owned = Owned(into, arena, root, shareRepeats: true);
         staging.Nodes.Add(owned);
         staging.Rows += rows;
-        staging.Bytes += into.ByteSize(owned);
+        staging.Bytes += into.NamedBytes(owned);
         return staging;
     }
 
@@ -2905,7 +2907,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         // A column gathered as codes is cut where its values would have been: its target counts the values' bytes, so that
-        // its chunks hold the rows they held, and what it holds, its codes, is what counts toward the writer's ceiling.
+        // its chunks hold the rows they held, and what it holds, its codes, is what counts toward the writer's ceiling. The
+        // values' bytes are those the rows name: a merge's staged rows view a text that repeats the row before's once.
+        // Gathered, the copy holds each row's bytes, which the encoders size the chunk by.
         bool coded = _dictionaries?[field] is not null;
         int owned = coded
             ? _dictionaries![field]!.CodeInto(arena, node, into, _codesTypes![field])
@@ -2914,7 +2918,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         gathering.Nodes.Add(owned);
         gathering.Rows += rows;
         gathering.Blocks += blocks;
-        gathering.Bytes += coded ? arena.ByteSize(node) : held;
+        gathering.Bytes += coded ? arena.NamedBytes(node) : held;
         gathering.Held += held;
         Interlocked.Add(ref _gatheredHeld, held);
     }
