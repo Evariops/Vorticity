@@ -257,6 +257,13 @@ internal static class BacklogBench
         private long _slabs;
         private long _free;
         private long _beside;
+        private long _native;
+        private long _growth;
+
+        // The resident bytes of the last second's samples, one every 50 ms: how much faster the process grows than a reading of
+        // its container's memory, a second apart, sees.
+        private readonly long[] _second = new long[20];
+        private int _at;
 
         internal Sampler()
         {
@@ -277,12 +284,14 @@ internal static class BacklogBench
             Interlocked.Exchange(ref _slabs, 0);
             Interlocked.Exchange(ref _free, 0);
             Interlocked.Exchange(ref _beside, 0);
+            Interlocked.Exchange(ref _native, 0);
+            Interlocked.Exchange(ref _growth, 0);
             _large?.Reset();
         }
 
         internal string Peaks() => string.Create(
             CultureInfo.InvariantCulture,
-            $"peaks: resident {Mib(Interlocked.Read(ref _resident))} MiB, blocks {Mib(Interlocked.Read(ref _blocks))}, of which the pool keeps {Mib(Interlocked.Read(ref _parked))} and past 16 MiB are rented {Mib(_large?.Peak ?? 0)}, slabs {Mib(Interlocked.Read(ref _slabs))} of which free {Mib(Interlocked.Read(ref _free))}, heap beside the blocks and slabs {Mib(Interlocked.Read(ref _beside))}");
+            $"peaks: resident {Mib(Interlocked.Read(ref _resident))} MiB, blocks {Mib(Interlocked.Read(ref _blocks))}, of which the pool keeps {Mib(Interlocked.Read(ref _parked))} and past 16 MiB are rented {Mib(_large?.Peak ?? 0)}, slabs {Mib(Interlocked.Read(ref _slabs))} of which free {Mib(Interlocked.Read(ref _free))}, heap beside the blocks and slabs {Mib(Interlocked.Read(ref _beside))}, resident past the committed heap {Mib(Interlocked.Read(ref _native))}, resident nothing counts grown in a second {Mib(Interlocked.Read(ref _growth))}");
 
         /// <summary>The pinned bytes of the blocks: the slabs whole, and the blocks of an array of their own.</summary>
         private static long Pinned() => Slabs.HeldBytes + BlockOwner.LiveBytes - Slabs.PieceBytes;
@@ -340,7 +349,22 @@ internal static class BacklogBench
         private void Sample()
         {
             long blocks = BlockOwner.LiveBytes;
-            Raise(ref _resident, MemoryPeaks.Read().Working);
+            long resident = MemoryPeaks.Read().Working;
+            Raise(ref _resident, resident);
+            Raise(ref _native, resident - GC.GetGCMemoryInfo().TotalCommittedBytes);
+
+            // What no reservation and no holder of kept memory counts: what a reading of the container's memory, a second
+            // apart, learns of late, and its margin covers. The timer's callbacks never overlap: it fires again only 50 ms
+            // after, and a sample takes far less.
+            long unaccounted = resident - QueryMemoryBudget.Process.ReservedBytes - HeldMemory.TotalBytes();
+            long before = _second[_at];
+            _second[_at] = unaccounted;
+            _at = (_at + 1) % _second.Length;
+            if (before != 0)
+            {
+                Raise(ref _growth, unaccounted - before);
+            }
+
             Raise(ref _blocks, blocks);
             Raise(ref _parked, MemoryAccount.Pool.ParkedBytes);
             Raise(ref _slabs, Slabs.HeldBytes);
