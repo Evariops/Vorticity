@@ -438,12 +438,18 @@ internal sealed class ShreddedVariant
         ulong lastLow = 0;
         ulong lastHigh = 0;
         bool seen = false;
+
+        // The last row rebuilt, -1 after any other: a row whose metadata and every node's slot are that row's views the
+        // value rebuilt for it. A metric's series holds the same attributes row after row, which were rebuilt each, a twelfth
+        // of a consolidation of shredded metric records (2026-11-16).
+        int rebuilt = -1;
         for (int row = 0; row < rows; row++)
         {
             Span<byte> view = into.Slice(row * ViewSize, ViewSize);
             if (!root.Group[row])
             {
                 view.Clear();
+                rebuilt = -1;
                 continue;
             }
 
@@ -460,9 +466,11 @@ internal sealed class ShreddedVariant
                     view[0] = 1;
                 }
 
+                rebuilt = -1;
                 continue;
             }
 
+            bool sameMetadata = true;
             if (_objects)
             {
                 // A view equal to the last row's views the same bytes: a column of one metadata,
@@ -474,14 +482,98 @@ internal sealed class ShreddedVariant
                 {
                     dictionary = Dictionary(BlockStatsPass.Value(metadataBuffers, metadataViews, row));
                     (lastLow, lastHigh, seen) = (low, high, true);
+                    sameMetadata = false;
                 }
+            }
+
+            if (rebuilt == row - 1 && sameMetadata && rebuilt >= 0 && Same(root, row))
+            {
+                into.Slice(rebuilt * ViewSize, ViewSize).CopyTo(view);
+                rebuilt = row;
+                continue;
             }
 
             int start = _used;
             Write(root, row, in dictionary);
             CanonicalSupport.WriteView(ref MemoryMarshal.GetReference(view), ref _scratch[start], _used - start, own, start);
+            rebuilt = row;
         }
     }
+
+    /// <summary>
+    /// Whether <paramref name="shred"/> holds at <paramref name="slot"/> what it holds at the slot before, as its slots lie:
+    /// the same presences, the same views and the same values, node by node; an array is never said to. Views that differ may
+    /// name equal bytes, which this does not tell, and the row is then rebuilt.
+    /// </summary>
+    private static bool Same(Shred shred, int slot)
+    {
+        int prior = slot - 1;
+        if (shred.Group[slot] != shred.Group[prior])
+        {
+            return false;
+        }
+
+        if (!shred.Group[slot])
+        {
+            return true;
+        }
+
+        bool value = shred.Value >= 0 && shred.ValuePresent[slot];
+        if (value != (shred.Value >= 0 && shred.ValuePresent[prior])
+            || (value && !SameSlot(shred.ValueViews.Span, ViewSize, slot)))
+        {
+            return false;
+        }
+
+        bool typed = shred.Typed >= 0 && shred.TypedPresent[slot];
+        if (typed != (shred.Typed >= 0 && shred.TypedPresent[prior]))
+        {
+            return false;
+        }
+
+        if (!typed)
+        {
+            return true;
+        }
+
+        switch (shred.Kind)
+        {
+            case ShredKind.Object:
+                foreach (Shred field in shred.Fields)
+                {
+                    if (!Same(field, slot))
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+
+            case ShredKind.Array:
+                return false;
+
+            case ShredKind.Bool:
+            {
+                ReadOnlySpan<byte> bits = shred.Data.Span;
+                int at = shred.BitOffset + slot;
+                int before = at - 1;
+                return ((bits[at >> 3] >> (at & 7)) & 1) == ((bits[before >> 3] >> (before & 7)) & 1);
+            }
+
+            case ShredKind.Fixed:
+                return SameSlot(shred.Data.Span, shred.Width, slot);
+
+            case ShredKind.Decimal:
+                return SameSlot(shred.Data.Span, shred.Storage, slot);
+
+            default:
+                return SameSlot(shred.Data.Span, ViewSize, slot);
+        }
+    }
+
+    /// <summary>Whether the <paramref name="width"/> bytes of slot <paramref name="slot"/> of <paramref name="data"/> are the slot before's.</summary>
+    private static bool SameSlot(ReadOnlySpan<byte> data, int width, int slot) =>
+        data.Slice(slot * width, width).SequenceEqual(data.Slice((slot - 1) * width, width));
 
     /// <summary>The dictionary of <paramref name="metadata"/>; a new generation of field ids when it is not the last row's.</summary>
     private VariantDictionary Dictionary(ReadOnlySpan<byte> metadata)
