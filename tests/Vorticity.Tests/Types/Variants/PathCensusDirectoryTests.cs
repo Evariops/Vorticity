@@ -33,6 +33,32 @@ public sealed class PathCensusDirectoryTests
         Same(counted.Root, read.Root, "$");
         Assert.Equal(Describe(ShreddingChoice.Choose(counted)), Describe(ShreddingChoice.Choose(read)));
         Assert.NotNull(ShreddingChoice.Choose(read));
+
+        // The rows and the bytes of their values, which the directory keeps too: a first pass that reads none of the rows
+        // sizes the column's chunks as one that read them.
+        Assert.Equal(counted.ValueBytes, body.ValueBytes);
+        read.AddCounts(body.Rows, body.ValueBytes);
+        Assert.Equal(counted.Rows, read.Rows);
+        Assert.Equal(counted.ValueBytes, read.ValueBytes);
+        Assert.Equal(ShreddingChoice.ChunkTargetBytes(counted), ShreddingChoice.ChunkTargetBytes(read));
+    }
+
+    /// <summary>
+    /// A directory of the version before the rows' value bytes still reads, its paths whole, and says it keeps none of them:
+    /// a first pass then reads the rows for their bytes.
+    /// </summary>
+    [Fact]
+    public void ADirectoryOfTheVersionBeforeKeepsNoValueBytes()
+    {
+        Random random = new Random(5);
+        PathCensus counted = Census([.. Enumerable.Range(0, 1_000).Select(_ => Row(random))]);
+        VariantDirectory written = VariantDirectory.From(counted, null);
+        VariantDirectory older = new VariantDirectory(written.Rows, written.Entries, written.GroupRows, written.Partial);
+        using VariantDirectory.DirectoryBody body = VariantDirectory.Open(older.ToBytes())!;
+        Assert.Equal(-1, body.ValueBytes);
+        Assert.Equal(counted.Rows, body.Rows);
+        Assert.True(PathCensus.Tells(body));
+        Assert.Equal(written.Entries.Count, VariantDirectory.From(older.ToBytes())!.Entries.Count);
     }
 
     /// <summary>

@@ -331,6 +331,18 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
     }
 
     /// <summary>
+    /// Counts <paramref name="rows"/> rows whose values hold <paramref name="valueBytes"/> bytes, as <see cref="AddRows"/> counts
+    /// a batch's, from what the directory of the object they come from keeps of them (<see cref="Indexes.VariantDirectory.ValueBytes"/>):
+    /// a job's first pass then reads none of the object's column.
+    /// </summary>
+    internal void AddCounts(long rows, long valueBytes)
+    {
+        Settle();
+        Rows += rows;
+        ValueBytes += valueBytes;
+    }
+
+    /// <summary>
     /// Whether the directory <paramref name="body"/> tells every count a shredding is chosen from: whole, and with no list and
     /// no number, whose counts it keeps by the class a question reads them as. A list's elements' class and a double apart from
     /// a 32-bit float, which a shredding takes apart, it does not keep.

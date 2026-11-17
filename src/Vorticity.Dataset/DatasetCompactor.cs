@@ -133,6 +133,9 @@ public sealed record CompactionResult
     /// inputs did not decode ahead, slices its merge did not merge ahead, blocks its writers did not send through at once.
     /// </summary>
     internal (int Reads, int Slices, int Flights) AdvancesHeldBack { get; init; }
+
+    /// <summary>The inputs its first pass counted from their path directories alone, reading none of their rows (<see cref="Indexes.VariantDirectory.ValueBytes"/>).</summary>
+    internal int InputsToldByDirectories { get; init; }
 }
 
 /// <summary>Runs one compaction: a k-way merge of the inputs on the sort key when there is
@@ -737,6 +740,7 @@ internal static partial class DatasetCompactor
             InputWindowsAhead = windowsAhead,
             StoreWaitsWithoutLane = memory.Lane?.GivenBack ?? 0,
             AdvancesHeldBack = memory.HeldBack,
+            InputsToldByDirectories = memory.InputsToldByDirectories,
         };
     }
 
@@ -1790,21 +1794,41 @@ internal static partial class DatasetCompactor
                     : new VariantDirectory.DirectoryBody?[variants.Length];
                 try
                 {
-                    // In batches of the rows its lane was priced at (CensusRows): read at the scan's own size, a lane of log
-                    // records held a window of their attributes rebuilt, and the census of a tier merge of 23 inputs was refused
-                    // at 671 MiB of 672, twice, before a job of 5 ran (2026-11-16).
-                    await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants, piece?.RowsOf(input, 0), CensusRows(dataset, job), memory.InputsAccount)
-                        .WithCancellation(cancellationToken).ConfigureAwait(false))
+                    // Every column's directory keeps its rows' value bytes too: none of the input is read, its rows put back
+                    // together from their shredding only to be sized, a log's attributes from some four hundred keys a row.
+                    bool told = true;
+                    foreach (VariantDirectory.DirectoryBody? directory in directories)
+                    {
+                        told &= directory is { ValueBytes: >= 0 };
+                    }
+
+                    if (told)
                     {
                         for (int v = 0; v < variants.Length; v++)
                         {
-                            if (directories[v] is null)
+                            paths[v].AddCounts(directories[v]!.Rows, directories[v]!.ValueBytes);
+                        }
+
+                        memory.ToldByDirectories();
+                    }
+                    else
+                    {
+                        // In batches of the rows its lane was priced at (CensusRows): read at the scan's own size, a lane of
+                        // log records held a window of their attributes rebuilt, and the census of a tier merge of 23 inputs was
+                        // refused at 671 MiB of 672, twice, before a job of 5 ran (2026-11-16).
+                        await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants, piece?.RowsOf(input, 0), CensusRows(dataset, job), memory.InputsAccount)
+                            .WithCancellation(cancellationToken).ConfigureAwait(false))
+                        {
+                            for (int v = 0; v < variants.Length; v++)
                             {
-                                paths[v].Add(batch, v);
-                            }
-                            else
-                            {
-                                paths[v].AddRows(batch, v);
+                                if (directories[v] is null)
+                                {
+                                    paths[v].Add(batch, v);
+                                }
+                                else
+                                {
+                                    paths[v].AddRows(batch, v);
+                                }
                             }
                         }
                     }

@@ -258,6 +258,40 @@ public sealed partial class DatasetCompactionLanesTests
         }
     }
 
+    /// <summary>
+    /// A consolidation of appends whose objects keep a path directory of their variant column: its first pass counts each from
+    /// its directory alone, the rows' value bytes included, and reads none of their rows; its objects shred what a pass that
+    /// read them would have chosen, and hold every row.
+    /// </summary>
+    [Fact]
+    public async Task AFirstPassCountsTheInputsItsDirectoriesTellAndReadsNoneOfTheirRows()
+    {
+        Random random = new Random(47);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 2);
+
+        // Objects aimed past a mebibyte, which a job writes with a table of contents and counts the paths of first.
+        DatasetOptions options = OptionsOf(session);
+        options = options with { Layout = options.Layout! with { ObjectBytes = 4 << 20 } };
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, options, Ct);
+        for (int a = 0; a < 3; a++)
+        {
+            // No number past an integer and no list, which a directory keeps by the class a question reads them as and a
+            // shredding takes apart: such a directory tells every count.
+            Doc[] rows = [.. Enumerable.Range(a * 20_000, 20_000).Select(i => new Doc(0, $"svc-{random.Next(0, 60):D2}", i, Variant.Object(
+                ("route", Variant.From($"/api/r{random.Next(20)}")),
+                ("status", Variant.From(200 + (random.Next(4) * 100))),
+                ("user", Variant.From($"user-{random.Next(500)}")))))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Doc>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        IReadOnlyList<CompactionResult> results = await dataset.ConsolidateAsync(Ct);
+        Assert.Equal(3, results.Sum(static result => result.InputsToldByDirectories));
+        Assert.Equal(60_000, await dataset.ScanBuilder().CountAsync(Ct));
+    }
+
     /// <summary>A store whose puts, when <paramref name="late"/>, answer once a millisecond went by.</summary>
     private sealed class LatePuts(IObjectStore inner, bool late) : ForwardingStore(inner)
     {

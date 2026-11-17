@@ -51,6 +51,14 @@ internal sealed class JobMemory : IAsyncDisposable
     /// <summary>What its writer rents under: each object's writer and its sink.</summary>
     internal QueryMemoryBudget Writer { get; }
 
+    /// <summary>The inputs its first pass counted from their path directories alone, reading none of their rows.</summary>
+    internal int InputsToldByDirectories => Volatile.Read(ref _toldByDirectories);
+
+    private int _toldByDirectories;
+
+    /// <summary>Notes an input its first pass counted from its directories alone, from the lane that counted it.</summary>
+    internal void ToldByDirectories() => Interlocked.Increment(ref _toldByDirectories);
+
     /// <summary>The lane the job's own flow holds, which its objects' sinks give back while they wait for the store; null before it holds one.</summary>
     internal Execution.HeldLane? Lane { get; set; }
 

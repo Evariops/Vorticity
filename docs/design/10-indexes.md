@@ -329,8 +329,13 @@ granule is long share a span, so a path keeps about a span per granule at most, 
 granule that holds none. A directory written before 0.10.0 named the granules of the path, whatever the
 class: a key some sources send as text and others as a number named every source's granules as holding
 text. The entry
-is on the variant column. Its one run holds one region, behind a version byte (2; version 1 named the
-slices of the key) and the body's length, the body one zstd frame.
+is on the variant column. Its one run holds one region, behind a version byte (3; version 2 kept no
+value bytes, version 1 named the slices of the key) and the body's length, the body one zstd frame. The
+body's head holds the object's rows, the rows of a group its entries name, whether it is partial, and,
+from version 3, the bytes of the rows' values as the residual would hold them unshredded, which a job's
+first pass sizes a shredded column's chunks by without reading the rows. A version 2 region still reads,
+its value bytes unknown; a reader of an earlier library finds the new version unknown and, the directory
+a hint, refutes nothing by it.
 
 The directory fits the file's index budget. Over it, the paths of the residual held least are left
 out first, and the directory says it is partial, after which a path's absence proves nothing.
