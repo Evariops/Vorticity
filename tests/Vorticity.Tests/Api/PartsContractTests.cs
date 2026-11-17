@@ -206,6 +206,38 @@ public sealed class PartsContractTests
         }
     }
 
+    /// <summary>A dataset's writer takes records in memory on the lanes as a file's does: its rows are the ones a span gives.</summary>
+    [Fact]
+    public async Task ADatasetTakesRecordsOnTheLanesAsItTakesASpan()
+    {
+        Reading[] rows = Rows(90_000);
+        List<List<Reading>> read = [];
+        foreach (bool lanes in (bool[])[false, true])
+        {
+            await using MemoryObjectStore store = new MemoryObjectStore();
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes ? 8 : 1);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Reading.Schema, new DatasetOptions { Session = session }, Ct);
+            await using (ObjectDraft draft = dataset.StartObject())
+            {
+                if (lanes)
+                {
+                    await draft.Writer.WriteRecordsAsync<Reading>(rows, Ct);
+                }
+                else
+                {
+                    await draft.Writer.WriteAsync<Reading>(rows, Ct);
+                }
+
+                await dataset.AppendAsync(draft, Ct);
+            }
+
+            read.Add(await dataset.Scan<Reading>().ToRecordsAsync(Ct).ToListAsync(Ct));
+        }
+
+        Assert.Equal(rows, read[0]);
+        Assert.Equal(read[0], read[1]);
+    }
+
     private static async Task<List<Reading>> RowsOfAsync(string path)
     {
         await using VortexFile file = await VortexFile.OpenAsync(path, Ct);

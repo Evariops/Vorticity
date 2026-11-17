@@ -3313,6 +3313,7 @@ Vorticity.Dataset:     method ValueTask WriteAsync<TRecord>(Columns<TRecord>, Ca
 Vorticity.Dataset:     method ValueTask WriteAsync<TRecord>(IAsyncEnumerable<TRecord>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask WriteAsync<TRecord>(ReadOnlySpan<TRecord>, CancellationToken = default)
 Vorticity.Dataset:     method ValueTask WriteAsync<TRecord>(Scan<TRecord>, CancellationToken = default)
+Vorticity.Dataset:     method ValueTask WriteRecordsAsync<TRecord>(ReadOnlyMemory<TRecord>, CancellationToken = default)
 Vorticity.Dataset:     property VortexSchema Schema { get; }
 Vorticity.Dataset:     property long RowCount { get; }
 Vorticity.Dataset: sealed class Vorticity.Dataset.FileObjectStore : IObjectStore
