@@ -29,6 +29,18 @@ internal sealed class BatchHandover
     /// <summary>What the consumer keeps with the scan for <see cref="Prepare"/> to read: a job's input, how its batches are shaped.</summary>
     internal object? State { get; set; }
 
+    /// <summary>The windows the merge's inputs share past their own, which the scan takes from once its consumer reads it; null for none.</summary>
+    internal DecodeAhead? Ahead { get; init; }
+
+    /// <summary>
+    /// The splits in flight the scan keeps of its own, past which it takes windows of <see cref="Ahead"/>; and those it holds
+    /// now. Here rather than in the scan, which every scan would pay for; on the consumer's flow, the scan's pump.
+    /// </summary>
+    internal int Own = int.MaxValue;
+
+    /// <inheritdoc cref="Own"/>
+    internal int Borrowed;
+
     /// <summary>The scan that hands its batches over, once started.</summary>
     internal BatchAsyncEnumerator? Scan { get; set; }
 

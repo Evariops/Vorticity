@@ -118,6 +118,12 @@ public sealed record CompactionResult
 
     /// <summary>Of <see cref="MergeSlices"/>, those merged ahead on lanes of their own rather than by the job's flow.</summary>
     internal int MergeSlicesAhead { get; init; }
+
+    /// <summary>
+    /// The windows its inputs decoded ahead past their own two, shared by its merges' inputs and taken by those it read
+    /// (<see cref="Scanning.DecodeAhead"/>): the input it drains decoded on several lanes.
+    /// </summary>
+    internal long InputWindowsAhead { get; init; }
 }
 
 /// <summary>Runs one compaction: a k-way merge of the inputs on the sort key when there is
@@ -664,8 +670,10 @@ internal static partial class DatasetCompactor
         long windowsKeyed = 0;
         int slicesCut = 0;
         int slicesAhead = 0;
+        long windowsAhead = lateOutputs?.InputWindowsAhead ?? 0;
         foreach (ObjectStream outputs in streams)
         {
+            windowsAhead += outputs.InputWindowsAhead;
             objectsOut += outputs.Written.Count;
             bytesOut += outputs.Bytes;
             scratch += outputs.ScratchBytes;
@@ -708,6 +716,7 @@ internal static partial class DatasetCompactor
             InputWindowsKeyedByMerge = windowsKeyed,
             MergeSlices = slicesCut,
             MergeSlicesAhead = slicesAhead,
+            InputWindowsAhead = windowsAhead,
         };
     }
 
@@ -1227,11 +1236,19 @@ internal static partial class DatasetCompactor
         Writing.RunLedger ledger = new Writing.RunLedger();
         List<KeyOrderedMerge> made = [];
         int atOnce = ranges is null ? OpenAtOnce(job) : ranges.MostInputs;
+
+        // The windows the inputs the merge reads decode ahead past their own two, on the session's lanes but the merge's: a
+        // window is admitted while what the jobs' budget leaves the job, less it, still holds what the writer was priced at
+        // past what it holds now. The batches stay those of the inputs' splits, so the bytes written are the same.
+        int lanes = dataset.Session.Lanes.Lanes - 1;
+        Scanning.DecodeAhead? ahead = lanes <= 0
+            ? null
+            : new Scanning.DecodeAhead(lanes, bytes => memory.Room - bytes >= Math.Max(0, writer - memory.Writer.ReservedBytes));
         KeyOrderedMerge MergeOf(int slice, Action<KeyOrderedMerge.Window>? retiring)
         {
             KeyOrderedMerge one = InputsMerged(
                 dataset, schema, job, batchRows, cancellationToken, ranges: slices ?? ranges, range: slices is null ? range : slice, meter: meter,
-                memory: memory, emitted: emitted, ledger: ledger, retiring: retiring);
+                memory: memory, emitted: emitted, ledger: ledger, retiring: retiring, ahead: ahead);
 
             // As its inputs open, the job reprices the batches of those still to open from what the open ones hold; not a
             // merge in slices, whose slices open their inputs in an order its lanes decide, and whose batches, priced for the
@@ -1307,6 +1324,7 @@ internal static partial class DatasetCompactor
                 outputs.Slices += slices!.Count;
             }
 
+            outputs.InputWindowsAhead += ahead?.Taken ?? 0;
             if (lateOutputs is not null)
             {
                 lateOutputs.Ledger = null;
@@ -1444,7 +1462,8 @@ internal static partial class DatasetCompactor
         JobMemory? memory = null,
         long[]? emitted = null,
         Writing.RunLedger? ledger = null,
-        Action<KeyOrderedMerge.Window>? retiring = null)
+        Action<KeyOrderedMerge.Window>? retiring = null,
+        Scanning.DecodeAhead? ahead = null)
     {
         Buffers.MemoryAccount? account = memory?.InputsAccount;
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
@@ -1496,6 +1515,7 @@ internal static partial class DatasetCompactor
             Emitted = emitted,
             Ledger = ledger,
             Retiring = retiring,
+            Ahead = ledger is null ? null : ahead,
         };
 
         int RowsNow() => memory is { InputRows: > 0 } repriced && batchRows > 0 ? Math.Min(batchRows, repriced.InputRows) : batchRows;
@@ -2048,6 +2068,9 @@ internal static partial class DatasetCompactor
 
         /// <inheritdoc cref="Slices"/>
         internal int SlicesAhead { get; set; }
+
+        /// <summary>The windows the merges' inputs decoded ahead past their own two (<see cref="Scanning.DecodeAhead"/>).</summary>
+        internal long InputWindowsAhead { get; set; }
 
         /// <summary>
         /// Whether the object being written has reached the destination's size: its writer's, with the rows of the block's map

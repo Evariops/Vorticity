@@ -220,7 +220,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// The splits the scan keeps going at once: the degree, widened by the read-ahead; two at least for a consumer that takes
     /// batches over, whose lanes the scan cannot reuse at the next step.
     /// </summary>
-    private int Lanes => _reverse ? 1 : Math.Max(Handover is null ? 1 : 2, Math.Max(_degree, Prefetch > 0 ? Prefetch + 1 : 1));
+    private int Lanes => _reverse ? 1 : Math.Max(Handover is null ? 1 : 2 + (Handover.Ahead?.PerInput ?? 0), Math.Max(_degree, Prefetch > 0 ? Prefetch + 1 : 1));
 
     /// <summary>
     /// The splits of those that may decode at once beside the consumer, each on a lane of the session's: the degree but the
@@ -621,6 +621,10 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
                 lanes.Handover = handover;
                 lanes.Handed = [];
                 handover.Scan = this;
+                if (handover.Ahead is { } shared)
+                {
+                    handover.Own = Math.Max(1, window - shared.PerInput);
+                }
             }
         }
         else if (Ahead is { } reads)
@@ -1282,6 +1286,9 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         /// </summary>
         internal int Budget(int window) =>
             (int)Math.Clamp(Math.Min(InFlightBytes / _splitBytes, InFlightShare / _splitShare), 1, window);
+
+        /// <summary>The bytes a split's lane holds once decoded, the most measured so far, or the guess before.</summary>
+        internal double SplitBytes => _splitBytes;
     }
 
     /// <summary>
@@ -1417,6 +1424,10 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
 
         _disposed = true;
         _drained = true;
+        if (_extras is LaneWindow { Handover: { Borrowed: > 0 } handover })
+        {
+            GiveBackAhead(handover, 0);
+        }
 
         if (Ahead is { Count: > 0 } ahead)
         {
@@ -2879,10 +2890,30 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
             int kept = handed.Count - (_held && _currentLane is { Handed: true } ? 1 : 0);
             budget = Math.Max(1, budget - kept);
         }
+
+        // The shared windows past the splits now in flight go back, for the input the merge reads next to take.
+        BatchHandover? handover = lanes.Handover;
+        if (handover is { Borrowed: > 0 })
+        {
+            GiveBackAhead(handover, Math.Max(0, (int)(assigned - _delivered) - handover.Own));
+        }
+
         try
         {
             while (assigned - _delivered < budget)
             {
+                // Past its own places, a split takes a window of the merge's shared ones: only once the consumer reads the
+                // scan, past its first batch, and while the job's memory admits it.
+                if (handover is { Ahead: { } shared } && assigned - _delivered >= handover.Own + handover.Borrowed)
+                {
+                    if (_drained || _delivered == 0 || !shared.TryTake((long)lanes.SplitBytes))
+                    {
+                        break;
+                    }
+
+                    handover.Borrowed++;
+                }
+
                 if (_drained || !TryNextSplit(out RowRange split))
                 {
                     _drained = true;
@@ -2909,6 +2940,17 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
                 _started = assigned;
                 StartReads(lanes);
             }
+        }
+    }
+
+    /// <summary>Gives back the shared windows the scan holds through <paramref name="handover"/> past <paramref name="kept"/>; on the consumer's flow.</summary>
+    private static void GiveBackAhead(BatchHandover handover, int kept)
+    {
+        int over = handover.Borrowed - kept;
+        if (over > 0)
+        {
+            handover.Borrowed -= over;
+            handover.Ahead!.Give(over);
         }
     }
 

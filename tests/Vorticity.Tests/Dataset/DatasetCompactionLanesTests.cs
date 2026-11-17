@@ -126,6 +126,54 @@ public sealed partial class DatasetCompactionLanesTests
     }
 
     /// <summary>
+    /// Two appends of 150 000 rows, each read in several batches: the input the merge reads decodes windows ahead past its own
+    /// two on the lanes, and the rows are those of a consolidation on one lane.
+    /// </summary>
+    [Fact]
+    public async Task AConsolidationsMergeDecodesTheInputItReadsAheadOnTheLanes()
+    {
+        List<long> objects = [];
+        long ahead = 0;
+        foreach (int lanes in new[] { 1, 4 })
+        {
+            Random random = new Random(37);
+            await using MemoryObjectStore store = new MemoryObjectStore();
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, OptionsOf(session), Ct);
+            for (int a = 0; a < 2; a++)
+            {
+                Doc[] rows = [.. Enumerable.Range(a * 150_000, 150_000).Select(i => new Doc(random.Next(0, 2), $"svc-{random.Next(0, 60):D2}", i, Attributes(random)))];
+                await using ObjectDraft draft = dataset.StartObject();
+                await draft.Writer.WriteAsync<Doc>(rows, Ct);
+                await dataset.AppendAsync(draft, Ct);
+            }
+
+            IReadOnlyList<CompactionResult> results = await dataset.ConsolidateAsync(Ct);
+            long taken = results.Sum(static result => result.InputWindowsAhead);
+            Assert.True(lanes > 1 || taken == 0, $"at one lane, {taken} windows ahead");
+            ahead += taken;
+            List<long> sizes = [];
+            await foreach (PositionedObject positioned in dataset.ScanBuilder().ObjectsAsync(Ct))
+            {
+                sizes.Add(positioned.Entry.Rows);
+            }
+
+            if (lanes == 1)
+            {
+                objects = sizes;
+            }
+            else
+            {
+                Assert.Equal(objects, sizes);
+            }
+
+            Assert.Equal(300_000, await dataset.ScanBuilder().CountAsync(Ct));
+        }
+
+        Assert.True(ahead > 0, "no input decoded a window ahead past its own");
+    }
+
+    /// <summary>
     /// Services named at a kibibyte, so that a chunk of the file holds four blocks of 256 rows and ends within an object: the
     /// writers' lines meet the end of a chunk, emitted once every block of it landed and before the next block ingests, and
     /// the segments are the same bytes at one lane, four and fourteen.

@@ -120,6 +120,13 @@ internal sealed class KeyOrderedMerge : IMergedRuns
     /// </summary>
     internal RunLedger? Ledger { get; init; }
 
+    /// <summary>
+    /// The windows the inputs decode ahead past their own two, shared by the job's merges (<see cref="Scanning.DecodeAhead"/>):
+    /// the input the merge drains decodes on several lanes. Null for none; it needs a <see cref="Ledger"/>, whose inputs hand
+    /// their batches over.
+    /// </summary>
+    internal Scanning.DecodeAhead? Ahead { get; init; }
+
     /// <summary>The run the merge is on: an input's batch, or a window of it, cut when asked for.</summary>
     /// <exception cref="InvalidOperationException">The merge is not on a run.</exception>
     internal RecordBatch Current
@@ -801,7 +808,7 @@ internal sealed class KeyOrderedMerge : IMergedRuns
             Object = key;
             Rank = rank;
             FirstRow = firstRow;
-            Handover = merge.Ledger is null ? null : new BatchHandover(Prepare);
+            Handover = merge.Ledger is null ? null : new BatchHandover(Prepare) { Ahead = merge.Ahead };
         }
 
         /// <summary>What its scan hands its batches over through, under a ledger; null otherwise.</summary>
