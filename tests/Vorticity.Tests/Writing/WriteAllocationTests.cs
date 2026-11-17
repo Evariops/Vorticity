@@ -313,6 +313,14 @@ public sealed class WriteAllocationTests
     private const long AwaitedStates = 2 << 10;
 
     /// <summary>
+    /// The line a writer of more than four blocks makes once on several lanes, to send its blocks through several at once:
+    /// its flights, their stagings and counted rows, the states of its items; and its first four blocks, each sent through
+    /// alone on a task of its own before the line is made. 11,368 to 13,624 bytes past one thread measured at 262,144 rows,
+    /// over four runs, and 12,672 at twice that (2026-11-17): a writer's, not a row's.
+    /// </summary>
+    private const long LineState = 14 << 10;
+
+    /// <summary>
     /// The degree axis: zstd columns compressed side by side on four threads cost nothing one thread
     /// does not. The fan-out, its helpers and the helpers' encoders are the process's, rented by a
     /// writer and given back, and every chunk queues the same helpers again.
@@ -324,7 +332,8 @@ public sealed class WriteAllocationTests
     /// the methods on the fan's path are pooled, those of the methods above them made anew when they
     /// suspend with it, a few states a write whatever its rows (<see cref="AwaitedStates"/>). Pooled
     /// as well, those slowed a compaction by 1.5 %, at eight lanes as at one, where none awaits a
-    /// helper.
+    /// helper. And it sends its blocks through its line, made once (<see cref="LineState"/>), whose
+    /// steps of each block are pooled.
     /// </remarks>
     [Fact]
     public async Task AWriteOnFourThreadsAllocatesWhatAWriteOnOneDoes()
@@ -348,7 +357,7 @@ public sealed class WriteAllocationTests
             CultureInfo.InvariantCulture,
             $"DEGREE: {DegreeRows} rows of zstd columns, one thread {one} B, four threads {four} B\n");
         Console.Out.Write(report);
-        Assert.True(four <= one + AwaitedStates, report);
+        Assert.True(four <= one + AwaitedStates + LineState, report);
     }
 
     /// <summary>The floor of several writes of the degree axis's batch under <paramref name="options"/>.</summary>

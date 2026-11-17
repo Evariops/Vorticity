@@ -176,9 +176,15 @@ public sealed partial class VortexFileWriter
     /// more than one lane, of a table of several columns cut into chunks by their bytes. A block the line does not take
     /// goes through alone (<see cref="LineTakes"/>).
     /// </summary>
+    /// <remarks>
+    /// A writer that takes its caller's rows a block at a time makes its line from its <see cref="FlightsAhead"/>-th block on,
+    /// its first ones going through one at a time: one of a few blocks, an append's object of a few, makes none of its state,
+    /// some 11 KB (its flights, their stagings, the states of its items). A merge's writer, whose lag its merge chose for the
+    /// object it aims at, makes it at its first block.
+    /// </remarks>
     private bool UsesLine =>
         LandLag > 1 && _lanes > 1 && _rowBlock > 0 && _stagedRows == _rowBlock && _blockRows == _rowBlock && _automaticChunks && _isTabular
-        && _fieldCount > 1 && _rowBlock < 2 * CensusSliceRows
+        && _fieldCount > 1 && _rowBlock < 2 * CensusSliceRows && (_line is not null || !_blocksExactly || _flown >= FlightsAhead)
         && ColumnCompressor.Differential.Value is null && ArrayBlobWriter.ElementsHanded.Value is null;
 
     /// <summary>The line, made with the writer's first flight.</summary>
@@ -227,8 +233,14 @@ public sealed partial class VortexFileWriter
             return false;
         }
 
+        // The chunk the write of the block alone would cut (WriteDecodedAsync), under columns that gather too.
         (long widest, long total) = ColumnBytes(arena, node);
         long chunk = AutomaticChunkRows(widest, total, rows);
+        if (_gatheredBytes > 0)
+        {
+            chunk = Math.Min(chunk, GatheredChunkRows(arena, node, rows));
+        }
+
         if (pending >= chunk || (pending == 0 && rows >= chunk) || rows > chunk - pending)
         {
             return false;
@@ -635,6 +647,7 @@ public sealed partial class VortexFileWriter
     }
 
     /// <summary>Emits the chunk the rows of <paramref name="flight"/> ended, every flight before it landed, then records its landing.</summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask EmitAfterAsync(Flight flight, CancellationToken cancellationToken)
     {
         FlushAttach();
@@ -648,6 +661,7 @@ public sealed partial class VortexFileWriter
     /// Sends <paramref name="flight"/>'s block through alone, every flight before it landed, as a merge's writer sent every
     /// block before the line: its rows written as a batch of their own, its assembly done.
     /// </summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask AloneAsync(Flight flight, CancellationToken cancellationToken)
     {
         FlushAttach();
@@ -758,7 +772,11 @@ public sealed partial class VortexFileWriter
             {
                 if (_posed.Length == 0)
                 {
+                    // The line made at a later block than the writer's first: the blocks before it went through one at a
+                    // time, and count as landed, every state past them.
                     _posed = new int[writer.StateCount()];
+                    Array.Fill(_posed, (int)Math.Min(index, int.MaxValue));
+                    _prologued = _epilogued = _landed = index;
                 }
 
                 Flight flight = _spare.Count > 0 ? _spare.Pop() : new Flight();
@@ -800,6 +818,7 @@ public sealed partial class VortexFileWriter
         /// Waits, running the entries ready meanwhile and doing what falls to the owner, until the flights before
         /// <paramref name="target"/> landed; rethrows what failed a flight, unless <paramref name="quietly"/>.
         /// </summary>
+        [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
         internal async ValueTask SettleAsync(long target, bool quietly, CancellationToken cancellationToken)
         {
             // A writer given up does no more work on the line: its flights land as a failed one's do.
@@ -886,6 +905,7 @@ public sealed partial class VortexFileWriter
         }
 
         /// <summary>Does what falls to the owner for the oldest flight not landed: the emission of the chunk it ends, or its block alone.</summary>
+        [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
         private async ValueTask OwnAsync(Flight flight, CancellationToken cancellationToken)
         {
             bool alone = flight.Phase == FlightPhase.Alone;

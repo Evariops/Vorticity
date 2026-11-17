@@ -576,6 +576,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     // (VortexWriteOptions.StagedRows); 0 for the writer's own bounds.
     private int _stagedRows;
 
+    /// <summary>
+    /// Whether the writer takes its caller's rows a block at a time, as a merge hands its writer its blocks: a table of several
+    /// columns cut into chunks by their bytes, whose caller stages nothing of its own. Its blocks go through its line, several
+    /// at once, on more than one lane, and one after another on one; a call of a block or more is cut into blocks
+    /// (<see cref="WriteInBlocksAsync"/>). The same at any degree, so that the file is too.
+    /// </summary>
+    private bool _blocksExactly;
+
     /// <summary>The bytes past which they go whatever their rows, so that batches of large values wait for few others.</summary>
     private const long StagedBytes = 64 << 10;
 
@@ -1137,6 +1145,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         writer._stagedRows = options.StagedRows;
         writer._compressesAhead = options.CompressesShreddedAhead;
 
+        // A table of several columns cut into chunks by their bytes takes its caller's rows a block at a time, whatever its
+        // degree, and sends them through its line, four at once: its blocks go as a merge's do, and nothing reads its size
+        // blocks back but a merge, which says how far itself (LandLag). Its chunks are cut block by block, as a merge's are.
+        if (writer._stagedRows == 0 && rowBlock > 0 && rowBlock < 2 * CensusSliceRows && options.AutomaticChunks && writer._isTabular
+            && writer._fieldCount > 1)
+        {
+            writer._stagedRows = rowBlock;
+            writer._blocksExactly = true;
+            writer.LandLag = FlightsAhead;
+        }
+
         // A sheet of each column a sheet describes, fed as the column's indexes are.
         if (options.ColumnSheetBytes is not null && writer._isTabular)
         {
@@ -1483,6 +1502,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             return;
         }
 
+        // A writer that takes its rows a block at a time cuts a call of a block or more into blocks, each counted as it goes.
+        if (_blocksExactly && !seal)
+        {
+            await StartAsync(cancellationToken).ConfigureAwait(false);
+            await WriteInBlocksAsync(arena, root, rows, cancellationToken).ConfigureAwait(false);
+            _sized = false;
+            return;
+        }
+
         // The rows waiting go through first, counted first, the rows of each call following those of the call before.
         await UnstageAsync(cancellationToken).ConfigureAwait(false);
 
@@ -1687,6 +1715,67 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         protected override void Execute() => writer.CountSlice(Ready, At, Start, End);
     }
 
+    /// <summary>
+    /// Takes a call of a block or more a block at a time, as a merge hands its writer its blocks: the rows staged before it
+    /// completed to a block from the call's first rows, copied in; then each whole block of the call, held where it lies in the
+    /// caller's arena and copied as its block is assembled, by a pump of the core when the writer has lanes; and the rows past
+    /// the last whole block staged for the next call. Every cut is made in the caller's arena before a block flies: the
+    /// assemblies read it, and a slice made meanwhile would grow it under them. The call returns once every block landed, so
+    /// that the caller may reset its arena.
+    /// </summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask WriteInBlocksAsync(CanonicalArena arena, int root, int rows, CancellationToken cancellationToken)
+    {
+        int block = _stagedRows;
+        int head = _staging is { Rows: > 0 } staged ? Math.Min(rows, block - staged.Rows) : 0;
+        int whole = (rows - head) / block;
+        int tail = rows - head - (whole * block);
+        int headNode = head == 0 ? -1 : CanonicalSlice.SliceAcross(arena, arena, root, 0, head);
+        int tailNode = tail == 0 ? -1 : CanonicalSlice.SliceAcross(arena, arena, root, rows - tail, tail);
+        Block<int> blocks = whole == 0 ? default : Blocks.Rent<int>(whole);
+        try
+        {
+            for (int b = 0; b < whole; b++)
+            {
+                blocks[b] = CanonicalSlice.SliceAcross(arena, arena, root, head + (b * block), block);
+            }
+
+            try
+            {
+                if (headNode >= 0 && Stage(arena, headNode, head).Rows >= block)
+                {
+                    await FlyAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                for (int b = 0; b < whole; b++)
+                {
+                    Staging staging = StagingOf();
+                    staging.Parts.Add(new StagedPart(arena, blocks[b], 0, block, -1));
+                    staging.Rows = block;
+                    staging.Bytes = arena.NamedBytes(blocks[b]);
+                    await FlyAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                if (tailNode >= 0)
+                {
+                    _ = Stage(arena, tailNode, tail);
+                }
+            }
+            catch
+            {
+                // The blocks that flew land, whatever becomes of them, before the caller, failed, may reset its arena.
+                await SettleAsync().ConfigureAwait(false);
+                throw;
+            }
+
+            await LandAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            Blocks.Return(blocks);
+        }
+    }
+
     /// <summary><see cref="WriteCoreAsync"/> for rows checked against the schema and decoded, their paths counted aside.</summary>
     private async ValueTask WriteCountedAsync(CanonicalArena arena, int root, int rows, bool seal, CancellationToken cancellationToken)
     {
@@ -1742,7 +1831,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // Under columns that gather, rows written at once are taken a few blocks at a time, the widest column's bytes those a
         // gathered chunk aims at: a column cuts its chunks where the file's end, and a merge that hands over long runs would
         // leave chunks of a whole run, which a read of a few rows fetches whole.
-        long gathered = _gatheredBytes > 0 && rows > _rowBlock ? GatheredChunkRows(arena, root, rows) : long.MaxValue;
+        // A block at a time too, as a merge's writer and one that takes its rows a block at a time write them: a column of a
+        // block of more than its chunk's bytes ends its chunk with the block, where blocks went into chunks of eight.
+        long gathered = _gatheredBytes > 0 && rows >= _rowBlock ? GatheredChunkRows(arena, root, rows) : long.MaxValue;
         if ((_automaticChunks && !(seal && _pending.Count == 0 && rows % _rowBlock == 0)) || gathered < rows)
         {
             (long widest, long total) = _automaticChunks ? ColumnBytes(arena, root) : (0, 0);
@@ -2302,11 +2393,23 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// The merge and the writer took turns on one thread: at degree 14, the merge's thread spent 46 % of the job's processor
     /// time, and every block the writer's lanes ingested waited for it.
     /// </remarks>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask FlyAsync(CancellationToken cancellationToken)
     {
         Staging staging = _staging!;
         if (UsesLine)
         {
+            // The line made now: the blocks that went through one at a time before it land first, and what the size reads
+            // as the last of them landed is recorded, as the line records each of its own.
+            if (_line is null)
+            {
+                await LandAsync().ConfigureAwait(false);
+                if (_sized && _flown > _landBase)
+                {
+                    RecordLand(_flown - 1);
+                }
+            }
+
             await FlyOnLineAsync(staging, cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -2389,6 +2492,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// flights up to the one <see cref="FlightsAhead"/> back waited for, the entries ready run meanwhile, and the size read
     /// as that one landed.
     /// </summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask FlyOnLineAsync(Staging staging, CancellationToken cancellationToken)
     {
         FlightLine line = Line;
@@ -2423,6 +2527,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// Waits for the rows in flight to have gone through, throwing what failed them, and keeps their staging for the rows
     /// staged after the next ones: before anything else changes the writer, a caller's declarations at the end among them.
     /// </summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask LandAsync()
     {
         if (_line is { } line)
