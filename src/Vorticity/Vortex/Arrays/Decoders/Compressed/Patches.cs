@@ -379,7 +379,7 @@ internal readonly ref struct Patches
     }
 
     /// <summary>The first patch in <c>[from, Count]</c> whose position is at or after <paramref name="row"/>.</summary>
-    private static int FirstAtOrAfter(in Patches patches, int row, int from)
+    internal static int FirstAtOrAfter(in Patches patches, int row, int from)
     {
         int low = from;
         int high = patches.Count;

@@ -30,7 +30,27 @@ internal sealed class SparseDecoder : ArrayDecoder
     public override int Decode(ArrayDecodeContext context, in ArrayNode node, DType dtype, int length)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted: default, selective: false);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start: 0, count: length);
+    }
+
+    /// <summary>
+    /// A range is the fill over its rows, patched by the patches that fall in it: the patch set is read whole, decoded once
+    /// for every range of the node, and its first patch in the range found by a binary search.
+    /// </summary>
+    /// <remarks>
+    /// A shredded variant's typed column is sparse wherever the compressor finds nine nulls in ten, so without a range a
+    /// chunk of a million rows of it was decoded whole for its first batch and held for the next ones: 16 to 21 MiB an
+    /// input of a compaction, whatever its batch.
+    /// </remarks>
+    /// <inheritdoc/>
+    public override bool DecodesRange(ArrayDecodeContext context, in ArrayNode node) => true;
+
+    /// <inheritdoc/>
+    public override int DecodeRange(
+        ArrayDecodeContext context, in ArrayNode node, DType dtype, int length, int start, int count)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        return Core(context, in node, dtype, length, wanted: default, selective: false, start, count);
     }
 
     /// <summary>
@@ -47,7 +67,7 @@ internal sealed class SparseDecoder : ArrayDecoder
         ReadOnlySpan<int> wanted)
     {
         ArgumentNullException.ThrowIfNull(context);
-        return Core(context, in node, dtype, length, wanted, selective: true);
+        return Core(context, in node, dtype, length, wanted, selective: true, start: 0, count: length);
     }
 
     /// <inheritdoc/>
@@ -153,7 +173,7 @@ internal sealed class SparseDecoder : ArrayDecoder
 
     private static int Core(
         ArrayDecodeContext context, in ArrayNode node, DType dtype, int length,
-        ReadOnlySpan<int> wanted, bool selective)
+        ReadOnlySpan<int> wanted, bool selective, int start, int count)
     {
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 1, Id);
         ArrayDecodeContext.RequireChildCount(node.ChildCount, 2, Id);
@@ -166,8 +186,9 @@ internal sealed class SparseDecoder : ArrayDecoder
 
         // A selective read is one of the reads of a node larger than the batch, and each reads the
         // whole patch set: decoded once for all of them, as a range's is, when there are enough
-        // patches for that to pay.
-        bool whole = selective && patchCount >= Patches.RetainedFrom;
+        // patches for that to pay. A range short of the node is always one of several.
+        bool ranged = !selective && (start != 0 || count != length);
+        bool whole = ranged || (selective && patchCount >= Patches.RetainedFrom);
         DType indicesType = context.Types.Primitive(
             patchesMetadata.IndicesPType, Nullability.NonNullable);
         int indicesIndex = whole
@@ -235,7 +256,7 @@ internal sealed class SparseDecoder : ArrayDecoder
             //
             // The output is as long as the selection, which is where a selective read saves: the
             // fill is written once per delivered row rather than once per row of the node.
-            int produced = selective ? wanted.Length : length;
+            int produced = selective ? wanted.Length : count;
 
             ValueWriter writer = fillIsNull
                 ? ValueWriter.Create(context, in values, produced, hasFillBuffer ? 1 : 0, Id)
@@ -269,6 +290,10 @@ internal sealed class SparseDecoder : ArrayDecoder
                 {
                     Patches.ApplySelected(in patches, values.Bytes, writer.Width, wanted, writer.Bytes);
                 }
+                else if (ranged)
+                {
+                    Patches.ApplyRange(in patches, values.Bytes, writer.Width, start, count, writer.Bytes);
+                }
                 else
                 {
                     patches.ApplyAll(values.Bytes, writer.Width, writer.Bytes);
@@ -301,11 +326,14 @@ internal sealed class SparseDecoder : ArrayDecoder
             }
             else
             {
-                for (int i = 0; i < patches.Count; i++)
+                // A range walks its own patches alone, each placed at its row less the range's start.
+                int first = ranged ? Patches.FirstAtOrAfter(in patches, start, 0) : 0;
+                int last = ranged ? Patches.FirstAtOrAfter(in patches, start + count, first) : patches.Count;
+                for (int i = first; i < last; i++)
                 {
                     Place(
                         in writer, in validity, in values, in valuesValidity,
-                        i, patches.GetPosition(i), tracked);
+                        i, patches.GetPosition(i) - start, tracked);
                 }
             }
 
