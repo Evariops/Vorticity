@@ -2165,16 +2165,22 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private Dictionary<CanonicalArena, double>? _sourceRates;
 
     /// <summary>
-    /// Copies every row the writer keeps a window on in <paramref name="source"/> before it changes: the block in flight
-    /// assembled first, then the windows of the rows staged since on that source copied into the staging, where the other
-    /// windows stay. A merge calls it before an input takes its next batch or goes.
+    /// Copies every row the writer keeps a window on in <paramref name="source"/> before it changes: the runs of the blocks
+    /// being assembled copied out of the inputs first, then the windows of the rows staged since on that source copied into
+    /// the staging, where the other windows stay. A merge calls it before an input takes its next batch or goes.
     /// </summary>
+    /// <remarks>
+    /// It waits for the blocks' runs to be copied, not for the blocks to be concatenated, which reads no input: the merge's
+    /// thread waited 3.5 s of a consolidation's 9 s for whole assemblies here (2026-11-17).
+    /// </remarks>
     internal async ValueTask ReleaseAsync(CanonicalArena source)
     {
-        if (_assembled is { } assembled)
+        if (_owning is { IsCompleted: false } owning)
         {
-            // Whatever became of it: a block that failed to assemble fails its flight, which the writer's caller meets.
-            await assembled.ContinueWith(static _ => { }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default).ConfigureAwait(false);
+            // Never faults: a block whose runs failed to copy fails its flight, which the writer's caller meets.
+#pragma warning disable VSTHRD003 // The copies of the blocks this writer flew, which run on lanes of their own.
+            await owning.ConfigureAwait(false);
+#pragma warning restore VSTHRD003
         }
 
         if (_staging is { } staging)
@@ -2293,16 +2299,27 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // through: its runs copied out of the merge's inputs and concatenated, a third of a block's time on the one lane
         // the blocks pass through one after another (2026-11-16). Two blocks may be assembled side by side; what the
         // merge waits for before an input changes its batch is both (ReleaseAsync). Assembled one after another, the
-        // blocks made a chain of 6 s of a consolidation's 9.6 (2026-11-17).
-        Task? before = _assembled is { IsCompleted: false } running ? running : null;
+        // blocks made a chain of 6 s of a consolidation's 9.6 (2026-11-17). A release waits for the runs' copies alone, which
+        // the assembly makes first and says so (_owning), and not for the concatenation after them.
+        Task? before = _owning is { IsCompleted: false } running ? running : null;
         Task? assembling = null;
         if (budget is not null && budget.TryEnter(out long assemblerLane))
         {
+            TaskCompletionSource owned = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             assembling = Task.Run(
                 () =>
                 {
                     try
                     {
+                        try
+                        {
+                            Own(staging, null);
+                        }
+                        finally
+                        {
+                            owned.TrySetResult();
+                        }
+
                         staging.Assembled = Assemble(staging);
                     }
                     finally
@@ -2311,12 +2328,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     }
                 },
                 CancellationToken.None);
-            _assembled = before is null ? assembling : Task.WhenAll(before, assembling);
+            _owning = before is null ? owned.Task : Task.WhenAll(before, owned.Task);
         }
         else
         {
             staging.Assembled = Assemble(staging);
-            _assembled = before;
+            _owning = before;
         }
         await LandAsync().ConfigureAwait(false);
         _sizedBytes = _sink.Position + Held(out _sizedRate);
@@ -2359,10 +2376,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
-    /// Done once the last block staged was assembled, and every block before it, its runs copied out of the merge's inputs;
-    /// null when none is being assembled.
+    /// Done once the runs of the last block flown, and of every block before it, are copied out of the merge's inputs, which
+    /// is all a release waits for; null when none is being copied. Never faults.
     /// </summary>
-    private Task? _assembled;
+    private Task? _owning;
 
     /// <summary>
     /// Waits for the rows in flight to have gone through, throwing what failed them, and keeps their staging for the rows
