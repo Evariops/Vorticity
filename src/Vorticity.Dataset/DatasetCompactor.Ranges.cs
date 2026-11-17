@@ -16,9 +16,6 @@ namespace Vorticity.Dataset;
 
 internal static partial class DatasetCompactor
 {
-    /// <summary>The most ranges of the key a consolidation runs side by side.</summary>
-    private const int MostRanges = 8;
-
     /// <summary>The most slices a merge is cut in.</summary>
     private const int MostSlices = 64;
 
@@ -83,13 +80,6 @@ internal static partial class DatasetCompactor
     /// narrowed, twice (2026-11-17).
     /// </summary>
     private const int FirstWriterPerCeiling = 4;
-
-    /// <summary>
-    /// What a range of a consolidation holds, about: <see cref="InputsBytes"/> of the range of the most inputs, in batches
-    /// of <paramref name="batchRows"/>, and its objects' <paramref name="writer"/> (<see cref="WriterBytes"/>).
-    /// </summary>
-    private static long RangeBytes(VortexDataset dataset, DatasetSchema schema, CompactionJob job, KeyRanges ranges, long writer, int batchRows) =>
-        InputsBytes(dataset, schema, job, ranges.MostInputs, batchRows) + writer;
 
     /// <summary>
     /// What a decoded row of the job's inputs weighs, about: what the handle's last merge measured, or, before any, the
@@ -824,129 +814,6 @@ internal static partial class DatasetCompactor
         {
             int order = indexes[(int)(left >> 32)]![(int)left].SequenceCompareTo(indexes[(int)(right >> 32)]![(int)right]);
             return order != 0 ? order : left.CompareTo(right);
-        }
-    }
-
-    /// <summary>
-    /// The ranges of a consolidation merged side by side, each into objects of its own, as many at once as the room the jobs'
-    /// budget leaves holds what a range costs, one at least: each range's objects, in the ranges' order, and the rows they
-    /// hold together. Their blocks are the job's (<paramref name="memory"/>), which never pass the jobs' budget. A range whose
-    /// object runs past its bound starts again under a bound twice as large, alone; a failure stops the others, whose objects
-    /// are given up as a failed job's are.
-    /// </summary>
-    private static async ValueTask<(ObjectStream[] Streams, long Rows, int AtOnce, int BatchRows)> RangesAsync(
-        VortexDataset dataset,
-        DatasetSchema schema,
-        CompactionJob job,
-        KeyRanges ranges,
-        long writer,
-        RowMeter meter,
-        JobMemory memory,
-        Func<int, Execution.HeldLane?, ObjectStream> outputsOf,
-        CancellationToken cancellationToken,
-        int count = -1,
-        long[]? emitted = null)
-    {
-        // The ranges merged: every one, or the first count of them, a piece's below its cut.
-        count = count < 0 ? ranges.Count : count;
-        ObjectStream[] streams = new ObjectStream[count];
-        long[] rows = new long[count];
-
-        // As many lanes as the room left holds ranges, priced at what the handle's last job measured; a range's batches take
-        // what the budget leaves once its writer and its open inputs are counted, so that one range alone fits it.
-        int batchRows = InputBatchRows(dataset, schema, job, ranges.MostInputs, JobBudget(dataset), writer);
-        long perRange = Math.Max(1, RangeBytes(dataset, schema, job, ranges, writer, batchRows));
-        int lanes = (int)Math.Clamp(memory.Room / perRange, 1, count);
-
-        // After a refusal, no more inputs open at once than the refused job held: its batches halved are what narrows it.
-        if (dataset.JobSizingCap.Open is > 0 and int open)
-        {
-            lanes = Math.Clamp(open / Math.Max(1, ranges.MostInputs), 1, lanes);
-        }
-
-        // Each range merges on a lane of the session's: the first on the job's own, the others on lanes free now, as many as
-        // the room admits, and no more.
-        Execution.LaneBudget budget = dataset.Session.Lanes;
-        long[] held = Execution.LaneWorkers.Take(budget, lanes - 1);
-        lanes = held.Length + 1;
-        memory.Sizing = (batchRows, ranges.MostInputs * lanes);
-
-        using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        Exception? failed = null;
-        int next = -1;
-        Task[] running = new Task[lanes];
-        for (int lane = 1; lane < lanes; lane++)
-        {
-            // Each lane given back as its last range is written, not once every one is.
-            running[lane] = Execution.LaneWorkers.RunOnAsync(budget, held[lane - 1], () => LaneAsync(null));
-        }
-
-        // The job's own flow gives its lane back while its ranges' objects wait for the store; a worker keeps its own.
-        running[0] = LaneAsync(memory.Lane);
-        try
-        {
-            await Task.WhenAll(running).ConfigureAwait(false);
-        }
-        catch when (failed is not null)
-        {
-            // The failure that stopped the other ranges, rather than how they stopped.
-            ExceptionDispatchInfo.Throw(failed);
-        }
-
-        long written = 0;
-        foreach (long merged in rows)
-        {
-            written += merged;
-        }
-
-        return (streams, written, lanes, batchRows);
-
-        async Task LaneAsync(Execution.HeldLane? lane)
-        {
-            try
-            {
-                for (int range; (range = Interlocked.Increment(ref next)) < count;)
-                {
-                    (streams[range], rows[range]) = await RangeAsync(range, lane, stop.Token).ConfigureAwait(false);
-                }
-            }
-            catch (Exception failure)
-            {
-                Interlocked.CompareExchange(ref failed, failure, null);
-                await stop.CancelAsync().ConfigureAwait(false);
-                throw;
-            }
-        }
-
-        async Task<(ObjectStream Outputs, long Rows)> RangeAsync(int range, Execution.HeldLane? lane, CancellationToken token)
-        {
-            for (int doublings = 0; ; doublings++)
-            {
-                // What the range took of each input, counted apart and added once it is written: a range started again under a
-                // larger bound counts its rows once.
-                long[]? mine = emitted is null ? null : new long[emitted.Length];
-                ObjectStream outputs = outputsOf(doublings, lane);
-                try
-                {
-                    long merged = await MergeAsync(dataset, schema, job, outputs, null, null, batchRows, meter, memory, token, ranges, range, mine, writer * lanes).ConfigureAwait(false);
-                    await outputs.FinishAsync(token).ConfigureAwait(false);
-                    for (int i = 0; mine is not null && i < mine.Length; i++)
-                    {
-                        Interlocked.Add(ref emitted![i], mine[i]);
-                    }
-
-                    return (outputs, merged);
-                }
-                catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
-                {
-                    await outputs.AbandonAsync().ConfigureAwait(false);
-                }
-                catch
-                {
-                    await outputs.AbandonAsync().ConfigureAwait(false);
-                    throw;
-                }
-            }
         }
     }
 }

@@ -109,7 +109,7 @@ internal sealed class KeyOrderedMerge : IMergedRuns
 
     /// <summary>
     /// The rows emitted of each input, by its rank: what a piece of a consolidation took of each input, which it marks once
-    /// its objects are committed; null when nothing counts them.
+    /// its objects are committed; null when nothing counts them. This merge's alone: no other merge adds to it at once.
     /// </summary>
     internal long[]? Emitted { get; init; }
 
@@ -248,9 +248,11 @@ internal sealed class KeyOrderedMerge : IMergedRuns
         (MergeInput chosen, int count) = Choose();
         _emitting = chosen;
         _count = count;
+        // The merge's own count: a range of a piece counts into one of its own, added to the piece's once the range is written,
+        // and a merge in slices counts none, so no other merge adds to it, and a run costs no fence.
         if (Emitted is { } emitted && (ulong)chosen.Rank < (ulong)emitted.Length)
         {
-            Interlocked.Add(ref emitted[chosen.Rank], count);
+            emitted[chosen.Rank] += count;
         }
         // The run's window is cut when a caller asks for it (Current): a writer that takes the run where it lies
         // (CurrentRun) needs none.

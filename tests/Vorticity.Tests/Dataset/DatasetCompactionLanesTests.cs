@@ -127,8 +127,9 @@ public sealed partial class DatasetCompactionLanesTests
     }
 
     /// <summary>
-    /// Two appends of 150 000 rows, each read in several batches: the input the merge reads decodes windows ahead past its own
-    /// two on the lanes, and the rows are those of a consolidation on one lane.
+    /// Two appends of 150 000 rows, each read in several batches: the lanes work ahead of the merge, the input it reads
+    /// decoding windows past its own two, or the slices of a piece after the one taken merging, and the rows are those of a
+    /// consolidation on one lane.
     /// </summary>
     [Fact]
     public async Task AConsolidationsMergeDecodesTheInputItReadsAheadOnTheLanes()
@@ -149,9 +150,11 @@ public sealed partial class DatasetCompactionLanesTests
                 await dataset.AppendAsync(draft, Ct);
             }
 
+            // Ahead on the lanes free: windows of the input the merge drains, or slices of a piece merged ahead, which come
+            // first, the merge being downstream of the reads.
             IReadOnlyList<CompactionResult> results = await dataset.ConsolidateAsync(Ct);
-            long taken = results.Sum(static result => result.InputWindowsAhead);
-            Assert.True(lanes > 1 || taken == 0, $"at one lane, {taken} windows ahead");
+            long taken = results.Sum(static result => result.InputWindowsAhead + result.MergeSlicesAhead);
+            Assert.True(lanes > 1 || taken == 0, $"at one lane, {taken} windows or slices ahead");
             ahead += taken;
             List<long> sizes = [];
             await foreach (PositionedObject positioned in dataset.ScanBuilder().ObjectsAsync(Ct))
@@ -171,7 +174,7 @@ public sealed partial class DatasetCompactionLanesTests
             Assert.Equal(300_000, await dataset.ScanBuilder().CountAsync(Ct));
         }
 
-        Assert.True(ahead > 0, "no input decoded a window ahead past its own");
+        Assert.True(ahead > 0, "no input decoded a window ahead past its own, and no slice was merged ahead");
     }
 
     /// <summary>

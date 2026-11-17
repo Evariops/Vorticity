@@ -65,8 +65,8 @@ public sealed record CompactionResult
     public long MemoryReserved { get; init; }
 
     /// <summary>
-    /// The most ranges of the key a piece of a consolidation ran side by side below its cut, as many as the budget held; 1
-    /// for any other job, whose merge is one stream of objects.
+    /// The most ranges of the key a piece of a consolidation merged at once below its cut, the one its stream took and those
+    /// merged ahead on lanes free, as many as the budget admitted; 1 for any other job.
     /// </summary>
     public int RangesAtOnce { get; init; } = 1;
 
@@ -410,22 +410,22 @@ internal static partial class DatasetCompactor
         Activity? writing = DatasetTelemetry.StartCompactionPass("write");
         try
         {
-            if (piece is { Merged: > 1 })
             {
-                // A piece of several ranges below its cut merges them side by side, and counts what each took of each input.
-                (streams, rows, atOnce, batchRows) = await RangesAsync(
-                    dataset, schema, job, piece.Ranges, writer, meter, memory, (doublings, lane) => OutputsOf(job, doublings, lane), cancellationToken,
-                    piece.Merged, piece.Emitted).ConfigureAwait(false);
-            }
-            else
-            {
-                // A job in one piece takes what its blocks hold, never past the jobs' budget: a block refused gives the job up,
-                // and the handle's next plan takes fewer inputs. Its inputs' batches take what the budget leaves of it once its
-                // writer and its open inputs are counted.
+                // A job takes what its blocks hold, never past the jobs' budget: a block refused gives the job up, and the
+                // handle's next plan takes fewer inputs. Its inputs' batches take what the budget leaves of it once its writer
+                // and its open inputs are counted.
                 // A merge of slices' worth is cut in slices of the key, merged side by side on lanes free and taken in order
-                // into one stream (SlicedMerge): its batches priced for the slices ahead it may merge, whatever the degree.
+                // into one stream (SlicedMerge): its batches priced for the slices ahead it may merge, whatever the degree. A
+                // piece of several ranges below its cut takes them as its slices, each counting what it takes of each input:
+                // they merged side by side, each writing objects of its own.
                 KeyRanges? slices = null;
-                if (merge && piece is null && KeyRanges.SlicesOf(dataset, ran) >= 2)
+                int sliceCount = 0;
+                if (piece is { Merged: > 1 })
+                {
+                    slices = piece.Ranges;
+                    sliceCount = piece.Merged;
+                }
+                else if (merge && piece is null && KeyRanges.SlicesOf(dataset, ran) >= 2)
                 {
                     using Activity? cutting = DatasetTelemetry.StartCompactionPass("slices");
                     slices = await KeyRangesAsync(dataset, schema, ran, KeyRanges.SlicesOf(dataset, ran), cancellationToken).ConfigureAwait(false);
@@ -457,7 +457,7 @@ internal static partial class DatasetCompactor
                         rows = merge
                             ? await MergeAsync(
                                 dataset, schema, ran, outputs, late, lateOutputs, batchRows, meter, memory, cancellationToken,
-                                piece?.Ranges, 0, piece?.Emitted, writer, slices).ConfigureAwait(false)
+                                slices is null ? piece?.Ranges : null, 0, piece?.Emitted, writer, slices, sliceCount).ConfigureAwait(false)
                             : await ConcatenateAsync(dataset, schema, ran, outputs, memory, cancellationToken).ConfigureAwait(false);
                         await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
                         if (lateOutputs is not null)
@@ -466,6 +466,7 @@ internal static partial class DatasetCompactor
                         }
 
                         streams = [outputs];
+                        atOnce = piece is not null ? outputs.SlicesAtOnce : 1;
                         break;
                     }
                     catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
@@ -1253,8 +1254,13 @@ internal static partial class DatasetCompactor
         int range = 0,
         long[]? emitted = null,
         long writer = 0,
-        KeyRanges? slices = null)
+        KeyRanges? slices = null,
+        int sliceCount = 0)
     {
+        // The slices of the merge: the first sliceCount ranges of the cut, every one when it names none.
+        sliceCount = slices is null ? 0 : sliceCount > 0 ? sliceCount : slices.Count;
+        long[]?[]? sliceEmitted = slices is not null && emitted is not null ? new long[]?[sliceCount] : null;
+
         // The writers keep the runs where they lie in the inputs' batches, and note them in one ledger, which the merge reads
         // to give a batch back once every run on it is copied: the merge's thread neither copies runs nor waits for copies.
         Writing.RunLedger ledger = new Writing.RunLedger();
@@ -1270,9 +1276,11 @@ internal static partial class DatasetCompactor
         Scanning.DecodeAhead? ahead = lanes <= 0 ? null : new Scanning.DecodeAhead(lanes, memory.AdmitsRead);
         KeyOrderedMerge MergeOf(int slice, Action<KeyOrderedMerge.Window>? retiring)
         {
+            // A slice counts what it takes of each input apart, slices merging at once (KeyOrderedMerge.Emitted).
+            long[]? counts = sliceEmitted is null ? emitted : sliceEmitted[slice] = new long[emitted!.Length];
             KeyOrderedMerge one = InputsMerged(
                 dataset, schema, job, batchRows, cancellationToken, ranges: slices ?? ranges, range: slices is null ? range : slice, meter: meter,
-                memory: memory, emitted: emitted, ledger: ledger, retiring: retiring, ahead: ahead);
+                memory: memory, emitted: counts, ledger: ledger, retiring: retiring, ahead: ahead);
 
             // As its inputs open, the job reprices the batches of those still to open from what the open ones hold; not a
             // merge in slices, whose slices open their inputs in an order its lanes decide, and whose batches, priced for the
@@ -1295,7 +1303,7 @@ internal static partial class DatasetCompactor
         long sliceBytes = slices is null ? 0 : InputsBytes(dataset, schema, job, slices.MostInputs, batchRows);
         IMergedRuns merge = slices is null
             ? MergeOf(0, null)
-            : new SlicedMerge(slices.Count, MergeOf, ledger, dataset.Session.Lanes, cancellationToken)
+            : new SlicedMerge(sliceCount, MergeOf, ledger, dataset.Session.Lanes, cancellationToken)
             {
                 MostAhead = SlicesAheadPriced,
                 Admits = () => memory.AdmitsMerge(sliceBytes),
@@ -1352,7 +1360,17 @@ internal static partial class DatasetCompactor
             if (merge is SlicedMerge sliced)
             {
                 outputs.SlicesAhead += sliced.SlicesAhead;
-                outputs.Slices += slices!.Count;
+                outputs.Slices += sliceCount;
+                outputs.SlicesAtOnce = Math.Max(outputs.SlicesAtOnce, sliced.PeakAtOnce);
+            }
+
+            // What each slice took of each input, counted apart since slices merge at once, added up once every one is done.
+            for (int slice = 0; sliceEmitted is not null && slice < sliceEmitted.Length; slice++)
+            {
+                for (int input = 0; sliceEmitted[slice] is { } took && input < took.Length; input++)
+                {
+                    emitted![input] += took[input];
+                }
             }
 
             outputs.InputWindowsAhead += ahead?.Taken ?? 0;
@@ -2119,6 +2137,9 @@ internal static partial class DatasetCompactor
 
         /// <inheritdoc cref="Slices"/>
         internal int SlicesAhead { get; set; }
+
+        /// <summary>The most slices of its merges merging at once, the one taken and those ahead (<see cref="SlicedMerge.PeakAtOnce"/>); 1 for none.</summary>
+        internal int SlicesAtOnce { get; set; } = 1;
 
         /// <summary>The windows the merges' inputs decoded ahead past their own two (<see cref="Scanning.DecodeAhead"/>).</summary>
         internal long InputWindowsAhead { get; set; }

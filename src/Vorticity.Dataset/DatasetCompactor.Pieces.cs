@@ -166,8 +166,8 @@ internal static partial class DatasetCompactor
                 return null;
             }
 
-            // The piece's ranges below its cut, MostRanges at most, merged side by side as the budget holds; with a cut, one more
-            // past it.
+            // The piece's ranges below its cut, merged as the slices of one stream, those after the one taken ahead on the lanes
+            // the budget admits; with a cut, one more past it.
             List<byte[]> cuts = SubCuts(job, indexes, decoded, taken, starts, ends, partition, lanes, cut);
             if (cut is not null)
             {

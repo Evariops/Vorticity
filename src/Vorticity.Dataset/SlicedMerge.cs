@@ -65,6 +65,9 @@ internal sealed class SlicedMerge : IMergedRuns
     /// <summary>The slices merged ahead on lanes of their own, rather than by the taking flow.</summary>
     internal int SlicesAhead { get; private set; }
 
+    /// <summary>The most slices merging at once, the one being taken and those ahead of it: 1 when none merged ahead.</summary>
+    internal int PeakAtOnce { get; private set; } = 1;
+
     /// <summary>How many slices ahead of the one being taken may merge at once: as many as the room for their inputs holds.</summary>
     internal int MostAhead { get; init; } = int.MaxValue;
 
@@ -184,6 +187,7 @@ internal sealed class SlicedMerge : IMergedRuns
             Ahead ahead = new Ahead();
             _ahead[slice] = ahead;
             SlicesAhead++;
+            PeakAtOnce = Math.Max(PeakAtOnce, _started - _slice);
             ahead.Merged = Execution.LaneWorkers.RunOnAsync(_lanes, entered, () => MergeAheadAsync(slice, ahead));
         }
     }
