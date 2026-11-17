@@ -461,8 +461,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// What the writer holds and has not written, as the bytes it would encode to: what each column that gathers holds, at
-    /// its last rate, the chunks compressed ahead and not yet written at the rate they were counted at
-    /// (<see cref="CompressAhead"/>), and the rows that wait for a chunk of the file, staged or in transit, at
+    /// its last rate, the chunks in emission and not yet written at the rate they were counted at
+    /// (<see cref="StartEmission"/>), and the rows that wait for a chunk of the file, staged or in transit, at
     /// <paramref name="rate"/>, the rate of what the columns hold, their mean rate when they hold nothing, a first guess with
     /// none.
     /// </summary>
@@ -487,34 +487,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         rate = canonical > 0 ? encoded / canonical : columns > 0 ? rates / columns : Gathering.FirstRate;
-        return (long)(encoded + _aheadBytes + ((_pendingBytes + (_staging?.Bytes ?? 0) + mapBytes) * rate));
+        return (long)(encoded + _emittingBytes + ((_pendingBytes + (_staging?.Bytes ?? 0) + mapBytes) * rate));
     }
-
-    // Whether a shredded variant column compresses its chunk ahead of its writing (VortexWriteOptions.CompressesShreddedAhead);
-    // by column, its chunk compressed ahead and not yet written, null when none is; and what Held counts them at, the bytes
-    // their columns counted them at when they reached their targets.
-    private bool _compressesAhead;
-    // Each column's chunks compressed ahead, oldest first, at most AheadDepth of them; and the block bounds each may count
-    // into, free for the next, by column.
-    private List<AheadChunk>?[]? _compressedAhead;
-    private List<ChunkBlockBounds>?[]? _aheadBounds;
-    private long _aheadBytes;
-
-    /// <summary>
-    /// The chunks of a column compressed ahead at once: two, so that the column's next chunk compresses while the one before
-    /// still does. One at a time, a chunk of a log's attributes took 139 ms to compress, the column gathered the next in 80,
-    /// and the writer waited 1.9 s of a tier merge's 8.4 for the chunk before it, 32 times (2026-11-16).
-    /// </summary>
-    private const int AheadDepth = 2;
-
-    /// <summary>The chunks a shredded variant column compressed ahead of their writing.</summary>
-    internal int ChunksCompressedAhead { get; private set; }
-
-    /// <summary>The shredded chunks whose leaves were written apart on the core and grafted into their blob, compressed ahead or not.</summary>
-    internal int ChunksGrafted { get; private set; }
-
-    /// <summary>Of <see cref="ChunksCompressedAhead"/>, those whose rows the writer's line took block by block (<see cref="ShredChain"/>).</summary>
-    internal int ChunksTakenOnLine { get; private set; }
 
     // The rows staged before, going through on a lane of their own while the next ones stage (FlyAsync): their task, null
     // when none flies, and their staging, which the rows after the next ones stage in once they landed (LandAsync).
@@ -1149,7 +1123,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         writer._groupRows = writer._gathering is null ? 0 : options.GatheredGroupRows;
         writer._stagedRows = options.StagedRows;
-        writer._compressesAhead = options.CompressesShreddedAhead;
 
         // A table of several columns cut into chunks by their bytes takes its caller's rows a block at a time, whatever its
         // degree, and sends them through its line, four at once: its blocks go as a merge's do, and nothing reads its size
@@ -2579,8 +2552,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _flying = null;
         }
 
-        // And the chunks compressed ahead, which write with the lanes and contexts the abandon releases.
-        await SettleAheadAsync().ConfigureAwait(false);
+        // And the chunks in emission, which write with the lanes and contexts the abandon releases.
+        await SettleEmissionsAsync().ConfigureAwait(false);
     }
 
     /// <summary>Writes the small batches waiting, as one batch of all their rows, and drops them: the rows in flight land first.</summary>
@@ -3339,10 +3312,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     }
 
                     Gather(field, gathering, arena, node, rows, blocks);
-                    if (DueOrOver(gathering) && CompressesAhead(field))
+                    if (DueOrOver(gathering) && EmitsApart)
                     {
-                        await LandAheadAsync(field, cancellationToken, keep: AheadDepth - 1).ConfigureAwait(false);
-                        CompressAhead(Detach(field, gathering));
+                        await LandEmissionsAsync(field, cancellationToken, keep: EmissionDepth - 1).ConfigureAwait(false);
+                        StartEmission(Detach(field, gathering));
                     }
                     else if (DueOrOver(gathering))
                     {
@@ -3514,28 +3487,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             : null;
 
     /// <summary>
-    /// <see cref="BoundsFor"/> for a chunk compressed ahead, which counts into bounds of its own while the column's other
-    /// chunks in compression count into theirs: one of the column's free ones, or new; given back once its blob is written.
-    /// </summary>
-    private ChunkBlockBounds? AheadBoundsFor(int field)
-    {
-        if (_countedKeys?[field] is not { } keys)
-        {
-            return null;
-        }
-
-        List<ChunkBlockBounds> free = (_aheadBounds ??= new List<ChunkBlockBounds>?[_fieldCount])[field] ??= [];
-        if (free.Count == 0)
-        {
-            return new ChunkBlockBounds(keys, _blockRows, _variantTextBound).Cleared();
-        }
-
-        ChunkBlockBounds bounds = free[^1];
-        free.RemoveAt(free.Count - 1);
-        return bounds.Cleared();
-    }
-
-    /// <summary>
     /// The ingest statistics of column <paramref name="field"/> over the chunk, counted for the
     /// writer's ledger: whether they cover the chunk's rows, and whether its distinct table serves.
     /// </summary>
@@ -3546,10 +3497,19 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             return default;
         }
 
+        return Tally(new ChunkStats(_columns[field], firstBlock, blocks, this), arena, node, rows);
+    }
+
+    /// <summary>
+    /// Counts <paramref name="stats"/>, a chunk's of <paramref name="rows"/> rows at node <paramref name="node"/> of
+    /// <paramref name="arena"/>, for the writer's ledger: whether they cover the chunk's rows, and whether its distinct
+    /// table serves.
+    /// </summary>
+    private ChunkStats Tally(ChunkStats stats, CanonicalArena arena, int node, long rows)
+    {
         // The chunk's statistics, computed at ingest over exactly these rows. The chooser checks the
         // row count against the node it is given and measures the column again when they disagree,
         // so a mismatch costs a pass and never a wrong plan.
-        ChunkStats stats = new ChunkStats(_columns[field], firstBlock, blocks, this);
         if (stats.Stats.Rows != rows)
         {
             Interlocked.Increment(ref _chunksWithoutStatistics);
@@ -3574,10 +3534,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// Writes a column chunk's blob as the column's next segment, then lets go of the blob and of
-    /// what the column kept for the chunk.
+    /// what the column kept for the chunk, unless it was let go as the chunk left for an emission of its own
+    /// (<paramref name="released"/>).
     /// </summary>
     private async ValueTask WriteColumnBlobAsync(
-        int field, ArrayBlobWriter.BlobLease blob, int firstBlock, int blocks, CancellationToken cancellationToken, ChunkBlockBounds? bounds = null)
+        int field, ArrayBlobWriter.BlobLease blob, int firstBlock, int blocks, CancellationToken cancellationToken, ChunkBlockBounds? bounds = null,
+        bool released = false)
     {
         // The chunk's shredded keys, block by block, in the file's blocks.
         if (bounds is not null)
@@ -3654,7 +3616,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         // The compact summaries stay -- the zone map wants them at completion -- and only the sized
         // buffers go back to the pool.
-        _columns[field].ReleaseChunk(firstBlock, blocks);
+        if (!released)
+        {
+            _columns[field].ReleaseChunk(firstBlock, blocks);
+        }
     }
 
     /// <summary>Whether a column that gathers would hold more than <see cref="int.MaxValue"/> rows with <paramref name="rows"/> more.</summary>
@@ -3706,523 +3671,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         Interlocked.Add(ref _gatheredHeld, held);
     }
 
-    /// <summary>
-    /// A chunk of a shredded variant column taken from its gathering as it reached its target, compressed ahead of its
-    /// writing (<see cref="CompressAhead"/>): its rows, in a context of their own until compressed, where it lies among the
-    /// file's blocks, the canonical bytes its segment measures the rate against, what <see cref="Held"/> counts it at; and
-    /// once compressed, its blob, the ids it met past the file's when it began, and its shredded keys' block bounds.
-    /// </summary>
-    private sealed class AheadChunk(VortexFileWriter writer) : CoreUnit
-    {
-        internal int Field;
-        internal ScanContext? Context;
-        internal int Node;
-        internal int Rows;
-        internal int FirstBlock;
-        internal int Blocks;
-        internal long Cut;
-        internal long Counted;
-        internal long Held;
-        internal string[] Known = [];
-        internal int KnownCount;
-        internal string[] Fresh = [];
-        internal ChunkBlockBounds? Bounds;
-        internal ArrayBlobWriter.BlobLease Blob;
 
-        /// <summary>Whether its compression was offered to the core, to be waited for before it is written.</summary>
-        internal bool Offered;
-
-        /// <summary>
-        /// While its leaves are written apart on the core's pumps (<see cref="Compress"/>): the lane its rows were shredded in
-        /// and its blob is grafted in, the shredding, the piece the leaves run as and what it completes; null once grafted.
-        /// </summary>
-        internal CompressionLane? Lane;
-
-        /// <inheritdoc cref="Lane"/>
-        internal VariantShredder.Shredding? Shredding;
-
-        /// <inheritdoc cref="Lane"/>
-        internal CoreBatch? Batch;
-
-        /// <inheritdoc cref="Lane"/>
-        internal Task? Leaves;
-
-        /// <summary>The items of its piece, each a leaf of its blob written apart; made with its first.</summary>
-        internal LeafWork? Work;
-
-        /// <summary>Its rows taken block by block on the writer's line (<see cref="ShredChain"/>), every row of it; null when they are taken here.</summary>
-        internal TakenChunk? Taken;
-
-        protected override void Execute() => writer.Compress(this);
-    }
-
-    /// <summary>Gives back what <paramref name="chunk"/>'s rows taken on the line held, once: written or given up.</summary>
-    private void ReturnTaken(AheadChunk chunk)
-    {
-        if (chunk.Taken is { } taken)
-        {
-            chunk.Taken = null;
-            _chains![chunk.Field]!.Return(taken);
-        }
-    }
-
-    /// <summary>
-    /// A leaf of a shredded chunk of column <see cref="Field"/> written apart (<see cref="VariantShredder.Shredding.WriteLeafApart"/>),
-    /// an item of the piece the chunk's leaves run as: in a lane of its own, taken for the leaf and given back after it.
-    /// </summary>
-    private sealed class LeafWork(VortexFileWriter writer) : IBatchWork
-    {
-        /// <summary>The shredding whose leaves the piece writes.</summary>
-        internal VariantShredder.Shredding? Shredding;
-
-        /// <summary>The column the chunk is of, whose zstd level its leaves compress at.</summary>
-        internal int Field;
-
-        public void Run(CoreBatch batch, int item)
-        {
-            CompressionLane lane = CompressionLane.Take(writer);
-            try
-            {
-                lane.Blobs.ColumnLevel = writer.ZstdLevelOf(Field);
-                Shredding!.WriteLeafApart(item, lane.Blobs, lane.Encodings, writer._compress);
-            }
-            finally
-            {
-                lane.Blobs.ColumnLevel = 0;
-                lane.Give();
-            }
-        }
-    }
-
-    /// <summary>
-    /// Writes <paramref name="shredding"/>'s chunk of column <paramref name="field"/>, its rows taken, as one blob in
-    /// <paramref name="blobs"/> against <paramref name="encodings"/>: its leaves written apart as items of a piece of the
-    /// core, the caller's flow running its share, then the blob grafted from them, the bytes of the blob written in one go.
-    /// </summary>
-    private async ValueTask<ArrayBlobWriter.BlobLease> WriteLeavesAsync(
-        VariantShredder.Shredding shredding, int field, ArrayBlobWriter.Workspace blobs, EncodingDictionary encodings, CoreBatch fan)
-    {
-        int leaves = shredding.PrepareLeaves(blobs.EncodesValidity, _compress);
-        LeafWork work = _leafWork ??= new LeafWork(this);
-        work.Shredding = shredding;
-        work.Field = field;
-        try
-        {
-            await fan.RunAsync(work, leaves).ConfigureAwait(false);
-        }
-        catch
-        {
-            shredding.ReleaseLeaves();
-            throw;
-        }
-        finally
-        {
-            work.Shredding = null;
-        }
-
-        ChunksGrafted++;
-        return shredding.WriteGrafted(blobs, encodings, _compress);
-    }
-
-    // The leaves of the shredded chunks the writer's own flow writes, reused from one chunk to the next.
-    private LeafWork? _leafWork;
-
-    /// <summary>
-    /// Whether column <paramref name="field"/>'s chunk, its gathering due, is compressed ahead of its writing: a shredded
-    /// variant's, of a writer that asks it (<see cref="VortexWriteOptions.CompressesShreddedAhead"/>), once the file holds
-    /// an encoding id. A chunk compressed ahead meets the file's ids as they stand and is renumbered onto them when written,
-    /// and an id new to it at index 0 is left out of its tree as the default, where no renumbering reaches it.
-    /// </summary>
-    private bool CompressesAhead(int field) => _compressesAhead && _shredding?[field] is not null && _arrayEncodings.Count > 0;
-
-    /// <summary>
-    /// Takes what column <paramref name="field"/> gathered, its target reached, as a chunk to compress ahead
-    /// (<see cref="CompressAhead"/>): the column gathers again in a context of its own. Touches the column's gathering
-    /// alone, so that the column's item of a chunk across the writer's threads takes it.
-    /// </summary>
-    private AheadChunk Detach(int field, Gathering gathering)
-    {
-        ScanContext context = gathering.Context!;
-        int rows = checked((int)gathering.Rows);
-        int node = gathering.Nodes.Count == 1
-            ? gathering.Nodes[0]
-            : CanonicalConcat.Concat(
-                context.Decode, ChunkType(field), rows, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(gathering.Nodes));
-        AheadChunk chunk = new AheadChunk(this)
-        {
-            Field = field,
-            Context = context,
-            Node = node,
-            Rows = rows,
-            FirstBlock = gathering.FirstBlock,
-            Blocks = gathering.Blocks,
-            Cut = gathering.Bytes,
-            Counted = (long)(gathering.Bytes * gathering.Rate),
-        };
-
-        // What it holds counts toward the writer's ceiling until it is written (Uncount), at a point of the rows' own order, so
-        // that the ceiling decides the same whatever the lanes' pace. Left off the ceiling, the chunks compressing ahead took
-        // the writer past its price, and a consolidation was refused twice and narrowed to 8 inputs; written at a fixed
-        // block half a chunk after this one, once (2026-11-17).
-        chunk.Held = gathering.Held;
-
-        // Its rows taken block by block on the line, when they are exactly the chunk's.
-        chunk.Taken = _chains?[field]?.Hand(gathering.Generation, gathering.Rows);
-        gathering.Generation++;
-        gathering.Context = null;
-        gathering.Nodes.Clear();
-        gathering.Rows = 0;
-        gathering.Held = 0;
-        gathering.Bytes = 0;
-        gathering.Blocks = 0;
-        return chunk;
-    }
-
-    /// <summary>
-    /// Compresses <paramref name="chunk"/>, taken from its column's gathering (<see cref="Detach"/>), on a lane of the
-    /// session's of its own when one is free, the blocks after it going through meanwhile, and on the writer's thread
-    /// otherwise; its blob is written when its column's next chunk reaches its target, or at a flush, the end of a group or
-    /// the completion (<see cref="LandAheadAsync(int, CancellationToken, int)"/>). The column's chunks before it are written
-    /// first, and <see cref="AheadDepth"/> of them compress at once.
-    /// </summary>
-    /// <remarks>
-    /// A shredded variant's chunk compressed as one item of a chunk of the file across the writer's threads, which every
-    /// block after it waited for: 19.9 s of a backlog's 31.5 s of writing at degree 14 were chunks that compressed one.
-    /// The blob is written at the same place in the file whatever lane compressed it and whenever it ended: the file is the
-    /// same at any degree. Compressed against the file's ids as they stand, it makes those it met past them the file's in
-    /// the order it met them when it is written, as a chunk across the writer's threads does.
-    /// </remarks>
-    private void CompressAhead(AheadChunk chunk)
-    {
-        ((_compressedAhead ??= new List<AheadChunk>?[_fieldCount])[chunk.Field] ??= []).Add(chunk);
-        _aheadBytes += chunk.Counted;
-        ChunksCompressedAhead++;
-        int known = _arrayEncodings.Count;
-        chunk.Known = new string[known];
-        for (int i = 0; i < known; i++)
-        {
-            chunk.Known[i] = _arrayEncodings.Ids[i];
-        }
-
-        chunk.KnownCount = known;
-        chunk.Bounds = chunk.Taken is { } taken ? taken.Bounds : AheadBoundsFor(chunk.Field);
-        if (_lanes > 1)
-        {
-            // A unit of the core: a pump compresses it while the writer goes on, or the writer does when it writes the chunk.
-            chunk.Offered = true;
-            chunk.Offer(_core, Flow.Write);
-            return;
-        }
-
-        Compress(chunk);
-    }
-
-    /// <summary>
-    /// Compresses <paramref name="chunk"/> into its blob, on whichever thread runs it, and lets its rows go. On more than one
-    /// lane, its rows shredded here, each leaf of its blob, the rows' metadata, a key's values or its typed column, is written
-    /// apart as an item of a piece of the core, beside the others, and the writer's flow awaits the piece as the chunk is
-    /// written, then grafts the blob from them (<see cref="GraftedAsync"/>).
-    /// </summary>
-    /// <remarks>
-    /// A shredded chunk wrote its leaves one after another, hundreds of keys of a log's attributes, close to a core of serial
-    /// work a column (<c>PLAN-COMPACTION-SPEED.md</c>). The blob grafted is the bytes of the blob written in one go.
-    /// </remarks>
-    private void Compress(AheadChunk chunk)
-    {
-        CompressionLane lane = CompressionLane.Take(this);
-        ScanContext context = chunk.Context!;
-        bool apart = false;
-        try
-        {
-            lane.Encodings.Reset(chunk.Known.AsSpan(0, chunk.KnownCount));
-            int local = lane.Arena.ReferenceFrom(context.Canonical, chunk.Node);
-            if (_mayShareChildren)
-            {
-                local = ChunkCompactor.Compact(lane.Arena, local);
-            }
-
-            lane.Blobs.ColumnLevel = ZstdLevelOf(chunk.Field);
-            if (_lanes <= 1)
-            {
-                chunk.Blob = VariantShredder.Write(
-                    lane.Blobs, lane.Arena, local, _shredding![chunk.Field]!, chunk.Bounds, lane.Encodings, _compress);
-                NoteFresh(chunk, lane);
-                return;
-            }
-
-            // Its rows taken on the line block by block, or here at once.
-            VariantShredder.Shredding shredding;
-            if (chunk.Taken is { } taken)
-            {
-                shredding = taken.Shredding;
-                shredding.Settle(lane.Arena, local);
-                ChunksTakenOnLine++;
-            }
-            else
-            {
-                shredding = lane.Blobs.Shredding(_shredding![chunk.Field]!);
-                shredding.Take(lane.Arena, local, chunk.Bounds);
-            }
-
-            int leaves = shredding.PrepareLeaves(lane.Blobs.EncodesValidity, _compress);
-            chunk.Lane = lane;
-            chunk.Shredding = shredding;
-            chunk.Batch = CoreBatch.Rent(_core, _lanes);
-            apart = true;
-            // The piece is awaited, and the blob grafted, by the writer's flow as the chunk is written (GraftedAsync): its
-            // value task taken here as a task, once, a task a chunk of many blocks.
-            LeafWork work = chunk.Work ??= new LeafWork(this);
-            work.Shredding = shredding;
-            work.Field = chunk.Field;
-            chunk.Leaves = chunk.Batch.RunAsync(work, leaves).AsTask();
-        }
-        catch
-        {
-            if (apart)
-            {
-                DropLeaves(chunk);
-            }
-
-            throw;
-        }
-        finally
-        {
-            if (!apart)
-            {
-                lane.Blobs.ColumnLevel = 0;
-                lane.Give();
-                Release(chunk);
-                ReturnTaken(chunk);
-            }
-        }
-    }
-
-    /// <summary>
-    /// The blob of <paramref name="chunk"/> grafted from its leaves written apart, its lane given back and its rows let go:
-    /// once every leaf is written, the piece awaited (<see cref="GraftedAsync"/>).
-    /// </summary>
-    private void Graft(AheadChunk chunk)
-    {
-        CompressionLane lane = chunk.Lane!;
-        try
-        {
-            chunk.Blob = chunk.Shredding!.WriteGrafted(lane.Blobs, lane.Encodings, _compress);
-            NoteFresh(chunk, lane);
-            ChunksGrafted++;
-        }
-        finally
-        {
-            DropLeaves(chunk);
-        }
-    }
-
-    /// <summary>Lets go of what <paramref name="chunk"/>'s leaves written apart hold, grafted or not: its piece, its lane, its rows.</summary>
-    private void DropLeaves(AheadChunk chunk)
-    {
-        if (chunk.Lane is not { } lane)
-        {
-            ReturnTaken(chunk);
-            return;
-        }
-
-        chunk.Shredding?.ReleaseLeaves();
-        if (chunk.Batch is { } batch)
-        {
-            CoreBatch.Return(batch);
-        }
-
-        if (chunk.Work is { } work)
-        {
-            work.Shredding = null;
-        }
-
-        chunk.Shredding = null;
-        chunk.Batch = null;
-        chunk.Leaves = null;
-        chunk.Lane = null;
-        lane.Blobs.ColumnLevel = 0;
-        lane.Give();
-        Release(chunk);
-        ReturnTaken(chunk);
-    }
-
-    /// <summary>Notes the ids <paramref name="chunk"/>'s blob met past the file's as it began, which its landing makes the file's.</summary>
-    private static void NoteFresh(AheadChunk chunk, CompressionLane lane)
-    {
-        int fresh = lane.Encodings.Count - chunk.KnownCount;
-        chunk.Fresh = new string[fresh];
-        for (int i = 0; i < fresh; i++)
-        {
-            chunk.Fresh[i] = lane.Encodings.Ids[chunk.KnownCount + i];
-        }
-    }
-
-    /// <summary>
-    /// Awaits the piece <paramref name="chunk"/>'s leaves are written apart as, then grafts its blob from them; nothing for a
-    /// chunk compressed whole. What failed a leaf is thrown, the leaves let go.
-    /// </summary>
-    private async ValueTask GraftedAsync(AheadChunk chunk)
-    {
-        if (chunk.Leaves is not { } leaves)
-        {
-            return;
-        }
-
-        try
-        {
-            await leaves.ConfigureAwait(false);
-        }
-        catch
-        {
-            DropLeaves(chunk);
-            throw;
-        }
-
-        Graft(chunk);
-    }
-
-    /// <summary>Lets <paramref name="chunk"/>'s rows go, once: its context back to the process's.</summary>
-    private static void Release(AheadChunk chunk)
-    {
-        if (chunk.Context is not { } context)
-        {
-            return;
-        }
-
-        chunk.Context = null;
-        TransitContexts.Return(context);
-    }
-
-    /// <summary>Takes what <paramref name="chunk"/> held off the writer's ceiling, once: as it is written, or given up.</summary>
-    private void Uncount(AheadChunk chunk)
-    {
-        Interlocked.Add(ref _gatheredHeld, -chunk.Held);
-        chunk.Held = 0;
-    }
-
-
-    /// <summary>
-    /// Writes column <paramref name="field"/>'s chunks compressed ahead, oldest first, but the last <paramref name="keep"/>:
-    /// each once compressed, its new ids made the file's in the order it met them and its tree renumbered onto the file's
-    /// indices; nothing when none waits. A column whose next chunk is due keeps <see cref="AheadDepth"/> less one of them
-    /// compressing, a flush or the end none.
-    /// </summary>
-    private async ValueTask LandAheadAsync(int field, CancellationToken cancellationToken, int keep = 0)
-    {
-        while (_compressedAhead?[field] is { } chunks && chunks.Count > keep)
-        {
-            AheadChunk chunk = chunks[0];
-            chunks.RemoveAt(0);
-            await LandAheadAsync(field, chunk, cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>Writes <paramref name="chunk"/>, column <paramref name="field"/>'s oldest chunk compressed ahead (<see cref="LandAheadAsync(int, CancellationToken, int)"/>).</summary>
-    private async ValueTask LandAheadAsync(int field, AheadChunk chunk, CancellationToken cancellationToken)
-    {
-        _aheadBytes -= chunk.Counted;
-        Uncount(chunk);
-        if (chunk.Offered)
-        {
-            chunk.Offered = false;
-            try
-            {
-                await chunk.RunOrWaitAsync(_core).ConfigureAwait(false);
-                await GraftedAsync(chunk).ConfigureAwait(false);
-            }
-            catch
-            {
-                chunk.Blob.Dispose();
-                throw;
-            }
-        }
-
-        ArrayBlobWriter.BlobLease blob = chunk.Blob;
-        if (chunk.Fresh.Length > 0)
-        {
-            int count = chunk.KnownCount + chunk.Fresh.Length;
-            ushort[] map = new ushort[count];
-            bool same = true;
-            for (int i = 0; i < chunk.KnownCount; i++)
-            {
-                map[i] = (ushort)i;
-            }
-
-            for (int i = 0; i < chunk.Fresh.Length; i++)
-            {
-                ushort index = _arrayEncodings.Intern(chunk.Fresh[i]);
-                map[chunk.KnownCount + i] = index;
-                same &= index == chunk.KnownCount + i;
-            }
-
-            if (!same)
-            {
-                ArrayBlobWriter.Renumber(in blob, map);
-                ColumnChunksRenumbered++;
-            }
-        }
-
-        Gathering gathering = _gathering![field]!;
-        gathering.Cut = chunk.Cut;
-        await WriteColumnBlobAsync(field, blob, chunk.FirstBlock, chunk.Blocks, cancellationToken, chunk.Bounds).ConfigureAwait(false);
-        gathering.ChunkRows.Add(chunk.Rows);
-        if (chunk.Bounds is { } bounds)
-        {
-            _aheadBounds![field]!.Add(bounds);
-        }
-    }
-
-    /// <summary>Writes every column's chunk compressed ahead, in the columns' order.</summary>
-    private async ValueTask LandAheadAsync(CancellationToken cancellationToken)
-    {
-        for (int field = 0; _compressedAhead is not null && field < _compressedAhead.Length; field++)
-        {
-            await LandAheadAsync(field, cancellationToken).ConfigureAwait(false);
-        }
-    }
-
-    /// <summary>Waits for every chunk compressed ahead whatever becomes of it, and gives its blob back: the writer is given up.</summary>
-    private async ValueTask SettleAheadAsync()
-    {
-        for (int field = 0; _compressedAhead is not null && field < _compressedAhead.Length; field++)
-        {
-            if (_compressedAhead[field] is not { } chunks)
-            {
-                continue;
-            }
-
-            foreach (AheadChunk chunk in chunks)
-            {
-                if (chunk.Offered)
-                {
-                    chunk.Offered = false;
-                    try
-                    {
-                        await chunk.RunOrWaitAsync(_core).ConfigureAwait(false);
-                        await GraftedAsync(chunk).ConfigureAwait(false);
-                    }
-                    catch (Exception)
-                    {
-                        // Given up with the writer: its failure has no one to report to.
-                    }
-                }
-
-                DropLeaves(chunk);
-                Release(chunk);
-                Uncount(chunk);
-                chunk.Blob.Dispose();
-            }
-
-            chunks.Clear();
-        }
-
-        _aheadBytes = 0;
-    }
-
-    /// <summary>Writes what column <paramref name="field"/> has gathered as one chunk of its own, after its chunk compressed ahead.</summary>
+    /// <summary>Writes what column <paramref name="field"/> has gathered as one chunk of its own, after its chunks in emission.</summary>
     private async ValueTask EmitGatheredAsync(int field, Gathering gathering, CancellationToken cancellationToken)
     {
-        await LandAheadAsync(field, cancellationToken).ConfigureAwait(false);
+        await LandEmissionsAsync(field, cancellationToken).ConfigureAwait(false);
         ScanContext context = gathering.Context!;
         int rows = checked((int)gathering.Rows);
 
@@ -4263,8 +3716,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         _groupTaken = 0;
 
-        // The chunks compressed ahead go out before what the columns hold, in the columns' order.
-        await LandAheadAsync(cancellationToken).ConfigureAwait(false);
+        // The chunks in emission go out before what the columns hold, in the columns' order.
+        await LandEmissionsAsync(cancellationToken).ConfigureAwait(false);
         if (CompressesAcross && Fan is { } fan)
         {
             await EmitGatheredAcrossAsync(gathering, fan, cancellationToken).ConfigureAwait(false);

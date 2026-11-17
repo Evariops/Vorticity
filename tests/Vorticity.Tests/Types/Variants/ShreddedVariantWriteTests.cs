@@ -452,45 +452,33 @@ public sealed partial class ShreddedVariantWriteTests
     }
 
     /// <summary>
-    /// Shredded variant columns that gather to a target of their own and compress each chunk ahead of its writing
-    /// (<see cref="VortexWriteOptions.CompressesShreddedAhead"/>) write the same file on one thread and on four, of the size
-    /// of the file written without, which reads back every row: a chunk's blob goes out where the column's next chunk
-    /// reaches its target, whatever lane compressed it and whenever it ended, its new encoding ids made the file's then.
+    /// Shredded variant columns that gather to a target of their own, each chunk emitted by a task of its own as it is due,
+    /// write the same file on one thread and on four, which reads back every row: a chunk's blob goes out where the column's
+    /// chunk after next is due, whatever lane compressed it and whenever it ended, its new encoding ids made the file's then.
     /// </summary>
     [Fact]
-    public async Task ChunksCompressedAheadWriteTheSameFileOnOneThreadAndOnFour()
+    public async Task ChunksEmittedApartWriteTheSameFileOnOneThreadAndOnFour()
     {
         Random random = new Random(23);
         Doc[] rows = [.. Enumerable.Range(0, 30_000).Select(i => new Doc(i, Document(random), random.Next(3) == 0 ? null : Document(random)))];
         Dictionary<string, VariantShredding> shredding = new() { [nameof(Doc.Attributes)] = Shredding(random), [nameof(Doc.Extra)] = Shredding(random) };
         string onePath = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.vortex");
         string fourPath = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.vortex");
-        string plainPath = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.vortex");
-        string plainFourPath = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.vortex");
         try
         {
-            (int one, int oneGrafted, _) = await WriteGatheredAsync(rows, shredding, onePath, degree: 1, ahead: true);
-            (int four, int fourGrafted, int fourOnLine) = await WriteGatheredAsync(rows, shredding, fourPath, degree: 4, ahead: true);
-            _ = await WriteGatheredAsync(rows, shredding, plainPath, degree: 1, ahead: false);
+            (int one, int oneGrafted, _) = await WriteGatheredAsync(rows, shredding, onePath, degree: 1);
+            (int four, int fourGrafted, int fourOnLine) = await WriteGatheredAsync(rows, shredding, fourPath, degree: 4);
 
-            // On four threads, the line took the rows of chunks compressed ahead block by block.
-            Assert.True(fourOnLine > 0, $"no chunk of {four} compressed ahead was taken on the line");
-
-            // Written without, on four threads: the chunks' columns compressed side by side, each shredded one's leaves in a
-            // pass of their own and grafted, the file of one thread.
-            (_, int plainGrafted, _) = await WriteGatheredAsync(rows, shredding, plainFourPath, degree: 4, ahead: false);
-            Assert.True(plainGrafted > 2, $"{plainGrafted} chunks grafted on four threads without compressing ahead");
-            Assert.Equal(await System.IO.File.ReadAllBytesAsync(plainPath, Ct), await System.IO.File.ReadAllBytesAsync(plainFourPath, Ct));
-            Assert.True(one > 2, $"{one} chunks compressed ahead on one thread");
+            // On four threads, the line took the rows of shredded chunks block by block.
+            Assert.True(fourOnLine > 0, $"no chunk of {four} emitted apart was taken on the line");
+            Assert.True(one > 2, $"{one} chunks emitted apart on one thread");
             Assert.Equal(one, four);
 
-            // On four threads each chunk's leaves were written apart, then grafted into its blob: the same bytes.
+            // On four threads each shredded chunk's leaves were written apart, then grafted into its blob: the same bytes.
             Assert.Equal(0, oneGrafted);
-            Assert.True(fourGrafted >= four, $"{fourGrafted} chunks grafted of {four} compressed ahead");
+            Assert.True(fourGrafted >= fourOnLine, $"{fourGrafted} chunks grafted of {fourOnLine} taken on the line");
             byte[] bytes = await System.IO.File.ReadAllBytesAsync(onePath, Ct);
             Assert.Equal(bytes, await System.IO.File.ReadAllBytesAsync(fourPath, Ct));
-            long plain = new FileInfo(plainPath).Length;
-            Assert.True(Math.Abs(bytes.Length - plain) <= plain / 50, $"{bytes.Length} bytes compressed ahead against {plain} without");
             await using VortexFile file = await VortexFile.OpenAsync(fourPath, Ct);
             List<Doc> read = await file.Scan<Doc>().ToRecordsAsync(Ct).ToListAsync(Ct);
             Assert.Equal(rows.Length, read.Count);
@@ -505,8 +493,6 @@ public sealed partial class ShreddedVariantWriteTests
         {
             System.IO.File.Delete(onePath);
             System.IO.File.Delete(fourPath);
-            System.IO.File.Delete(plainPath);
-            System.IO.File.Delete(plainFourPath);
         }
     }
 
@@ -567,10 +553,10 @@ public sealed partial class ShreddedVariantWriteTests
     }
 
     /// <summary>
-    /// Writes <paramref name="rows"/>, every column gathering chunks of 16 KiB, and returns the chunks compressed ahead, the
-    /// chunks grafted from their leaves, and those compressed ahead whose rows the line took block by block.
+    /// Writes <paramref name="rows"/>, every column gathering chunks of 16 KiB, and returns the chunks emitted apart, the
+    /// chunks grafted from their leaves, and the shredded ones emitted apart whose rows the line took block by block.
     /// </summary>
-    private static async Task<(int Ahead, int Grafted, int OnLine)> WriteGatheredAsync(Doc[] rows, Dictionary<string, VariantShredding> shredding, string path, int degree, bool ahead)
+    private static async Task<(int Apart, int Grafted, int OnLine)> WriteGatheredAsync(Doc[] rows, Dictionary<string, VariantShredding> shredding, string path, int degree)
     {
         VortexWriteOptions options = new VortexWriteOptions
         {
@@ -579,12 +565,11 @@ public sealed partial class ShreddedVariantWriteTests
             ShreddedVariants = shredding,
             DegreeOfParallelism = degree,
             GatheredChunkBytes = 16 << 10,
-            CompressesShreddedAhead = ahead,
         };
         await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Doc>(path, options);
         await writer.WriteAsync<Doc>(rows, Ct);
         await writer.CompleteAsync(Ct);
-        return (writer.ChunksCompressedAhead, writer.ChunksGrafted, writer.ChunksTakenOnLine);
+        return (writer.ChunksEmittedApart, writer.ChunksGrafted, writer.ChunksTakenOnLine);
     }
 
     /// <summary>

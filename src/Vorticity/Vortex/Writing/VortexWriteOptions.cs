@@ -327,13 +327,6 @@ public sealed record VortexWriteOptions
     internal int StagedRows { get; init; }
 
     /// <summary>
-    /// Whether a shredded variant column that gathers compresses its chunk as it reaches its target, on a lane of its own
-    /// when one is free, and writes it when the column's next chunk reaches its own, or at a flush, the end of a group or
-    /// the completion: what a compaction gives its writer, whose blocks then go through while the chunk compresses.
-    /// </summary>
-    internal bool CompressesShreddedAhead { get; init; }
-
-    /// <summary>
     /// The bytes from which the file keeps a sheet of each top-level column (<see cref="Indexes.ColumnSheet"/>), which a
     /// file's table of contents names, counted before its sheets; null, the default, for none. A dataset's sealed
     /// objects keep them from the size at which its scans read an object's sheets before the object, under which a

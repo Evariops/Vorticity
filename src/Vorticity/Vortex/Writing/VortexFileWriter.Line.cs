@@ -77,7 +77,7 @@ public sealed partial class VortexFileWriter
         }
 
         double rate = canonical > 0 ? encoded / canonical : columns > 0 ? rates / columns : Gathering.FirstRate;
-        return new Landing(_sink.Position, encoded + _aheadBytes, _pendingBytes, rate);
+        return new Landing(_sink.Position, encoded + _emittingBytes, _pendingBytes, rate);
     }
 
     // The line the flights go through when the writer sends a merge's blocks several at once; null otherwise.

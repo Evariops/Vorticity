@@ -23,7 +23,7 @@ public sealed partial class VortexFileWriter
             return _chains.Length == 0 ? null : _chains;
         }
 
-        if (!_compressesAhead || _shredding is not { } shredding || _gathering is not { } gathering)
+        if (_shredding is not { } shredding || _gathering is not { } gathering)
         {
             _chains = [];
             return null;

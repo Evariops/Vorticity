@@ -165,11 +165,13 @@ The session's degree is the number of cores its work takes beside its callers' o
 A writer uses the session's degree too, and `VortexWriteOptions.DegreeOfParallelism` overrides it
 for one file. When a batch of a block or more comes in, the writer summarizes its columns side by
 side: each column's statistics, plus a text column's bounds and the distinct values a dictionary is
-priced from. It then chooses and compresses a chunk's columns side by side, a column with a chunk
-target of its own included. A column that takes longer than its share of the threads, and whose
-previous chunk was tried as zstd on a quarter of a megabyte of values or more, has its zstd frames
-compressed in parallel too, one frame per block, beside the other columns' work. The file is byte
-for byte the same whatever the degree. A write that builds indexes summarizes its first block on one
+priced from. It then chooses and compresses a chunk's columns side by side. A column that takes
+longer than its share of the threads, and whose previous chunk was tried as zstd on a quarter of a
+megabyte of values or more, has its zstd frames compressed in parallel too, one frame per block,
+beside the other columns' work. A column with a chunk target of its own, as a dataset's objects have,
+compresses each chunk as a task of its own, on a free lane while the rows after it go through, the
+chunks of one column one after another and its zstd frames in parallel when they qualify as above.
+The file is byte for byte the same whatever the degree. A write that builds indexes summarizes its first block on one
 thread, which tells its index builders what the statistics say of it, and every block after it side by
 side; one that indexes a nested column summarizes every block on one thread.
 

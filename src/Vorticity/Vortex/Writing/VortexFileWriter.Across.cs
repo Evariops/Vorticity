@@ -318,12 +318,12 @@ public sealed partial class VortexFileWriter
     {
         for (int field = 0; field < _fieldCount; field++)
         {
-            // A chunk taken to compress ahead goes behind the column's chunks before it, the oldest of which goes out now
-            // when as many as compress at once already do.
+            // A chunk taken to emission goes behind the column's chunks before it, the oldest of which goes out now when as
+            // many as are in emission at once already are.
             if (columns.TakeDetached(field) is { } detached)
             {
-                await LandAheadAsync(field, cancellationToken, keep: AheadDepth - 1).ConfigureAwait(false);
-                CompressAhead(detached);
+                await LandEmissionsAsync(field, cancellationToken, keep: EmissionDepth - 1).ConfigureAwait(false);
+                StartEmission(detached);
                 continue;
             }
 
@@ -400,9 +400,9 @@ public sealed partial class VortexFileWriter
         // Per column, the block bounds of its shredded keys in this chunk; null for a writer that counts none.
         private Indexes.ChunkBlockBounds?[]? _bounds;
 
-        // Per column, the chunk it took from its gathering to compress ahead (VortexFileWriter.CompressAhead), its target
-        // reached in this chunk of the file; null for none.
-        private AheadChunk?[] _detached = [];
+        // Per column, the chunk it took from its gathering to emission (VortexFileWriter.StartEmission), its target reached in
+        // this chunk of the file; null for none.
+        private ColumnEmission?[] _detached = [];
         private int[] _gatheredFirst = [];
         private int[] _gatheredBlocks = [];
         private int[] _gatheredRows = [];
@@ -528,7 +528,7 @@ public sealed partial class VortexFileWriter
                 _gatheredFirst = new int[fields];
                 _gatheredBlocks = new int[fields];
                 _gatheredRows = new int[fields];
-                _detached = new AheadChunk?[fields];
+                _detached = new ColumnEmission?[fields];
                 _shredLanes = new CompressionLane?[fields];
                 _shreds = new VariantShredder.Shredding?[fields];
                 _leafCounts = new int[fields];
@@ -690,10 +690,10 @@ public sealed partial class VortexFileWriter
         /// <summary>The gathering column <paramref name="field"/> was given to in this chunk, or null.</summary>
         internal Gathering? GatheredOf(int field) => _gathered[field];
 
-        /// <summary>The chunk column <paramref name="field"/> took from its gathering in this chunk to compress ahead, given to the caller; null for none.</summary>
-        internal AheadChunk? TakeDetached(int field)
+        /// <summary>The chunk column <paramref name="field"/> took from its gathering in this chunk to emission, given to the caller; null for none.</summary>
+        internal ColumnEmission? TakeDetached(int field)
         {
-            AheadChunk? chunk = field < _detached.Length ? _detached[field] : null;
+            ColumnEmission? chunk = field < _detached.Length ? _detached[field] : null;
             if (chunk is not null)
             {
                 _detached[field] = null;
@@ -826,9 +826,9 @@ public sealed partial class VortexFileWriter
                     return;
                 }
 
-                // A shredded variant's chunk is taken as it is and compressed ahead once the chunk's blobs go out, the
-                // column's chunk before it written first (WriteColumnBlobsAsync).
-                if (writer.CompressesAhead(field))
+                // The chunk is taken as it is and emitted apart once the chunk's blobs go out, the column's chunks before it
+                // written first (WriteColumnBlobsAsync).
+                if (writer.EmitsApart)
                 {
                     _detached[field] = writer.Detach(field, gathering);
                     return;
@@ -1122,12 +1122,12 @@ public sealed partial class VortexFileWriter
                 ReleaseShred(field);
             }
 
-            // A chunk taken to compress ahead that a failure kept from compressing gives its rows back.
+            // A chunk taken to emission that a failure kept from starting gives its rows back.
             for (int field = 0; field < _detached.Length; field++)
             {
                 if (_detached[field] is { } detached && _writer is { } writer)
                 {
-                    Release(detached);
+                    writer.Release(detached);
                     writer.Uncount(detached);
                     writer.ReturnTaken(detached);
                 }
