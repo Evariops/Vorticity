@@ -1038,36 +1038,78 @@ internal sealed class IndexWriter : IDisposable
     /// The first part of feeding the keys variant column <paramref name="field"/> shreds, where they are written in groups
     /// apart: on one thread, the batch's <paramref name="rows"/> read once for every key (<see cref="Compute.VariantFieldExpr.KeyReads.Read"/>),
     /// and the nested paths fed; where the rows cannot be read so, every key fed here. The groups follow
-    /// (<see cref="FeedKeys"/>), then <see cref="EndKeys"/>.
+    /// (<see cref="FeedKeys"/>), then <see cref="KeyPass.End"/>.
     /// </summary>
     /// <param name="field">The variant column.</param>
+    /// <param name="pass">The batch's pass over the column's keys (<see cref="NewKeyPass"/>).</param>
     /// <param name="arena">The batch's arena.</param>
     /// <param name="nodeIndex">The column's node.</param>
     /// <param name="rows">The batch's rows.</param>
     /// <param name="filled">The rows of the open block before the batch's.</param>
     /// <param name="blockRows">The rows of a block.</param>
-    internal void ReadKeys(int field, CanonicalArena arena, int nodeIndex, int rows, int filled, int blockRows)
+    internal void ReadKeys(int field, KeyPass pass, CanonicalArena arena, int nodeIndex, int rows, int filled, int blockRows)
     {
         VariantFeed feed = _variantFeeds![field]!;
-        CanonicalArena into = feed.Rows;
+        CanonicalArena into = pass.Rows;
         int variant = CanonicalSlice.SliceAcross(arena, into, nodeIndex, 0, rows);
         int keyed = feed.Slots.Length - feed.Nested.Length;
-        Compute.VariantFieldExpr.KeyReads reads = feed.Reads!;
-        feed.Whole = !reads.Read(into, variant);
-        if (feed.Whole)
+        Compute.VariantFieldExpr.KeyReads reads = pass.Reads!;
+        pass.Whole = !reads.Read(into, variant);
+        if (pass.Whole)
         {
             for (int i = 0; i < keyed; i++)
             {
-                feed.Nodes[i] = reads.Paths[i].Apply(into, variant);
+                pass.Nodes[i] = reads.Paths[i].Apply(into, variant);
             }
         }
 
         for (int n = 0; n < feed.Nested.Length; n++)
         {
-            feed.Nodes[keyed + n] = feed.Nested[n].Apply(into, variant);
+            pass.Nodes[keyed + n] = feed.Nested[n].Apply(into, variant);
         }
 
-        FeedSlots(feed, into, feed.Whole ? 0 : keyed, feed.Slots.Length, 1, rows, filled, blockRows);
+        FeedSlots(feed, pass.Nodes, into, pass.Whole ? 0 : keyed, feed.Slots.Length, 1, rows, filled, blockRows);
+    }
+
+    /// <summary>
+    /// A pass over the keys variant column <paramref name="field"/> shreds, for one batch where they are fed apart
+    /// (<see cref="ReadKeys"/>, <see cref="FeedKeys"/>, <see cref="KeyPass.End"/>): the batch's rows of the column sliced into an
+    /// arena of the pass's own and read there once for every key, and the node each key and nested path was read into. Each
+    /// batch in flight holds its own, kept from one batch to the next.
+    /// </summary>
+    internal KeyPass NewKeyPass(int field)
+    {
+        VariantFeed feed = _variantFeeds![field]!;
+        return new KeyPass(new CanonicalArena(64, _account), feed.Reads?.Fork(), feed.Slots.Length);
+    }
+
+    /// <inheritdoc cref="NewKeyPass"/>
+    internal sealed class KeyPass(CanonicalArena rows, Compute.VariantFieldExpr.KeyReads? reads, int slots) : IDisposable
+    {
+        /// <summary>Where the batch's rows of the column are sliced, and each key read whole into when they cannot be read once.</summary>
+        internal CanonicalArena Rows { get; } = rows;
+
+        /// <summary>The batch's read of the top-level keys, its notes held until <see cref="End"/>.</summary>
+        internal Compute.VariantFieldExpr.KeyReads? Reads { get; } = reads;
+
+        /// <summary>For each key, the node its values were read into.</summary>
+        internal int[] Nodes { get; } = new int[slots];
+
+        /// <summary>Whether the batch's rows could not be read once for every key, and <see cref="ReadKeys"/> fed them all.</summary>
+        internal bool Whole { get; set; }
+
+        /// <summary>Ends the batch's pass: the read given back, the rows let go, the arena's blocks kept for the next batch.</summary>
+        internal void End()
+        {
+            Reads?.Release();
+            Rows.ResetKeepingBlocks();
+        }
+
+        public void Dispose()
+        {
+            Reads?.Release();
+            Rows.Reset();
+        }
     }
 
     /// <summary>
@@ -1077,13 +1119,14 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     /// <param name="field">The variant column.</param>
     /// <param name="group">The group.</param>
+    /// <param name="pass">The batch's pass over the column's keys, which <see cref="ReadKeys"/> read.</param>
     /// <param name="rows">The batch's rows.</param>
     /// <param name="filled">The rows of the open block before the batch's.</param>
     /// <param name="blockRows">The rows of a block.</param>
-    internal void FeedKeys(int field, int group, int rows, int filled, int blockRows)
+    internal void FeedKeys(int field, int group, KeyPass pass, int rows, int filled, int blockRows)
     {
         VariantFeed feed = _variantFeeds![field]!;
-        if (feed.Whole)
+        if (pass.Whole)
         {
             return;
         }
@@ -1094,10 +1137,10 @@ internal sealed class IndexWriter : IDisposable
         {
             for (int i = group; i < keyed; i += feed.Groups)
             {
-                feed.Nodes[i] = feed.Reads!.Write(into, i);
+                pass.Nodes[i] = pass.Reads!.Write(into, i);
             }
 
-            FeedSlots(feed, into, group, keyed, feed.Groups, rows, filled, blockRows);
+            FeedSlots(feed, pass.Nodes, into, group, keyed, feed.Groups, rows, filled, blockRows);
         }
         finally
         {
@@ -1108,22 +1151,13 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
-    /// <summary>Ends the keys of variant column <paramref name="field"/> fed apart: the read given back, its rows let go.</summary>
-    internal void EndKeys(int field)
-    {
-        if (_variantFeeds?[field] is { } feed)
-        {
-            feed.Reads?.Release();
-            feed.Rows.ResetKeepingBlocks();
-        }
-    }
-
     /// <summary>
     /// Feeds the builders of the slots <paramref name="first"/>, <paramref name="first"/> + <paramref name="step"/>, and so on
-    /// below <paramref name="end"/> of <paramref name="feed"/> their columns over the batch's <paramref name="rows"/>, block by
-    /// block, closing each block as it fills; <paramref name="filled"/> rows of the open block came before the batch's.
+    /// below <paramref name="end"/> of <paramref name="feed"/> their columns, the nodes <paramref name="nodes"/> names in
+    /// <paramref name="arena"/>, over the batch's <paramref name="rows"/>, block by block, closing each block as it fills;
+    /// <paramref name="filled"/> rows of the open block came before the batch's.
     /// </summary>
-    private void FeedSlots(VariantFeed feed, CanonicalArena arena, int first, int end, int step, int rows, int filled, int blockRows)
+    private void FeedSlots(VariantFeed feed, int[] nodes, CanonicalArena arena, int first, int end, int step, int rows, int filled, int blockRows)
     {
         for (int offset = 0; offset < rows;)
         {
@@ -1132,7 +1166,7 @@ internal sealed class IndexWriter : IDisposable
             {
                 foreach (IndexBuilder builder in _builders[feed.Slots[k]])
                 {
-                    builder.Accumulate(arena, feed.Nodes[k], offset, take);
+                    builder.Accumulate(arena, nodes[k], offset, take);
                 }
             }
 
@@ -2562,9 +2596,6 @@ internal sealed class IndexWriter : IDisposable
         /// with their column.
         /// </summary>
         internal int Groups { get; private set; }
-
-        /// <summary>Whether the batch's rows could not be read once for every key, and <see cref="ReadKeys"/> fed them all.</summary>
-        internal bool Whole { get; set; }
 
         // Each group's arena, which its keys' columns are written into, emptied after each batch.
         private CanonicalArena?[] _groupRows = [];

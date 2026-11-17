@@ -684,6 +684,21 @@ internal sealed class VariantFieldExpr : FieldExpr
         internal void Hold(CanonicalArena arena, int valueIndex, int rows, Block<Note> notes, Block<int> origin) =>
             (Arena, ValueIndex, Rows, Notes, Origin) = (arena, valueIndex, rows, notes, origin);
 
+        /// <summary>
+        /// The same paths, for a pass of its own beside this one's: the keys and their table shared, which no pass writes,
+        /// and each key's last note the new pass's own.
+        /// </summary>
+        internal KeyReads Fork() => new KeyReads(this);
+
+        private KeyReads(KeyReads shape)
+        {
+            _keys = shape._keys;
+            _table = shape._table;
+            Paths = shape.Paths;
+            KeyOf = shape.KeyOf;
+            Heads = new int[shape.Heads.Length];
+        }
+
         internal KeyReads(VariantFieldExpr[] paths)
         {
             Paths = paths;

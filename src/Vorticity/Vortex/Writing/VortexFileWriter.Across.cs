@@ -289,7 +289,7 @@ public sealed partial class VortexFileWriter
             Span<int> items = fan.Items(ahead + (_fieldCount * 4));
             columns.LayAhead(items[..ahead]);
             Span<int> ingest = items[ahead..];
-            int count = FeedItems(ingest, IngestItems(arena, ingest));
+            int count = FeedItems(ingest, IngestItems(arena, _fieldNodes, ingest));
             columns.Fuse(ingest[..count], rows, firstBlock, blocks);
             await fan.RunAsync(columns, ahead + count, arena, rows).ConfigureAwait(false);
             _indexes?.AttachCounts(Counted, rows);
@@ -748,11 +748,11 @@ public sealed partial class VortexFileWriter
             VortexFileWriter writer = _writer!;
             if ((entry & 7) == 0)
             {
-                writer.FeedPart(field, chunk, _rows);
+                writer.FeedPart(field, chunk, writer._fieldNodes, _rows, writer._blockFilled, writer.Counted, keysApart: false);
                 return;
             }
 
-            writer.IngestPart(field, (ColumnWriter.IngestParts)(entry & 7), chunk, _rows);
+            writer.IngestPart(field, (ColumnWriter.IngestParts)(entry & 7), chunk, writer._fieldNodes[field], _rows, writer._blockFilled);
             Counted(field, chunk);
         }
 

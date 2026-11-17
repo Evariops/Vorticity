@@ -551,6 +551,8 @@ public sealed partial class VortexFileWriter
         _indexes?.Dispose();
         _counted?.Dispose();
         _counted = null;
+        _across?.Release();
+        _across = null;
         ReleaseBuilders();
 
         // The blob workspace's builder and metadata writer rent from the shared pool, and the threads

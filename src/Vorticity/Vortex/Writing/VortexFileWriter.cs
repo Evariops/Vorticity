@@ -2606,14 +2606,23 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private async ValueTask IngestAcrossAsync(CoreBatch fan, CanonicalArena arena, int rows)
     {
         _ingestGathered = _gatherInIngest;
-        if (_indexes is { AsksNothing: false, Streams: true } indexes && KeysApart(indexes) is int groups and > 0)
+        Flight flight = _across ??= new Flight();
+        flight.Take(arena, _fieldNodes, rows, _blockFilled, Counted);
+        try
         {
-            await IngestKeysApartAsync(fan, indexes, arena, rows, groups).ConfigureAwait(false);
+            if (_indexes is { AsksNothing: false, Streams: true } indexes && KeysApart(indexes) is int groups and > 0)
+            {
+                await IngestKeysApartAsync(fan, indexes, flight, groups).ConfigureAwait(false);
+            }
+            else
+            {
+                int count = ItemsOf(fan, flight);
+                await fan.RunAsync(this, count, flight).ConfigureAwait(false);
+            }
         }
-        else
+        finally
         {
-            int count = ItemsOf(fan, arena);
-            await fan.RunAsync(this, count, arena, rows).ConfigureAwait(false);
+            flight.Land();
         }
 
         _blockFilled = (_blockFilled + rows) % _blockRows;
@@ -2643,7 +2652,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// ingested their column, held every block of a merge of log records at fourteen lanes.
     /// </summary>
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
-    private async ValueTask IngestKeysApartAsync(CoreBatch fan, IndexWriter indexes, CanonicalArena arena, int rows, int groups)
+    private async ValueTask IngestKeysApartAsync(CoreBatch fan, IndexWriter indexes, Flight flight, int groups)
     {
         try
         {
@@ -2657,15 +2666,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 if (indexes.KeyGroups(field) > 0)
                 {
+                    flight.PassOf(indexes, field);
                     items[count++] = KeysItem | field;
                 }
             }
 
             count = GatherItems(items, count);
-            count += IngestItems(arena, items[count..]);
+            count += IngestItems(flight.Arena, flight.FieldNodes, items[count..]);
             count = FeedItems(items, count);
-            _keysApart = true;
-            await fan.RunAsync(this, count, arena, rows).ConfigureAwait(false);
+            flight.KeysApart = true;
+            await fan.RunAsync(this, count, flight).ConfigureAwait(false);
             items = fan.Items(groups);
             count = 0;
             for (int field = 0; field < _fieldCount; field++)
@@ -2676,31 +2686,27 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 }
             }
 
-            await fan.RunAsync(this, count, arena, rows).ConfigureAwait(false);
+            await fan.RunAsync(this, count, flight).ConfigureAwait(false);
             BatchesKeysApart++;
         }
         finally
         {
-            _keysApart = false;
             for (int field = 0; field < _fieldCount; field++)
             {
                 if (indexes.KeyGroups(field) > 0)
                 {
-                    indexes.EndKeys(field);
+                    flight.PassOf(indexes, field).End();
                 }
             }
         }
     }
 
-    // Whether the fan's turn feeds the variant columns' keys apart, which their columns' own items then leave out.
-    private bool _keysApart;
-
     /// <summary>The items of an ingest across <paramref name="fan"/>'s threads, laid in its room: how many there are.</summary>
-    private int ItemsOf(CoreBatch fan, CanonicalArena arena)
+    private int ItemsOf(CoreBatch fan, Flight flight)
     {
         Span<int> items = fan.Items((_fieldCount * 5) + 1);
         int count = GatherItems(items, 0);
-        count += IngestItems(arena, items[count..]);
+        count += IngestItems(flight.Arena, flight.FieldNodes, items[count..]);
         return FeedItems(items, count);
     }
 
@@ -2750,12 +2756,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// bounds and the distinct table of a column that keeps them apart from its statistics.
     /// </summary>
     /// <returns>How many items there are.</returns>
-    private int IngestItems(CanonicalArena arena, Span<int> items)
+    private int IngestItems(CanonicalArena arena, ReadOnlySpan<int> fieldNodes, Span<int> items)
     {
         int count = 0;
         for (int field = 0; field < _fieldCount; field++)
         {
-            ColumnWriter.IngestParts apart = _columns[field].Apart(arena.GetNode(_fieldNodes[field]).Kind);
+            ColumnWriter.IngestParts apart = _columns[field].Apart(arena.GetNode(fieldNodes[field]).Kind);
             items[count++] = (field << 3) | (int)(ColumnWriter.IngestParts.All & ~apart);
             if ((apart & ColumnWriter.IngestParts.Bounds) != 0)
             {
@@ -2772,14 +2778,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>Runs one accumulator of <see cref="IngestAcrossAsync"/> over the batch, block by block, or one column's index builders.</summary>
-    void IBatchWork.Run(CoreBatch fan, int item)
+    void IBatchWork.Run(CoreBatch fan, int item) => RunItem((Flight)fan.State!, fan.Item(item));
+
+    /// <summary>Runs ingest item <paramref name="entry"/> of <paramref name="flight"/>: an accumulator over the batch, block by block, a column's index builders, a gathering or a part of the keys fed apart.</summary>
+    private void RunItem(Flight flight, int entry)
     {
-        int entry = fan.Item(item);
+        int rows = flight.Rows;
         if ((entry & GatherItem) != 0)
         {
             int column = entry & 0xF_FFFF;
-            CanonicalArena chunk = (CanonicalArena)fan.State!;
-            Gather(column, _gathering![column]!, chunk, _fieldNodes[column], fan.Value, ChunkBlocks(fan.Value, _blockRows));
+            Gather(column, _gathering![column]!, flight.Arena, flight.FieldNodes[column], rows, ChunkBlocks(rows, _blockRows));
             return;
         }
 
@@ -2787,13 +2795,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             int field = entry & 0xF_FFFF;
             int part = (entry >> 20) & 0x3FF;
+            IndexWriter indexes = _indexes!;
+            IndexWriter.KeyPass pass = flight.Keys[field]!;
             if (part == 0)
             {
-                _indexes!.ReadKeys(field, (CanonicalArena)fan.State!, _fieldNodes[field], fan.Value, _blockFilled, _blockRows);
+                indexes.ReadKeys(field, pass, flight.Arena, flight.FieldNodes[field], rows, flight.Filled, _blockRows);
             }
             else
             {
-                _indexes!.FeedKeys(field, part - 1, fan.Value, _blockFilled, _blockRows);
+                indexes.FeedKeys(field, part - 1, pass, rows, flight.Filled, _blockRows);
             }
 
             return;
@@ -2801,36 +2811,39 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         if ((entry & 7) == 0)
         {
-            FeedPart(entry >> 3, (CanonicalArena)fan.State!, fan.Value);
+            FeedPart(entry >> 3, flight.Arena, flight.FieldNodes, rows, flight.Filled, flight.Counted, flight.KeysApart);
             return;
         }
 
-        IngestPart(entry >> 3, (ColumnWriter.IngestParts)(entry & 7), (CanonicalArena)fan.State!, fan.Value);
+        int accumulated = entry >> 3;
+        IngestPart(accumulated, (ColumnWriter.IngestParts)(entry & 7), flight.Arena, flight.FieldNodes[accumulated], rows, flight.Filled);
     }
 
     /// <summary>
-    /// Feeds column <paramref name="field"/>'s index builders the batch's <paramref name="rows"/>, block by block, closing each
-    /// block as it fills; past the columns, the composite keys'.
+    /// Feeds column <paramref name="field"/>'s index builders the batch's <paramref name="rows"/> of <paramref name="arena"/>,
+    /// whose columns' nodes are <paramref name="fieldNodes"/>, block by block, closing each block as it fills, from
+    /// <paramref name="filled"/> rows of the open block; past the columns, the composite keys'. The counts read
+    /// <paramref name="counted"/> beside the column; a variant column whose keys are fed apart in groups
+    /// (<paramref name="keysApart"/>) leaves them out.
     /// </summary>
-    private void FeedPart(int field, CanonicalArena arena, int rows)
+    private void FeedPart(int field, CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int rows, int filled, CountedRows? counted, bool keysApart)
     {
         IndexWriter indexes = _indexes!;
         bool keys = field == _fieldCount;
-        int node = keys ? -1 : _fieldNodes[field];
+        int node = keys ? -1 : fieldNodes[field];
 
         // A variant column whose keys go apart feeds its own builders alone.
-        bool apart = !keys && _keysApart && indexes.KeyGroups(field) > 0;
-        int filled = _blockFilled;
+        bool apart = !keys && keysApart && indexes.KeyGroups(field) > 0;
         for (int offset = 0; offset < rows;)
         {
             int take = Math.Min(_blockRows - filled, rows - offset);
             if (keys)
             {
-                indexes.AccumulateKeys(arena, _fieldNodes, offset, take);
+                indexes.AccumulateKeys(arena, fieldNodes, offset, take);
             }
             else
             {
-                indexes.Accumulate(field, arena, node, offset, take, keys: !apart, Counted);
+                indexes.Accumulate(field, arena, node, offset, take, keys: !apart, counted);
             }
 
             offset += take;
@@ -2851,12 +2864,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
     }
 
-    /// <summary>Runs accumulator <paramref name="parts"/> of column <paramref name="field"/> over the batch's <paramref name="rows"/>, block by block.</summary>
-    private void IngestPart(int field, ColumnWriter.IngestParts parts, CanonicalArena arena, int rows)
+    /// <summary>
+    /// Runs accumulator <paramref name="parts"/> of column <paramref name="field"/>, node <paramref name="node"/> of
+    /// <paramref name="arena"/>, over the batch's <paramref name="rows"/>, block by block, from <paramref name="filled"/> rows
+    /// of the open block.
+    /// </summary>
+    private void IngestPart(int field, ColumnWriter.IngestParts parts, CanonicalArena arena, int node, int rows, int filled)
     {
         ColumnWriter column = _columns[field];
-        int node = _fieldNodes[field];
-        int filled = _blockFilled;
         for (int offset = 0; offset < rows;)
         {
             int take = Math.Min(_blockRows - filled, rows - offset);
