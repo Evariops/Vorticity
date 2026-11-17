@@ -1296,7 +1296,11 @@ internal static partial class DatasetCompactor
             dataset.Snapshot,
             inputs.Select(static held => held.Object).ToAsyncEnumerable(),
             schema.Tree!,
-            rankedTies: false,
+
+            // Equal keys in the order of the job's inputs, as a read promises: an input that ran through the keys equal to
+            // another's put its rows first or not depending on where its batch ended, and the batches' rows follow what the
+            // job measured, so the same rows compacted twice wrote objects whose rows of one key came in another order.
+            rankedTies: true,
             // The rows of an input's batches read as it opens: the plan's, or fewer once the job repriced them (JobMemory.Reprice).
             (lease, entry) => meter is null
                 ? RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], RowsNow(), account, InputPrefetch)
