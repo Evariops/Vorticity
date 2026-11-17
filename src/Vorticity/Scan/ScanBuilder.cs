@@ -84,6 +84,18 @@ internal sealed class ScanBuilder
 
     private bool _consumerLane;
 
+    /// <summary>
+    /// Has the scan hand its batches over to <paramref name="handover"/>'s consumer, which keeps each one it takes past the
+    /// next step, until it gives it back: a compaction's input windows, read by its writers until they copied their runs.
+    /// </summary>
+    internal ScanBuilder WithHandover(BatchHandover handover)
+    {
+        _handover = handover;
+        return this;
+    }
+
+    private BatchHandover? _handover;
+
     /// <summary>Whether a filtered batch is compacted; false delivers whole blocks with the passing rows marked.</summary>
     internal ScanBuilder WithCompaction(bool compact)
     {
@@ -810,6 +822,7 @@ internal sealed class ScanBuilder
             Account = _account,
             Prefetch = _prefetch,
             ConsumerHoldsLane = _consumerLane,
+            Handover = _handover,
             Compact = _compact,
             KeepEncodings = _keepEncodings,
             SinkDecodes = _sinkDecodes,

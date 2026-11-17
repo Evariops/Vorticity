@@ -2107,16 +2107,19 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// Takes rows <paramref name="row"/> to <paramref name="row"/> + <paramref name="rows"/> of node <paramref name="root"/> of
-    /// <paramref name="source"/>, a merge's input batch, in the key's order after the rows taken before: a merge's writer
-    /// (<see cref="VortexWriteOptions.StagedRows"/>) keeps a window on them and copies them when the block they complete goes
-    /// through, on that block's lane; any other writer takes them as a batch now. The source stays as it is until
-    /// <see cref="ReleaseAsync"/> says it will change.
+    /// <paramref name="source"/>, a merge's input batch whose rows name <paramref name="rowBytes"/> bytes each on average, in
+    /// the key's order after the rows taken before: a merge's writer (<see cref="VortexWriteOptions.StagedRows"/>) keeps a
+    /// window on them and copies them when the block they complete goes through, on that block's lane, and says so to the
+    /// merge's <see cref="Ledger"/>; any other writer takes them as a batch now. The source stays as it is until the ledger
+    /// says every run noted on it is copied.
     /// </summary>
     /// <remarks>
     /// The merge's thread copied each run into the writer's staging as it chose it, beside choosing it: a ninth of a
-    /// consolidation's processor, on the chain every lane of the writer waited for (2026-11-16).
+    /// consolidation's processor, on the chain every lane of the writer waited for (2026-11-16). Then it copied what the
+    /// staging still held of an input before the input moved on, and waited for the blocks in flight to copy theirs: 2.7 s
+    /// over two rounds of a consolidation, and 0.85 s of copies a round on its thread.
     /// </remarks>
-    internal async ValueTask WriteRunAsync(CanonicalArena source, int root, int row, int rows, CancellationToken cancellationToken)
+    internal async ValueTask WriteRunAsync(CanonicalArena source, int root, int row, int rows, double rowBytes, CancellationToken cancellationToken)
     {
         ThrowIfDone();
         Carry();
@@ -2140,10 +2143,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         while (rows > 0)
         {
             Staging staging = StagingOf();
+            if (staging.Parts.Count == 0)
+            {
+                RequireMatchingSchema(source.GetNode(root).DType);
+            }
+
             int take = Math.Min(rows, _stagedRows - staging.Rows);
             staging.Parts.Add(new StagedPart(source, root, row, take, -1));
+            Ledger?.Note(staging, ref staging.FirstRun);
             staging.Rows += take;
-            staging.Bytes += (long)(take * BytesPerRow(source, root));
+            staging.Bytes += (long)(take * rowBytes);
             row += take;
             rows -= take;
             if (staging.Rows >= _stagedRows)
@@ -2154,70 +2163,37 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
-    /// The bytes a row of <paramref name="source"/>'s batch names, on average: what the rows a merge stages from it are sized
-    /// by until they are copied. Counted once a batch, its schema checked then, and forgotten when the batch is released.
+    /// The runs of a merge this writer and the merge's other writers keep where they lie in its inputs' batches, which the
+    /// merge gives back once every run noted on a batch is copied; null for a writer whose rows are its own.
     /// </summary>
-    /// <remarks>
-    /// Counted run by run, on a window of each run, the merge's thread cut a window and walked its texts for each of a
-    /// consolidation's 1.5 million runs (2026-11-16).
-    /// </remarks>
-    private double BytesPerRow(CanonicalArena source, int root)
-    {
-        Dictionary<CanonicalArena, double> rates = _sourceRates ??= new Dictionary<CanonicalArena, double>(ReferenceEqualityComparer.Instance);
-        if (!rates.TryGetValue(source, out double rate))
-        {
-            CanonicalNode node = source.GetNode(root);
-            RequireMatchingSchema(node.DType);
-            rate = (double)source.NamedBytes(root) / Math.Max(1, node.Length);
-            rates[source] = rate;
-        }
-
-        return rate;
-    }
-
-    // The bytes a row names of each merge input's batch a run was staged from, until the batch is released.
-    private Dictionary<CanonicalArena, double>? _sourceRates;
+    internal RunLedger? Ledger { get; set; }
 
     /// <summary>
-    /// Copies every row the writer keeps a window on in <paramref name="source"/> before it changes: the runs of the blocks
-    /// being assembled copied out of the inputs first, then the windows of the rows staged since on that source copied into
-    /// the staging, where the other windows stay. A merge calls it before an input takes its next batch or goes.
+    /// Copies every row the writer still keeps where it lies in a merge's inputs, once its blocks in flight are through: what
+    /// a merge has its writers do as it ends, before it gives its inputs' batches back.
     /// </summary>
-    /// <remarks>
-    /// It waits for the blocks' runs to be copied, not for the blocks to be concatenated, which reads no input: the merge's
-    /// thread waited 3.5 s of a consolidation's 9 s for whole assemblies here (2026-11-17).
-    /// </remarks>
-    internal async ValueTask ReleaseAsync(CanonicalArena source)
+    internal async ValueTask LetGoOfInputsAsync()
     {
-        if (_owning is { IsCompleted: false } owning)
-        {
-            // Never faults: a block whose runs failed to copy fails its flight, which the writer's caller meets.
-#pragma warning disable VSTHRD003 // The copies of the blocks this writer flew, which run on lanes of their own.
-            await owning.ConfigureAwait(false);
-#pragma warning restore VSTHRD003
-        }
-
+        await LandAsync().ConfigureAwait(false);
         if (_staging is { } staging)
         {
-            Own(staging, source);
+            Own(staging);
         }
-
-        _sourceRates?.Remove(source);
     }
 
     /// <summary>
-    /// Copies the rows of <paramref name="staging"/> still held where they lie in a merge's input, those of
-    /// <paramref name="source"/>, or of every source when null, into the staging's arena, each run cut there, decoded when
-    /// the input delivered an encoded column, and a list narrowed to the elements its rows name.
+    /// Copies the rows of <paramref name="staging"/> still held where they lie in a merge's inputs into the staging's arena,
+    /// each run cut there, decoded when the input delivered an encoded column, and a list narrowed to the elements its rows
+    /// name; then tells the merge's ledger they are copied.
     /// </summary>
-    private void Own(Staging staging, CanonicalArena? source)
+    private void Own(Staging staging)
     {
         CanonicalArena into = staging.Context.Canonical;
         List<StagedPart> parts = staging.Parts;
         for (int i = 0; i < parts.Count; i++)
         {
             StagedPart part = parts[i];
-            if (part.Source is { } from && (source is null || ReferenceEquals(from, source)))
+            if (part.Source is { } from)
             {
                 // A text that repeats the row before's is copied once: the rows staged are sized by the bytes they name, and
                 // the writer copies each row's bytes again as it gathers them, before any encoder sizes them.
@@ -2225,6 +2201,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 parts[i] = new StagedPart(null, 0, 0, part.Rows, Owned(into, into, window, shareRepeats: true));
             }
         }
+
+        Ledger?.Release(staging, ref staging.FirstRun);
     }
 
     /// <summary>
@@ -2233,7 +2211,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private int Assemble(Staging staging)
     {
-        Own(staging, null);
+        Own(staging);
         ScanContext context = staging.Context;
         List<StagedPart> parts = staging.Parts;
         int node;
@@ -2309,55 +2287,51 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         Staging staging = _staging!;
         LaneBudget? budget = _lanes > 1 ? _budget : null;
 
-        // The block is assembled at once, on a lane of its own when one is free, while the block before it still goes
-        // through: its runs copied out of the merge's inputs and concatenated, a third of a block's time on the one lane
-        // the blocks pass through one after another (2026-11-16). Two blocks may be assembled side by side; what the
-        // merge waits for before an input changes its batch is both (ReleaseAsync). Assembled one after another, the
-        // blocks made a chain of 6 s of a consolidation's 9.6 (2026-11-17). A release waits for the runs' copies alone, which
-        // the assembly makes first and says so (_owning), and not for the concatenation after them.
-        Task? before = _owning is { IsCompleted: false } running ? running : null;
-        Task? assembling = null;
-        if (budget is not null && budget.TryEnter(out long assemblerLane))
+        // The block is assembled at once, a unit of the core that a pump runs while the block before it still goes through:
+        // its runs copied out of the merge's inputs and concatenated, a third of a block's time on the one lane the blocks
+        // pass through one after another (2026-11-16). Two blocks may be assembled side by side. Assembled one after
+        // another, the blocks made a chain of 6 s of a consolidation's 9.6 (2026-11-17). Its copies done, the merge's ledger
+        // says so, and the merge gives back the input batches no run of a writer is left on.
+        bool offered = _lanes > 1;
+        if (offered)
         {
-            TaskCompletionSource owned = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            assembling = Task.Run(
-                () =>
-                {
-                    try
-                    {
-                        try
-                        {
-                            Own(staging, null);
-                        }
-                        finally
-                        {
-                            owned.TrySetResult();
-                        }
-
-                        staging.Assembled = Assemble(staging);
-                    }
-                    finally
-                    {
-                        budget.Exit(assemblerLane);
-                    }
-                },
-                CancellationToken.None);
-            _owning = before is null ? owned.Task : Task.WhenAll(before, owned.Task);
+            (staging.Assembly ??= new AssemblyUnit(this, staging)).Offer(_core, Flow.Write);
         }
         else
         {
             staging.Assembled = Assemble(staging);
-            _owning = before;
         }
-        await LandAsync().ConfigureAwait(false);
+
+        try
+        {
+            await LandAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // The block before failed: this one's assembly ends before the writer, failing, gives its staging up.
+            if (offered)
+            {
+                try
+                {
+                    await staging.Assembly!.RunOrWaitAsync(_core).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // The writer fails with the block before's failure, which the caller meets.
+                }
+            }
+
+            throw;
+        }
+
         _sizedBytes = _sink.Position + Held(out _sizedRate);
         _sized = true;
         if (budget is null || !budget.TryEnter(out long entered))
         {
             // No lane free: the block goes through on the merge's thread, and its staging takes the next rows.
-            if (assembling is not null)
+            if (offered)
             {
-                await assembling.ConfigureAwait(false);
+                await staging.Assembly!.RunOrWaitAsync(_core).ConfigureAwait(false);
             }
 
             await WriteStagedAsync(staging, cancellationToken).ConfigureAwait(false);
@@ -2372,13 +2346,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 try
                 {
-                    if (assembling is not null)
-                    {
-#pragma warning disable VSTHRD003 // The block's assembly, started by this writer just before.
-                        await assembling.ConfigureAwait(false);
-#pragma warning restore VSTHRD003
-                    }
-
+                    // Its assembly, run here on the flight's lane when no pump took it yet.
+                    await staging.Assembly!.RunOrWaitAsync(_core).ConfigureAwait(false);
                     await WriteStagedAsync(staging, cancellationToken).ConfigureAwait(false);
                 }
                 finally
@@ -2389,11 +2358,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             CancellationToken.None);
     }
 
-    /// <summary>
-    /// Done once the runs of the last block flown, and of every block before it, are copied out of the merge's inputs, which
-    /// is all a release waits for; null when none is being copied. Never faults.
-    /// </summary>
-    private Task? _owning;
+    /// <summary>The assembly of a staging's block, a unit of the core (<see cref="Assemble"/>).</summary>
+    private sealed class AssemblyUnit(VortexFileWriter writer, Staging staging) : CoreUnit
+    {
+        protected override void Execute() => staging.Assembled = writer.Assemble(staging);
+    }
 
     /// <summary>
     /// Waits for the rows in flight to have gone through, throwing what failed them, and keeps their staging for the rows
@@ -2499,6 +2468,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         internal int Rows;
         internal long Bytes;
         internal int Assembled = -1;
+
+        /// <summary>The number its first run kept in a merge's input took in the merge's ledger, -1 while it keeps none.</summary>
+        internal long FirstRun = -1;
+
+        /// <summary>The unit that assembles its block, kept from one block to the next.</summary>
+        internal AssemblyUnit? Assembly;
 
         // The parts' nodes in order, for their concatenation, kept from one block to the next.
         internal int[] Order = new int[256];

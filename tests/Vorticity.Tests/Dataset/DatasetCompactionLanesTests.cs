@@ -58,6 +58,35 @@ public sealed partial class DatasetCompactionLanesTests
     }
 
     /// <summary>
+    /// A consolidation's merge keeps each input's batch as its scan decoded it, its keys encoded beside the decode, until
+    /// the writers have copied the runs they keep of it: it takes every batch over from its scan and copies none, at one
+    /// lane and at four.
+    /// </summary>
+    [Fact]
+    public async Task AConsolidationsMergeTakesItsInputsBatchesOverAndCopiesNone()
+    {
+        foreach (int lanes in new[] { 1, 4 })
+        {
+            Random random = new Random(31);
+            await using MemoryObjectStore store = new MemoryObjectStore();
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, OptionsOf(session), Ct);
+            for (int a = 0; a < 6; a++)
+            {
+                Doc[] rows = [.. Enumerable.Range(a * 8_000, 8_000).Select(i => new Doc(random.Next(0, 2), $"svc-{random.Next(0, 60):D2}", i, Attributes(random)))];
+                await using ObjectDraft draft = dataset.StartObject();
+                await draft.Writer.WriteAsync<Doc>(rows, Ct);
+                await dataset.AppendAsync(draft, Ct);
+            }
+
+            IReadOnlyList<CompactionResult> results = await dataset.ConsolidateAsync(Ct);
+            Assert.True(results.Sum(static result => result.InputWindowsTaken) > 0, $"at {lanes} lanes, no batch was taken over");
+            Assert.Equal(0, results.Sum(static result => result.InputWindowsCopied));
+            Assert.Equal(48_000, await dataset.ScanBuilder().CountAsync(Ct));
+        }
+    }
+
+    /// <summary>
     /// One store of six appends, copied four times and consolidated on each copy at one lane, one lane again, four lanes
     /// and fourteen: every segment of every object is the same bytes. The rows of one key come in the order of the job's
     /// inputs whatever the batches its inputs are read in, which the memory the job measures decides; an input that ran

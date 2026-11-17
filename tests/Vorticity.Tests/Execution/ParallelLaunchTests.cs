@@ -34,7 +34,7 @@ public sealed partial class ParallelLaunchTests
     /// <remarks>
     /// On a compaction job's path: the plan's step that removes each. <c>DatasetCompactor.Ranges.cs</c>, the ranges' lanes
     /// (B3). <c>DatasetCompactor.cs</c>, the inputs opened side by side and the census's lanes (B2, C5).
-    /// <c>VortexFileWriter.cs</c>, the assembly and the flight of a staged block (B2, B4a). <c>KeyIndexBuilder.cs</c>,
+    /// <c>VortexFileWriter.cs</c>, the flight of a staged block (B4a). <c>KeyIndexBuilder.cs</c>,
     /// the sort of a spilled bucket ahead (B5). <c>BatchAsyncEnumerable.cs</c>, a split's decode on a lane it takes (C1).
     /// The questions' starts go with D1, a part's with D2.
     /// </remarks>
@@ -71,7 +71,7 @@ public sealed partial class ParallelLaunchTests
         ["Vorticity/Session/SynopsisCache.cs"] = 1,
         ["Vorticity/Vortex/Writing/KeyIndexBuilder.cs"] = 2,
         ["Vorticity/Vortex/Writing/VortexFileWriter.Parts.cs"] = 1,
-        ["Vorticity/Vortex/Writing/VortexFileWriter.cs"] = 4,
+        ["Vorticity/Vortex/Writing/VortexFileWriter.cs"] = 2,
     };
 
     /// <summary>

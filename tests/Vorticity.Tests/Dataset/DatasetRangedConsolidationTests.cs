@@ -36,14 +36,16 @@ public sealed partial class DatasetRangedConsolidationTests
     }
 
     /// <summary>
-    /// The same days consolidated on four lanes under a jobs' budget of 8 MiB, which holds fewer ranges than the lanes: the
+    /// The same days consolidated on four lanes under a jobs' budget of 10 MiB, which holds fewer ranges than the lanes: the
     /// ranges run fewer at a time, every job's blocks within the budget, and hold every live row as ranges side by side hold
     /// them; the jobs say how many ran at once and what their blocks held.
     /// </summary>
     [Fact]
     public async Task UnderABudgetNoRangeFitsTheRangesRunOneAtATimeAndHoldTheSame()
     {
-        const long Budget = 8L << 20;
+        // 10 MiB: one range at a time held 7.98 MB, then 8.77 MB once an input's batch stays until the writers copied the
+        // runs they keep of it (2026-11-17); four side by side hold 18 MB.
+        const long Budget = 10L << 20;
         (List<Row> appended, List<Row> roomy, IReadOnlyList<CompactionResult> wide) = await ConsolidateAsync(lanes: 4);
         (_, List<Row> tight, IReadOnlyList<CompactionResult> narrow) = await ConsolidateAsync(lanes: 4, new QueryMemoryBudget(Budget));
         List<Row> live = [.. appended.Where(static row => !(row.Day == 0 && row.Status == 7))];

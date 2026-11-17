@@ -91,6 +91,12 @@ public sealed record CompactionResult
 
     /// <summary>The batches the writers staged and sent through on a lane of their own while the merge went on.</summary>
     internal long WriterBatchesFlown { get; init; }
+
+    /// <summary>The inputs' batches its merge took over from their scans and kept until its writers copied their runs.</summary>
+    internal long InputWindowsTaken { get; init; }
+
+    /// <summary>The inputs' batches its merge copied to keep: an input of deleted rows, or of another schema.</summary>
+    internal long InputWindowsCopied { get; init; }
 }
 
 /// <summary>Runs one compaction: a k-way merge of the inputs on the sort key when there is
@@ -632,6 +638,8 @@ internal static partial class DatasetCompactor
         long batches = lateOutputs?.Batches ?? 0;
         long across = lateOutputs?.BatchesAcross ?? 0;
         long flown = lateOutputs?.BatchesFlown ?? 0;
+        long windowsTaken = 0;
+        long windowsCopied = 0;
         foreach (ObjectStream outputs in streams)
         {
             objectsOut += outputs.Written.Count;
@@ -640,6 +648,8 @@ internal static partial class DatasetCompactor
             batches += outputs.Batches;
             across += outputs.BatchesAcross;
             flown += outputs.BatchesFlown;
+            windowsTaken += outputs.WindowsTaken;
+            windowsCopied += outputs.WindowsCopied;
         }
 
         return new CompactionResult
@@ -662,6 +672,8 @@ internal static partial class DatasetCompactor
             WriterBatches = batches,
             WriterBatchesAcross = across,
             WriterBatchesFlown = flown,
+            InputWindowsTaken = windowsTaken,
+            InputWindowsCopied = windowsCopied,
         };
     }
 
@@ -979,7 +991,7 @@ internal static partial class DatasetCompactor
     /// </summary>
     private static IAsyncEnumerable<RecordBatch> RowsOfAsync(
         ObjectLease lease, ObjectEntry entry, DatasetSchema schema, CancellationToken cancellationToken, int[]? fields = null, RowRange? rows = null,
-        int batchRows = 0, Buffers.MemoryAccount? account = null, int prefetch = 0)
+        int batchRows = 0, Buffers.MemoryAccount? account = null, int prefetch = 0, Scanning.BatchHandover? handover = null)
     {
         // A job's input reads and decodes under the job's inputs' account (JobMemory), which never passes the jobs' budget.
         // Its batches hold its rows at most: an input of 1 924 rows in a merge of batches of 16 384 held 566 KB, a batch's
@@ -992,13 +1004,18 @@ internal static partial class DatasetCompactor
         // asks ahead decode on lanes free now beside it, and on its own flow when none is.
         if (schema.ColumnsOf(file.DType, entry.Key) is not { } columns)
         {
-            ScanBuilder whole = file.ScanBuilder().WithAccount(account).WithPrefetch(prefetch).WithConsumerLane();
+            // Its deleted rows left out, its batches are views of the scan's in their arena, which the merge takes over with it.
+            ScanBuilder whole = Handed(file.ScanBuilder().WithAccount(account).WithPrefetch(prefetch).WithConsumerLane(), handover);
             return LiveRowsAsync(Ranged(Batched(fields is null ? whole : whole.ProjectMask(projection), batchRows), rows), entry, cancellationToken);
         }
 
+        // Reshaped, its batches are views of the scan's in their arena, which the merge takes over with it.
         ObjectReadPlan read = columns.Read(null, projection);
+        ScanBuilder shaped = Handed(
+            file.ScanBuilder().WithAccount(account).WithPrefetch(prefetch).WithConsumerLane().ProjectMask(read.Shape.Source).WithEncodings(false, false),
+            handover);
         return ObjectColumns.ReshapeAsync(
-            LiveRowsAsync(Ranged(Batched(file.ScanBuilder().WithAccount(account).WithPrefetch(prefetch).WithConsumerLane().ProjectMask(read.Shape.Source).WithEncodings(false, false), batchRows), rows), entry, cancellationToken),
+            LiveRowsAsync(Ranged(Batched(shaped, batchRows), rows), entry, cancellationToken),
             read.Shape,
             null,
             0,
@@ -1008,6 +1025,10 @@ internal static partial class DatasetCompactor
 
     /// <summary>The scan of <paramref name="rows"/> alone, or of every row.</summary>
     private static ScanBuilder Ranged(ScanBuilder scan, RowRange? rows) => rows is { } range ? scan.Rows(range) : scan;
+
+    /// <summary>The scan handing its batches over to <paramref name="handover"/>'s merge, when given one.</summary>
+    private static ScanBuilder Handed(ScanBuilder scan, Scanning.BatchHandover? handover) =>
+        handover is null ? scan : scan.WithHandover(handover);
 
     /// <summary>The scan in batches of <paramref name="rows"/> rows, each decoded on its own, or of the scan's own size when 0.</summary>
     private static ScanBuilder Batched(ScanBuilder scan, int rows) => rows > 0 ? scan.WithMaxBatchRows(rows).WithWindowRows(rows) : scan;
@@ -1159,23 +1180,69 @@ internal static partial class DatasetCompactor
         long[]? emitted = null,
         long writer = 0)
     {
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, batchRows, cancellationToken, ranges: ranges, range: range, meter: meter, memory: memory, emitted: emitted);
+        // The writers keep the runs where they lie in the inputs' batches, and note them in one ledger, which the merge reads
+        // to give a batch back once every run on it is copied: the merge's thread neither copies runs nor waits for copies.
+        Writing.RunLedger ledger = new Writing.RunLedger();
+        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, batchRows, cancellationToken, ranges: ranges, range: range, meter: meter, memory: memory, emitted: emitted, ledger: ledger);
         ValueCut? values = schema.Cut;
         long rows = 0;
 
         // As its inputs open, the job reprices the batches of those still to open from what the open ones hold.
         int atOnce = ranges is null ? OpenAtOnce(job) : ranges.MostInputs;
         merge.Opened = open => memory.Reprice(open, atOnce, batchRows, writer, LeastBatchRows);
+        outputs.Ledger = ledger;
+        if (lateOutputs is not null)
+        {
+            lateOutputs.Ledger = ledger;
+        }
 
-        // The writers keep windows on the runs, which they copy before an input's batch changes.
-        merge.Releasing = lateOutputs is null
-            ? outputs.ReleaseAsync
-            : async source =>
+        try
+        {
+            await using (merge.ConfigureAwait(false))
             {
-                await outputs.ReleaseAsync(source).ConfigureAwait(false);
-                await lateOutputs.ReleaseAsync(source).ConfigureAwait(false);
-            };
-        await using (merge.ConfigureAwait(false))
+                try
+                {
+                    rows = await MergeRunsAsync(merge, outputs, late, lateOutputs, values, cancellationToken).ConfigureAwait(false);
+
+                    // The merge ends: its writers copy what they still keep of its inputs, which then go.
+                    await outputs.LetGoOfInputsAsync().ConfigureAwait(false);
+                    if (lateOutputs is not null)
+                    {
+                        await lateOutputs.LetGoOfInputsAsync().ConfigureAwait(false);
+                    }
+                }
+                catch
+                {
+                    // Failed, the writers read the inputs' batches no more once their rows in flight are through.
+                    await outputs.SettleAsync().ConfigureAwait(false);
+                    if (lateOutputs is not null)
+                    {
+                        await lateOutputs.SettleAsync().ConfigureAwait(false);
+                    }
+
+                    throw;
+                }
+            }
+        }
+        finally
+        {
+            outputs.Ledger = null;
+            outputs.WindowsTaken += merge.WindowsTaken;
+            outputs.WindowsCopied += merge.WindowsCopied;
+            if (lateOutputs is not null)
+            {
+                lateOutputs.Ledger = null;
+            }
+        }
+
+        return rows;
+    }
+
+    /// <summary>The merge's runs, one after another, into the objects they fall in: the rows that came late apart.</summary>
+    private static async ValueTask<long> MergeRunsAsync(
+        KeyOrderedMerge merge, ObjectStream outputs, LateRows? late, ObjectStream? lateOutputs, ValueCut? values, CancellationToken cancellationToken)
+    {
+        long rows = 0;
         {
             while (await merge.MoveNextAsync().ConfigureAwait(false))
             {
@@ -1297,7 +1364,8 @@ internal static partial class DatasetCompactor
         int only = -1,
         RowMeter? meter = null,
         JobMemory? memory = null,
-        long[]? emitted = null)
+        long[]? emitted = null,
+        Writing.RunLedger? ledger = null)
     {
         Buffers.MemoryAccount? account = memory?.InputsAccount;
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
@@ -1335,9 +1403,10 @@ internal static partial class DatasetCompactor
             // job measured, so the same rows compacted twice wrote objects whose rows of one key came in another order.
             rankedTies: true,
             // The rows of an input's batches read as it opens: the plan's, or fewer once the job repriced them (JobMemory.Reprice).
-            (lease, entry) => meter is null
-                ? RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], RowsNow(), account, InputPrefetch)
-                : MeteredAsync(RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], RowsNow(), account, InputPrefetch), meter, cancellationToken),
+            // Under a ledger, its scan hands its batches over, their keys encoded by their decode.
+            (lease, entry, handover) => meter is null
+                ? RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], RowsNow(), account, InputPrefetch, handover)
+                : MeteredAsync(RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], RowsNow(), account, InputPrefetch, handover), meter, cancellationToken),
             opened: null,
             cancellationToken,
             ranges?.Low(range) ?? default,
@@ -1346,6 +1415,7 @@ internal static partial class DatasetCompactor
             Account = account ?? QueryMemoryBudget.JobsOf(dataset.Session).Account,
             Rent = memory is null ? null : memory.RentAsync,
             Emitted = emitted,
+            Ledger = ledger,
         };
 
         int RowsNow() => memory is { InputRows: > 0 } repriced && batchRows > 0 ? Math.Min(batchRows, repriced.InputRows) : batchRows;
@@ -1895,6 +1965,12 @@ internal static partial class DatasetCompactor
         /// <summary>The batches the writers of the objects it sealed sent through on a lane of their own while it went on.</summary>
         internal long BatchesFlown { get; private set; }
 
+        /// <summary>The inputs' batches the merges into this stream took over, and those they copied to keep.</summary>
+        internal long WindowsTaken { get; set; }
+
+        /// <inheritdoc cref="WindowsTaken"/>
+        internal long WindowsCopied { get; set; }
+
         /// <summary>Whether the object being written has reached the destination's size.</summary>
         internal bool WantsRoll => _output is not null && _output.Writer.Size >= _target;
 
@@ -1976,16 +2052,39 @@ internal static partial class DatasetCompactor
             _lastKeyLength = SortedRows.Keep(ref _lastKey, merge.KeyAt(to - 1));
 
             // The rows where they lie in the input's batch: the writer keeps a window on them and copies them with the block
-            // they fall in, on its lane, until the input's batch changes (ReleaseAsync).
-            (Vorticity.Arrays.CanonicalArena arena, int root, int row) = merge.CurrentRun;
+            // they fall in, on its lane; the merge keeps the batch until the ledger says every run on it is copied.
+            (Vorticity.Arrays.CanonicalArena arena, int root, int row, double rowBytes) = merge.CurrentRun;
             _rows += to - from;
             Batches++;
-            await output.Writer.WriteRunAsync(arena, root, row + from, to - from, cancellationToken).ConfigureAwait(false);
+            await output.Writer.WriteRunAsync(arena, root, row + from, to - from, rowBytes, cancellationToken).ConfigureAwait(false);
         }
 
-        /// <summary>Has the writer of the object being written copy the rows it keeps windows on in <paramref name="source"/>, which is about to change.</summary>
-        internal ValueTask ReleaseAsync(Vorticity.Arrays.CanonicalArena source) =>
-            _output is { } output ? output.Writer.ReleaseAsync(source) : ValueTask.CompletedTask;
+        /// <summary>
+        /// The runs the merge's writers keep where they lie in its inputs: each object's writer notes its own there, which the
+        /// merge reads to give its inputs' batches back. Null for a stream whose rows are its own.
+        /// </summary>
+        internal Writing.RunLedger? Ledger
+        {
+            get => _ledger;
+            set
+            {
+                _ledger = value;
+                if (_output is { } output)
+                {
+                    output.Writer.Ledger = value;
+                }
+            }
+        }
+
+        private Writing.RunLedger? _ledger;
+
+        /// <summary>Has the writer of the object being written copy every row it keeps in the merge's inputs, as the merge ends.</summary>
+        internal ValueTask LetGoOfInputsAsync() =>
+            _output is { } output ? output.Writer.LetGoOfInputsAsync() : ValueTask.CompletedTask;
+
+        /// <summary>Waits for the rows the object's writer has in flight, whatever becomes of them, as a failed merge ends.</summary>
+        internal ValueTask SettleAsync() =>
+            _output is { } output ? output.Writer.SettleAsync() : ValueTask.CompletedTask;
 
         /// <summary>Writes <paramref name="batch"/>'s rows after those written: in no key's order, they index nothing.</summary>
         internal async ValueTask WriteAsync(RecordBatch batch, CancellationToken cancellationToken)
@@ -2016,6 +2115,7 @@ internal static partial class DatasetCompactor
                 _schema, _inKeyOrder, _rowBound, contents: Keys is not null, synopses: Keys is not null, shredded: shredding?.Shredded,
                 variantChunks: shredding?.VariantChunks, byteBound: _byteBound, countsPaths: shredding is not null, postings: Postings, budget: Budget);
             _output = output;
+            output.Writer.Ledger = Ledger;
             Postings?.BlocksOf(VortexDataset.Uid(output.Identity), output.Writer.BlockRows);
             foreach ((int field, ObjectDictionary dictionary, long rowBytes) in Dictionaries)
             {

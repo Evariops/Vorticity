@@ -517,14 +517,17 @@ public sealed partial class VortexFileWriter
             }
         }
 
+        // A staging that still keeps runs where they lie in a merge's inputs reads them no more: the merge may give them back.
         if (_staging is { } staging)
         {
+            Ledger?.Release(staging, ref staging.FirstRun);
             TransitContexts.Return(staging.Context);
             _staging = null;
         }
 
         if (_landed is { } landed)
         {
+            Ledger?.Release(landed, ref landed.FirstRun);
             TransitContexts.Return(landed.Context);
             _landed = null;
         }

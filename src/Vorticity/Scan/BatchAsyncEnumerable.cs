@@ -138,7 +138,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live: null, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: ReadsAhead, account: Account, decoders: Decoders));
+            readAhead: ReadsAhead, account: Account, decoders: Decoders, handover: Handover));
 
     /// <summary>
     /// The chunks of the variant columns the scan reads through some shredded keys alone; null when it
@@ -210,8 +210,17 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </summary>
     internal bool ConsumerHoldsLane { get; init; }
 
-    /// <summary>The splits the scan keeps going at once: the degree, widened by the read-ahead.</summary>
-    private int Lanes => _reverse ? 1 : Math.Max(_degree, Prefetch > 0 ? Prefetch + 1 : 1);
+    /// <summary>
+    /// The consumer that takes batches over past the scan's next step (<see cref="BatchHandover"/>); null for a consumer
+    /// done with each batch at the next.
+    /// </summary>
+    internal BatchHandover? Handover { get; init; }
+
+    /// <summary>
+    /// The splits the scan keeps going at once: the degree, widened by the read-ahead; two at least for a consumer that takes
+    /// batches over, whose lanes the scan cannot reuse at the next step.
+    /// </summary>
+    private int Lanes => _reverse ? 1 : Math.Max(Handover is null ? 1 : 2, Math.Max(_degree, Prefetch > 0 ? Prefetch + 1 : 1));
 
     /// <summary>
     /// The splits of those that may decode at once beside the consumer, each on a lane of the session's: the degree but the
@@ -255,7 +264,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            zones: zones, widenRows: WidenRows, readAhead: ReadsAhead, account: Account, decoders: Decoders));
+            zones: zones, widenRows: WidenRows, readAhead: ReadsAhead, account: Account, decoders: Decoders, handover: Handover));
 
     /// <summary>
     /// The most rows a run of zones the zone maps prove whole is read in as one batch, rather than
@@ -277,7 +286,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(proven), _filter, proven, live, _metrics,
             cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: ReadsAhead, account: Account, decoders: Decoders));
+            readAhead: ReadsAhead, account: Account, decoders: Decoders, handover: Handover));
 #pragma warning restore VSTHRD200
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
@@ -532,7 +541,8 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         int widenRows = 0,
         int readAhead = 0,
         Buffers.MemoryAccount? account = null,
-        int decoders = -1)
+        int decoders = -1,
+        BatchHandover? handover = null)
         : base(QueryMemoryBudget.Of(file.Session), "scan")
     {
         // The question's account when the scan serves one, the scan holding nothing of its own to give back; else the scan
@@ -605,6 +615,12 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         if (_extras is LaneWindow lanes)
         {
             lanes.Return(lanes.Add(_lanes[0]!));
+            if (handover is not null)
+            {
+                lanes.Handover = handover;
+                lanes.Handed = [];
+                handover.Scan = this;
+            }
         }
         else if (Ahead is { } reads)
         {
@@ -1087,7 +1103,13 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
     {
         // Every lane made, the idle ones first, the one freed last at the top of them, then those
         // holding a split: one array for both, the scan's allocation being held to a ceiling.
-        private readonly Lane[] _made;
+        private Lane[] _made;
+
+        /// <summary>The consumer that takes batches over, past the scan's next step; null for none.</summary>
+        internal BatchHandover? Handover;
+
+        /// <summary>The lanes whose batches the consumer took and has not given back, oldest first.</summary>
+        internal List<Lane>? Handed;
 
         /// <summary>
         /// The lock the pump and the lanes hand splits over under, lent by the process (see
@@ -1179,11 +1201,34 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         /// <summary>Lane <paramref name="index"/> of those made.</summary>
         internal Lane LaneAt(int index) => _made[index];
 
-        /// <summary>Counts <paramref name="lane"/> among those made, holding a split, and returns it.</summary>
-        internal Lane Add(Lane lane) => _made[Count++] = lane;
+        /// <summary>
+        /// Counts <paramref name="lane"/> among those made, holding a split, and returns it: past the window only when the
+        /// consumer holds batches taken over, whose lanes hold no split in flight.
+        /// </summary>
+        internal Lane Add(Lane lane)
+        {
+            if (Count == _made.Length)
+            {
+                Array.Resize(ref _made, _made.Length * 2);
+            }
+
+            return _made[Count++] = lane;
+        }
 
         /// <summary>The lane freed last, which now holds a split, or null when every lane made holds one.</summary>
         internal Lane? TakeIdle() => _idleCount > 0 ? _made[--_idleCount] : null;
+
+        /// <summary>
+        /// Takes <paramref name="lane"/>, which holds no split, off the lanes made: one the consumer held past the window,
+        /// whose blocks would otherwise stay idle with it.
+        /// </summary>
+        internal void Remove(Lane lane)
+        {
+            int at = Array.IndexOf(_made, lane, _idleCount, Count - _idleCount);
+            Debug.Assert(at >= 0, "A lane is removed once, while it is not idle.");
+            _made[at] = _made[--Count];
+            _made[Count] = null!;
+        }
 
         /// <summary>Puts a lane that holds no split on top of the idle ones.</summary>
         internal void Return(Lane lane)
@@ -2673,6 +2718,7 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         catch
         {
             lane.Running = false;
+            Unbind(lane);
             lane.Context.ResetBatch();
             ReturnLane(lane);
             throw;
@@ -2742,10 +2788,11 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
             window.Measure(lane.Context.Canonical.HeldBytes(out double share), share);
         }
 
-        // Every batch before this one has taken its own reference to what it needed, and is dead;
-        // a chunk none of them borrowed after an earlier one is borrowed by no later one either.
-        _segments.Release(lane.Sequence);
-        _retained.Release(lane.Sequence);
+        // Every batch before this one has taken its own reference to what it needed, and is dead, but those the consumer
+        // took over; a chunk none of them borrowed after an earlier one is borrowed by no later one either.
+        long floor = ReleaseFloor(lane.Sequence);
+        _segments.Release(floor);
+        _retained.Release(floor);
 
         try
         {
@@ -2756,6 +2803,7 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         }
         catch
         {
+            Unbind(lane);
             lane.Context.ResetBatch();
             throw;
         }
@@ -2805,6 +2853,14 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         long assigned = _started;
         LaneWindow lanes = Window;
         int budget = lanes.Budget(window);
+
+        // The batches the consumer still holds past its current one take places of the window, so that it holds what it
+        // held before it kept them: the window's splits ahead start again as it gives them back (TakeBack).
+        if (lanes.Handed is { Count: > 0 } handed)
+        {
+            int kept = handed.Count - (_held && _currentLane is { Handed: true } ? 1 : 0);
+            budget = Math.Max(1, budget - kept);
+        }
         try
         {
             while (assigned - _delivered < budget)
@@ -3033,18 +3089,53 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
             }
 
             ScanCounters.Served(_metrics, context.Segments);
-            if (!_compact && !_filterProven)
+            int root = !_compact && !_filterProven ? ExecuteSelected(lane, rows) : ExecuteFiltered(lane, rows);
+
+            // What the consumer that takes batches over adds to each, beside its decode: a merge's input, its keys.
+            if (_extras is LaneWindow { Handover.Prepare: { } prepare })
             {
-                return ExecuteSelected(lane, rows);
+                lane.Prepared = prepare(Bind(lane, root, rows.Start), lane.Prepared);
             }
 
-            return ExecuteFiltered(lane, rows);
+            return root;
         }
         catch
         {
             _segments.Abandon(lane.Sequence);
+            Unbind(lane);
             context.ResetBatch();
             throw;
+        }
+    }
+
+    /// <summary>
+    /// The lane's own batch, bound to <paramref name="root"/> of its context, once a split: a scan whose consumer takes
+    /// batches over. Bound already for the split by its preparation, it is the same batch at its delivery.
+    /// </summary>
+    private static RecordBatch Bind(Lane lane, int root, long startRow)
+    {
+        if (lane.Owned is { } owned)
+        {
+            if (!lane.Bound)
+            {
+                owned.Rebind(lane.Context, root, startRow);
+                lane.Bound = true;
+            }
+
+            return owned;
+        }
+
+        lane.Bound = true;
+        return lane.Owned = new RecordBatch(lane.Context, root, startRow);
+    }
+
+    /// <summary>Lets the lane's own batch go, bound or not: it may be bound to the lane's next split.</summary>
+    private static void Unbind(Lane lane)
+    {
+        if (lane.Bound)
+        {
+            lane.Bound = false;
+            lane.Owned!.Dispose();
         }
     }
 
@@ -3090,6 +3181,7 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
             }
 
             lane.Running = false;
+            Unbind(lane);
             lane.Context.ResetBatch();
         }
 
@@ -3120,7 +3212,20 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
             NoteDecoded(batch, lane);
         }
 
-        batch?.Dispose();
+        // A batch the consumer took over stays, its lane with it, until it is given back (TakeBack).
+        if (lane is { Handed: true })
+        {
+            return;
+        }
+
+        if (lane is { Bound: true })
+        {
+            Unbind(lane);
+        }
+        else
+        {
+            batch?.Dispose();
+        }
 
         // The lane holds nothing once its batch is gone, and takes the next split.
         if (lane is not null)
@@ -3130,12 +3235,113 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
     }
 
     /// <summary>
+    /// Takes <paramref name="batch"/> over for the consumer, when it is the current batch of a scan that hands its batches
+    /// over: the scan keeps it, its lane and what it reads, past its next step, until <see cref="TakeBack"/>.
+    /// </summary>
+    internal bool TryHandOver(RecordBatch batch, out object? prepared, out bool same)
+    {
+        // The current batch, or a view a wrapper made of it in its arena, an object's columns reshaped there.
+        if (_extras is LaneWindow { Handed: { } handed } && _held && _currentLane is { Handed: false } lane
+            && (ReferenceEquals(batch, _current) || ReferenceEquals(batch.Arena, _current!.Arena)))
+        {
+            lane.Handed = true;
+            handed.Add(lane);
+            prepared = lane.Prepared;
+            same = ReferenceEquals(batch, _current);
+            return true;
+        }
+
+        prepared = null;
+        same = false;
+        return false;
+    }
+
+    /// <summary>
+    /// Gives back <paramref name="batch"/>, taken over before: its lane takes splits again, and what the oldest batch still
+    /// held no longer reads is released.
+    /// </summary>
+    internal void TakeBack(RecordBatch batch)
+    {
+        if (_extras is not LaneWindow { Handed: { } handed })
+        {
+            return;
+        }
+
+        int at = 0;
+        while (at < handed.Count && !ReferenceEquals(handed[at].Owned, batch))
+        {
+            at++;
+        }
+
+        if (at == handed.Count)
+        {
+            return;
+        }
+
+        Lane lane = handed[at];
+        handed.RemoveAt(at);
+        lane.Handed = false;
+        if (_disposed)
+        {
+            // The scan ended while the consumer held the batch: the lane goes now, and with the last batch what they read.
+            LetLaneGo(lane);
+            if (handed.Count == 0)
+            {
+                EndDisposal();
+            }
+
+            return;
+        }
+
+        // Still the current batch, it goes back at the next step as any other.
+        if (_held && ReferenceEquals(_currentLane, lane))
+        {
+            return;
+        }
+
+        // A lane made past the window, for the batches the consumer held, goes back to the pool with its blocks rather than
+        // stay idle holding them: the window's lanes are what the scan keeps.
+        LaneWindow lanes = (LaneWindow)_extras;
+        if (lanes.Count > _lanes.Length)
+        {
+            lanes.Remove(lane);
+            LetLaneGo(lane);
+        }
+        else
+        {
+            Unbind(lane);
+            ReturnLane(lane);
+        }
+        long floor = handed.Count > 0 ? Math.Min(handed[0].Sequence, _delivered - 1) : _delivered - 1;
+        _segments.Release(floor);
+        _retained.Release(floor);
+
+        // Its place in the window back, the splits ahead start again while the consumer works on its current batch.
+        if (!_drained)
+        {
+            Pump();
+        }
+    }
+
+    /// <summary>
+    /// What the scan may release once batch <paramref name="sequence"/> is delivered: what no batch from it on reads, and
+    /// none from the oldest batch the consumer still holds on either.
+    /// </summary>
+    private long ReleaseFloor(long sequence) =>
+        _extras is LaneWindow { Handed: { Count: > 0 } handed } ? Math.Min(handed[0].Sequence, sequence) : sequence;
+
+    /// <summary>
     /// Makes the batch over <paramref name="root"/> current: the one the previous step disposed,
     /// bound again so that a step allocates nothing, or a new one at the first step.
     /// </summary>
     private RecordBatch Deliver(Lane lane, int root, long startRow)
     {
-        if (_current is { } spare)
+        // A consumer that takes batches over is given each lane's own batch, which the next step does not rebind.
+        if (_extras is LaneWindow { Handover: not null })
+        {
+            _current = Bind(lane, root, startRow);
+        }
+        else if (_current is { } spare)
         {
             spare.Rebind(lane.Context, root, startRow);
         }
@@ -3191,12 +3397,18 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
 
     private void DisposeLanes()
     {
+        // A batch the consumer took over outlives the scan: a wrapper disposes the scan as soon as it ends, while the
+        // consumer still reads its last batches. Its lane, and what the batches read, go once it is given back (TakeBack).
+        bool holding = _extras is LaneWindow { Handed.Count: > 0 };
         for (int i = 0; i < MadeLaneCount; i++)
         {
             if (MadeLane(i) is { } lane)
             {
                 lane.Stop();
-                ScanContexts.Shared.Return(lane.Context);
+                if (!lane.Handed)
+                {
+                    LetLaneGo(lane);
+                }
             }
         }
 
@@ -3219,9 +3431,27 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         }
 
         _along = null;
+        if (!holding)
+        {
+            EndDisposal();
+        }
+    }
 
-        // Once no lane runs: the held segments and the retained chunks carry references of their own,
-        // and the locks they and the window were lent go back to the process.
+    /// <summary>What a lane holds, back to the pool: its batch, what the handover prepared of it, its context.</summary>
+    private static void LetLaneGo(Lane lane)
+    {
+        Unbind(lane);
+        (lane.Prepared as IDisposable)?.Dispose();
+        lane.Prepared = null;
+        ScanContexts.Shared.Return(lane.Context);
+    }
+
+    /// <summary>
+    /// The end of the scan's disposal, once no lane runs and no batch is held: the held segments and the retained chunks
+    /// carry references of their own, and the locks they and the window were lent go back to the process.
+    /// </summary>
+    private void EndDisposal()
+    {
         _segments.Dispose();
         _retained.Dispose();
         (_extras as LaneWindow)?.ReturnGate();
@@ -3267,6 +3497,18 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
 
         /// <summary>Whether the loop's next signal is the decode of its split read, on a lane a decode that ended handed it.</summary>
         internal bool Decodes { get; set; }
+
+        /// <summary>The lane's own batch, for a scan whose consumer takes batches over: one a lane, never rebound while taken.</summary>
+        internal RecordBatch? Owned { get; set; }
+
+        /// <summary>What the handover's preparation made of the lane's batch, kept with the lane to reuse.</summary>
+        internal object? Prepared { get; set; }
+
+        /// <summary>Whether the consumer took the lane's batch over and has not given it back.</summary>
+        internal bool Handed { get; set; }
+
+        /// <summary>Whether <see cref="Owned"/> is bound to the lane's split, until it is let go.</summary>
+        internal bool Bound { get; set; }
 
         internal RowRange Rows { get; set; }
 

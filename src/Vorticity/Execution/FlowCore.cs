@@ -22,11 +22,11 @@ internal enum Flow
 /// </summary>
 /// <remarks>
 /// <para>
-/// A pump is a work item of the pool, never a thread of the library's: it is queued once a lane is taken for it, runs the
-/// units it finds one after another without going back to the pool, and gives its lane back once it finds none, or at a
-/// unit's end when work that holds no lane waits for one (<see cref="LaneBudget.Waiting"/>). A lane given back by anything
-/// that held one starts a pump for the work still queued (<see cref="LaneFreed"/>), so that no work waits while a lane is
-/// free, and none runs past the degree.
+/// A pump is a work item of the pool, never a thread of the library's: it is queued while a lane is free, takes the lane as
+/// it starts, runs the units it finds one after another without going back to the pool, and gives its lane back once it
+/// finds none, or at a unit's end when work that holds no lane waits for one (<see cref="LaneBudget.Waiting"/>). A pump the
+/// pool runs late holds no lane meanwhile. A lane given back by anything that held one starts a pump for the work still
+/// queued (<see cref="LaneFreed"/>), so that no work waits while a lane is free, and none runs past the degree.
 /// </para>
 /// <para>
 /// The queue is one lock, taken once per unit, never per row. A unit is synchronous: what waits, for the store or for
@@ -44,6 +44,7 @@ internal sealed class FlowCore
     private readonly Pump[] _idle;
     private int _idleCount;
     private int _queued;
+    private int _pending;
     private long _pumpsStarted;
     private long _unitsRun;
     private long _yields;
@@ -135,41 +136,62 @@ internal sealed class FlowCore
         }
     }
 
-    /// <summary>Starts <paramref name="wanted"/> pumps at most, each on a lane free now, while work is queued.</summary>
+    /// <summary>
+    /// Queues <paramref name="wanted"/> pumps at most on the pool while work is queued, no more than the lanes free now that
+    /// no pump queued already will take: a pump takes its lane as it starts, so that a pump the pool runs late holds none,
+    /// where it held one from its queueing and a busy pool left a job's ranges no lane.
+    /// </summary>
     private void Wake(int wanted)
     {
         for (; wanted > 0 && Volatile.Read(ref _queued) > 0; wanted--)
         {
-            if (!Lanes.TryEnter(out long entered))
-            {
-                return;
-            }
-
             Pump? pump = null;
             lock (_gate)
             {
-                if (_queued > 0 && _idleCount > 0)
+                if (_queued > 0 && _idleCount > 0 && Lanes.Lanes - Lanes.Held - _pending > 0)
                 {
                     pump = _idle[--_idleCount];
+                    _pending++;
                 }
             }
 
             if (pump is null)
             {
-                Lanes.ExitQuietly(entered);
                 return;
             }
 
-            pump.Entered = entered;
             Interlocked.Increment(ref _pumpsStarted);
             ThreadPool.UnsafeQueueUserWorkItem(pump, preferLocal: false);
         }
     }
 
-    /// <summary>A pump's loop: the queued units, the most downstream flow first, until none is left.</summary>
+    /// <summary>
+    /// A pump's loop, on a lane it takes as it starts: the queued units, the most downstream flow first, until none is left.
+    /// No lane free by then, it leaves at once; the lane given back next queues another.
+    /// </summary>
     private void Run(Pump pump)
     {
-        long entered = pump.Entered;
+        bool entering = Lanes.TryEnter(out long entered);
+        lock (_gate)
+        {
+            _pending--;
+            if (!entering)
+            {
+                _idle[_idleCount++] = pump;
+            }
+        }
+
+        if (!entering)
+        {
+            // A lane given back since the check, by the holder that took the one this pump came for, queues it again.
+            if (Volatile.Read(ref _queued) > 0 && Lanes.Held < Lanes.Lanes)
+            {
+                Wake(1);
+            }
+
+            return;
+        }
+
         while (true)
         {
             CoreWork? work = null;
@@ -269,9 +291,6 @@ internal sealed class FlowCore
 
     private sealed class Pump(FlowCore core) : IThreadPoolWorkItem
     {
-        /// <summary>When the pump's lane was taken.</summary>
-        internal long Entered;
-
         public void Execute() => core.Run(this);
     }
 }

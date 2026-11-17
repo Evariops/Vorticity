@@ -57,14 +57,19 @@ public sealed partial class CompactionBlockBudgetTests
     }
 
     /// <summary>
-    /// A budget of 16 MiB and a handle that learned an input and a writer cost a byte each, so that its plan takes the whole
+    /// A budget of 18 MiB and a handle that learned an input and a writer cost a byte each, so that its plan takes the whole
     /// class: the job is refused a block, given up, and a narrower one runs in its place within the budget; once it ends,
     /// the budget holds nothing, and the next job has it whole.
     /// </summary>
+    /// <remarks>
+    /// The last job of the backlog, two objects of 60 000 rows, held 16.22 MB of a budget of 16 MiB, then 16.74 MB once an
+    /// input's batch stays until the writers copied the runs they keep of it (2026-11-17): refused under a busy test run, it
+    /// narrowed nothing. 18 MiB holds it, and still refuses the first job, planned at the whole class.
+    /// </remarks>
     [Fact]
     public async Task AJobTheBudgetRefusesGivesWayToANarrowerOneAndLeavesTheBudgetWhole()
     {
-        const long Small = 16L << 20;
+        const long Small = 18L << 20;
         QueryMemoryBudget budget = new QueryMemoryBudget(Small);
         await using VortexSession session = VortexSession.Create(o => o.JobMemoryBudget = budget);
         await using MemoryObjectStore store = new MemoryObjectStore();
