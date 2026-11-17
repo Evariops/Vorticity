@@ -132,6 +132,7 @@ public sealed partial class VortexFileWriter
             columns.LayAhead(items[..ahead]);
             columns.Order(items[ahead..]);
             await fan.RunAsync(columns, ahead + _fieldCount, arena).ConfigureAwait(false);
+            await columns.LeavesAsync(fan).ConfigureAwait(false);
             await WriteColumnBlobsAsync(columns, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -185,6 +186,7 @@ public sealed partial class VortexFileWriter
             }
 
             await fan.RunAsync(columns, due, arena).ConfigureAwait(false);
+            await columns.LeavesAsync(fan).ConfigureAwait(false);
             await WriteColumnBlobsAsync(columns, firstBlock, blocks, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -233,6 +235,7 @@ public sealed partial class VortexFileWriter
             }
 
             await fan.RunAsync(columns, count).ConfigureAwait(false);
+            await columns.LeavesAsync(fan).ConfigureAwait(false);
             await WriteColumnBlobsAsync(columns, 0, 0, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -292,6 +295,7 @@ public sealed partial class VortexFileWriter
             int count = FeedItems(ingest, IngestItems(arena, _fieldNodes, ingest));
             columns.Fuse(ingest[..count], rows, firstBlock, blocks);
             await fan.RunAsync(columns, ahead + count, arena, rows).ConfigureAwait(false);
+            await columns.LeavesAsync(fan).ConfigureAwait(false);
             _indexes?.AttachCounts(Counted, rows);
             _blockFilled = (_blockFilled + rows) % _blockRows;
             BatchesIngestedAcross++;
@@ -407,6 +411,18 @@ public sealed partial class VortexFileWriter
         // trial priced zstd (see ZstdPlan.Ahead).
         private ZstdPlan.Ahead?[] _ahead = [];
 
+        // Per column, a shredded variant whose item took its rows, and whose leaves a second pass writes apart (LeavesAsync):
+        // the lane it took them in, which grafts its blob, its shredding, its leaves, where they start among the pass's,
+        // and the gathered rows it read, emptied once its blob is grafted. The shredded columns in order, and the pass.
+        private CompressionLane?[] _shredLanes = [];
+        private VariantShredder.Shredding?[] _shreds = [];
+        private int[] _leafCounts = [];
+        private int[] _leafStarts = [];
+        private ScanContext?[] _shredRows = [];
+        private int[] _shredFields = [];
+        private int _shredCount;
+        private LeafPass? _leafPass;
+
         /// <summary>
         /// The bits of an item of frames compressed ahead that number it among its column's: the column is above them,
         /// and the item's number is their complement, below zero, apart from every other item's.
@@ -513,6 +529,12 @@ public sealed partial class VortexFileWriter
                 _gatheredBlocks = new int[fields];
                 _gatheredRows = new int[fields];
                 _detached = new AheadChunk?[fields];
+                _shredLanes = new CompressionLane?[fields];
+                _shreds = new VariantShredder.Shredding?[fields];
+                _leafCounts = new int[fields];
+                _leafStarts = new int[fields];
+                _shredRows = new ScanContext?[fields];
+                _shredFields = new int[fields];
                 for (int field = 0; field < fields; field++)
                 {
                     _fresh[field] = new string[4];
@@ -838,7 +860,15 @@ public sealed partial class VortexFileWriter
             }
             finally
             {
-                context.Canonical.Reset();
+                // A shredded column's leaves, written in the second pass, read the rows it gathered until its blob is grafted.
+                if (_shreds[field] is null)
+                {
+                    context.Canonical.Reset();
+                }
+                else
+                {
+                    _shredRows[field] = context;
+                }
             }
         }
 
@@ -852,6 +882,7 @@ public sealed partial class VortexFileWriter
             long began = Stopwatch.GetTimestamp();
             VortexFileWriter writer = _writer!;
             CompressionLane lane = CompressionLane.Take(writer);
+            bool shredded = false;
 
             // What the column's frames compressed ahead took counts as its own, every item done.
             ZstdPlan.Ahead? ahead = _ahead[field];
@@ -881,18 +912,27 @@ public sealed partial class VortexFileWriter
                 lane.Blobs.Ahead = ahead;
                 if (plan is not null)
                 {
+                    // Its rows taken here, its leaves written apart in the chunk's second pass, its blob grafted after it
+                    // in this lane (LeavesAsync).
                     Indexes.ChunkBlockBounds? bounds = writer.BoundsFor(field);
-                    _blobs[field] = VariantShredder.Write(lane.Blobs, lane.Arena, local, plan, bounds, lane.Encodings, writer._compress);
                     if (bounds is not null)
                     {
                         _bounds![field] = bounds;
                     }
+
+                    VariantShredder.Shredding shredding = lane.Blobs.Shredding(plan);
+                    shredding.Take(lane.Arena, local, bounds);
+                    _leafCounts[field] = shredding.PrepareLeaves(lane.Blobs.EncodesValidity, writer._compress);
+                    _shreds[field] = shredding;
+                    _shredLanes[field] = lane;
+                    shredded = true;
                 }
                 else
                 {
                     _blobs[field] = ArrayBlobWriter.Write(lane.Blobs, lane.Arena, local, lane.Encodings, writer._compress, stats);
+                    KeepFresh(field, lane.Encodings);
                 }
-                KeepFresh(field, lane.Encodings);
+
                 if (ahead is { Taken: true })
                 {
                     Interlocked.Increment(ref writer._columnChunksFramedAhead);
@@ -900,13 +940,116 @@ public sealed partial class VortexFileWriter
             }
             finally
             {
-                lane.Blobs.ColumnLevel = 0;
                 lane.Blobs.Ahead = null;
                 ahead?.Finish();
-                lane.Give();
+                if (!shredded)
+                {
+                    lane.Blobs.ColumnLevel = 0;
+                    lane.Give();
+                }
             }
 
             _took[field] = Stopwatch.GetTimestamp() - began + framed;
+        }
+
+        /// <summary>
+        /// The chunk's second pass, once every column's item ran: the leaves of each shredded column whose item took its rows,
+        /// written apart as items of <paramref name="fan"/>, then each blob grafted from them in its column's lane, its new
+        /// ids kept as the column's; nothing when no column took any. The blobs are those each column wrote in one go.
+        /// </summary>
+        internal async ValueTask LeavesAsync(CoreBatch fan)
+        {
+            int total = 0;
+            _shredCount = 0;
+            for (int field = 0; field < _shreds.Length; field++)
+            {
+                if (_shreds[field] is not null)
+                {
+                    _leafStarts[field] = total;
+                    total += _leafCounts[field];
+                    _shredFields[_shredCount++] = field;
+                }
+            }
+
+            if (_shredCount == 0)
+            {
+                return;
+            }
+
+            try
+            {
+                await fan.RunAsync(_leafPass ??= new LeafPass(this), total).ConfigureAwait(false);
+                for (int i = 0; i < _shredCount; i++)
+                {
+                    int field = _shredFields[i];
+                    CompressionLane lane = _shredLanes[field]!;
+                    _blobs[field] = _shreds[field]!.WriteGrafted(lane.Blobs, lane.Encodings, _writer!._compress);
+                    KeepFresh(field, lane.Encodings);
+                    ReleaseShred(field);
+                    _writer.ChunksGrafted++;
+                }
+            }
+            finally
+            {
+                for (int field = 0; field < _shreds.Length; field++)
+                {
+                    ReleaseShred(field);
+                }
+
+                _shredCount = 0;
+            }
+        }
+
+        /// <summary>Writes leaf <paramref name="item"/> of the chunk's second pass apart: of the shredded column whose leaves it falls among.</summary>
+        private void RunLeaf(int item)
+        {
+            int field = _shredFields[0];
+            for (int i = 1; i < _shredCount && _leafStarts[_shredFields[i]] <= item; i++)
+            {
+                field = _shredFields[i];
+            }
+
+            VortexFileWriter writer = _writer!;
+            CompressionLane lane = CompressionLane.Take(writer);
+            try
+            {
+                lane.Blobs.ColumnLevel = writer.ZstdLevelOf(field);
+                _shreds[field]!.WriteLeafApart(item - _leafStarts[field], lane.Blobs, lane.Encodings, writer._compress);
+            }
+            finally
+            {
+                lane.Blobs.ColumnLevel = 0;
+                lane.Give();
+            }
+        }
+
+        /// <summary>Lets go of what column <paramref name="field"/>'s shredding holds, grafted or not: its leaves, its lane, the rows it gathered.</summary>
+        private void ReleaseShred(int field)
+        {
+            if (_shreds[field] is { } shredding)
+            {
+                shredding.ReleaseLeaves();
+                _shreds[field] = null;
+            }
+
+            if (_shredLanes[field] is { } lane)
+            {
+                lane.Blobs.ColumnLevel = 0;
+                lane.Give();
+                _shredLanes[field] = null;
+            }
+
+            if (_shredRows[field] is { } rows)
+            {
+                rows.Canonical.Reset();
+                _shredRows[field] = null;
+            }
+        }
+
+        /// <summary>The items of a chunk's second pass, each a leaf of a shredded column written apart.</summary>
+        private sealed class LeafPass(ChunkColumns columns) : IBatchWork
+        {
+            public void Run(CoreBatch batch, int item) => columns.RunLeaf(item);
         }
 
         /// <summary>Keeps, as the column's, the ids <paramref name="encodings"/> took past the file's.</summary>
@@ -975,6 +1118,7 @@ public sealed partial class VortexFileWriter
                 _blobs[field].Dispose();
                 _blobs[field] = default;
                 _ahead[field]?.Finish();
+                ReleaseShred(field);
             }
 
             // A chunk taken to compress ahead that a failure kept from compressing gives its rows back.

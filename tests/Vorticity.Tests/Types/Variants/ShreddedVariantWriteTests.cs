@@ -466,17 +466,24 @@ public sealed partial class ShreddedVariantWriteTests
         string onePath = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.vortex");
         string fourPath = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.vortex");
         string plainPath = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.vortex");
+        string plainFourPath = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.vortex");
         try
         {
             (int one, int oneGrafted) = await WriteGatheredAsync(rows, shredding, onePath, degree: 1, ahead: true);
             (int four, int fourGrafted) = await WriteGatheredAsync(rows, shredding, fourPath, degree: 4, ahead: true);
             _ = await WriteGatheredAsync(rows, shredding, plainPath, degree: 1, ahead: false);
+
+            // Written without, on four threads: the chunks' columns compressed side by side, each shredded one's leaves in a
+            // pass of their own and grafted, the file of one thread.
+            (_, int plainGrafted) = await WriteGatheredAsync(rows, shredding, plainFourPath, degree: 4, ahead: false);
+            Assert.True(plainGrafted > 2, $"{plainGrafted} chunks grafted on four threads without compressing ahead");
+            Assert.Equal(await System.IO.File.ReadAllBytesAsync(plainPath, Ct), await System.IO.File.ReadAllBytesAsync(plainFourPath, Ct));
             Assert.True(one > 2, $"{one} chunks compressed ahead on one thread");
             Assert.Equal(one, four);
 
             // On four threads each chunk's leaves were written apart, then grafted into its blob: the same bytes.
             Assert.Equal(0, oneGrafted);
-            Assert.Equal(four, fourGrafted);
+            Assert.True(fourGrafted >= four, $"{fourGrafted} chunks grafted of {four} compressed ahead");
             byte[] bytes = await System.IO.File.ReadAllBytesAsync(onePath, Ct);
             Assert.Equal(bytes, await System.IO.File.ReadAllBytesAsync(fourPath, Ct));
             long plain = new FileInfo(plainPath).Length;
@@ -496,6 +503,7 @@ public sealed partial class ShreddedVariantWriteTests
             System.IO.File.Delete(onePath);
             System.IO.File.Delete(fourPath);
             System.IO.File.Delete(plainPath);
+            System.IO.File.Delete(plainFourPath);
         }
     }
 

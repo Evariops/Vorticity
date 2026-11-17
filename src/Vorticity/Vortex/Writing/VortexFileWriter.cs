@@ -510,7 +510,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The chunks a shredded variant column compressed ahead of their writing.</summary>
     internal int ChunksCompressedAhead { get; private set; }
 
-    /// <summary>Of <see cref="ChunksCompressedAhead"/>, those whose leaves were written apart on the core and grafted into their blob.</summary>
+    /// <summary>The shredded chunks whose leaves were written apart on the core and grafted into their blob, compressed ahead or not.</summary>
     internal int ChunksGrafted { get; private set; }
 
     // The rows staged before, going through on a lane of their own while the next ones stage (FlyAsync): their task, null
@@ -3418,9 +3418,19 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         long began = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
-            blob = plan is not null
-                ? VariantShredder.Write(blobs, arena, node, plan, bounds, _arrayEncodings, _compress)
-                : ArrayBlobWriter.Write(blobs, arena, node, _arrayEncodings, _compress, stats);
+            if (plan is not null && Fan is { } fan)
+            {
+                // Its leaves written apart on the writer's lanes, then grafted: the bytes of the blob written in one go.
+                VariantShredder.Shredding shredding = blobs.Shredding(plan);
+                shredding.Take(arena, node, bounds);
+                blob = await WriteLeavesAsync(shredding, field, blobs, _arrayEncodings, fan).ConfigureAwait(false);
+            }
+            else
+            {
+                blob = plan is not null
+                    ? VariantShredder.Write(blobs, arena, node, plan, bounds, _arrayEncodings, _compress)
+                    : ArrayBlobWriter.Write(blobs, arena, node, _arrayEncodings, _compress, stats);
+            }
         }
         finally
         {
@@ -3741,18 +3751,24 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
-    /// A leaf of a chunk compressed ahead written apart (<see cref="VariantShredder.Shredding.WriteLeafApart"/>), an item of
-    /// the piece its chunk's leaves run as: in a lane of its own, taken for the leaf and given back after it.
+    /// A leaf of a shredded chunk of column <see cref="Field"/> written apart (<see cref="VariantShredder.Shredding.WriteLeafApart"/>),
+    /// an item of the piece the chunk's leaves run as: in a lane of its own, taken for the leaf and given back after it.
     /// </summary>
-    private sealed class LeafWork(VortexFileWriter writer, AheadChunk chunk) : IBatchWork
+    private sealed class LeafWork(VortexFileWriter writer) : IBatchWork
     {
+        /// <summary>The shredding whose leaves the piece writes.</summary>
+        internal VariantShredder.Shredding? Shredding;
+
+        /// <summary>The column the chunk is of, whose zstd level its leaves compress at.</summary>
+        internal int Field;
+
         public void Run(CoreBatch batch, int item)
         {
             CompressionLane lane = CompressionLane.Take(writer);
             try
             {
-                lane.Blobs.ColumnLevel = writer.ZstdLevelOf(chunk.Field);
-                chunk.Shredding!.WriteLeafApart(item, lane.Blobs, lane.Encodings, writer._compress);
+                lane.Blobs.ColumnLevel = writer.ZstdLevelOf(Field);
+                Shredding!.WriteLeafApart(item, lane.Blobs, lane.Encodings, writer._compress);
             }
             finally
             {
@@ -3761,6 +3777,39 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
         }
     }
+
+    /// <summary>
+    /// Writes <paramref name="shredding"/>'s chunk of column <paramref name="field"/>, its rows taken, as one blob in
+    /// <paramref name="blobs"/> against <paramref name="encodings"/>: its leaves written apart as items of a piece of the
+    /// core, the caller's flow running its share, then the blob grafted from them, the bytes of the blob written in one go.
+    /// </summary>
+    private async ValueTask<ArrayBlobWriter.BlobLease> WriteLeavesAsync(
+        VariantShredder.Shredding shredding, int field, ArrayBlobWriter.Workspace blobs, EncodingDictionary encodings, CoreBatch fan)
+    {
+        int leaves = shredding.PrepareLeaves(blobs.EncodesValidity, _compress);
+        LeafWork work = _leafWork ??= new LeafWork(this);
+        work.Shredding = shredding;
+        work.Field = field;
+        try
+        {
+            await fan.RunAsync(work, leaves).ConfigureAwait(false);
+        }
+        catch
+        {
+            shredding.ReleaseLeaves();
+            throw;
+        }
+        finally
+        {
+            work.Shredding = null;
+        }
+
+        ChunksGrafted++;
+        return shredding.WriteGrafted(blobs, encodings, _compress);
+    }
+
+    // The leaves of the shredded chunks the writer's own flow writes, reused from one chunk to the next.
+    private LeafWork? _leafWork;
 
     /// <summary>
     /// Whether column <paramref name="field"/>'s chunk, its gathering due, is compressed ahead of its writing: a shredded
@@ -3890,7 +3939,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             apart = true;
             // The piece is awaited, and the blob grafted, by the writer's flow as the chunk is written (GraftedAsync): its
             // value task taken here as a task, once, a task a chunk of many blocks.
-            chunk.Leaves = chunk.Batch.RunAsync(chunk.Work ??= new LeafWork(this, chunk), leaves).AsTask();
+            LeafWork work = chunk.Work ??= new LeafWork(this);
+            work.Shredding = shredding;
+            work.Field = chunk.Field;
+            chunk.Leaves = chunk.Batch.RunAsync(work, leaves).AsTask();
         }
         catch
         {
@@ -3943,6 +3995,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         if (chunk.Batch is { } batch)
         {
             CoreBatch.Return(batch);
+        }
+
+        if (chunk.Work is { } work)
+        {
+            work.Shredding = null;
         }
 
         chunk.Shredding = null;
