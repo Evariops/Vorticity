@@ -542,9 +542,49 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         ulong lastHigh = 0;
         int lastAt = -1;
         ulong lastHash = 0;
+
+        // Most rows hold no value, a shredded key's: their marks set at once, and the rows that do found a word of the bitmap
+        // at a time rather than each row's validity read. A row at a time, the hundreds of keys of a log's attributes walked
+        // every row of every block.
+        ReadOnlySpan<byte> bits = default;
+        int bitOffset = 0;
+        bool sparse = !allValid && OneBitmap(own, wrapper, out bits, out bitOffset)
+            && BitmapKernels.CountSet(bits, bitOffset + start, count) * 2 < count;
+        if (sparse)
+        {
+            _nulls += count - BitmapKernels.CountSet(bits, bitOffset + start, count);
+            if (numbering)
+            {
+                ids.Fill(-1);
+            }
+
+            if (hashing)
+            {
+                rowHashes.Slice(start, count).Clear();
+            }
+        }
+
+        ulong word = 0;
+        int wordAt = -64;
         for (int row = start; row < start + count; row++)
         {
-            if (!allValid && !(own.IsValid(row) && wrapper.IsValid(row)))
+            if (sparse)
+            {
+                while (word == 0 && wordAt + 64 < count)
+                {
+                    wordAt += 64;
+                    word = BitmapKernels.Word(bits, bitOffset + start + wordAt, Math.Min(64, count - wordAt));
+                }
+
+                if (word == 0)
+                {
+                    break;
+                }
+
+                row = start + wordAt + BitOperations.TrailingZeroCount(word);
+                word &= word - 1;
+            }
+            else if (!allValid && !(own.IsValid(row) && wrapper.IsValid(row)))
             {
                 _nulls++;
                 if (numbering)
@@ -653,6 +693,23 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 (repeats, lastLow, lastHigh, lastAt, lastHash) = (true, low, high, at, valueHash);
             }
         }
+    }
+
+    /// <summary>
+    /// The one bitmap that says which rows hold a value, of <paramref name="own"/> and <paramref name="wrapper"/> read together:
+    /// either's when the other holds every row, theirs when they are the same; false when none holds one, or for two bitmaps.
+    /// </summary>
+    private static bool OneBitmap(ValidityMask own, ValidityMask wrapper, out ReadOnlySpan<byte> bits, out int bitOffset)
+    {
+        ValidityMask one = wrapper.AllValid ? own : own.AllValid ? wrapper : own;
+        bits = one.Bits;
+        bitOffset = one.BitOffset;
+        if (own.AllInvalid || wrapper.AllInvalid || bits.IsEmpty)
+        {
+            return false;
+        }
+
+        return own.AllValid || wrapper.AllValid || (own.Bits == wrapper.Bits && own.BitOffset == wrapper.BitOffset);
     }
 
     /// <summary>A text column's valid rows <c>[start, start + count)</c> once the counts are gone: each value's register raised.</summary>
