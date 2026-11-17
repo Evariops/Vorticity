@@ -513,6 +513,8 @@ text: a consolidation of 72 million such rows held 9.9 GB at its writer's peak, 
 bytes a row; written a column at a time, 3.1 GB and 56 bytes, its write 8 % shorter
 (`vortex-queries --micro consolidation`).
 
+A chunk a job compresses ahead of its writing, on more than one lane, writes its leaves apart: once its rows are shredded, each leaf of its blob, the rows' metadata, a key's values or its typed column, is an item of a piece of the core, laid out and compressed in a workspace and against an encoding dictionary of its own, on the session's lanes beside the others. The writer's flow awaits the piece as it writes the chunk, then grafts the blob from the leaves in the order the blob comes to them: each leaf's tree written again node by node in the blob's builder, its buffers past the blob's, its ids the file's in the order the blob meets them. The blob is the bytes of the blob written in one go, whatever order the leaves were written in. The rows' metadata, which every variant node of the tree names, is compressed once a validity encoding and its buffers copied where it is named again. A chunk's leaves wrote one after another before, hundreds of keys of a log's attributes, close to a core of serial work a variant column.
+
 A body is a variant too: a line of text keeps its text, which the trigram and token indexes search, and
 an object is shredded as attributes are, and shown again from its columns and residual, keys in order.
 

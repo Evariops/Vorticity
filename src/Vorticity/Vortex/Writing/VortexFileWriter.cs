@@ -510,6 +510,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The chunks a shredded variant column compressed ahead of their writing.</summary>
     internal int ChunksCompressedAhead { get; private set; }
 
+    /// <summary>Of <see cref="ChunksCompressedAhead"/>, those whose leaves were written apart on the core and grafted into their blob.</summary>
+    internal int ChunksGrafted { get; private set; }
+
     // The rows staged before, going through on a lane of their own while the next ones stage (FlyAsync): their task, null
     // when none flies, and their staging, which the rows after the next ones stage in once they landed (LandAsync).
     private Task? _flight;
@@ -3716,7 +3719,47 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         /// <summary>Whether its compression was offered to the core, to be waited for before it is written.</summary>
         internal bool Offered;
 
+        /// <summary>
+        /// While its leaves are written apart on the core's pumps (<see cref="Compress"/>): the lane its rows were shredded in
+        /// and its blob is grafted in, the shredding, the piece the leaves run as and what it completes; null once grafted.
+        /// </summary>
+        internal CompressionLane? Lane;
+
+        /// <inheritdoc cref="Lane"/>
+        internal VariantShredder.Shredding? Shredding;
+
+        /// <inheritdoc cref="Lane"/>
+        internal CoreBatch? Batch;
+
+        /// <inheritdoc cref="Lane"/>
+        internal Task? Leaves;
+
+        /// <summary>The items of its piece, each a leaf of its blob written apart; made with its first.</summary>
+        internal LeafWork? Work;
+
         protected override void Execute() => writer.Compress(this);
+    }
+
+    /// <summary>
+    /// A leaf of a chunk compressed ahead written apart (<see cref="VariantShredder.Shredding.WriteLeafApart"/>), an item of
+    /// the piece its chunk's leaves run as: in a lane of its own, taken for the leaf and given back after it.
+    /// </summary>
+    private sealed class LeafWork(VortexFileWriter writer, AheadChunk chunk) : IBatchWork
+    {
+        public void Run(CoreBatch batch, int item)
+        {
+            CompressionLane lane = CompressionLane.Take(writer);
+            try
+            {
+                lane.Blobs.ColumnLevel = writer.ZstdLevelOf(chunk.Field);
+                chunk.Shredding!.WriteLeafApart(item, lane.Blobs, lane.Encodings, writer._compress);
+            }
+            finally
+            {
+                lane.Blobs.ColumnLevel = 0;
+                lane.Give();
+            }
+        }
     }
 
     /// <summary>
@@ -3805,11 +3848,21 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         Compress(chunk);
     }
 
-    /// <summary>Compresses <paramref name="chunk"/> into its blob, on whichever thread runs it, and lets its rows go.</summary>
+    /// <summary>
+    /// Compresses <paramref name="chunk"/> into its blob, on whichever thread runs it, and lets its rows go. On more than one
+    /// lane, its rows shredded here, each leaf of its blob, the rows' metadata, a key's values or its typed column, is written
+    /// apart as an item of a piece of the core, beside the others, and the writer's flow awaits the piece as the chunk is
+    /// written, then grafts the blob from them (<see cref="GraftedAsync"/>).
+    /// </summary>
+    /// <remarks>
+    /// A shredded chunk wrote its leaves one after another, hundreds of keys of a log's attributes, close to a core of serial
+    /// work a column (<c>PLAN-COMPACTION-SPEED.md</c>). The blob grafted is the bytes of the blob written in one go.
+    /// </remarks>
     private void Compress(AheadChunk chunk)
     {
         CompressionLane lane = CompressionLane.Take(this);
         ScanContext context = chunk.Context!;
+        bool apart = false;
         try
         {
             lane.Encodings.Reset(chunk.Known.AsSpan(0, chunk.KnownCount));
@@ -3820,21 +3873,120 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
 
             lane.Blobs.ColumnLevel = ZstdLevelOf(chunk.Field);
-            chunk.Blob = VariantShredder.Write(
-                lane.Blobs, lane.Arena, local, _shredding![chunk.Field]!, chunk.Bounds, lane.Encodings, _compress);
-            int fresh = lane.Encodings.Count - chunk.KnownCount;
-            chunk.Fresh = new string[fresh];
-            for (int i = 0; i < fresh; i++)
+            if (_lanes <= 1)
             {
-                chunk.Fresh[i] = lane.Encodings.Ids[chunk.KnownCount + i];
+                chunk.Blob = VariantShredder.Write(
+                    lane.Blobs, lane.Arena, local, _shredding![chunk.Field]!, chunk.Bounds, lane.Encodings, _compress);
+                NoteFresh(chunk, lane);
+                return;
             }
+
+            VariantShredder.Shredding shredding = lane.Blobs.Shredding(_shredding![chunk.Field]!);
+            shredding.Take(lane.Arena, local, chunk.Bounds);
+            int leaves = shredding.PrepareLeaves(lane.Blobs.EncodesValidity, _compress);
+            chunk.Lane = lane;
+            chunk.Shredding = shredding;
+            chunk.Batch = CoreBatch.Rent(_core, _lanes);
+            apart = true;
+            // The piece is awaited, and the blob grafted, by the writer's flow as the chunk is written (GraftedAsync): its
+            // value task taken here as a task, once, a task a chunk of many blocks.
+            chunk.Leaves = chunk.Batch.RunAsync(chunk.Work ??= new LeafWork(this, chunk), leaves).AsTask();
+        }
+        catch
+        {
+            if (apart)
+            {
+                DropLeaves(chunk);
+            }
+
+            throw;
         }
         finally
         {
-            lane.Blobs.ColumnLevel = 0;
-            lane.Give();
-            Release(chunk);
+            if (!apart)
+            {
+                lane.Blobs.ColumnLevel = 0;
+                lane.Give();
+                Release(chunk);
+            }
         }
+    }
+
+    /// <summary>
+    /// The blob of <paramref name="chunk"/> grafted from its leaves written apart, its lane given back and its rows let go:
+    /// once every leaf is written, the piece awaited (<see cref="GraftedAsync"/>).
+    /// </summary>
+    private void Graft(AheadChunk chunk)
+    {
+        CompressionLane lane = chunk.Lane!;
+        try
+        {
+            chunk.Blob = chunk.Shredding!.WriteGrafted(lane.Blobs, lane.Encodings, _compress);
+            NoteFresh(chunk, lane);
+            ChunksGrafted++;
+        }
+        finally
+        {
+            DropLeaves(chunk);
+        }
+    }
+
+    /// <summary>Lets go of what <paramref name="chunk"/>'s leaves written apart hold, grafted or not: its piece, its lane, its rows.</summary>
+    private static void DropLeaves(AheadChunk chunk)
+    {
+        if (chunk.Lane is not { } lane)
+        {
+            return;
+        }
+
+        chunk.Shredding?.ReleaseLeaves();
+        if (chunk.Batch is { } batch)
+        {
+            CoreBatch.Return(batch);
+        }
+
+        chunk.Shredding = null;
+        chunk.Batch = null;
+        chunk.Leaves = null;
+        chunk.Lane = null;
+        lane.Blobs.ColumnLevel = 0;
+        lane.Give();
+        Release(chunk);
+    }
+
+    /// <summary>Notes the ids <paramref name="chunk"/>'s blob met past the file's as it began, which its landing makes the file's.</summary>
+    private static void NoteFresh(AheadChunk chunk, CompressionLane lane)
+    {
+        int fresh = lane.Encodings.Count - chunk.KnownCount;
+        chunk.Fresh = new string[fresh];
+        for (int i = 0; i < fresh; i++)
+        {
+            chunk.Fresh[i] = lane.Encodings.Ids[chunk.KnownCount + i];
+        }
+    }
+
+    /// <summary>
+    /// Awaits the piece <paramref name="chunk"/>'s leaves are written apart as, then grafts its blob from them; nothing for a
+    /// chunk compressed whole. What failed a leaf is thrown, the leaves let go.
+    /// </summary>
+    private async ValueTask GraftedAsync(AheadChunk chunk)
+    {
+        if (chunk.Leaves is not { } leaves)
+        {
+            return;
+        }
+
+        try
+        {
+            await leaves.ConfigureAwait(false);
+        }
+        catch
+        {
+            DropLeaves(chunk);
+            throw;
+        }
+
+        Graft(chunk);
     }
 
     /// <summary>Lets <paramref name="chunk"/>'s rows go, once: its context back to the process's.</summary>
@@ -3884,6 +4036,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             try
             {
                 await chunk.RunOrWaitAsync(_core).ConfigureAwait(false);
+                await GraftedAsync(chunk).ConfigureAwait(false);
             }
             catch
             {
@@ -3954,6 +4107,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     try
                     {
                         await chunk.RunOrWaitAsync(_core).ConfigureAwait(false);
+                        await GraftedAsync(chunk).ConfigureAwait(false);
                     }
                     catch (Exception)
                     {
@@ -3961,6 +4115,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     }
                 }
 
+                DropLeaves(chunk);
                 Release(chunk);
                 Uncount(chunk);
                 chunk.Blob.Dispose();

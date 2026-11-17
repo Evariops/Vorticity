@@ -468,11 +468,15 @@ public sealed partial class ShreddedVariantWriteTests
         string plainPath = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.vortex");
         try
         {
-            int one = await WriteGatheredAsync(rows, shredding, onePath, degree: 1, ahead: true);
-            int four = await WriteGatheredAsync(rows, shredding, fourPath, degree: 4, ahead: true);
+            (int one, int oneGrafted) = await WriteGatheredAsync(rows, shredding, onePath, degree: 1, ahead: true);
+            (int four, int fourGrafted) = await WriteGatheredAsync(rows, shredding, fourPath, degree: 4, ahead: true);
             _ = await WriteGatheredAsync(rows, shredding, plainPath, degree: 1, ahead: false);
             Assert.True(one > 2, $"{one} chunks compressed ahead on one thread");
             Assert.Equal(one, four);
+
+            // On four threads each chunk's leaves were written apart, then grafted into its blob: the same bytes.
+            Assert.Equal(0, oneGrafted);
+            Assert.Equal(four, fourGrafted);
             byte[] bytes = await System.IO.File.ReadAllBytesAsync(onePath, Ct);
             Assert.Equal(bytes, await System.IO.File.ReadAllBytesAsync(fourPath, Ct));
             long plain = new FileInfo(plainPath).Length;
@@ -551,8 +555,8 @@ public sealed partial class ShreddedVariantWriteTests
         return writer.BatchesKeysApart;
     }
 
-    /// <summary>Writes <paramref name="rows"/>, every column gathering chunks of 16 KiB, and returns the chunks compressed ahead.</summary>
-    private static async Task<int> WriteGatheredAsync(Doc[] rows, Dictionary<string, VariantShredding> shredding, string path, int degree, bool ahead)
+    /// <summary>Writes <paramref name="rows"/>, every column gathering chunks of 16 KiB, and returns the chunks compressed ahead and those of them grafted from their leaves.</summary>
+    private static async Task<(int Ahead, int Grafted)> WriteGatheredAsync(Doc[] rows, Dictionary<string, VariantShredding> shredding, string path, int degree, bool ahead)
     {
         VortexWriteOptions options = new VortexWriteOptions
         {
@@ -566,7 +570,7 @@ public sealed partial class ShreddedVariantWriteTests
         await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Doc>(path, options);
         await writer.WriteAsync<Doc>(rows, Ct);
         await writer.CompleteAsync(Ct);
-        return writer.ChunksCompressedAhead;
+        return (writer.ChunksCompressedAhead, writer.ChunksGrafted);
     }
 
     /// <summary>
@@ -598,6 +602,24 @@ public sealed partial class ShreddedVariantWriteTests
                             Assert.True(
                                 expected.Memory.Span.SequenceEqual(actual.Memory.Span),
                                 $"{name}, compressed {compress}, frames of {frameRows} rows: {actual.Length} bytes a column at a time against {expected.Length} laid out whole");
+
+                            // Each leaf written apart, the last first as lanes would finish them in any order, then grafted.
+                            using ArrayBlobWriter.Workspace grafting = new ArrayBlobWriter.Workspace { FrameRows = frameRows, Account = TestAccount.Shared };
+                            using ArrayBlobWriter.Workspace apart = new ArrayBlobWriter.Workspace { FrameRows = frameRows, Account = TestAccount.Shared };
+                            VariantShredder.Shredding shredding = grafting.Shredding(plan);
+                            shredding.Take(batch.Arena, column, null);
+                            int leaves = shredding.PrepareLeaves(grafting.EncodesValidity, compress);
+                            EncodingDictionary leafIds = new EncodingDictionary(ComponentKind.Array, Vorticity.Editions.EditionRegistry.Newest);
+                            for (int leaf = leaves - 1; leaf >= 0; leaf--)
+                            {
+                                shredding.WriteLeafApart(leaf, apart, leafIds, compress);
+                            }
+
+                            using ArrayBlobWriter.BlobLease grafted = shredding.WriteGrafted(
+                                grafting, new EncodingDictionary(ComponentKind.Array, Vorticity.Editions.EditionRegistry.Newest), compress);
+                            Assert.True(
+                                actual.Memory.Span.SequenceEqual(grafted.Memory.Span),
+                                $"{name}, compressed {compress}, frames of {frameRows} rows: {grafted.Length} bytes of {leaves} leaves grafted against {actual.Length} written in the blob");
                         }
                     }
                 }

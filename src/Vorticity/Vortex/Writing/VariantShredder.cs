@@ -1,10 +1,13 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Compute;
+using Vorticity.Serialization.FlatBuffers;
+using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
 using Vorticity.Types.Variants;
 
@@ -209,6 +212,242 @@ internal static class VariantShredder
             return _arena.AddStruct(variant.DType, _rows, variant.Validity, [_metadata, residual, tree]);
         }
 
+        // The leaves of the chunk taken, in the order its blob comes to them (PrepareLeaves), each written apart (WriteLeaf),
+        // kept from one chunk to the next; the first of them not yet listed; and while the blob is written from them
+        // (WriteGrafted), the next to graft.
+        private readonly List<LeafJob> _jobs = [];
+        private int _jobCount;
+        private int _cursor = -1;
+
+        /// <summary>
+        /// Lists the leaves of the chunk taken, in the order its blob comes to them as <see cref="Write"/> writes it: each
+        /// variant node's metadata and values and each typed column, with the validity encoding the blob writes each under,
+        /// a variant's typed tree's under <paramref name="compress"/>, the rest under <paramref name="encodesValidity"/>. The
+        /// rows' metadata, which every variant node names, is written once a validity encoding. Their count.
+        /// </summary>
+        internal int PrepareLeaves(bool encodesValidity, bool compress)
+        {
+            _jobCount = 0;
+            _metadataJobs = default;
+            _listCompress = compress;
+            ListVariant(_root, encodesValidity);
+            return _jobCount;
+        }
+
+        // The leaf of the rows' metadata written under each validity encoding, which the others name again; and the validity
+        // encoding of a variant's typed tree, as the blob writer sets it there (ArrayBlobWriter.WriteShredded).
+        private (LeafJob? Plain, LeafJob? Encoded) _metadataJobs;
+        private bool _listCompress;
+
+        /// <summary>A variant node's leaves: its metadata and values under <paramref name="validity"/>, its typed tree under the blob's compression.</summary>
+        private void ListVariant(Group group, bool validity)
+        {
+            LeafJob metadata = List(LeafKind.Metadata, null, validity);
+            LeafJob? first = validity ? _metadataJobs.Encoded : _metadataJobs.Plain;
+            if (first is null)
+            {
+                _metadataJobs = validity ? (_metadataJobs.Plain, metadata) : (metadata, _metadataJobs.Encoded);
+            }
+            else
+            {
+                metadata.Same = first;
+            }
+
+            List(LeafKind.Values, group, validity);
+            ListTyped(group, _listCompress);
+        }
+
+        /// <summary>A typed node's leaves, under <paramref name="validity"/>: its column, or each field of its object's in order (<see cref="WriteTyped"/>, <see cref="WriteField"/>).</summary>
+        private void ListTyped(Group group, bool validity)
+        {
+            if (group is not ObjectGroup objects)
+            {
+                List(LeafKind.Typed, group, validity);
+                return;
+            }
+
+            int count = objects.WrittenCount;
+            for (int i = 0; i < count; i++)
+            {
+                Group field = objects.Written(i);
+                if (field.Values.HoldsAny)
+                {
+                    ListVariant(field, validity);
+                }
+                else
+                {
+                    ListTyped(field, validity);
+                }
+            }
+        }
+
+        private LeafJob List(LeafKind kind, Group? group, bool validity)
+        {
+            if (_jobCount == _jobs.Count)
+            {
+                _jobs.Add(new LeafJob());
+            }
+
+            LeafJob job = _jobs[_jobCount++];
+            job.Kind = kind;
+            job.Group = group;
+            job.Validity = validity;
+            job.Same = null;
+            job.Done = false;
+            return job;
+        }
+
+        /// <summary>
+        /// Writes leaf <paramref name="index"/> of those <see cref="PrepareLeaves"/> listed, apart, in <paramref name="work"/>
+        /// and against <paramref name="encodings"/>, emptied first, as <see cref="Write"/> would write it in the blob: on any
+        /// thread, beside the other leaves, each reading only what its node took of the chunk. What it wrote is kept, its
+        /// buffers its own, for <see cref="WriteGrafted"/> to graft.
+        /// </summary>
+        internal void WriteLeafApart(int index, ArrayBlobWriter.Workspace work, EncodingDictionary encodings, bool compress)
+        {
+            LeafJob job = _jobs[index];
+            if (job.Same is not null)
+            {
+                return;
+            }
+
+            // A dtype arena takes no two writers: the leaf's node is made in one of its own.
+            DTypeArena types = new DTypeArena();
+            CanonicalArena leaves = work.Leaves;
+            bool encodes = work.EncodesValidity;
+            encodings.Clear();
+            work.Builder.Clear();
+            work.EncodesValidity = job.Validity;
+            try
+            {
+                int node = job.Kind switch
+                {
+                    LeafKind.Metadata => leaves.ReferenceFrom(_arena, _metadata),
+                    LeafKind.Values => job.Group!.Values.Build(leaves, types, types.Binary(Nullability.Nullable), _rows),
+                    _ => ((Leaf)job.Group!).Typed(leaves, types, _rows),
+                };
+                int written = ArrayBlobWriter.WriteChild(work, leaves, node, encodings, compress);
+
+                // Its buffers its own, past the leaves' arena emptied below, and its tree as the builder finished it.
+                work.Keep(0);
+                job.Take(work, written, encodings);
+            }
+            finally
+            {
+                work.EncodesValidity = encodes;
+                work.Discard();
+                leaves.ResetKeepingBlocks();
+            }
+        }
+
+        /// <summary>
+        /// <see cref="Write"/>, each leaf grafted where the blob comes to it from what <see cref="WriteLeafApart"/> wrote of it apart:
+        /// its tree written again node by node in the blob's builder, its buffers past the blob's, its ids the dictionary's in
+        /// the order the blob meets them; the same bytes as the chunk written as one blob.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">A leaf the blob comes to was not listed there, or not written.</exception>
+        internal ArrayBlobWriter.BlobLease WriteGrafted(ArrayBlobWriter.Workspace blob, EncodingDictionary encodings, bool compress)
+        {
+            _cursor = 0;
+            try
+            {
+                return Write(blob, encodings, compress);
+            }
+            finally
+            {
+                _cursor = -1;
+                ReleaseLeaves();
+            }
+        }
+
+        /// <summary>Gives back what the leaves written apart still hold: their trees, and the buffers no blob took.</summary>
+        internal void ReleaseLeaves()
+        {
+            for (int i = 0; i < _jobCount; i++)
+            {
+                _jobs[i].Release();
+            }
+        }
+
+        /// <summary>The leaf the blob comes to next, as <see cref="PrepareLeaves"/> listed it: grafted into <paramref name="blob"/>.</summary>
+        private int Graft(ArrayBlobWriter.Workspace blob, EncodingDictionary encodings, LeafKind kind, Group? group)
+        {
+            LeafJob job = _cursor < _jobCount ? _jobs[_cursor++] : throw new InvalidOperationException("The blob came to a leaf no list holds.");
+            if (job.Kind != kind || !ReferenceEquals(job.Group, group))
+            {
+                throw new InvalidOperationException("The leaves were listed in another order than the blob comes to them.");
+            }
+
+            LeafJob made = job.Same ?? job;
+            if (!made.Done)
+            {
+                throw new InvalidOperationException("A leaf the blob comes to was not written.");
+            }
+
+            // Its buffers past the blob's: the leaf's own the first time, the blob's then, copies of them each time the rows'
+            // metadata is named again, which comes after.
+            int shift = blob.Buffers.Count;
+            for (int i = 0; i < made.Buffers.Count; i++)
+            {
+                blob.Buffers.Add(job.Same is null ? made.Buffers[i] : Copied(made.Buffers[i]));
+            }
+
+            made.Taken = true;
+
+            int budget = VortexLimits.MaxFlatBufferTables;
+            FlatBufferTable root = FlatBufferTable.Root(made.Tree.AsSpan(0, made.TreeLength), ref budget);
+            return Regraft(blob.Builder, encodings, root, made.Ids, shift, depth: 1);
+        }
+
+        /// <summary>A pending buffer of bytes of its own, copied from <paramref name="pending"/>'s: a view or zeros as they are.</summary>
+        private static ArrayBlobWriter.PendingBuffer Copied(ArrayBlobWriter.PendingBuffer pending)
+        {
+            if (pending.Bytes is null || pending.Length == 0)
+            {
+                return pending;
+            }
+
+            Block<byte> bytes = Blocks.Rent<byte>(pending.Length);
+            pending.CopyTo(bytes.AsSpan(0, pending.Length));
+            return new ArrayBlobWriter.PendingBuffer(bytes, pending.Length, pending.AlignmentExponent, rented: true);
+        }
+
+        /// <summary>
+        /// Writes <paramref name="node"/>, a node of a leaf's tree, and its children before it, in <paramref name="builder"/>,
+        /// as the blob writer wrote it: its encoding the id <paramref name="ids"/> names interned in
+        /// <paramref name="encodings"/>, its buffers <paramref name="shift"/> on; its offset.
+        /// </summary>
+        private static int Regraft(FlatBufferBuilder builder, EncodingDictionary encodings, FlatBufferTable node, string[] ids, int shift, int depth)
+        {
+            VortexLimits.CheckDepth(depth, VortexLimits.MaxArrayDepth, "Array");
+            FlatBufferVector children = node.GetVector(SchemaFieldIds.ArrayNodeChildren);
+            int count = children.Count;
+            Block<int> rented = count > 16 ? Blocks.Rent<int>(count) : default;
+            Span<int> offsets = count > 16 ? rented.AsSpan() : stackalloc int[16];
+            try
+            {
+                for (int i = 0; i < count; i++)
+                {
+                    offsets[i] = Regraft(builder, encodings, children.GetTable(i), ids, shift, depth + 1);
+                }
+
+                ushort encoding = encodings.Intern(ids[node.GetUInt16(SchemaFieldIds.ArrayNodeEncoding)]);
+                ReadOnlySpan<ushort> buffers = node.TryGetStructVector(SchemaFieldIds.ArrayNodeBuffers, out ReadOnlySpan<ushort> held) ? held : default;
+                Span<ushort> moved = buffers.Length <= 16 ? stackalloc ushort[16] : new ushort[buffers.Length];
+                for (int i = 0; i < buffers.Length; i++)
+                {
+                    moved[i] = checked((ushort)(buffers[i] + shift));
+                }
+
+                return ArrayWriter.WriteNode(
+                    builder, encoding, node.GetByteVector(SchemaFieldIds.ArrayNodeMetadata), offsets[..count], moved[..buffers.Length], statsOffset: 0);
+            }
+            finally
+            {
+                Blocks.Return(rented);
+            }
+        }
+
         /// <summary>
         /// The chunk taken, shredded and written as one blob: each typed column laid out in the workspace's leaves when the
         /// blob comes to it, the buffers the blob took of it kept, and the leaves emptied for the next.
@@ -270,7 +509,7 @@ internal static class VariantShredder
         private int WriteVariantChild(ArrayBlobWriter.Workspace blob, Group group, int child, EncodingDictionary encodings, bool compress) =>
             child switch
             {
-                0 => ArrayBlobWriter.WriteChild(blob, _arena, _metadata, encodings, compress),
+                0 => _cursor >= 0 ? Graft(blob, encodings, LeafKind.Metadata, null) : ArrayBlobWriter.WriteChild(blob, _arena, _metadata, encodings, compress),
                 1 => WriteLeaf(blob, group, values: true, encodings, compress),
                 _ => WriteTyped(blob, group, encodings, compress),
             };
@@ -310,6 +549,11 @@ internal static class VariantShredder
         /// </summary>
         private int WriteLeaf(ArrayBlobWriter.Workspace blob, Group group, bool values, EncodingDictionary encodings, bool compress)
         {
+            if (_cursor >= 0)
+            {
+                return Graft(blob, encodings, values ? LeafKind.Values : LeafKind.Typed, group);
+            }
+
             CanonicalArena leaves = blob.Leaves;
             int first = blob.Buffers.Count;
             try
@@ -340,10 +584,78 @@ internal static class VariantShredder
         }
     }
 
+    /// <summary>What a leaf of a shredded chunk's blob is: the rows' metadata, a node's values, or a node's typed column.</summary>
+    private enum LeafKind : byte
+    {
+        Metadata,
+        Values,
+        Typed,
+    }
+
     /// <summary>
-    /// One node of the shredding over a chunk's rows: what of each row that holds it the node does not take, its typed
-    /// values, and the rows that hold it.
+    /// A leaf of a shredded chunk's blob written apart (<see cref="Shredding.WriteLeafApart"/>): which leaf, the validity encoding
+    /// the blob writes it under, and once written its tree as the builder finished it, its buffers, which are its own until a
+    /// blob takes them, and the ids its tree names by index.
     /// </summary>
+    private sealed class LeafJob
+    {
+        internal LeafKind Kind;
+        internal Group? Group;
+        internal bool Validity;
+
+        /// <summary>The leaf written under the same validity encoding of which this one is a copy: the rows' metadata, named again.</summary>
+        internal LeafJob? Same;
+
+        internal bool Done;
+        internal Block<byte> Tree;
+        internal int TreeLength;
+        internal string[] Ids = [];
+
+        /// <summary>Whether a blob took its buffers, which are the blob's to give back from then on.</summary>
+        internal bool Taken;
+
+        internal List<ArrayBlobWriter.PendingBuffer> Buffers { get; } = [];
+
+        /// <summary>Takes what <paramref name="work"/> wrote of the leaf, its tree at <paramref name="written"/>, against <paramref name="encodings"/>.</summary>
+        internal void Take(ArrayBlobWriter.Workspace work, int written, EncodingDictionary encodings)
+        {
+            ReadOnlySpan<byte> tree = work.Builder.Finish(written);
+            if (Tree.Length < tree.Length)
+            {
+                Blocks.Return(Tree);
+                Tree = Blocks.Rent<byte>(tree.Length);
+            }
+
+            tree.CopyTo(Tree.AsSpan());
+            TreeLength = tree.Length;
+            Buffers.Clear();
+            Buffers.AddRange(work.Buffers);
+            work.Buffers.Clear();
+            Ids = [.. encodings.Ids];
+            Taken = false;
+            Done = true;
+        }
+
+        /// <summary>Gives back the buffers no blob took, and its tree's block.</summary>
+        internal void Release()
+        {
+            for (int i = 0; !Taken && i < Buffers.Count; i++)
+            {
+                if (Buffers[i].Rented)
+                {
+                    Blocks.ReturnBytes(Buffers[i].Bytes);
+                }
+            }
+
+            Buffers.Clear();
+            Blocks.Return(Tree);
+            Tree = default;
+            TreeLength = 0;
+            Taken = false;
+            Done = false;
+        }
+    }
+
     /// <summary>
     /// The nodes a row reached as it was read, in order, each with where its value lies in the row's: what a row that repeats
     /// the value takes again, node by node, each node its own part alone (<see cref="Group.Again(ReadOnlySpan{byte}, int)"/>). A row whose object kept
