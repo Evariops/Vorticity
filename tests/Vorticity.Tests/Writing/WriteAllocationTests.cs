@@ -247,9 +247,11 @@ public sealed class WriteAllocationTests
 
     /// <summary>
     /// What one more column adds, in bytes: the ceiling that says the cost is a state and not a
-    /// scratch. The writer's block scratch is ~130 KiB and measured here is **1 687 B**, a
-    /// sixtieth of it, so the claim holds with room; the ceiling is set just above the measurement
-    /// as a ratchet, not as a target. The blob a column's chunk becomes is assembled in the one
+    /// scratch. The writer's block scratch is ~130 KiB and measured here is **1 055 B**, a
+    /// hundred and twentieth of it, so the claim holds with room; the ceiling is set just above the measurement
+    /// as a ratchet, not as a target. It was 1 687 B while the columns compressed side by side kept
+    /// their blobs, their new ids and their statistics in arrays of a column each; each chunk is now
+    /// emitted by a task of its own, which keeps them. The blob a column's chunk becomes is assembled in the one
     /// workspace the writer keeps, and every column's zone map in the one scratch completions
     /// share, so a column adds none of either.
     /// </summary>
@@ -260,10 +262,10 @@ public sealed class WriteAllocationTests
     /// Bloom builder it abandons at the first block. A thousand columns therefore cost about 2 MB
     /// to write once, against 130 KiB of scratch.
     /// </remarks>
-    private const double PerColumnCeiling = 1_800.0;
+    private const double PerColumnCeiling = 1_150.0;
 
-    /// <summary>The wide schema's own ratchet, in bytes. Measured at 1 694 920 B, the batch built outside the measure.</summary>
-    private const long WideCeiling = 1_800_000;
+    /// <summary>The wide schema's own ratchet, in bytes. Measured at 1 064 656 B, the batch built outside the measure.</summary>
+    private const long WideCeiling = 1_150_000;
 
     /// <summary>
     /// The schema axis: a schema of a thousand columns costs a thousand small states and one

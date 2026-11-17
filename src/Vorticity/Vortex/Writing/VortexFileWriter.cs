@@ -1947,15 +1947,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 int whole = (int)chunk;
                 int piece = whole == rows ? root : CanonicalSlice.SliceAcross(arena, arena, root, offset, whole);
-                if (IngestsWithColumns(whole))
-                {
-                    await IngestAndEmitAcrossAsync(arena, piece, whole, cancellationToken).ConfigureAwait(false);
-                }
-                else
-                {
-                    await IngestThenEmitAsync(arena, piece, whole, cancellationToken).ConfigureAwait(false);
-                }
-
+                await IngestThenEmitAsync(arena, piece, whole, cancellationToken).ConfigureAwait(false);
                 offset += whole;
                 continue;
             }
@@ -3167,6 +3159,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         int emit = checked((int)(blocks * _rowBlock));
         int total = checked((int)_pendingRows);
 
+        // The emissions of the chunks cut from these rows read them through records of their own, and keep the transit's
+        // buffers until they are done: the writer lets go of it then, and the next rows go into another (EndSharing).
         if (emit == total)
         {
             int all = _pending.Count == 1
@@ -3174,7 +3168,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 : CanonicalConcat.Concat(
                     from.Decode, _schema, total,
                     System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending));
-            await EmitWholeBlocksAsync(from.Canonical, all, emit, cancellationToken).ConfigureAwait(false);
+            _sharingFrom = from;
+            try
+            {
+                await EmitWholeBlocksAsync(from.Canonical, all, emit, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                EndSharing(from);
+            }
+
             ResetTransit();
             return;
         }
@@ -3215,7 +3218,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             : CanonicalConcat.Concat(
                 from.Decode, _schema, emit,
                 System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending)[..going]);
-        await EmitWholeBlocksAsync(from.Canonical, head, emit, cancellationToken).ConfigureAwait(false);
+        _sharingFrom = from;
+        try
+        {
+            await EmitWholeBlocksAsync(from.Canonical, head, emit, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            EndSharing(from);
+            throw;
+        }
 
         // The remainder moves to the other arena before this one is reset, because a slice is a
         // view onto the storage the reset would hand back.
@@ -3245,7 +3257,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             Reprobe(to.Canonical, _carry[i]);
         }
 
-        from.Canonical.Reset();
+        if (!EndSharing(from))
+        {
+            from.Canonical.Reset();
+        }
+
         _pending.Clear();
         _pending.AddRange(_carry);
         _pendingRows = total - emit;
@@ -3256,7 +3272,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Drops every pending row and frees the transit arena's storage.</summary>
     private void ResetTransit()
     {
-        _transit![_current]!.Canonical.Reset();
+        // Let go of when the emissions of its rows read it still (EndSharing): the next rows go into another.
+        _transit![_current]?.Canonical.Reset();
         _pending.Clear();
         _pendingRows = 0;
         _pendingBytes = 0;
@@ -3282,11 +3299,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             Over();
         }
 
-        // A column that would gather past int.MaxValue rows writes what it holds first, as the loop
-        // below does it: a chunk that would make one do so is written on this thread.
-        if (CompressesAcross && !GatheringOverflows(rows))
+        // Every column's chunk due leaves for an emission of its own once the file holds an encoding id; before, on this
+        // thread, which interns the file's first. A column that would gather past int.MaxValue rows writes what it holds
+        // first, as the loop below does it: a chunk that would make one do so is written on this thread.
+        if (EmitsApart && !GatheringOverflows(rows))
         {
-            await EmitColumnsAcrossAsync(arena, rootIndex, rows, blocks, cancellationToken).ConfigureAwait(false);
+            await EmitApartAsync(arena, rootIndex, rows, blocks, cancellationToken).ConfigureAwait(false);
         }
         else
         {
@@ -3386,12 +3404,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         ArrayBlobWriter.Workspace blobs = Blobs;
         ArrayBlobWriter.BlobLease blob;
         blobs.ColumnLevel = ZstdLevelOf(field);
-
-        // A column of a file whose next chunks are compressed side by side has its trial watched, and its time noted,
-        // for those.
-        ZstdPlan.Ahead? watched = plan is null && !Codes(field) ? Watch(field, arena, node) : null;
-        blobs.Ahead = watched;
-        long began = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
             if (plan is not null && Fan is { } fan)
@@ -3411,13 +3423,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         finally
         {
             blobs.ColumnLevel = 0;
-            blobs.Ahead = null;
-            watched?.Finish();
-        }
-
-        if (watched is not null)
-        {
-            _chunkColumns!.Took(field, System.Diagnostics.Stopwatch.GetTimestamp() - began);
         }
 
         await WriteColumnBlobAsync(field, blob, firstBlock, blocks, cancellationToken, bounds).ConfigureAwait(false);
@@ -3709,6 +3714,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Writes what every column with a target of its own has gathered, at a flush, the end of a group of rows or the completion.</summary>
     private async ValueTask EmitGatheredAsync(CancellationToken cancellationToken)
     {
+        // The chunks in emission go out before what the columns hold, in the columns' order: those of the columns chunked
+        // with the file too, which a flush and the completion write.
+        await LandEmissionsAsync(cancellationToken).ConfigureAwait(false);
         if (_gathering is not { } gathering)
         {
             return;
@@ -3716,11 +3724,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         _groupTaken = 0;
 
-        // The chunks in emission go out before what the columns hold, in the columns' order.
-        await LandEmissionsAsync(cancellationToken).ConfigureAwait(false);
-        if (CompressesAcross && Fan is { } fan)
+        // What each column holds emitted at once, each by a task of its own, then written in the columns' order.
+        if (EmitsApart)
         {
-            await EmitGatheredAcrossAsync(gathering, fan, cancellationToken).ConfigureAwait(false);
+            for (int field = 0; field < gathering.Length; field++)
+            {
+                if (gathering[field] is { Rows: > 0 } column)
+                {
+                    StartEmission(Detach(field, column));
+                }
+            }
+
+            await LandEmissionsAsync(cancellationToken).ConfigureAwait(false);
             return;
         }
 
@@ -3874,7 +3889,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 : CanonicalConcat.Concat(
                     from.Decode, _schema, total,
                     System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending));
-            await EmitChunkAsync(from.Canonical, whole, total, cancellationToken).ConfigureAwait(false);
+            _sharingFrom = from;
+            try
+            {
+                await EmitChunkAsync(from.Canonical, whole, total, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                EndSharing(from);
+            }
+
             ResetTransit();
         }
 

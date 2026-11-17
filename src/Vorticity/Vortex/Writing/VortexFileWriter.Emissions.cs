@@ -31,6 +31,151 @@ public sealed partial class VortexFileWriter
     // The leaves of the shredded chunks the writer's own flow writes, reused from one chunk to the next.
     private LeafWork? _leafWork;
 
+    // By column, an emission landed, for its next chunk: a column holds as many as it has in emission at once, made once.
+    private ColumnEmission?[]? _spareEmissions;
+
+    // The transit context the chunk being emitted lies in (EmitBlockAsync), and, once a column's emission takes records
+    // over its buffers, what keeps it until the last of them lets it go.
+    private ScanContext? _sharingFrom;
+    private SharedRows? _sharing;
+
+    /// <summary>
+    /// A transit context whose buffers the emissions of a chunk of the file read through records of their own, given back
+    /// to the process's once the writer and every one of them let it go: the next chunk's rows go into another.
+    /// </summary>
+    private sealed class SharedRows(ScanContext context)
+    {
+        // The writer's hold, and one per emission.
+        private int _holds = 1;
+
+        internal ScanContext Context => context;
+
+        internal void Hold() => Interlocked.Increment(ref _holds);
+
+        internal void Release()
+        {
+            if (Interlocked.Decrement(ref _holds) == 0)
+            {
+                TransitContexts.Return(context);
+            }
+        }
+    }
+
+    /// <summary>An emission for a chunk of column <paramref name="field"/>: the one the column's last landed left, or new.</summary>
+    private ColumnEmission TakeEmission(int field)
+    {
+        if (_spareEmissions?[field] is { } spare)
+        {
+            _spareEmissions[field] = null;
+            return spare;
+        }
+
+        return new ColumnEmission(this);
+    }
+
+    /// <summary>Keeps <paramref name="chunk"/>, landed, for its column's next chunk, emptied.</summary>
+    private void Spare(ColumnEmission chunk)
+    {
+        chunk.Arena = null;
+        chunk.Owned = null;
+        chunk.Shared = null;
+        chunk.Inline = false;
+        chunk.Stats = null;
+        chunk.Bounds = null;
+        chunk.Blob = default;
+        chunk.Offered = false;
+        chunk.Taken = null;
+        chunk.Then = null;
+        chunk.FreshCount = 0;
+        chunk.Cut = 0;
+        chunk.Counted = 0;
+        chunk.Held = 0;
+        (_spareEmissions ??= new ColumnEmission?[_fieldCount])[chunk.Field] ??= chunk;
+    }
+
+    /// <summary>
+    /// Takes column <paramref name="field"/>'s share of a chunk of the file, node <paramref name="node"/> of
+    /// <paramref name="arena"/>, <paramref name="rows"/> rows over <paramref name="blocks"/> blocks from
+    /// <paramref name="firstBlock"/>, as a chunk to emit apart, with what its ingest knew of it: on more than one lane, through
+    /// records of its own over the transit's buffers, which the writer keeps until the emission lets them go, or a copy of
+    /// rows the caller lent; on one, read where it lies, compressed as it leaves.
+    /// </summary>
+    private ColumnEmission DetachChunk(int field, CanonicalArena arena, int node, int rows, int firstBlock, int blocks)
+    {
+        ColumnEmission chunk = TakeEmission(field);
+        chunk.Field = field;
+        chunk.Rows = rows;
+        chunk.FirstBlock = firstBlock;
+        chunk.Blocks = blocks;
+
+        // What its bytes held while in transit counts toward the writer's size until it lands, at the rate of the rows that wait.
+        chunk.Counted = (long)(arena.NamedBytes(node) * Gathering.FirstRate);
+
+        // A column written against an object dictionary goes as its codes, which the statistics of its values do not describe.
+        if (Codes(field))
+        {
+            node = Coded(field, arena, node);
+        }
+
+        chunk.Stats = _columns[field].Freeze(firstBlock, blocks);
+        if (_shredding?[field] is null && !Codes(field))
+        {
+            Tally(new ChunkStats(chunk.Stats, this), arena, node, rows);
+        }
+
+        if (_lanes <= 1 || ProbesWatch)
+        {
+            chunk.Arena = arena;
+            chunk.Node = node;
+            chunk.Inline = true;
+            return chunk;
+        }
+
+        ScanContext own = TransitContexts.Rent(Account);
+        if (_sharingFrom is { } from && ReferenceEquals(arena, from.Canonical))
+        {
+            SharedRows shared = _sharing ??= new SharedRows(from);
+            shared.Hold();
+            chunk.Shared = shared;
+            chunk.Node = own.Canonical.ReferenceFrom(arena, node);
+        }
+        else
+        {
+            chunk.Node = own.Canonical.CopyFrom(arena, node);
+        }
+
+        chunk.Arena = own.Canonical;
+        chunk.Owned = own;
+        return chunk;
+    }
+
+    /// <summary>
+    /// Ends the emission of a chunk of the file from transit context <paramref name="from"/> (<see cref="_sharingFrom"/>):
+    /// true when an emission took records over its buffers, which the writer then lets go of, the emissions giving it back
+    /// to the process's once done; false when it is still the writer's to reset.
+    /// </summary>
+    private bool EndSharing(ScanContext from)
+    {
+        _sharingFrom = null;
+        if (_sharing is not { } shared || !ReferenceEquals(shared.Context, from))
+        {
+            _sharing = null;
+            return false;
+        }
+
+        _sharing = null;
+        for (int slot = 0; _transit is not null && slot < _transit.Length; slot++)
+        {
+            if (ReferenceEquals(_transit[slot], from))
+            {
+                _transit[slot] = null;
+            }
+        }
+
+        shared.Release();
+        return true;
+    }
+
     /// <summary>
     /// The chunks of a column in emission at once: two, so that the column's next chunk is taken while the one before is
     /// still compressed. One at a time, a chunk of a log's attributes took 139 ms to compress, the column gathered the next
@@ -70,7 +215,23 @@ public sealed partial class VortexFileWriter
     private sealed class ColumnEmission(VortexFileWriter writer) : CoreUnit
     {
         internal int Field;
-        internal ScanContext? Context;
+
+        /// <summary>
+        /// The arena its rows are read from, at <see cref="Node"/>; null once let go. Its own context when it has one
+        /// (<see cref="Owned"/>), records over the transit's buffers that <see cref="Shared"/> keeps, or, compressed on the
+        /// writer's flow as it leaves (<see cref="Inline"/>), the arena the chunk lies in.
+        /// </summary>
+        internal CanonicalArena? Arena;
+
+        /// <inheritdoc cref="Arena"/>
+        internal ScanContext? Owned;
+
+        /// <inheritdoc cref="Arena"/>
+        internal SharedRows? Shared;
+
+        /// <summary>Whether it is compressed on the writer's flow as it leaves rather than by a unit of the core.</summary>
+        internal bool Inline;
+
         internal int Node;
         internal int Rows;
         internal int FirstBlock;
@@ -81,6 +242,7 @@ public sealed partial class VortexFileWriter
         internal string[] Known = [];
         internal int KnownCount;
         internal string[] Fresh = [];
+        internal int FreshCount;
         internal ChunkBlockBounds? Bounds;
         internal ArrayBlobWriter.BlobLease Blob;
 
@@ -234,17 +396,17 @@ public sealed partial class VortexFileWriter
             ? gathering.Nodes[0]
             : CanonicalConcat.Concat(
                 context.Decode, ChunkType(field), rows, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(gathering.Nodes));
-        ColumnEmission chunk = new ColumnEmission(this)
-        {
-            Field = field,
-            Context = context,
-            Node = node,
-            Rows = rows,
-            FirstBlock = gathering.FirstBlock,
-            Blocks = gathering.Blocks,
-            Cut = gathering.Bytes,
-            Counted = (long)(gathering.Bytes * gathering.Rate),
-        };
+        ColumnEmission chunk = TakeEmission(field);
+        chunk.Field = field;
+        chunk.Arena = context.Canonical;
+        chunk.Owned = context;
+        chunk.Inline = ProbesWatch;
+        chunk.Node = node;
+        chunk.Rows = rows;
+        chunk.FirstBlock = gathering.FirstBlock;
+        chunk.Blocks = gathering.Blocks;
+        chunk.Cut = gathering.Bytes;
+        chunk.Counted = (long)(gathering.Bytes * gathering.Rate);
 
         // What its ingest knew of it, read by its emission while the column ingests the blocks after it, and counted as a
         // chunk compressed on the writer's flow counts it.
@@ -294,7 +456,11 @@ public sealed partial class VortexFileWriter
         _emittingBytes += chunk.Counted;
         ChunksEmittedApart++;
         int known = _arrayEncodings.Count;
-        chunk.Known = new string[known];
+        if (chunk.Known.Length < known)
+        {
+            chunk.Known = new string[Math.Max(known, chunk.Known.Length * 2)];
+        }
+
         for (int i = 0; i < known; i++)
         {
             chunk.Known[i] = _arrayEncodings.Ids[i];
@@ -306,13 +472,15 @@ public sealed partial class VortexFileWriter
             chunk.Bounds = chunk.Taken is { } taken ? taken.Bounds : EmissionBoundsFor(field);
         }
 
-        if (_lanes <= 1)
+        if (_lanes <= 1 || chunk.Inline)
         {
+            chunk.Inline = true;
             Compress(chunk);
             return;
         }
 
         chunk.Offered = true;
+        ColumnChunksAcross++;
         if (_shredding?[field] is null)
         {
             // After the column's emission before, which offers it as it ends; at once when it did.
@@ -369,19 +537,18 @@ public sealed partial class VortexFileWriter
         }
 
         CompressionLane lane = CompressionLane.Take(this);
-        ScanContext context = chunk.Context!;
         bool apart = false;
         try
         {
             lane.Encodings.Reset(chunk.Known.AsSpan(0, chunk.KnownCount));
-            int local = lane.Arena.ReferenceFrom(context.Canonical, chunk.Node);
+            int local = lane.Arena.ReferenceFrom(chunk.Arena!, chunk.Node);
             if (_mayShareChildren)
             {
                 local = ChunkCompactor.Compact(lane.Arena, local);
             }
 
             lane.Blobs.ColumnLevel = ZstdLevelOf(chunk.Field);
-            if (_lanes <= 1)
+            if (chunk.Inline)
             {
                 chunk.Blob = VariantShredder.Write(
                     lane.Blobs, lane.Arena, local, _shredding![chunk.Field]!, chunk.Bounds, lane.Encodings, _compress);
@@ -450,9 +617,9 @@ public sealed partial class VortexFileWriter
         try
         {
             lane = CompressionLane.Take(this);
-            ScanContext context = chunk.Context!;
+            CanonicalArena rows = chunk.Arena!;
             lane.Encodings.Reset(chunk.Known.AsSpan(0, chunk.KnownCount));
-            int local = lane.Arena.ReferenceFrom(context.Canonical, chunk.Node);
+            int local = lane.Arena.ReferenceFrom(rows, chunk.Node);
             if (_mayShareChildren)
             {
                 local = ChunkCompactor.Compact(lane.Arena, local);
@@ -462,7 +629,7 @@ public sealed partial class VortexFileWriter
             ZstdPlan.Ahead? frames = Codes(chunk.Field)
                 ? null
                 : (_emissionFrames ??= new ZstdPlan.Ahead?[_fieldCount])[chunk.Field] ??= new ZstdPlan.Ahead();
-            int items = frames?.Plan(context.Canonical, chunk.Node, _rowBlock, LevelOf(chunk.Field), _lanes) ?? 0;
+            int items = frames?.Plan(rows, chunk.Node, _rowBlock, LevelOf(chunk.Field), chunk.Inline ? 1 : _lanes) ?? 0;
             if (items > 0)
             {
                 chunk.Lane = lane;
@@ -616,11 +783,17 @@ public sealed partial class VortexFileWriter
     private static void NoteFresh(ColumnEmission chunk, CompressionLane lane)
     {
         int fresh = lane.Encodings.Count - chunk.KnownCount;
-        chunk.Fresh = new string[fresh];
+        if (chunk.Fresh.Length < fresh)
+        {
+            chunk.Fresh = new string[fresh];
+        }
+
         for (int i = 0; i < fresh; i++)
         {
             chunk.Fresh[i] = lane.Encodings.Ids[chunk.KnownCount + i];
         }
+
+        chunk.FreshCount = fresh;
     }
 
     /// <summary>
@@ -660,17 +833,25 @@ public sealed partial class VortexFileWriter
         }
     }
 
-    /// <summary>Lets <paramref name="chunk"/>'s rows go, once: its context back to the process's, its tables back to its column.</summary>
+    /// <summary>
+    /// Lets <paramref name="chunk"/>'s rows go, once: its context back to the process's, its hold on the transit it reads
+    /// through let go, its tables back to its column.
+    /// </summary>
     private void Release(ColumnEmission chunk)
     {
         chunk.Stats?.GiveTables();
-        if (chunk.Context is not { } context)
+        chunk.Arena = null;
+        if (chunk.Owned is { } context)
         {
-            return;
+            chunk.Owned = null;
+            TransitContexts.Return(context);
         }
 
-        chunk.Context = null;
-        TransitContexts.Return(context);
+        if (chunk.Shared is { } shared)
+        {
+            chunk.Shared = null;
+            shared.Release();
+        }
     }
 
     /// <summary>Takes what <paramref name="chunk"/> held off the writer's ceiling, once: as it is written, or given up.</summary>
@@ -712,17 +893,17 @@ public sealed partial class VortexFileWriter
         }
 
         ArrayBlobWriter.BlobLease blob = chunk.Blob;
-        if (chunk.Fresh.Length > 0)
+        if (chunk.FreshCount > 0)
         {
-            int count = chunk.KnownCount + chunk.Fresh.Length;
-            ushort[] map = new ushort[count];
+            int count = chunk.KnownCount + chunk.FreshCount;
+            Span<ushort> map = count <= 128 ? stackalloc ushort[128] : new ushort[count];
             bool same = true;
             for (int i = 0; i < chunk.KnownCount; i++)
             {
                 map[i] = (ushort)i;
             }
 
-            for (int i = 0; i < chunk.Fresh.Length; i++)
+            for (int i = 0; i < chunk.FreshCount; i++)
             {
                 ushort index = _arrayEncodings.Intern(chunk.Fresh[i]);
                 map[chunk.KnownCount + i] = index;
@@ -731,15 +912,20 @@ public sealed partial class VortexFileWriter
 
             if (!same)
             {
-                ArrayBlobWriter.Renumber(in blob, map);
+                ArrayBlobWriter.Renumber(in blob, map[..count]);
                 ColumnChunksRenumbered++;
             }
         }
 
-        Gathering gathering = _gathering![field]!;
-        gathering.Cut = chunk.Cut;
+        // A column that gathers measures its rate on the chunk; one chunked with the file has none to measure.
+        Gathering? gathering = _gathering?[field];
+        if (gathering is not null)
+        {
+            gathering.Cut = chunk.Cut;
+        }
+
         await WriteColumnBlobAsync(field, blob, chunk.FirstBlock, chunk.Blocks, cancellationToken, chunk.Bounds, released: true).ConfigureAwait(false);
-        gathering.ChunkRows.Add(chunk.Rows);
+        gathering?.ChunkRows.Add(chunk.Rows);
         if (chunk.Bounds is { } bounds)
         {
             _emissionBounds![field]!.Add(bounds);
@@ -756,6 +942,8 @@ public sealed partial class VortexFileWriter
         {
             _lastEmission[field] = null;
         }
+
+        Spare(chunk);
     }
 
     /// <summary>Writes every column's chunks in emission, in the columns' order.</summary>
