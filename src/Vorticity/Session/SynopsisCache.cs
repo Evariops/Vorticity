@@ -659,7 +659,7 @@ public sealed class SynopsisCache : IAsyncDisposable
         VortexTelemetry.SynopsisFetched(length);
         if (start)
         {
-            ThreadPool.UnsafeQueueUserWorkItem(static cache => cache.Drain(), this, preferLocal: false);
+            Execution.Waits.Upkeep(static cache => cache.Drain(), this);
         }
 
         return true;

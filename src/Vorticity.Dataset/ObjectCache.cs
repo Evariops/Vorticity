@@ -523,7 +523,7 @@ internal sealed class ObjectCache : IAsyncDisposable
         if (closing is not null)
         {
             // Asked by a reservation or a sweep, which must not wait for files to close: a failure to close is observed.
-            Task closed = Task.Run(() => CloseAsync(closing).AsTask());
+            Task closed = Execution.Waits.StartAsync(() => CloseAsync(closing).AsTask());
             _ = closed.ContinueWith(static close => _ = close.Exception, CancellationToken.None, TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
         }
 

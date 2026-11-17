@@ -66,6 +66,46 @@ internal static class LaneWorkers
         return taken is null ? [] : [.. taken];
     }
 
+    /// <summary>
+    /// Takes as many lanes of <paramref name="lanes"/> free now as <paramref name="into"/> holds, or fewer, writing each
+    /// lane's entry there, for a caller that keeps the array from one round of workers to the next: how many it took.
+    /// </summary>
+    internal static int TakeInto(LaneBudget lanes, Span<long> into)
+    {
+        int taken = 0;
+        while (taken < into.Length && lanes.TryEnter(out long entered))
+        {
+            into[taken++] = entered;
+        }
+
+        return taken;
+    }
+
+    /// <summary>Takes a lane of <paramref name="lanes"/> if one is free now: whether one was, its entry in <paramref name="entered"/>.</summary>
+    internal static bool TryTake(LaneBudget lanes, out long entered) => lanes.TryEnter(out entered);
+
+    /// <summary>
+    /// Queues <paramref name="work"/> for the pool, a work item of its own that runs on a lane of the session's its owner
+    /// took for it: <paramref name="here"/>, on the calling thread's own queue, which runs it next with its data in cache.
+    /// </summary>
+    internal static void Queue(IThreadPoolWorkItem work, bool here) => ThreadPool.UnsafeQueueUserWorkItem(work, preferLocal: here);
+
+    /// <summary>Runs <paramref name="worker"/> on the pool, on the lane of <paramref name="lanes"/> <see cref="Take"/> took as <paramref name="entered"/>, which it gives back as it ends.</summary>
+    internal static Task<T> RunOnAsync<T>(LaneBudget lanes, long entered, Func<Task<T>> worker) =>
+        Task.Run(
+            async () =>
+            {
+                try
+                {
+                    return await worker().ConfigureAwait(false);
+                }
+                finally
+                {
+                    lanes.Exit(entered);
+                }
+            },
+            CancellationToken.None);
+
     /// <summary>Runs <paramref name="worker"/> on the pool, on the lane of <paramref name="lanes"/> <see cref="Take"/> took as <paramref name="entered"/>, which it gives back as it ends.</summary>
     internal static Task RunOnAsync(LaneBudget lanes, long entered, Func<Task> worker) =>
         Task.Run(
@@ -81,6 +121,37 @@ internal static class LaneWorkers
                 }
             },
             CancellationToken.None);
+
+    /// <summary>
+    /// Runs <paramref name="body"/> for each of items <c>[0, count)</c>, on the caller and on up to
+    /// <paramref name="workers"/> − 1 workers beside it, each on a lane of <paramref name="lanes"/> free now that it holds
+    /// until it ends, every one taking the next item as it finishes one; the first failure cancels the others and is thrown.
+    /// What a question's <c>Parallel.ForAsync</c> did, its workers on threads the session's degree did not count.
+    /// </summary>
+    internal static async Task ForAsync(LaneBudget lanes, int count, int workers, Func<int, CancellationToken, ValueTask> body, CancellationToken cancellationToken)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        int[] next = [-1];
+        using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        CancellationToken token = failed.Token;
+        await RunAsync(
+            lanes,
+            Math.Clamp(workers, 1, count),
+            async _ =>
+            {
+                int item;
+                while ((item = Interlocked.Increment(ref next[0])) < count)
+                {
+                    token.ThrowIfCancellationRequested();
+                    await body(item, token).ConfigureAwait(false);
+                }
+            },
+            failed).ConfigureAwait(false);
+    }
 
     /// <summary>
     /// Runs <paramref name="work"/> on the pool once a lane of <paramref name="lanes"/> is free, which it holds until it ends:

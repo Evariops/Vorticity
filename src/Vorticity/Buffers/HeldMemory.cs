@@ -198,7 +198,7 @@ internal static class HeldMemory
             return;
         }
 
-        ThreadPool.UnsafeQueueUserWorkItem(
+        Execution.Waits.Upkeep<object?>(
             static _ =>
             {
                 try

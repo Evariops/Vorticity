@@ -1411,7 +1411,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     return;
                 }
 
-                if (!lanes.TryTake())
+                if (!lanes.TryTake(out long entered))
                 {
                     lanes.Unreserve(size);
                     _walked = position;
@@ -1422,7 +1422,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 BlockOwner block = _account.Rent(size, 64);
                 BlockOwner? views = values == NoViews ? null : _account.Rent(header.ValueCount * CanonicalSupport.ViewSize, 64);
                 AheadPage page = new(this, position, header, at, stored, _chunk.Slice(at + offset, stored - offset), _codec, block, lanes, size, views, values);
-                page.Queue();
+                page.Queue(entered);
                 Counters?.AddAhead();
                 _ahead.Enqueue(page);
                 _aheadBytes += size;

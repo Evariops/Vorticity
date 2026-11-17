@@ -168,18 +168,18 @@ internal sealed class SlicedMerge : IMergedRuns
     private void StartAhead()
     {
         _started = Math.Max(_started, _slice + 1);
-        while (_started < _count && _started - _slice <= MostAhead && _lanes.TryEnter(out long entered))
+        while (_started < _count && _started - _slice <= MostAhead && Execution.LaneWorkers.TryTake(_lanes, out long entered))
         {
             int slice = _started++;
             Ahead ahead = new Ahead();
             _ahead[slice] = ahead;
             SlicesAhead++;
-            ahead.Merged = Task.Run(() => MergeAheadAsync(slice, ahead, entered), CancellationToken.None);
+            ahead.Merged = Execution.LaneWorkers.RunOnAsync(_lanes, entered, () => MergeAheadAsync(slice, ahead));
         }
     }
 
-    /// <summary>Merges slice <paramref name="slice"/> ahead, on the lane taken at <paramref name="entered"/>, its runs into <paramref name="ahead"/>.</summary>
-    private async Task MergeAheadAsync(int slice, Ahead ahead, long entered)
+    /// <summary>Merges slice <paramref name="slice"/> ahead, on the lane taken for it, its runs into <paramref name="ahead"/>.</summary>
+    private async Task MergeAheadAsync(int slice, Ahead ahead)
     {
         ChannelWriter<Run> writer = ahead.Runs.Writer;
         try
@@ -202,10 +202,6 @@ internal sealed class SlicedMerge : IMergedRuns
         {
             writer.TryComplete(failure);
             throw;
-        }
-        finally
-        {
-            _lanes.Exit(entered);
         }
     }
 

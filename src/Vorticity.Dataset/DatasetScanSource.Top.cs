@@ -138,18 +138,24 @@ internal sealed partial class DatasetScanSource
             }
         }
 
+        // The runs read side by side, as many as the reads in flight, beside the session's degree: each waits a round trip of
+        // the store for a few granules, the blocks it then decodes the fewest the top can do with (19 of 73 granules on a
+        // day of seven hourly objects). Held to the degree's lanes, a top on one lane waited ten round trips where it waits
+        // four.
         Lock gate = new Lock();
-        ParallelOptions parallel = new ParallelOptions { CancellationToken = cancellationToken, MaxDegreeOfParallelism = reads };
-        await Parallel.ForEachAsync(runs, parallel, async (run, token) =>
-        {
-            FilterLiteral? edge;
-            lock (gate)
+        await Execution.Waits.ForAsync(
+            runs.Count, reads,
+            async (r, token) =>
             {
-                edge = top.Edge;
-            }
+                FilterLiteral? edge;
+                lock (gate)
+                {
+                    edge = top.Edge;
+                }
 
-            await FeedAsync(spec, run, path, edge, descending, top, gate, metrics, token).ConfigureAwait(false);
-        }).ConfigureAwait(false);
+                await FeedAsync(spec, runs[r], path, edge, descending, top, gate, metrics, token).ConfigureAwait(false);
+            },
+            cancellationToken).ConfigureAwait(false);
 
         // The objects whose statistics bound none of their granules, whole, in turn under the edge the top holds then: the
         // first whose bound cannot reach it, or the floor, ends them.

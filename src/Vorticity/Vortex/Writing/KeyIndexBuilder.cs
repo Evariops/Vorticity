@@ -736,31 +736,25 @@ internal sealed class KeyIndexBuilder : IndexBuilder
     {
         LaneBudget? lanes = Lanes;
         long entered = 0;
-        if (!aside || lanes is null || !lanes.TryEnter(out entered))
+        if (!aside || lanes is null || !Execution.LaneWorkers.TryTake(lanes, out entered))
         {
             return buckets.SortedAsync(bucket, scratch, buffers, cancellationToken).AsTask();
         }
 
         // Started whatever the token says, so that the lane it took is given back by the work and never left behind.
         Func<int, Task>? held = BeforeSort;
-        return Task.Run(
+        return Execution.LaneWorkers.RunOnAsync(
+            lanes,
+            entered,
             async () =>
             {
-                try
+                if (held is not null)
                 {
-                    if (held is not null)
-                    {
-                        await held(bucket).ConfigureAwait(false);
-                    }
+                    await held(bucket).ConfigureAwait(false);
+                }
 
-                    return await buckets.SortedAsync(bucket, scratch, buffers, cancellationToken).ConfigureAwait(false);
-                }
-                finally
-                {
-                    lanes.Exit(entered);
-                }
-            },
-            CancellationToken.None);
+                return await buckets.SortedAsync(bucket, scratch, buffers, cancellationToken).ConfigureAwait(false);
+            });
     }
 
     /// <summary>

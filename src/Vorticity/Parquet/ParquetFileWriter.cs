@@ -151,7 +151,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         _columns = new ColumnChunkWriter[map.Columns.Length];
 
         // The lanes every column's pages compress on, while the columns encode the pages after them.
-        PageLanes? lanes = _lanes > 1 ? new PageLanes(_lanes) : null;
+        PageLanes? lanes = _lanes > 1 ? new PageLanes(_lanes, session.Lanes) : null;
         HashSet<string> blooms = options.BloomFilters is { } named ? new(named.Keys, StringComparer.Ordinal) : [];
         HashSet<string> codecs = options.ColumnCompression is { } own ? new(own.Keys, StringComparer.Ordinal) : [];
         HashSet<string> hints = options.Hints is { } pinned ? new(pinned.Keys, StringComparer.Ordinal) : [];

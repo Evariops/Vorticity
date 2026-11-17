@@ -2358,7 +2358,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         SizeAtFlight(NextFlight(staging.Bytes));
-        if (budget is null || !budget.TryEnter(out long entered))
+        if (budget is null || !Execution.LaneWorkers.TryTake(budget, out long entered))
         {
             // No lane free: the block goes through on the merge's thread, and its staging takes the next rows.
             if (offered)
@@ -2373,21 +2373,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         _staging = null;
         _flying = staging;
         BatchesFlown++;
-        _flight = Task.Run(
+        _flight = Execution.LaneWorkers.RunOnAsync(
+            budget,
+            entered,
             async () =>
             {
-                try
-                {
-                    // Its assembly, run here on the flight's lane when no pump took it yet.
-                    await staging.Assembly!.RunOrWaitAsync(_core).ConfigureAwait(false);
-                    await WriteStagedAsync(staging, cancellationToken).ConfigureAwait(false);
-                }
-                finally
-                {
-                    budget.Exit(entered);
-                }
-            },
-            CancellationToken.None);
+                // Its assembly, run here on the flight's lane when no pump took it yet.
+                await staging.Assembly!.RunOrWaitAsync(_core).ConfigureAwait(false);
+                await WriteStagedAsync(staging, cancellationToken).ConfigureAwait(false);
+            });
     }
 
     /// <summary>

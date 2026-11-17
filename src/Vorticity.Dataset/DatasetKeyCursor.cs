@@ -1198,11 +1198,8 @@ internal sealed partial class DatasetKeyCursor : IKeyWalker
         }
         else
         {
-            await Parallel.ForEachAsync(
-                    taken,
-                    new ParallelOptions { MaxDegreeOfParallelism = OpenFanOut, CancellationToken = cancellationToken },
-                    (slot, token) => OpenAsync(slot, token))
-                .ConfigureAwait(false);
+            // The opens wait on the store, OpenFanOut requests out at once, on no lane.
+            await Execution.Waits.ForAsync(taken.Count, OpenFanOut, (i, token) => OpenAsync(taken[i], token), cancellationToken).ConfigureAwait(false);
         }
 
         foreach (Slot slot in taken)

@@ -74,9 +74,11 @@ public class AuditCountsAccumulateBenchmarks
     {
         using ColumnSheetBuilder sheet = new ColumnSheetBuilder();
         using ColumnCountsBuilder counts = new ColumnCountsBuilder(sheet, _plan, field: 1, QueryMemoryBudget.Process.Account);
+        using CountedRows counted = new CountedRows();
+        counts.Counted = counted;
         for (int b = 0; b < _arenas.Length; b++)
         {
-            _plan.Prepare(_arenas[b], _nodes[b], Block);
+            _plan.Prepare(counted, _arenas[b], _nodes[b], Block);
             sheet.Accumulate(_arenas[b], _nodes[b][1], 0, Block);
             counts.Accumulate(_arenas[b], _nodes[b][1], 0, Block);
         }
@@ -94,9 +96,11 @@ public class AuditCountsAccumulateBenchmarks
     {
         using ColumnSheetBuilder sheet = new ColumnSheetBuilder();
         using GranuleStatsBuilder stats = new GranuleStatsBuilder(sheet, _plan, field, field == 2 ? _amount : _size);
+        using CountedRows counted = new CountedRows();
+        stats.Counted = counted;
         for (int b = 0; b < _arenas.Length; b++)
         {
-            _plan.Prepare(_arenas[b], _nodes[b], Block);
+            _plan.Prepare(counted, _arenas[b], _nodes[b], Block);
             sheet.Accumulate(_arenas[b], _nodes[b][field], 0, Block);
             stats.Accumulate(_arenas[b], _nodes[b][field], 0, Block);
             stats.CloseBlock();
@@ -114,9 +118,10 @@ public class AuditCountsAccumulateBenchmarks
     {
         using ColumnSheetBuilder sheet = new ColumnSheetBuilder();
         sheet.NumberRows();
+        using CountedRows counted = new CountedRows();
         for (int b = 0; b < _arenas.Length; b++)
         {
-            _plan.Prepare(_arenas[b], _nodes[b], Block);
+            _plan.Prepare(counted, _arenas[b], _nodes[b], Block);
             sheet.Accumulate(_arenas[b], _nodes[b][field], 0, Block);
         }
 

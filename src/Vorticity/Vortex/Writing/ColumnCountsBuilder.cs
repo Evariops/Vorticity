@@ -64,6 +64,30 @@ internal sealed class CountedRows : IDisposable
     private Block<ulong>[] _hashes = [];
     private bool[] _whole = [];
 
+    /// <summary>
+    /// Makes the place of each of <paramref name="measures"/> measures and <paramref name="wide"/> wide columns, before the
+    /// batch's columns are fed side by side: each then reads or writes its own place alone, and none grows an array another
+    /// column reads. On the thread that prepares the batch (<see cref="CountsPlan.Prepare"/>).
+    /// </summary>
+    internal void Shape(int measures, int wide)
+    {
+        if (_measures.Length < measures)
+        {
+            Array.Resize(ref _measures, measures);
+        }
+
+        for (int m = 0; m < measures; m++)
+        {
+            _measures[m] ??= new MeasureRows();
+        }
+
+        if (_hashes.Length < wide)
+        {
+            Array.Resize(ref _hashes, wide);
+            Array.Resize(ref _whole, wide);
+        }
+    }
+
     /// <summary>The values of measure <paramref name="measure"/>, by its number in the plan.</summary>
     internal MeasureRows Measure(int measure)
     {
@@ -235,6 +259,9 @@ internal sealed class CountsPlan
     /// <summary>Reads the batch's measures' values into <paramref name="into"/>, the batch's, before its columns are counted.</summary>
     internal void Prepare(CountedRows into, CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int rows)
     {
+        // Every measure's and every wide column's place made here, before the columns are fed: the columns of a block in
+        // flight are fed side by side, and two growing the same array at once lost one's place.
+        into.Shape(Measures.Length, Wide.Count);
         for (int m = 0; m < Measures.Length; m++)
         {
             CountedMeasure measure = Measures[m];

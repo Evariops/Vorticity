@@ -2932,7 +2932,7 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
             LaneWindow lanes = Window;
             lanes.ReadSlots++;
             StartReads(lanes);
-            if (_free > 0 && lanes.SessionLanes.TryEnter(out long entered))
+            if (_free > 0 && Execution.LaneWorkers.TryTake(lanes.SessionLanes, out long entered))
             {
                 _free--;
                 lane.Entered = entered;

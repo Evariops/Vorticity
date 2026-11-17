@@ -392,13 +392,11 @@ internal sealed class TerminalScan
         runs.Add(undecided.Count);
         LaneWork work = new LaneWork(runs.Count - 1, undecided.Count, stopAtFirst);
         using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        Task[] running = new Task[Math.Min(_degree, runs.Count - 1)];
-        for (int l = 0; l < running.Length; l++)
-        {
-            running[l] = Task.Run(LaneAsync, CancellationToken.None);
-        }
 
-        // No lane throws: each keeps its failure in the work's state, the first of them thrown here.
+        // The caller's lane and lanes of the session's free, the degree at most, each holding its lane until it ends. No
+        // lane throws: each keeps its failure in the work's state, the first of them thrown here.
+        Task[] running = Execution.LaneWorkers.Start(_file.Session.Lanes, Math.Min(_degree, runs.Count - 1) - 1, _ => LaneAsync());
+        await LaneAsync().ConfigureAwait(false);
         await Task.WhenAll(running).ConfigureAwait(false);
         if (work.Failure is { } failed && !work.Found)
         {

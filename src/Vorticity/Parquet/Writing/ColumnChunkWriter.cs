@@ -675,7 +675,7 @@ internal sealed class ColumnChunkWriter : IDisposable
         if (Lanes is { } lanes && Encryptor is null)
         {
             // On a lane when one is free, else here, but behind the pages before it either way.
-            bool queued = lanes.TryTake();
+            bool queued = lanes.TryTake(out long entered);
             if (queued || _pending.Count > 0)
             {
                 PendingPage page = new(this, lanes, header, levels, input, tally);
@@ -683,7 +683,7 @@ internal sealed class ColumnChunkWriter : IDisposable
                 _pendingBound += page.Bound;
                 if (queued)
                 {
-                    page.Queue();
+                    page.Queue(entered);
                 }
                 else
                 {

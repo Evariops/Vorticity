@@ -31,6 +31,7 @@ internal sealed class PageLanes
     internal const int Bytes = 8 << 20;
 
     private readonly long _budget;
+    private readonly Execution.LaneBudget _session;
     private readonly ConcurrentQueue<LaneWork> _waiting = new();
     private int _free;
     private long _ahead;
@@ -40,11 +41,14 @@ internal sealed class PageLanes
     /// columns hold ahead: 2 MiB a lane, 48 MiB at least, six columns' worth of <see cref="Bytes"/>, so
     /// that a file's few columns of long text keep their pages ahead on few lanes as on many; a
     /// column's first page ahead may pass it. ClickBench's first file scanned in 34 ms on 8 lanes
-    /// under 16 MiB, its four columns of text sharing two columns' worth, against 29 under 48.
+    /// under 16 MiB, its four columns of text sharing two columns' worth, against 29 under 48. Each lane is also one of
+    /// <paramref name="session"/>'s, the session's lanes, held from the work's queuing to its end, so that a scan or a
+    /// writer and the session's other work together never pass its degree.
     /// </summary>
-    internal PageLanes(int lanes)
+    internal PageLanes(int lanes, Execution.LaneBudget session)
     {
         _free = lanes;
+        _session = session;
         _budget = Math.Max(48L << 20, lanes * (2L << 20));
     }
 
@@ -78,8 +82,11 @@ internal sealed class PageLanes
         _ => 4 << 10,
     };
 
-    /// <summary>Takes a lane; false when every one is busy, and the column runs the codec itself.</summary>
-    internal bool TryTake()
+    /// <summary>
+    /// Takes a lane, and one of the session's with it, when it was taken in <paramref name="entered"/>; false when every
+    /// one is busy, or the session has none free, and the column runs the codec itself.
+    /// </summary>
+    internal bool TryTake(out long entered)
     {
         int free = Volatile.Read(ref _free);
         while (free > 0)
@@ -87,17 +94,28 @@ internal sealed class PageLanes
             int seen = Interlocked.CompareExchange(ref _free, free - 1, free);
             if (seen == free)
             {
-                return true;
+                if (Execution.LaneWorkers.TryTake(_session, out entered))
+                {
+                    return true;
+                }
+
+                Interlocked.Increment(ref _free);
+                return false;
             }
 
             free = seen;
         }
 
+        entered = 0;
         return false;
     }
 
-    /// <summary>Gives a lane back.</summary>
-    internal void Give() => Interlocked.Increment(ref _free);
+    /// <summary>Gives back a lane, and the session's taken with it at <paramref name="entered"/>.</summary>
+    internal void Give(long entered)
+    {
+        Interlocked.Increment(ref _free);
+        _session.Exit(entered);
+    }
 
     /// <summary>Whether a work queued waits for a lane, or a column or another lane claimed it since.</summary>
     internal bool Waiting => !_waiting.IsEmpty;
@@ -127,7 +145,7 @@ internal sealed class PageLanes
     internal void Post(LaneWork work)
     {
         _waiting.Enqueue(work);
-        ThreadPool.UnsafeQueueUserWorkItem(work, preferLocal: false);
+        Execution.LaneWorkers.Queue(work, here: false);
     }
 }
 
@@ -157,6 +175,7 @@ internal abstract class LaneWork(PageLanes lanes) : IThreadPoolWorkItem, IValueT
     private Action? _onFinished;
     private int _state;
     private bool _queued;
+    private long _entered;
 
     /// <summary>What the work threw, which the column rethrows where it takes the page.</summary>
     internal ExceptionDispatchInfo? Error { get; private set; }
@@ -167,10 +186,11 @@ internal abstract class LaneWork(PageLanes lanes) : IThreadPoolWorkItem, IValueT
     /// <summary>Whether a lane has begun the work and not yet finished it.</summary>
     internal bool Running => (Volatile.Read(ref _state) & (ByLane | Finished)) == ByLane;
 
-    /// <summary>Queues the work on the lane taken for it, for the pool or a thread that helps to run.</summary>
-    internal void Queue()
+    /// <summary>Queues the work on the lane taken for it at <paramref name="entered"/> (<see cref="PageLanes.TryTake"/>), for the pool or a thread that helps to run.</summary>
+    internal void Queue(long entered)
     {
         _queued = true;
+        _entered = entered;
         lanes.Post(this);
     }
 
@@ -300,7 +320,7 @@ internal abstract class LaneWork(PageLanes lanes) : IThreadPoolWorkItem, IValueT
     {
         if (_queued)
         {
-            lanes.Give();
+            lanes.Give(_entered);
         }
     }
 

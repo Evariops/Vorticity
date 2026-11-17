@@ -86,10 +86,12 @@ public sealed partial class Scan<TRecord>
         }
         else
         {
-            // A part a lane: each part reads its chunks on one, its batches folded on the thread that decoded them.
-            ParallelOptions lanes = new ParallelOptions { MaxDegreeOfParallelism = Math.Min(degree, parts.Count), CancellationToken = cancellationToken };
-            await Parallel.ForAsync(0, parts.Count, lanes, async (i, token) =>
-                states[i] = await FoldAsync<TAggregator, TState>(parts[i], 1, token).ConfigureAwait(false)).ConfigureAwait(false);
+            // A part a lane: each part reads its chunks on one, its batches folded on the thread that decoded them; the
+            // caller's and lanes of the session's free, the degree at most.
+            await Execution.LaneWorkers.ForAsync(
+                _source.Session.Lanes, parts.Count, Math.Min(degree, parts.Count),
+                async (i, token) => states[i] = await FoldAsync<TAggregator, TState>(parts[i], 1, token).ConfigureAwait(false),
+                cancellationToken).ConfigureAwait(false);
         }
 
         TState state = states[0];

@@ -185,7 +185,8 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
                 return;
             }
 
-            _making[entry.Uid] = Task.Run(() => CopyBesideAsync(dataset, version, entry, keys));
+            // The copy shreds the object, on a lane of the session's it holds, waited for holding none, beside the questions.
+            _making[entry.Uid] = Execution.LaneWorkers.RunHeldAsync(dataset.Session.Lanes, () => CopyBesideAsync(dataset, version, entry, keys), CancellationToken.None);
         }
     }
 

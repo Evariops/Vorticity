@@ -244,7 +244,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         // A scan given lanes decompresses each column's next pages on them while the pages before are
         // read: as many at once as its degree, shared by the columns.
         int degree = spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : file.Session.Options.MaxDegreeOfParallelism;
-        PageLanes? lanes = degree > 1 ? new PageLanes(degree) : null;
+        PageLanes? lanes = degree > 1 ? new PageLanes(degree, file.Session.Lanes) : null;
         _lanes = lanes;
         _degree = degree;
         _mayDecodeAcross = degree > 1 && fields.Length > 1;
@@ -543,7 +543,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
                 readers[i] = _readers[_flat[i]];
             }
 
-            _pipeline = new FieldPipeline(readers, _context.Options, PipelineLanes(_degree), _lanes, _account);
+            _pipeline = new FieldPipeline(readers, _context.Options, PipelineLanes(_degree), _lanes, _file.Session.Lanes, _account);
         }
 
         _pipeline.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_steps));
@@ -739,7 +739,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         {
             GroupRead spare = _spare;
             CancellationToken abandon = _abandon.Token;
-            _planned = Task.Run(() => ChooseAsync(spare, abandon), abandon);
+            _planned = Execution.Waits.StartAsync(() => ChooseAsync(spare, abandon));
         }
 
         _groupStart = read.Group.FirstRow;
@@ -928,7 +928,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         ScanCounters.Note(_metrics, window.Runs.Count, bytes);
         CancellationToken abandon = _abandon.Token;
         ISegmentReader source = _file.Reader;
-        return Task.Run(() => source.ReadManyAsync(read, abandon).AsTask(), abandon);
+        return Execution.Waits.StartAsync(() => source.ReadManyAsync(read, abandon).AsTask());
     }
 
     /// <summary>The request that reads window <paramref name="window"/>, past the first, made the first time a group has so many.</summary>

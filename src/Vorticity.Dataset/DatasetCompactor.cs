@@ -1093,13 +1093,12 @@ internal static partial class DatasetCompactor
             InputLeases opened = new InputLeases(new ObjectLease?[job.Inputs.Count < 2 ? 0 : job.Inputs.Count]);
             try
             {
-                ParallelOptions lanes = new ParallelOptions
-                {
-                    MaxDegreeOfParallelism = Math.Max(1, dataset.Session.Options.MaxConcurrentReads),
-                    CancellationToken = cancellationToken,
-                };
-                await Parallel.ForAsync(0, opened._leases.Length, lanes, async (i, token) =>
-                    opened._leases[i] = await memory.RentAsync(job.Inputs[i].Entry, token).ConfigureAwait(false)).ConfigureAwait(false);
+                // Opens, which wait on the store: beside the session's degree, as many at once as it reads.
+                await Execution.Waits.ForAsync(
+                    opened._leases.Length,
+                    dataset.Session.Options.MaxConcurrentReads,
+                    async (i, token) => opened._leases[i] = await memory.RentAsync(job.Inputs[i].Entry, token).ConfigureAwait(false),
+                    cancellationToken).ConfigureAwait(false);
                 return opened;
             }
             catch
@@ -1562,22 +1561,12 @@ internal static partial class DatasetCompactor
 
         // The job's own lane, and beside it the lanes of the session's that are free now (LaneBudget), as many as the room
         // admits: the job holds the session's degree with its writers' helpers and every other job's, where the census took
-        // its own threads past it.
-        Execution.LaneBudget budget = dataset.Session.Lanes;
-        List<long> held = [];
-        while (held.Count < admitted - 1 && budget.TryEnter(out long entered))
-        {
-            held.Add(entered);
-        }
-
-        try
-        {
-            ParallelOptions lanes = new ParallelOptions
-            {
-                MaxDegreeOfParallelism = held.Count + 1,
-                CancellationToken = cancellationToken,
-            };
-            await Parallel.ForAsync(0, job.Inputs.Count, lanes, async (input, token) =>
+        // its own threads past it. Each lane given back as it finds no input left.
+        await Execution.LaneWorkers.ForAsync(
+            dataset.Session.Lanes,
+            job.Inputs.Count,
+            admitted,
+            async (input, token) =>
             {
                 List<ValueCount> counted;
                 try
@@ -1602,15 +1591,8 @@ internal static partial class DatasetCompactor
                     counts[input] = counted;
                     Drain();
                 }
-            }).ConfigureAwait(false);
-        }
-        finally
-        {
-            foreach (long entered in held)
-            {
-                budget.Exit(entered);
-            }
-        }
+            },
+            cancellationToken).ConfigureAwait(false);
 
         // The inputs refused beside the others, each counted alone on the job's thread, in their order.
         refused.Sort();

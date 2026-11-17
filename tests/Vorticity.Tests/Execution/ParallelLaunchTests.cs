@@ -1,14 +1,14 @@
-// The rule "only a pump of the core computes in parallel", made executable as a ratchet.
+// The rule "only the core starts work beside its caller", made executable.
 //
 // Every place the library starts work beside its caller is a place the session's degree may not see: a `Task.Run`, a
-// `Parallel.For*`, a work item queued on the pool, a thread, or a lane taken of the session's budget by hand. The
-// core (`src/Vorticity/Execution`) is where they belong: its pumps hold a lane each and run units. This counts the
-// others, per file of `src`, and holds each file at a ceiling that only comes down as the plan of the parallel flows
-// moves its work onto the core (PLAN-FLUX-PARALLELES, steps B1 to D2).
+// `Parallel.For*`, a work item queued on the pool, a thread, or a lane taken of the session's budget by hand. They all go
+// through `src/Vorticity/Execution`, which tells what computes from what waits: the core's pumps and pieces
+// (`FlowCore`, `CoreFor`), the workers that hold a lane of the session's each (`LaneWorkers`), and what waits on the store
+// or the disk beside the degree (`Waits`). This counts the others, in every file of `src` outside it, which the plan of the
+// parallel flows brought to zero (PLAN-FLUX-PARALLELES, steps B1 to D1).
 //
-// It counts calls on lines of code, never in comments, the way `PerRowDispatchTests` does: a call added beside the
-// core turns its file red on the commit that adds it, which then either moves it onto the core or raises the ceiling
-// with a sentence in the commit saying why it cannot go there yet.
+// It counts calls on lines of code, never in comments, the way `PerRowDispatchTests` does: a call added outside the core
+// turns its file red on the commit that adds it, which then goes through one of the core's entries instead.
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -20,87 +20,24 @@ using Xunit;
 
 namespace Vorticity.Tests.Execution;
 
-/// <summary>Holds the library's starts of parallel work outside its core at a descending count.</summary>
+/// <summary>Holds the library's starts of parallel work outside its core at zero.</summary>
 public sealed partial class ParallelLaunchTests
 {
     /// <summary>A start of work beside the caller, not a mention of one.</summary>
     [GeneratedRegex(@"Task\.Run\(|Parallel\.(For|ForAsync|ForEach|ForEachAsync)\(|QueueUserWorkItem\(|new Thread\(|\.TryEnter\(out ")]
     private static partial Regex Launch();
 
-    /// <summary>
-    /// Per file of <c>src</c>, the starts it may contain. LOWER IT BY HAND when a start moves onto the core, in the same
-    /// commit; a file that reaches zero leaves the table.
-    /// </summary>
-    /// <remarks>
-    /// On a compaction job's path: the plan's step that removes each. <c>DatasetCompactor.Ranges.cs</c>, a piece's ranges'
-    /// lanes (C2). <c>SlicedMerge.cs</c>, the slices merged ahead on lanes free, each an async flow of its own until a
-    /// slice is a unit of the core. <c>DatasetCompactor.cs</c>, the inputs opened side by side and the census's lanes (B2, C5).
-    /// <c>VortexFileWriter.cs</c>, the flight of a block a writer sends through alone (B4a). <c>KeyIndexBuilder.cs</c>,
-    /// the sort of a spilled bucket ahead (B5). <c>BatchAsyncEnumerable.cs</c>, a split's decode on a lane it takes (C1).
-    /// A question's aggregations run on the core (D1): their synchronous items as items of a piece of the core
-    /// (<c>Execution.CoreFor</c>), their workers that wait as they go on lanes of the session's they hold
-    /// (<c>Execution.LaneWorkers</c>). The dataset's questions' starts go with D1 too, a part's with D2.
-    /// </remarks>
-    private static readonly Dictionary<string, int> Ceilings = new(StringComparer.Ordinal)
-    {
-        ["Vorticity.Dataset/DatasetCompactor.Ranges.cs"] = 2,
-        ["Vorticity.Dataset/DatasetCompactor.cs"] = 3,
-        ["Vorticity.Dataset/DatasetKeyCursor.cs"] = 1,
-        ["Vorticity.Dataset/DatasetRowChanges.cs"] = 1,
-        ["Vorticity.Dataset/DatasetScanBuilder.Answers.cs"] = 1,
-        ["Vorticity.Dataset/DatasetScanBuilder.Paths.cs"] = 1,
-        ["Vorticity.Dataset/DatasetScanSource.Top.cs"] = 1,
-        ["Vorticity.Dataset/LevelZeroMemo.cs"] = 1,
-        ["Vorticity.Dataset/ObjectCache.cs"] = 1,
-        ["Vorticity.Dataset/SlicedMerge.cs"] = 2,
-        ["Vorticity/Buffers/HeldMemory.cs"] = 1,
-        ["Vorticity/IO/LocalFileSource.cs"] = 1,
-        ["Vorticity/Parquet/Codecs/PageLanes.cs"] = 1,
-        ["Vorticity/Parquet/Reading/FieldPipeline.cs"] = 1,
-        ["Vorticity/Parquet/Reading/ParquetBatches.cs"] = 2,
-        ["Vorticity/Scan/BatchAsyncEnumerable.cs"] = 1,
-        ["Vorticity/Scan/KeyOrderedBatches.cs"] = 1,
-        ["Vorticity/Scan/Scan.Parts.cs"] = 1,
-        ["Vorticity/Scan/TerminalScan.cs"] = 1,
-        ["Vorticity/Session/SynopsisCache.cs"] = 1,
-        ["Vorticity/Vortex/Writing/KeyIndexBuilder.cs"] = 2,
-        ["Vorticity/Vortex/Writing/VortexFileWriter.Parts.cs"] = 1,
-        ["Vorticity/Vortex/Writing/VortexFileWriter.cs"] = 2,
-    };
-
-    /// <summary>
-    /// No file of <c>src</c> outside the core starts more parallel work than its ceiling, and a file that starts fewer
-    /// says so, so that the ceiling comes down with it.
-    /// </summary>
+    /// <summary>No file of <c>src</c> outside the core starts parallel work: each goes through one of the core's entries.</summary>
     [Fact]
-    public void NoFileStartsMoreParallelWorkThanItsCeiling()
+    public void NoFileOutsideTheCoreStartsParallelWork()
     {
-        Dictionary<string, int> counted = Count();
         StringBuilder over = new StringBuilder();
-        StringBuilder under = new StringBuilder();
-        foreach ((string file, int count) in counted.OrderBy(static pair => pair.Key, StringComparer.Ordinal))
+        foreach ((string file, int count) in Count().OrderBy(static pair => pair.Key, StringComparer.Ordinal))
         {
-            int ceiling = Ceilings.GetValueOrDefault(file);
-            if (count > ceiling)
-            {
-                over.Append(file).Append(": ").Append(count).Append(" starts, ceiling ").Append(ceiling).Append('\n');
-            }
-            else if (count < ceiling)
-            {
-                under.Append(file).Append(": ").Append(count).Append(" starts, ceiling ").Append(ceiling).Append(" (lower it)\n");
-            }
+            over.Append(file).Append(": ").Append(count).Append(" starts\n");
         }
 
-        foreach ((string file, int ceiling) in Ceilings)
-        {
-            if (!counted.ContainsKey(file))
-            {
-                under.Append(file).Append(": 0 starts, ceiling ").Append(ceiling).Append(" (remove it)\n");
-            }
-        }
-
-        Assert.True(over.Length == 0, "Parallel work started outside the core:\n" + over);
-        Assert.True(under.Length == 0, "A ceiling to lower:\n" + under);
+        Assert.True(over.Length == 0, "Parallel work started outside the core (src/Vorticity/Execution):\n" + over);
     }
 
     private static Dictionary<string, int> Count()

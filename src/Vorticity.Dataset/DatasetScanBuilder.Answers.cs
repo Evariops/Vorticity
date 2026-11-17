@@ -401,7 +401,8 @@ internal sealed partial class DatasetScanBuilder
                 if (next == Visit.Open && !state.Ended)
                 {
                     await slots.WaitAsync(stop.Token).ConfigureAwait(false);
-                    running.Add(Task.Run(() => LaneAsync(held), CancellationToken.None));
+                    // The object answered on a lane of the session's it holds, waited for holding none.
+                    running.Add(Execution.LaneWorkers.RunHeldAsync(_dataset.Session.Lanes, () => LaneAsync(held), CancellationToken.None));
                 }
 
                 if (state.Ended)

@@ -160,17 +160,7 @@ The host asks once, with `MaxDegreeOfParallelism` on its session, and a single s
 ScanOptions four = new ScanOptions { DegreeOfParallelism = 4 };   // 0, the default, is the session's
 ```
 
-The session's degree is the number of cores its work takes beside its callers' own threads, all of it
-together: the writers' helpers, the scans' decodes ahead of their loops, an aggregation's lanes and its
-merge, and the compaction jobs. An aggregation's lane past the first, which runs on your thread, starts
-only on a lane of the session's that is free, and holds it until it ends: a group by and a job run
-together never take more cores than the degree beside your thread. Your
-thread is one of a scan's degree: a scan at 4 decodes on three pool threads at most beside your loop.
-A compaction job has no caller, and holds one of the session's lanes for its own flow, its reads'
-decodes and its writer's helpers taking the others: at a degree of 8, a maintainer's jobs compute on
-eight threads at most, however many run at once. The runtime's own work comes on top: the garbage
-collector, and the thread pool's idle spin (below). Whatever holds a lane takes another only when one
-is free, or does the work itself, so that a session never waits on its own degree.
+The session's degree is the number of cores its work takes beside its callers' own threads, all of it together: the writers' helpers and the parts of `WriteRecordsAsync`, the scans' decodes ahead of their loops, a count's lanes, a dataset's objects answered side by side, an aggregation's lanes and its merge, a Parquet file's pages and columns, and the compaction jobs. Every one of them past the first, which runs on your thread, starts only on a lane of the session's that is free, and holds it until it ends: a group by and a job run together never take more cores than the degree beside your thread. Your thread is one of a scan's degree: a scan at 4 decodes on three pool threads at most beside your loop. A compaction job has no caller, and holds one of the session's lanes for its own flow, its reads' decodes and its writer's helpers taking the others: at a degree of 8, a maintainer's jobs compute on eight threads at most, however many run at once. What waits on the store or the disk and computes little, the objects a question opens, a top's reads of its best granules, the reads of a local file, the writes of the synopsis cache, goes beside the degree, since a lane held while a request is out does nothing the degree is for. The runtime's own work comes on top: the garbage collector, and the thread pool's idle spin (below). Whatever holds a lane takes another only when one is free, or does the work itself, so that a session never waits on its own degree; a question's work that must run whatever the lanes, an object of a dataset answered beside the others, waits for a lane holding none, as a job does before it starts.
 
 A writer uses the session's degree too, and `VortexWriteOptions.DegreeOfParallelism` overrides it
 for one file. When a batch of a block or more comes in, the writer summarizes its columns side by

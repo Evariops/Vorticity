@@ -102,14 +102,19 @@ public sealed partial class VortexFileWriter
 
         try
         {
-            ParallelOptions lanes = new ParallelOptions { MaxDegreeOfParallelism = degree, CancellationToken = cancellationToken };
-            await Parallel.ForAsync(0, count, lanes, async (i, token) =>
-            {
-                int start = i * per;
-                ReadOnlyMemory<TRecord> slice = records.Slice(start, Math.Min(per, records.Length - start));
-                TRecord.WriteRows(parts[i].Builder, slice.Span);
-                await parts[i].WriteAsync(token).ConfigureAwait(false);
-            }).ConfigureAwait(false);
+            // The caller writes a part, and each lane of the session's free now another, the parts taken in their order.
+            await Execution.LaneWorkers.ForAsync(
+                Session.Lanes,
+                count,
+                degree,
+                async (i, token) =>
+                {
+                    int start = i * per;
+                    ReadOnlyMemory<TRecord> slice = records.Slice(start, Math.Min(per, records.Length - start));
+                    TRecord.WriteRows(parts[i].Builder, slice.Span);
+                    await parts[i].WriteAsync(token).ConfigureAwait(false);
+                },
+                cancellationToken).ConfigureAwait(false);
         }
         finally
         {
