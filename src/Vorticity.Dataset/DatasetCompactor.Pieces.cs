@@ -62,9 +62,10 @@ internal static partial class DatasetCompactor
     /// </summary>
     private static async ValueTask<Piece?> PieceAsync(VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken)
     {
-        // As many objects' size as the piece's ranges merge side by side, the session's lanes, or less, so that a piece commits
-        // within its share of the window and its copies fit the scratch.
-        int lanes = Math.Max(1, Math.Min(MostRanges, dataset.Session.Options.MaxDegreeOfParallelism));
+        // As many objects' size as the piece has ranges, DatasetOptions.PieceObjects, or less, so that a piece commits within its
+        // share of the window and its copies fit the scratch. Fixed, never the session's lanes: a piece sized and cut by them
+        // wrote other objects at another degree. How many of its ranges run side by side, the budget decides.
+        int lanes = Math.Max(1, dataset.Options.PieceObjects);
         long pieceBytes = Math.Max(1, Math.Min(job.TargetBytes * lanes, JobBytesBound(dataset)));
         if (job.Trigger != CompactionTrigger.Consolidation || job.Moves || !schema.Keyed || job.Bytes <= pieceBytes
             || dataset.ConsolidatesWhole(CompactionPolicy.PartitionOf(dataset, job)))
@@ -165,7 +166,8 @@ internal static partial class DatasetCompactor
                 return null;
             }
 
-            // The piece's ranges side by side, below its cut, as the session's lanes merge them; with a cut, one more past it.
+            // The piece's ranges below its cut, MostRanges at most, merged side by side as the budget holds; with a cut, one more
+            // past it.
             List<byte[]> cuts = SubCuts(job, indexes, decoded, taken, starts, ends, partition, lanes, cut);
             if (cut is not null)
             {

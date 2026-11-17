@@ -232,6 +232,13 @@ public sealed record DatasetOptions
     internal long SliceRows { get; init; } = 1L << 18;
 
     /// <summary>
+    /// The objects' size a piece of a consolidation reads at most, and the ranges below its cut it merges: 8 by default,
+    /// whatever the session's degree, so that a consolidation commits the same pieces at any degree. A piece of eight
+    /// objects is what a degree of eight or more cut before; a test consolidates in pieces of one.
+    /// </summary>
+    internal int PieceObjects { get; init; } = 8;
+
+    /// <summary>
     /// What reading the dataset costs, which its planners price their paths by before reading anything: the store's own
     /// profile when null, the default (<see cref="IObjectStore.CostProfile"/>). An application that knows its store says so here,
     /// a store behind a cache or on another link than its kind says. The reads of its objects join their ranges by the store's

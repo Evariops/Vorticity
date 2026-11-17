@@ -90,6 +90,9 @@ public sealed partial class ConsolidationPiecesTests
             CalmAfter = null,
         },
         ContentsObjectBytes = 0,
+
+        // Pieces of one object's size, so that a day of a few objects runs in several.
+        PieceObjects = 1,
     };
 
     /// <summary><paramref name="appends"/> appends of <paramref name="rows"/> rows of one day, every one spanning every service.</summary>

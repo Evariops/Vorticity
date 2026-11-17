@@ -424,8 +424,9 @@ to lose less were weighed, none built:
 
 A fourth way is built: a consolidation that reads more than the layout's object size runs a piece at a
 time (`DatasetCompactor.Pieces`). Each job takes the keys of the partition below a cut, the first key of
-a granule of its inputs' sparse indexes past an object's size of what is left, moved up so that no object
-of level 1 lies across it; it writes them to level 1 and commits. The inputs of level 0 it took rows of go
+a granule of its inputs' sparse indexes past eight objects' size of what is left (`DatasetOptions.PieceObjects`,
+internal), moved up so that no object of level 1 lies across it; it writes them to level 1 and commits.
+The size is fixed: sized by the session's lanes, a piece wrote other objects at another degree. The inputs of level 0 it took rows of go
 back to level 0 in the same commit with those rows marked, as a delete marks them, a run from row 0 since
 an input's rows are in the key's order; one it took every row of goes. The next job's plan finds what is
 left and consolidates the next piece, each input read from past its marked run, the objects of level 1 the
