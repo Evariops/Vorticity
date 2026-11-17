@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.IO;
 using Vorticity.Types.Variants;
 using Xunit;
 
@@ -171,6 +172,65 @@ public sealed partial class DatasetCompactionLanesTests
         }
 
         Assert.True(ahead > 0, "no input decoded a window ahead past its own");
+    }
+
+    /// <summary>
+    /// A consolidation over a store whose puts answer a little later: the job's flow gives its lane back while its objects
+    /// wait for the store, and takes it again after, and the objects hold the rows they hold over a store that answers at once.
+    /// </summary>
+    [Fact]
+    public async Task AJobGivesItsLaneBackWhileItsObjectsWaitForTheStore()
+    {
+        List<long> objects = [];
+        foreach (bool late in new[] { false, true })
+        {
+            Random random = new Random(41);
+            await using MemoryObjectStore memory = new MemoryObjectStore();
+            await using LatePuts store = new LatePuts(memory, late);
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 4);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, OptionsOf(session), Ct);
+            for (int a = 0; a < 4; a++)
+            {
+                Doc[] rows = [.. Enumerable.Range(a * 8_000, 8_000).Select(i => new Doc(random.Next(0, 2), $"svc-{random.Next(0, 60):D2}", i, Attributes(random)))];
+                await using ObjectDraft draft = dataset.StartObject();
+                await draft.Writer.WriteAsync<Doc>(rows, Ct);
+                await dataset.AppendAsync(draft, Ct);
+            }
+
+            IReadOnlyList<CompactionResult> results = await dataset.ConsolidateAsync(Ct);
+            int waits = results.Sum(static result => result.StoreWaitsWithoutLane);
+            Assert.True(late ? waits > 0 : waits == 0, $"{waits} waits for the store without the job's lane, its puts late: {late}");
+            List<long> sizes = [];
+            await foreach (PositionedObject positioned in dataset.ScanBuilder().ObjectsAsync(Ct))
+            {
+                sizes.Add(positioned.Entry.Rows);
+            }
+
+            if (!late)
+            {
+                objects = sizes;
+            }
+            else
+            {
+                Assert.Equal(objects, sizes);
+            }
+
+            Assert.Equal(32_000, await dataset.ScanBuilder().CountAsync(Ct));
+        }
+    }
+
+    /// <summary>A store whose puts, when <paramref name="late"/>, answer once a millisecond went by.</summary>
+    private sealed class LatePuts(IObjectStore inner, bool late) : ForwardingStore(inner)
+    {
+        public override async ValueTask<PutOutcome> PutAsync(string key, System.IO.Pipelines.PipeReader content, long length, PutCondition condition, CancellationToken cancellationToken)
+        {
+            if (late)
+            {
+                await Task.Delay(1, cancellationToken).ConfigureAwait(false);
+            }
+
+            return await Inner.PutAsync(key, content, length, condition, cancellationToken).ConfigureAwait(false);
+        }
     }
 
     /// <summary>

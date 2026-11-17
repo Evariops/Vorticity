@@ -1188,7 +1188,7 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool contents = false, bool synopses = false,
         IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
         IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1, PartitionPostings? postings = null,
-        bool countsPaths = false, QueryMemoryBudget? budget = null)
+        bool countsPaths = false, QueryMemoryBudget? budget = null, Execution.HeldLane? lane = null)
     {
         RequireConditionalCreation(_store);
         DateTimeOffset started = _options.TimeProvider.GetUtcNow();
@@ -1197,8 +1197,12 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
 
         // A job's object holds its blocks under the job's writer's budget, which never passes the jobs' (JobMemory).
+        // A job's object gives the job's lane back while it waits for the store.
         ObjectSegmentSink sink = new ObjectSegmentSink(
-            _store, key, budget ?? QueryMemoryBudget.JobsOf(_options.Session), _options.MaxObjectBytes, _options.StreamedObjectBytes, byteBound);
+            _store, key, budget ?? QueryMemoryBudget.JobsOf(_options.Session), _options.MaxObjectBytes, _options.StreamedObjectBytes, byteBound)
+        {
+            Lane = lane,
+        };
 
         VortexWriteOptions write = _options.Write.WithIdentity(identity) with
         {

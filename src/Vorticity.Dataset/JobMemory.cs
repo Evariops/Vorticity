@@ -51,6 +51,9 @@ internal sealed class JobMemory : IAsyncDisposable
     /// <summary>What its writer rents under: each object's writer and its sink.</summary>
     internal QueryMemoryBudget Writer { get; }
 
+    /// <summary>The lane the job's own flow holds, which its objects' sinks give back while they wait for the store; null before it holds one.</summary>
+    internal Execution.HeldLane? Lane { get; set; }
+
     /// <summary>The account its inputs' scans and the merge rent under, which the job closes at its end.</summary>
     internal MemoryAccount InputsAccount => _inputs;
 

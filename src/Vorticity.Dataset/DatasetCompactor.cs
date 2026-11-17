@@ -124,6 +124,9 @@ public sealed record CompactionResult
     /// (<see cref="Scanning.DecodeAhead"/>): the input it drains decoded on several lanes.
     /// </summary>
     internal long InputWindowsAhead { get; init; }
+
+    /// <summary>The waits for the store its objects made with the job's lane given back (<see cref="Execution.HeldLane"/>).</summary>
+    internal int StoreWaitsWithoutLane { get; init; }
 }
 
 /// <summary>Runs one compaction: a k-way merge of the inputs on the sort key when there is
@@ -239,11 +242,12 @@ internal static partial class DatasetCompactor
         // The job's own flow computes, its merge first: it holds a lane of the session's for as long as it runs, taken once
         // its memory is, so that a job waiting for memory holds no lane. Everything it starts beside it takes a lane free now
         // or runs on this one, and never waits for one, which this lane, held by the waiter, would never free.
+        // Its objects' sinks give the lane back while they wait for the store, and take it again after (HeldLane).
         Execution.LaneBudget lanes = dataset.Session.Lanes;
-        long lane;
+        Execution.HeldLane lane;
         try
         {
-            lane = await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
+            lane = new Execution.HeldLane(lanes, await lanes.EnterAsync(cancellationToken).ConfigureAwait(false));
         }
         catch
         {
@@ -251,6 +255,7 @@ internal static partial class DatasetCompactor
             throw;
         }
 
+        memory.Lane = lane;
         try
         {
             return await RewriteUnderAsync(dataset, job, memory, cancellationToken).ConfigureAwait(false);
@@ -262,7 +267,8 @@ internal static partial class DatasetCompactor
         }
         finally
         {
-            lanes.Exit(lane);
+            memory.Lane = null;
+            lane.Exit();
             await memory.DisposeAsync().ConfigureAwait(false);
         }
     }
@@ -355,11 +361,13 @@ internal static partial class DatasetCompactor
             : null;
 
         // Each object it streams is announced to the store as at most what the job reads, times what a job
-        // writes a byte at worst; one that runs past it starts the job again under a bound twice as large.
-        ObjectStream OutputsOf(CompactionJob ran, int doublings) => new ObjectStream(
+        // writes a byte at worst; one that runs past it starts the job again under a bound twice as large. The objects the
+        // job's own flow writes give its lane back while they wait for the store.
+        ObjectStream OutputsOf(CompactionJob ran, int doublings, Execution.HeldLane? lane) => new ObjectStream(
             dataset, schema, ran.TargetBytes, ran.FirstRow, inKeyOrder: merge, rowBound: ran.Rows,
             ran.ToLevel, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn))
         {
+            Lane = lane,
             Budget = memory.Writer,
             Keys = indexed ? schema.Tree : null,
             Prefix = Math.Min(schema.Layout?.Layout.Prefix ?? 0, schema.Layout?.Components.Count ?? 0),
@@ -395,7 +403,7 @@ internal static partial class DatasetCompactor
             {
                 // A piece of several ranges below its cut merges them side by side, and counts what each took of each input.
                 (streams, rows, atOnce, batchRows) = await RangesAsync(
-                    dataset, schema, job, piece.Ranges, writer, meter, memory, doublings => OutputsOf(job, doublings), cancellationToken,
+                    dataset, schema, job, piece.Ranges, writer, meter, memory, (doublings, lane) => OutputsOf(job, doublings, lane), cancellationToken,
                     piece.Merged, piece.Emitted).ConfigureAwait(false);
             }
             else
@@ -423,8 +431,9 @@ internal static partial class DatasetCompactor
                     {
                         Arrival = Latest(ran),
                         Budget = memory.Writer,
+                        Lane = memory.Lane,
                     };
-                    ObjectStream outputs = OutputsOf(ran, doublings);
+                    ObjectStream outputs = OutputsOf(ran, doublings, memory.Lane);
                     try
                     {
                         // A piece reads its first range alone, below its cut, and counts what it takes of each input.
@@ -717,6 +726,7 @@ internal static partial class DatasetCompactor
             MergeSlices = slicesCut,
             MergeSlicesAhead = slicesAhead,
             InputWindowsAhead = windowsAhead,
+            StoreWaitsWithoutLane = memory.Lane?.GivenBack ?? 0,
         };
     }
 
@@ -2139,6 +2149,12 @@ internal static partial class DatasetCompactor
         internal QueryMemoryBudget? Budget { get; init; }
 
         /// <summary>
+        /// The lane of the flow that writes the objects, the job's own, which each object's sink gives back while it waits for
+        /// the store (<see cref="ObjectSegmentSink.Lane"/>); null for a flow that keeps its lane, a range's worker.
+        /// </summary>
+        internal Execution.HeldLane? Lane { get; init; }
+
+        /// <summary>
         /// Writes rows <paramref name="from"/> to <paramref name="to"/> of the merge's run, which the object takes next in the
         /// key's order: the first starts the next partition value's shredding when they start an object of another value,
         /// and the object's sparse index and blocks take them.
@@ -2289,7 +2305,8 @@ internal static partial class DatasetCompactor
             ValueShredding? shredding = Shreddings is { } shreddings ? shreddings[Math.Clamp(_value, 0, shreddings.Count - 1)] : null;
             output = _dataset.StartObjectUnder(
                 _schema, _inKeyOrder, _rowBound, contents: Keys is not null, synopses: Keys is not null, shredded: shredding?.Shredded,
-                variantChunks: shredding?.VariantChunks, byteBound: _byteBound, countsPaths: shredding is not null, postings: Postings, budget: Budget);
+                variantChunks: shredding?.VariantChunks, byteBound: _byteBound, countsPaths: shredding is not null, postings: Postings, budget: Budget,
+                lane: Lane);
             _output = output;
             output.Writer.Ledger = Ledger;
             output.Writer.LandLag = LandLagOf(output.Writer.BlockRows);

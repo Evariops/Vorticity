@@ -842,7 +842,7 @@ internal static partial class DatasetCompactor
         long writer,
         RowMeter meter,
         JobMemory memory,
-        Func<int, ObjectStream> outputsOf,
+        Func<int, Execution.HeldLane?, ObjectStream> outputsOf,
         CancellationToken cancellationToken,
         int count = -1,
         long[]? emitted = null)
@@ -878,10 +878,11 @@ internal static partial class DatasetCompactor
         for (int lane = 1; lane < lanes; lane++)
         {
             // Each lane given back as its last range is written, not once every one is.
-            running[lane] = Execution.LaneWorkers.RunOnAsync(budget, held[lane - 1], LaneAsync);
+            running[lane] = Execution.LaneWorkers.RunOnAsync(budget, held[lane - 1], () => LaneAsync(null));
         }
 
-        running[0] = LaneAsync();
+        // The job's own flow gives its lane back while its ranges' objects wait for the store; a worker keeps its own.
+        running[0] = LaneAsync(memory.Lane);
         try
         {
             await Task.WhenAll(running).ConfigureAwait(false);
@@ -900,13 +901,13 @@ internal static partial class DatasetCompactor
 
         return (streams, written, lanes, batchRows);
 
-        async Task LaneAsync()
+        async Task LaneAsync(Execution.HeldLane? lane)
         {
             try
             {
                 for (int range; (range = Interlocked.Increment(ref next)) < count;)
                 {
-                    (streams[range], rows[range]) = await RangeAsync(range, stop.Token).ConfigureAwait(false);
+                    (streams[range], rows[range]) = await RangeAsync(range, lane, stop.Token).ConfigureAwait(false);
                 }
             }
             catch (Exception failure)
@@ -917,14 +918,14 @@ internal static partial class DatasetCompactor
             }
         }
 
-        async Task<(ObjectStream Outputs, long Rows)> RangeAsync(int range, CancellationToken token)
+        async Task<(ObjectStream Outputs, long Rows)> RangeAsync(int range, Execution.HeldLane? lane, CancellationToken token)
         {
             for (int doublings = 0; ; doublings++)
             {
                 // What the range took of each input, counted apart and added once it is written: a range started again under a
                 // larger bound counts its rows once.
                 long[]? mine = emitted is null ? null : new long[emitted.Length];
-                ObjectStream outputs = outputsOf(doublings);
+                ObjectStream outputs = outputsOf(doublings, lane);
                 try
                 {
                     long merged = await MergeAsync(dataset, schema, job, outputs, null, null, batchRows, meter, memory, token, ranges, range, mine, writer * lanes).ConfigureAwait(false);
