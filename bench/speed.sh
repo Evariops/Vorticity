@@ -6,6 +6,8 @@
 # Benches (default: logs,metrics):
 #   logs     one tier merge of 5 job outputs of log records, 7.6 M rows, 2 GiB        (~15 s a round)
 #   metrics  one consolidation of 74 appends of metric records, 51.84 M rows, 2 GiB    (~20 s a round)
+#   runs     one tier merge of 60 appends of 30 000 metric records, 1.8 M rows in 1.2 M runs of a row or two, the first
+#            merges of a backlog of appends, three quarters of the time the 25 GB backlog took at degree 14    (~2 s a round)
 #   append   24 appends of 65 536 metric records into a dataset with variants          (seconds)
 #   scan, filter, write   the report's scenarios on its 10 485 760-row file, in the framework-dependent runner, 12 rounds
 #   parts    the scan's reads done by the caller on the scan's parts (SplitAsync), a task a part, on the same file
@@ -75,7 +77,7 @@ measured() { awk -F'\t' -v t="$tree" -v b="$1" -v d="$2" -v m="$mode" '$2==t && 
 # would compile whatever the working tree became meanwhile.
 for bench in ${only//,/ }; do
   case $bench in
-    logs|metrics|append) [ $built_queries = 0 ] && { build bench/Vorticity.Benchmarks.Queries; built_queries=1; } ;;
+    logs|metrics|runs|append) [ $built_queries = 0 ] && { build bench/Vorticity.Benchmarks.Queries; built_queries=1; } ;;
     scan|filter|write|parts)
       [ $built_runner = 0 ] && { build bench/Vorticity.Benchmarks.Runner; built_runner=1; }
       if [ ! -f "$fixture" ]; then
@@ -94,6 +96,7 @@ for bench in ${only//,/ }; do
     case $bench in
       logs) args=(--micro backlog --store "$home/logtier" --logs --jobs 1 --compact-only --memory-limit 2g --degree "$degree" --repeat 2 --bytes-digest) ;;
       metrics) args=(--micro backlog --store "$home/metrictier" --jobs 1 --compact-only --memory-limit 2g --degree "$degree" --repeat 2 --bytes-digest) ;;
+      runs) args=(--micro backlog --store "$home/appends60" --jobs 1 --compact-only --memory-limit 2g --degree "$degree" --repeat 3 --bytes-digest) ;;
       append) kind=append; args=(--micro backlog --store "$home/append" --build-only --appends 24 --rows 65536 --memory-limit 2g --degree "$degree") ;;
       scan) kind=runner; args=(--scenario scan "$fixture" 10485760 --repeat 12 --threads "$degree") ;;
       filter) kind=runner; args=(--scenario filter-wide "$fixture" 10485760 --repeat 12 --threads "$degree") ;;
