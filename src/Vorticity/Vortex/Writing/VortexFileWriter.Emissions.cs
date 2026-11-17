@@ -507,15 +507,29 @@ public sealed partial class VortexFileWriter
             return null;
         }
 
-        List<ChunkBlockBounds> free = (_emissionBounds ??= new List<ChunkBlockBounds>?[_fieldCount])[field] ??= [];
-        if (free.Count == 0)
+        List<ChunkBlockBounds> free = FreeBounds(field);
+        lock (free)
         {
-            return new ChunkBlockBounds(keys, _blockRows, _variantTextBound).Cleared();
+            if (free.Count > 0)
+            {
+                ChunkBlockBounds bounds = free[^1];
+                free.RemoveAt(free.Count - 1);
+                return bounds.Cleared();
+            }
         }
 
-        ChunkBlockBounds bounds = free[^1];
-        free.RemoveAt(free.Count - 1);
-        return bounds.Cleared();
+        return new ChunkBlockBounds(keys, _blockRows, _variantTextBound).Cleared();
+    }
+
+    /// <summary>
+    /// The block bounds column <paramref name="field"/>'s chunks landed gave back, for the next to count into: taken by an
+    /// emission as it starts, or by the chain that takes its rows on the line (<see cref="ShredChain"/>), in the line's
+    /// prologues; given back as a chunk lands. Under its own lock.
+    /// </summary>
+    private List<ChunkBlockBounds> FreeBounds(int field)
+    {
+        List<ChunkBlockBounds>?[] all = _emissionBounds ?? Interlocked.CompareExchange(ref _emissionBounds, new List<ChunkBlockBounds>?[_fieldCount], null) ?? _emissionBounds;
+        return all[field] ?? Interlocked.CompareExchange(ref all[field], [], null) ?? all[field]!;
     }
 
     /// <summary>
@@ -928,7 +942,12 @@ public sealed partial class VortexFileWriter
         gathering?.ChunkRows.Add(chunk.Rows);
         if (chunk.Bounds is { } bounds)
         {
-            _emissionBounds![field]!.Add(bounds);
+            // Those a chain made for the rows it took on the line too: whoever made them, the column's next chunk counts into them.
+            List<ChunkBlockBounds> free = FreeBounds(field);
+            lock (free)
+            {
+                free.Add(bounds);
+            }
         }
 
         // What its emission decided for the column's ingest takes effect here, at a point of the rows' own order.

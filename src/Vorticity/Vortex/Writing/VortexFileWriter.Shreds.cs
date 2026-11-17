@@ -163,7 +163,7 @@ public sealed partial class VortexFileWriter
 
             ScanContext store = _store ??= TransitContexts.Rent(writer.Account);
             store.Canonical.Reset();
-            _bounds = writer._countedKeys?[field] is { } keys ? new ChunkBlockBounds(keys, writer._blockRows, writer._variantTextBound).Cleared() : null;
+            _bounds = writer.EmissionBoundsFor(field);
             _shredding.Begin(store.Canonical, _bounds);
             _planned = 0;
         }

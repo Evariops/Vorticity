@@ -497,6 +497,37 @@ public sealed partial class ShreddedVariantWriteTests
     }
 
     /// <summary>
+    /// A shredded column whose top-level keys are counted block by block, its chunks' rows taken on the line on four threads:
+    /// the bounds the line counted a chunk's keys into go back to the column as the chunk lands, for its next chunk to count
+    /// into, and the file is the one a thread writes. Made by the line rather than taken from the column's, they found no
+    /// place to go back to, and a tier merge of log records failed at its first chunk landed (2026-11-17).
+    /// </summary>
+    [Fact]
+    public async Task ChunksTakenOnTheLineGiveTheirKeysBoundsBackAsTheyLand()
+    {
+        VariantShredding plan = VariantShredding.Object(
+            ("route", VariantShredding.Primitive(VariantClass.String)),
+            ("code", VariantShredding.Primitive(VariantClass.Integer)));
+        Doc[] rows = [.. Enumerable.Range(0, 30_000).Select(i => new Doc(i, Variant.Object(("route", $"/r/{i % 97}"), ("code", i % 13)), null))];
+        Dictionary<string, VariantShredding> shredding = new() { [nameof(Doc.Attributes)] = plan };
+        string onePath = Path.Combine(Path.GetTempPath(), $"vorticity-bounds-{Guid.NewGuid():N}.vortex");
+        string fourPath = Path.Combine(Path.GetTempPath(), $"vorticity-bounds-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            (int one, _, _) = await WriteGatheredAsync(rows, shredding, onePath, degree: 1);
+            (int four, _, int fourOnLine) = await WriteGatheredAsync(rows, shredding, fourPath, degree: 4);
+            Assert.True(fourOnLine > 1, $"{fourOnLine} chunks of {four} taken on the line");
+            Assert.Equal(one, four);
+            Assert.Equal(await System.IO.File.ReadAllBytesAsync(onePath, Ct), await System.IO.File.ReadAllBytesAsync(fourPath, Ct));
+        }
+        finally
+        {
+            System.IO.File.Delete(onePath);
+            System.IO.File.Delete(fourPath);
+        }
+    }
+
+    /// <summary>
     /// Shredded variant columns whose keys a job's object indexes, each key's sheet, locates and statistics over the granules:
     /// on four and eight threads, the keys of each column written in groups apart, each group on its own thread, the file is
     /// the one written on one thread, byte for byte.
