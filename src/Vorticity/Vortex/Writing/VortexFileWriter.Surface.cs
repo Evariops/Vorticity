@@ -532,6 +532,9 @@ public sealed partial class VortexFileWriter
             _landed = null;
         }
 
+        // The stagings and counted rows the line's flights left, and the passes over the keys they kept.
+        ReleaseLine();
+
         if (_gathering is { } gathering)
         {
             foreach (Gathering? column in gathering)

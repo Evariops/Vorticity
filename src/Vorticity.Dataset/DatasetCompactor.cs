@@ -95,6 +95,12 @@ public sealed record CompactionResult
     /// <summary>The batches the writers staged and sent through on a lane of their own while the merge went on.</summary>
     internal long WriterBatchesFlown { get; init; }
 
+    /// <summary>Of <see cref="WriterBatchesFlown"/>, the blocks the writers sent through their line, several at once, each column's work on them in order.</summary>
+    internal long WriterBlocksOnLine { get; init; }
+
+    /// <summary>The chunks of the file the blocks on the writers' lines ended, each emitted before the next block ingested.</summary>
+    internal long WriterChunksEndedOnLine { get; init; }
+
     /// <summary>The inputs' batches its merge took over from their scans and kept until its writers copied their runs.</summary>
     internal long InputWindowsTaken { get; init; }
 
@@ -659,6 +665,8 @@ internal static partial class DatasetCompactor
         long batches = lateOutputs?.Batches ?? 0;
         long across = lateOutputs?.BatchesAcross ?? 0;
         long flown = lateOutputs?.BatchesFlown ?? 0;
+        long onLine = lateOutputs?.BlocksOnLine ?? 0;
+        long chunksOnLine = lateOutputs?.ChunksEndedOnLine ?? 0;
         long windowsTaken = 0;
         long windowsCopied = 0;
         long windowsKeyed = 0;
@@ -672,6 +680,8 @@ internal static partial class DatasetCompactor
             batches += outputs.Batches;
             across += outputs.BatchesAcross;
             flown += outputs.BatchesFlown;
+            onLine += outputs.BlocksOnLine;
+            chunksOnLine += outputs.ChunksEndedOnLine;
             windowsTaken += outputs.WindowsTaken;
             windowsCopied += outputs.WindowsCopied;
             windowsKeyed += outputs.WindowsKeyedHere;
@@ -699,6 +709,8 @@ internal static partial class DatasetCompactor
             WriterBatches = batches,
             WriterBatchesAcross = across,
             WriterBatchesFlown = flown,
+            WriterBlocksOnLine = onLine,
+            WriterChunksEndedOnLine = chunksOnLine,
             InputWindowsTaken = windowsTaken,
             InputWindowsCopied = windowsCopied,
             InputWindowsKeyedByMerge = windowsKeyed,
@@ -2042,6 +2054,12 @@ internal static partial class DatasetCompactor
         /// <summary>The batches the writers of the objects it sealed sent through on a lane of their own while it went on.</summary>
         internal long BatchesFlown { get; private set; }
 
+        /// <summary>Of <see cref="BatchesFlown"/>, the blocks those writers sent through their line, several at once.</summary>
+        internal long BlocksOnLine { get; private set; }
+
+        /// <summary>The chunks of the file the blocks on those writers' lines ended.</summary>
+        internal long ChunksEndedOnLine { get; private set; }
+
         /// <summary>The inputs' batches the merges into this stream took over, and those they copied to keep.</summary>
         internal long WindowsTaken { get; set; }
 
@@ -2242,6 +2260,23 @@ internal static partial class DatasetCompactor
         }
 
         /// <summary>
+        /// The blocks back an object's writer reads its size at as the object nears its target (<see cref="VortexFileWriter.LandLag"/>):
+        /// <see cref="VortexFileWriter.FlightsAhead"/> for an object aimed at <see cref="VortexFileWriter.LineObjectBlocks"/>
+        /// blocks or more, at the bytes a row of the job's inputs holds, whose writer then sends that many blocks through at
+        /// once; one block for a smaller one, as before. Read from the job alone, the same at any degree.
+        /// </summary>
+        private int LandLagOf(int blockRows)
+        {
+            if (_rowBound <= 0 || _byteBound <= 0 || blockRows <= 0)
+            {
+                return 1;
+            }
+
+            double blockBytes = (double)_byteBound / _rowBound * blockRows;
+            return _target / blockBytes >= VortexFileWriter.LineObjectBlocks ? VortexFileWriter.FlightsAhead : 1;
+        }
+
+        /// <summary>
         /// The object being written, started when none is: one with a sparse index keeps a table of contents, and in a
         /// partition value's rows shreds what they pay for, its writer counting its paths as it takes its rows, for its path
         /// directory, at the grain of its granules: counted here run by run, they held a merge's thread a fortieth of its
@@ -2260,6 +2295,7 @@ internal static partial class DatasetCompactor
                 variantChunks: shredding?.VariantChunks, byteBound: _byteBound, countsPaths: shredding is not null, postings: Postings, budget: Budget);
             _output = output;
             output.Writer.Ledger = Ledger;
+            output.Writer.LandLag = LandLagOf(output.Writer.BlockRows);
             Postings?.BlocksOf(VortexDataset.Uid(output.Identity), output.Writer.BlockRows);
             foreach ((int field, ObjectDictionary dictionary, long rowBytes) in Dictionaries)
             {
@@ -2324,6 +2360,8 @@ internal static partial class DatasetCompactor
                     ScratchBytes += output.Writer.ScratchBytes;
                     BatchesAcross += output.Writer.BatchesIngestedAcross;
                     BatchesFlown += output.Writer.BatchesFlown;
+                    BlocksOnLine += output.Writer.BlocksOnLine;
+                    ChunksEndedOnLine += output.Writer.ChunksEndedOnLine;
                 }
 
                 written = await _dataset.SealAsync(output, _rows, _firstRow, cancellationToken).ConfigureAwait(false);

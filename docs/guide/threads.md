@@ -176,8 +176,11 @@ priced from. It then chooses and compresses a chunk's columns side by side, a co
 target of its own included. A column that takes longer than its share of the threads, and whose
 previous chunk was tried as zstd on a quarter of a megabyte of values or more, has its zstd frames
 compressed in parallel too, one frame per block, beside the other columns' work. The file is byte
-for byte the same whatever the degree. A write that builds indexes summarizes its columns on one
-thread.
+for byte the same whatever the degree. A write that builds indexes summarizes its first block on one
+thread, which tells its index builders what the statistics say of it, and every block after it side by
+side; one that indexes a nested column summarizes every block on one thread.
+
+A compaction job's writer goes further when its object is aimed at 32 blocks or more: it sends up to four blocks through at once, each column's work on them in the order of the blocks, so that a column quick to take a block runs ahead of the slowest one rather than waiting for it at every block. The objects it writes are the same bytes at any degree, the job reading its writer's size four blocks back to end them.
 
 Measured on the demonstration file, warmed up, each variant run in turn, the best of fifteen rounds in
 a process and the median of seven processes:

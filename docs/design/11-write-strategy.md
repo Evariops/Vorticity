@@ -258,6 +258,8 @@ its rows and compresses its chunks on its thread as well, and its chunks go out 
 thread puts them. A column's zstd frames are compressed side by side too. A write that builds
 indexes summarizes on one thread.
 
+A writer that stages its blocks, a dataset job's whose object is aimed at many blocks, sends several blocks through at once on its line (`VortexFileWriter.FlightLine`), up to four ahead of the one whose landing its size is read at. Each block is a flight. Its prologue runs in the order of the blocks: it decides whether the line takes the block, reads the measures the columns' counts share and prepares the block's census into what the flight owns. Its items run on the session's lanes: each column's statistics, bounds and distinct table, each column's index builders, each variant column's read of its keys and each group of them, the census. An item runs once every state it touches is done with the block before, a column's statistics, its distinct table, its builders, a group of keys, so the columns quick to take a block run ahead of the slowest, where every block once waited for the slowest item of the block before. Its epilogue runs in order and puts its rows in transit. The end of a chunk of the file is a barrier: a column's distinct table must see no row of the next chunk before its own chunk is chosen, so the blocks of one chunk overlap, and the next chunk's first block waits for the emission. The counts of a column attach the wide columns' distinct values of a block as they start on the next one, once every wide column took it: an attachment raises registers to their maximum, which no later block lowers, and a column found no longer wide is dropped whole at the end of the object whenever the counts learn of it. A block the line does not take, an object's first, one that would start a chunk past the rows in transit, make a whole chunk alone or cross one, goes through alone as every block did before.
+
 ### 3.8 Appending to a file
 
 `VortexSession.OpenWriterAsync(path)` returns a writer that continues a file whose shape this writer can
@@ -321,7 +323,11 @@ sorted run's keys, which took a thousand-key `IN` from 117 to 51 ms.
 2. Equality is on bytes. A table hit is confirmed on the key's bytes, and hashes only route.
 3. An index is whole or absent, and the report says which (see [the policy](10-indexes.md#6-the-policy)).
 4. Merges are exact or conservative. Statistics merge exactly, a filter node is sized from the exact
-   union of its blocks, and a bounded string minimum or maximum is marked as a bound.
+   union of its blocks, and a bounded string minimum or maximum is marked as a bound. A block's bounds
+   are the same whether its rows come as views or as a constant: a merge's block of one run keeps the
+   constant its input decoded, one of several runs concatenates their views, and where the runs fall
+   depends on how the inputs' batches were cut. A constant block once had no bounds, and its zone map
+   none: one consolidation wrote a different zone map on one lane than on four.
 5. Pruning never removes a row a full scan returns (see [statistic
    precision](08-semantics.md#1-statistic-precision-what-inexact-licenses)).
 

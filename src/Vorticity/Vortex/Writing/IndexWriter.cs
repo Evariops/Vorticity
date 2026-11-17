@@ -1013,6 +1013,9 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     internal int KeyGroups(int field) => _variantFeeds?[field]?.Groups ?? 0;
 
+    /// <summary>Whether variant column <paramref name="field"/>, its keys fed apart, has nested paths whose builders are fed apart from its groups (<see cref="FeedNested"/>).</summary>
+    internal bool FeedsNested(int field) => _variantFeeds?[field]?.Nested.Length > 0;
+
     /// <summary>
     /// The threads the keys of a variant column may be written on apart, the writer's lanes: its keys are dealt into as many
     /// groups, a key to each in turn, and none is split below two keys read together. A log's attributes shred hundreds of
@@ -1049,6 +1052,20 @@ internal sealed class IndexWriter : IDisposable
     /// <param name="blockRows">The rows of a block.</param>
     internal void ReadKeys(int field, KeyPass pass, CanonicalArena arena, int nodeIndex, int rows, int filled, int blockRows)
     {
+        TakeKeys(field, pass, arena, nodeIndex, rows);
+        VariantFeed feed = _variantFeeds![field]!;
+        int keyed = feed.Slots.Length - feed.Nested.Length;
+        FeedSlots(feed, pass.Nodes, pass.Rows, pass.Whole ? 0 : keyed, feed.Slots.Length, 1, rows, filled, blockRows);
+    }
+
+    /// <summary>
+    /// <see cref="ReadKeys"/> without its feeding: the batch's rows of variant column <paramref name="field"/> read into
+    /// <paramref name="pass"/> once for every key, or each key read whole when they cannot be, and each nested path read,
+    /// touching no builder, so that it runs beside anything. The nested paths' builders are fed next
+    /// (<see cref="FeedNested"/>), and each group's (<see cref="FeedGroup"/>), each on its own.
+    /// </summary>
+    internal void TakeKeys(int field, KeyPass pass, CanonicalArena arena, int nodeIndex, int rows)
+    {
         VariantFeed feed = _variantFeeds![field]!;
         CanonicalArena into = pass.Rows;
         int variant = CanonicalSlice.SliceAcross(arena, into, nodeIndex, 0, rows);
@@ -1067,8 +1084,30 @@ internal sealed class IndexWriter : IDisposable
         {
             pass.Nodes[keyed + n] = feed.Nested[n].Apply(into, variant);
         }
+    }
 
-        FeedSlots(feed, pass.Nodes, into, pass.Whole ? 0 : keyed, feed.Slots.Length, 1, rows, filled, blockRows);
+    /// <summary>Feeds the builders of the nested paths of variant column <paramref name="field"/> what <see cref="TakeKeys"/> read into <paramref name="pass"/>.</summary>
+    internal void FeedNested(int field, KeyPass pass, int rows, int filled, int blockRows)
+    {
+        VariantFeed feed = _variantFeeds![field]!;
+        FeedSlots(feed, pass.Nodes, pass.Rows, feed.Slots.Length - feed.Nested.Length, feed.Slots.Length, 1, rows, filled, blockRows);
+    }
+
+    /// <summary>
+    /// <see cref="FeedKeys"/> after <see cref="TakeKeys"/>: group <paramref name="group"/>'s keys of variant column
+    /// <paramref name="field"/> written from the read and their builders fed; where the rows were read key by key, each of
+    /// the group's keys fed what was read of it. A builder is fed the same calls whichever item feeds it.
+    /// </summary>
+    internal void FeedGroup(int field, int group, KeyPass pass, int rows, int filled, int blockRows)
+    {
+        if (!pass.Whole)
+        {
+            FeedKeys(field, group, pass, rows, filled, blockRows);
+            return;
+        }
+
+        VariantFeed feed = _variantFeeds![field]!;
+        FeedSlots(feed, pass.Nodes, pass.Rows, group, feed.Slots.Length - feed.Nested.Length, feed.Groups, rows, filled, blockRows);
     }
 
     /// <summary>
@@ -2280,6 +2319,53 @@ internal sealed class IndexWriter : IDisposable
 
     /// <summary>What a batch's counts read beside their columns, for a file that keeps counts: new, to be held by the batch's writer; null otherwise.</summary>
     internal CountedRows? NewCountedRows() => _counts is null ? null : new CountedRows();
+
+    /// <summary>Whether the file keeps counts, whose batches read counted rows (<see cref="NewCountedRows"/>).</summary>
+    internal bool KeepsCounts => _counts is not null;
+
+    /// <summary>
+    /// The top-level columns whose distinct values the counts of the others keep (<see cref="CountsPlan.Wide"/>), whose sheets
+    /// hash their rows of each batch for them; empty for a file that keeps no counts or no such column.
+    /// </summary>
+    internal IEnumerable<int> WideFields
+    {
+        get
+        {
+            foreach (WideColumn wide in _counts?.Wide ?? [])
+            {
+                yield return wide.Field;
+            }
+        }
+    }
+
+    /// <summary>Settles whether column <paramref name="field"/> stays wide, from its own sheet, once it took a batch: nothing for a column that is not one.</summary>
+    internal void SettleWide(int field)
+    {
+        foreach (WideColumn wide in _counts?.Wide ?? [])
+        {
+            if (wide.Field == field)
+            {
+                CountsPlan.Settle(wide, end: false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Raises the registers of column <paramref name="field"/>'s counts from a batch of <paramref name="rows"/> rows, with
+    /// <paramref name="counted"/>, the batch's, once every wide column's sheet took it: what <see cref="AttachCounts"/> does
+    /// for every column, here for one, on the lane that feeds it.
+    /// </summary>
+    internal void Attach(int field, CountedRows counted, int rows)
+    {
+        foreach (IndexBuilder builder in _builders[field])
+        {
+            if (builder is ColumnCountsBuilder counts)
+            {
+                counts.Counted = counted;
+                counts.Attach(rows);
+            }
+        }
+    }
 
     /// <summary>
     /// The counts builder of column <paramref name="field"/>, or null when it has none; asked once every row is in, it

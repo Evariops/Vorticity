@@ -65,6 +65,14 @@ internal abstract class CoreUnit : CoreWork, IValueTaskSource
     /// <summary>The unit's work.</summary>
     protected abstract void Execute();
 
+    /// <summary>
+    /// Called once the unit's result is set, whoever ran it: from here on the unit may be offered again, so what lets its
+    /// owner go on to offer it again goes here rather than in <see cref="Execute"/>.
+    /// </summary>
+    protected virtual void Ended()
+    {
+    }
+
     /// <summary>Offers the unit to <paramref name="core"/> in <paramref name="flow"/>, for one pump.</summary>
     internal void Offer(FlowCore core, Flow flow)
     {
@@ -85,6 +93,7 @@ internal abstract class CoreUnit : CoreWork, IValueTaskSource
             Complete();
             Volatile.Write(ref _state, Done);
             _done.SetResult(true);
+            Ended();
         }
         else
         {
@@ -112,10 +121,15 @@ internal abstract class CoreUnit : CoreWork, IValueTaskSource
         }
 
         _done.SetResult(true);
+        Ended();
         return false;
     }
 
-    internal override void Signal() => _done.SetResult(true);
+    internal override void Signal()
+    {
+        _done.SetResult(true);
+        Ended();
+    }
 
     /// <summary>Runs the unit's work, its failure kept for whoever awaits it.</summary>
     private void Complete()

@@ -83,27 +83,31 @@ internal sealed class FlowCore
 
     /// <summary>
     /// Queues <paramref name="work"/> in <paramref name="flow"/> for <paramref name="claims"/> pumps at most, and starts as
-    /// many as lanes are free now; the claims left wait for lanes given back.
+    /// many as lanes are free now; the claims left wait for lanes given back. A work still queued stays where it is, and
+    /// only more pumps start for it: what offers itself again as it finds more to do.
     /// </summary>
     internal void Offer(CoreWork work, Flow flow, int claims)
     {
         lock (_gate)
         {
-            work.Flow = flow;
-            work.Queued = true;
-            work.Previous = _tails[(int)flow];
-            work.Next = null;
-            if (_tails[(int)flow] is { } tail)
+            if (!work.Queued)
             {
-                tail.Next = work;
-            }
-            else
-            {
-                _heads[(int)flow] = work;
-            }
+                work.Flow = flow;
+                work.Queued = true;
+                work.Previous = _tails[(int)flow];
+                work.Next = null;
+                if (_tails[(int)flow] is { } tail)
+                {
+                    tail.Next = work;
+                }
+                else
+                {
+                    _heads[(int)flow] = work;
+                }
 
-            _tails[(int)flow] = work;
-            _queued++;
+                _tails[(int)flow] = work;
+                _queued++;
+            }
         }
 
         Wake(claims);

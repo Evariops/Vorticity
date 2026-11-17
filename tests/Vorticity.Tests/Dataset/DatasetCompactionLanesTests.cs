@@ -106,16 +106,59 @@ public sealed partial class DatasetCompactionLanesTests
     [InlineData(2_048)]
     public async Task AConsolidationWritesTheSameSegmentsAtAnyDegreeAndOnAnyRun(int sliceRows)
     {
-        int[] degrees = [1, 1, 4, 14];
+        // Blocks of 256 rows, so that an object is aimed at dozens of them and its writer sends several through at once.
+        List<CompactionResult> sliced = await SameSegmentsAtDegreesAsync(
+            [1, 1, 4, 14],
+            static random => $"svc-{random.Next(0, 60):D2}",
+            session =>
+            {
+                DatasetOptions options = OptionsOf(session) with { Write = new VortexWriteOptions { BlockRows = 256 } };
+                return sliceRows > 0 ? options with { SliceRows = sliceRows } : options;
+            });
+
+        // At four lanes and fourteen, the writers sent blocks through their line, several at once, and the bytes are those of one.
+        Assert.True(sliced.Sum(static job => job.WriterBlocksOnLine) > 0, "no block went through a writer's line");
+        if (sliceRows > 0)
+        {
+            Assert.True(sliced.Max(static job => job.MergeSlices) >= 2, "no merge was cut in slices");
+            Assert.True(sliced.Sum(static job => job.MergeSlicesAhead) > 0, "no slice was merged ahead");
+        }
+    }
+
+    /// <summary>
+    /// Services named at a kibibyte, so that a chunk of the file holds four blocks of 256 rows and ends within an object: the
+    /// writers' lines meet the end of a chunk, emitted once every block of it landed and before the next block ingests, and
+    /// the segments are the same bytes at one lane, four and fourteen.
+    /// </summary>
+    [Fact]
+    public async Task AConsolidationWhoseChunksEndWithinItsObjectsWritesTheSameSegmentsAtAnyDegree()
+    {
+        string padding = new string('x', 1_000);
+        List<CompactionResult> jobs = await SameSegmentsAtDegreesAsync(
+            [1, 4, 14],
+            random => $"svc-{random.Next(0, 60):D2}-{padding}",
+            static session => OptionsOf(session) with { Write = new VortexWriteOptions { BlockRows = 256 } });
+        Assert.True(jobs.Sum(static job => job.WriterBlocksOnLine) > 0, "no block went through a writer's line");
+        Assert.True(jobs.Sum(static job => job.WriterChunksEndedOnLine) > 0, "no chunk ended on a writer's line");
+    }
+
+    /// <summary>
+    /// One store of six appends of 8 000 rows, whose services <paramref name="service"/> names, copied once a degree of
+    /// <paramref name="degrees"/> and consolidated there with <paramref name="optionsOf"/>: every segment of every object is
+    /// the same bytes on every copy. The jobs' results, of every degree.
+    /// </summary>
+    private static async Task<List<CompactionResult>> SameSegmentsAtDegreesAsync(
+        int[] degrees, Func<Random, string> service, Func<VortexSession, DatasetOptions> optionsOf)
+    {
         List<List<(string Path, byte[] Bytes)>> runs = [];
-        List<CompactionResult> sliced = [];
+        List<CompactionResult> jobs = [];
         await using MemoryObjectStore built = new MemoryObjectStore();
         {
             Random random = new Random(29);
             await using VortexDataset dataset = await VortexDataset.CreateAsync(built, Doc.Schema, OptionsOf(VortexSession.Default), Ct);
             for (int a = 0; a < 6; a++)
             {
-                Doc[] rows = [.. Enumerable.Range(a * 8_000, 8_000).Select(i => new Doc(random.Next(0, 2), $"svc-{random.Next(0, 60):D2}", i, Attributes(random)))];
+                Doc[] rows = [.. Enumerable.Range(a * 8_000, 8_000).Select(i => new Doc(random.Next(0, 2), service(random), i, Attributes(random)))];
                 await using ObjectDraft draft = dataset.StartObject();
                 await draft.Writer.WriteAsync<Doc>(rows, Ct);
                 await dataset.AppendAsync(draft, Ct);
@@ -136,9 +179,8 @@ public sealed partial class DatasetCompactionLanesTests
 
             int degree = degrees[run];
             await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
-            DatasetOptions options = sliceRows > 0 ? OptionsOf(session) with { SliceRows = sliceRows } : OptionsOf(session);
-            await using VortexDataset dataset = await VortexDataset.OpenAsync(copy, options, Ct);
-            sliced.AddRange(await dataset.ConsolidateAsync(Ct));
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(copy, optionsOf(session), Ct);
+            jobs.AddRange(await dataset.ConsolidateAsync(Ct));
             List<(string Path, byte[] Bytes)> segments = [];
             int index = 0;
             await foreach (PositionedObject positioned in dataset.ScanBuilder().ObjectsAsync(Ct))
@@ -168,12 +210,8 @@ public sealed partial class DatasetCompactionLanesTests
             }
         }
 
-        Assert.Equal(string.Empty, differ.ToString());
-        if (sliceRows > 0)
-        {
-            Assert.True(sliced.Max(static job => job.MergeSlices) >= 2, "no merge was cut in slices");
-            Assert.True(sliced.Sum(static job => job.MergeSlicesAhead) > 0, "no slice was merged ahead");
-        }
+        Assert.True(differ.Length == 0, "segments differ:\n" + differ);
+        return jobs;
     }
 
     private static async Task<(List<long> Objects, List<Doc> Rows, long Flown)> ConsolidateAsync(int lanes, int held = 0)

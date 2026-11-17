@@ -881,7 +881,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// Whether any batch has waited in the transit arena or with the small batches, which is what
     /// <see cref="PreferredBatchRows"/> exists to avoid.
     /// </summary>
-    internal bool Buffered => _transit is not null || _staging is not null || _flying is not null;
+    internal bool Buffered => _transit is not null || _staging is not null || _flying is not null || _line?.Flying == true;
 
     /// <summary>How many nodes wait in transit for their chunk.</summary>
     /// <remarks>Nothing in the library asks; the count exists for the tests of the small batches.</remarks>
@@ -2270,7 +2270,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         if (_staging is null)
         {
-            _staging = _landed ?? new Staging(TransitContexts.Rent(Account));
+            _staging = _landed ?? SpareStaging();
             _landed = null;
         }
 
@@ -2305,6 +2305,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private async ValueTask FlyAsync(CancellationToken cancellationToken)
     {
         Staging staging = _staging!;
+        if (UsesLine)
+        {
+            await FlyOnLineAsync(staging, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         LaneBudget? budget = _lanes > 1 ? _budget : null;
 
         // The block is assembled at once, a unit of the core that a pump runs while the block before it still goes through:
@@ -2344,8 +2350,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             throw;
         }
 
-        _sizedBytes = _sink.Position + Held(out _sizedRate);
-        _sized = true;
+        // The flight before landed: what the size reads of it recorded, and the size read as the flight FlightsAhead back
+        // landed, at any degree.
+        if (_sized && _flown > _landBase)
+        {
+            RecordLand(_flown - 1);
+        }
+
+        SizeAtFlight(NextFlight(staging.Bytes));
         if (budget is null || !budget.TryEnter(out long entered))
         {
             // No lane free: the block goes through on the merge's thread, and its staging takes the next rows.
@@ -2378,10 +2390,39 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             CancellationToken.None);
     }
 
+    /// <summary>
+    /// <see cref="FlyAsync"/> on the writer's line: the block admitted as the next flight and its assembly offered, then the
+    /// flights up to the one <see cref="FlightsAhead"/> back waited for, the entries ready run meanwhile, and the size read
+    /// as that one landed.
+    /// </summary>
+    private async ValueTask FlyOnLineAsync(Staging staging, CancellationToken cancellationToken)
+    {
+        FlightLine line = Line;
+        long flight = NextFlight(staging.Bytes);
+        _staging = null;
+        BatchesFlown++;
+        line.Admit(staging, flight);
+        (staging.Assembly ??= new AssemblyUnit(this, staging)).Offer(_core, Flow.Write);
+        await line.SettleAsync(flight - LandLag + 1, quietly: false, cancellationToken).ConfigureAwait(false);
+        SizeAtFlight(flight);
+    }
+
     /// <summary>The assembly of a staging's block, a unit of the core (<see cref="Assemble"/>).</summary>
     private sealed class AssemblyUnit(VortexFileWriter writer, Staging staging) : CoreUnit
     {
         protected override void Execute() => staging.Assembled = writer.Assemble(staging);
+
+        /// <summary>
+        /// On the line, the block's prologue may run, in order: told once the unit's result is set, since the flight may go
+        /// all the way through and its staging be staged and offered again before a pump that ran the unit leaves it.
+        /// </summary>
+        protected override void Ended()
+        {
+            if (staging.Flight is not null)
+            {
+                writer._line?.Assembled(staging);
+            }
+        }
     }
 
     /// <summary>
@@ -2390,6 +2431,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     internal async ValueTask LandAsync()
     {
+        if (_line is { } line)
+        {
+            // Every flight on the line, then the distinct values of the last one, which no flight after it attaches.
+            await line.SettleAsync(_flown, quietly: false, CancellationToken.None).ConfigureAwait(false);
+            FlushAttach();
+        }
+
         if (_flight is not { } flight)
         {
             return;
@@ -2413,6 +2461,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     internal async ValueTask SettleAsync()
     {
+        if (_line is { } line)
+        {
+            await line.SettleAsync(_flown, quietly: true, CancellationToken.None).ConfigureAwait(false);
+        }
+
         if (_flight is { } flight)
         {
             await flight.ContinueWith(static done => _ = done.Exception, TaskScheduler.Default).ConfigureAwait(false);
@@ -2494,6 +2547,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         /// <summary>The unit that assembles its block, kept from one block to the next.</summary>
         internal AssemblyUnit? Assembly;
+
+        /// <summary>The flight on the writer's line that sends its block through; null off the line.</summary>
+        internal Flight? Flight;
+
+        /// <summary>Whether its block on the line is assembled, under the line's lock.</summary>
+        internal bool Ready;
 
         // The parts' nodes in order, for their concatenation, kept from one block to the next.
         internal int[] Order = new int[256];

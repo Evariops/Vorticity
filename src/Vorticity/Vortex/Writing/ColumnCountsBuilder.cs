@@ -176,14 +176,23 @@ internal sealed class CountsPlan
     {
         foreach (WideColumn wide in Wide)
         {
-            ColumnSheetBuilder sheet = wide.Sheet;
-            bool settled = end || sheet.Rows - sheet.Nulls >= ColumnCountsBuilder.FirstCheck;
-            long valid = sheet.Rows - sheet.Nulls;
-            if (wide.Live && (!sheet.Counting || (settled && (sheet.Distinct <= ColumnCountsBuilder.WideValues || sheet.Distinct * 4L > valid))))
-            {
-                wide.Live = false;
-                sheet.StopHashing();
-            }
+            Settle(wide, end);
+        }
+    }
+
+    /// <summary>
+    /// <see cref="SettleWide"/> for the one wide column <paramref name="wide"/>, from its sheet alone: what the column's own
+    /// pose of a batch settles, the batch in, whatever the other columns are doing.
+    /// </summary>
+    internal static void Settle(WideColumn wide, bool end)
+    {
+        ColumnSheetBuilder sheet = wide.Sheet;
+        bool settled = end || sheet.Rows - sheet.Nulls >= ColumnCountsBuilder.FirstCheck;
+        long valid = sheet.Rows - sheet.Nulls;
+        if (wide.Live && (!sheet.Counting || (settled && (sheet.Distinct <= ColumnCountsBuilder.WideValues || sheet.Distinct * 4L > valid))))
+        {
+            wide.Live = false;
+            sheet.StopHashing();
         }
     }
 
