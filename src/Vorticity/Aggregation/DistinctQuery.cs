@@ -520,7 +520,9 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
             Emitter = _emitter,
         };
 
-        _pass = Task.Run(() => PassAsync(projection, spec, plan, token), token);
+        // The pass on a lane of the session's it holds, waited for holding none, its scan on the degree's other lanes: the
+        // reader awaits what it emits.
+        _pass = Execution.LaneWorkers.RunHeldAsync(projection.Host.Source.Session.Lanes, () => PassAsync(projection, spec, plan, token), token);
         return true;
     }
 

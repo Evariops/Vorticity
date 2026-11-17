@@ -4175,7 +4175,7 @@ internal static class AggregationEngine
         int readBytes = (int)Math.Clamp(room / 16 / ((2 * workers) + 1), SpillBuffer.PageOf(memory, workers + 1), 64L << 20);
         RunMerge merge = new RunMerge([.. runs], kind, plan, settled, inputs, source, memory, spill, bits, readBytes);
         plan.LastRun = (gathered with { MergeParts = merge.Parts }).Spilled(spill);
-        MergedParts delivery = new MergedParts(merge, builder, Math.Min(workers, merge.Parts), plan, memory, 0, merging, cancellationToken);
+        MergedParts delivery = new MergedParts(merge, builder, Math.Min(workers, merge.Parts), source.Session.Lanes, plan, memory, 0, merging, cancellationToken);
         (GroupKeys none, AggregateSlot[] noSlots) = merge.Empty();
         plan.LastGroups = 0;
         AggregationOutcome first = new AggregationOutcome(plan, noSlots, none, default) { Parts = delivery };
@@ -4588,7 +4588,7 @@ internal static class AggregationEngine
                     if (inputs[s] != AggregationPartition.Settled && Array.Exists(partitions, partition => partition.Slots[s].Spilled))
                     {
                         AggregateSlot[] lanes = Array.ConvertAll(partitions, partition => partition.Slots[s]);
-                        await biggest.Slots[s].MergeSpilledAsync(lanes, spill!, degree, memory, cancellationToken).ConfigureAwait(false);
+                        await biggest.Slots[s].MergeSpilledAsync(lanes, spill!, new Execution.Spread(source.Session.Core, degree), memory, cancellationToken).ConfigureAwait(false);
                     }
                 }
             }
@@ -4620,7 +4620,7 @@ internal static class AggregationEngine
 
             if (apart is not null)
             {
-                await MergePairedAsync(partitions, largest, maps!, apart, degree, memory, cancellationToken).ConfigureAwait(false);
+                await MergePairedAsync(partitions, largest, maps!, apart, new Execution.Spread(source.Session.Core, degree), memory, cancellationToken).ConfigureAwait(false);
             }
 
             return (biggest.Keys, biggest.Slots, partitions.Length - 1, 0, null, serial);
@@ -4636,7 +4636,7 @@ internal static class AggregationEngine
         }
 
         // What the partitions share is merged once: a composite's indexes of its columns.
-        await keysOf[0].RebaseAsync(keysOf, token).ConfigureAwait(false);
+        await keysOf[0].RebaseAsync(keysOf, source.Session.Core, degree, token).ConfigureAwait(false);
 
         biggest.Trim();
         long laneBytes = 0;
@@ -4670,14 +4670,11 @@ internal static class AggregationEngine
         int shift = 64 - BitOperations.Log2((uint)parts);
         Block<int>[] placed = new Block<int>[partitions.Length];
         Block<int>[] starts = new Block<int>[partitions.Length];
-        Task[] cutting = new Task[partitions.Length];
-        for (int p = 0; p < partitions.Length; p++)
-        {
-            int partition = p;
-            cutting[p] = Task.Run(() => (placed[partition], starts[partition]) = Cut(keysOf[partition], seed, shift, parts, byValue), token);
-        }
 
-        await GuardedAsync(cutting, failed).ConfigureAwait(false);
+        // Each partition cut on a lane of the session's, the caller's among them, the question's degree at most.
+        await Execution.CoreFor.RunAsync(
+            source.Session.Core, degree, partitions.Length,
+            partition => (placed[partition], starts[partition]) = Cut(keysOf[partition], seed, shift, parts, byValue), token).ConfigureAwait(false);
 
         // Each part merged from every partition, the parts taken from a queue. A part's groups are
         // reserved before they come (PartMerge.Merge); what a group costs, the lanes' tables tell.
@@ -4690,29 +4687,25 @@ internal static class AggregationEngine
             // tables and the places of their groups go once the last part is merged.
             (GroupKeys none, AggregateSlot[] noSlots) = merge.Empty();
             plan.LastRun = Gathered(partitions, Stopwatch.GetTimestamp() - started, parts, 0) with { MergeEntries = laneGroups };
-            MergedParts delivery = new MergedParts(merge, builder, Math.Clamp(degree - 1, 1, parts), plan, memory, cut, started, cancellationToken);
+            MergedParts delivery = new MergedParts(merge, builder, Math.Clamp(degree - 1, 1, parts), source.Session.Lanes, plan, memory, cut, started, cancellationToken);
             return (none, noSlots, parts, 0, delivery, laneGroups);
         }
 
         GroupKeys[] partKeys = new GroupKeys[parts];
         AggregateSlot[][] partSlots = new AggregateSlot[parts][];
-        Task[] workers = new Task[Math.Min(degree, parts)];
-        for (int w = 0; w < workers.Length; w++)
-        {
-            workers[w] = Task.Run(
-                () =>
-                {
-                    int part;
-                    while ((part = merge.Take()) < parts)
-                    {
-                        token.ThrowIfCancellationRequested();
-                        (partKeys[part], partSlots[part], _, _) = merge.Merge(part);
-                    }
-                },
-                token);
-        }
 
-        await GuardedAsync(workers, failed).ConfigureAwait(false);
+        // Each part merged by an item on a lane of the session's, the parts taken from the merge's queue in its order.
+        await Execution.CoreFor.RunAsync(
+            source.Session.Core, Math.Min(degree, parts), parts,
+            item =>
+            {
+                int part = merge.Take();
+                if (part < parts)
+                {
+                    (partKeys[part], partSlots[part], _, _) = merge.Merge(part);
+                }
+            },
+            token).ConfigureAwait(false);
         long merged = 0;
         for (int part = 0; part < parts; part++)
         {
@@ -4760,7 +4753,7 @@ internal static class AggregationEngine
     /// by its map onto the largest's, its keys merged before.
     /// </summary>
     private static async Task MergePairedAsync(
-        AggregationPartition[] partitions, int largest, int[][] maps, bool[] apart, int degree, QueryMemory memory, CancellationToken cancellationToken)
+        AggregationPartition[] partitions, int largest, int[][] maps, bool[] apart, Execution.Spread spread, QueryMemory memory, CancellationToken cancellationToken)
     {
         AggregationPartition biggest = partitions[largest];
         int groups = biggest.Keys?.Count ?? 1;
@@ -4786,6 +4779,7 @@ internal static class AggregationEngine
 
         // Four parts a worker: a worker that took one part too many waits a quarter of a part's time.
         // Measured at fourteen lanes, 64 parts against 16 took a count over 10^7 users from 200 to 176 ms.
+        int degree = spread.Degree;
         int parts = Math.Max(2, (int)BitOperations.RoundUpToPowerOf2((uint)(4 * degree)));
         for (int s = 0; s < apart.Length; s++)
         {
@@ -4800,7 +4794,7 @@ internal static class AggregationEngine
                 slots[p] = lanes[p].Slots[s];
             }
 
-            await ((IPairedSlot)slots[0]).MergeInPartsAsync(slots, ordered, groups, parts, degree, memory, cancellationToken).ConfigureAwait(false);
+            await ((IPairedSlot)slots[0]).MergeInPartsAsync(slots, ordered, groups, parts, spread, memory, cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -5371,69 +5365,84 @@ internal static class AggregationEngine
         ScanSpec lane = spec with { Options = spec.Options with { DegreeOfParallelism = 1, Prefetch = 0 }, ReadAhead = ReadAheadPool.Carry(shared, pool) };
         int[] next = [-1];
 
+        // The partitions that read: the first on the caller's flow, which is one of the degree, and each other on a lane of the
+        // session's it holds while it reads, as many as are free now. A question and a job together never compute past the
+        // session's degree: each partition ran on a task of the pool the degree did not count. A partition left without a lane
+        // reads nothing, and ends empty for the merge.
+        long[] entered = partitions.Length > 1 ? Execution.LaneWorkers.Take(source.Session.Lanes, partitions.Length - 1) : [];
+        int running = 1 + entered.Length;
+
         // The ranges the fan's first ranges took, each its lane's before any lane starts, which the queue
         // passes over: a lane that started first would take another's from the queue. Null without a fan.
         int[]? taken = fan ? new int[ranges.Length] : null;
-        for (int p = 0; taken is not null && p < partitions.Length; p++)
+        for (int p = 0; taken is not null && p < running; p++)
         {
-            taken[(int)((long)p * ranges.Length / partitions.Length)] = 1;
+            taken[(int)((long)p * ranges.Length / running)] = 1;
         }
 
-        Task[] lanes = new Task[partitions.Length];
-        for (int p = 0; p < partitions.Length; p++)
+        async Task ReadAsync(int p)
         {
             AggregationPartition partition = partitions[p];
-            int first = (int)((long)p * ranges.Length / partitions.Length);
-            lanes[p] = Task.Run(
-                async () =>
+            try
+            {
+                if (taken is not null && p < running)
                 {
-                    try
+                    int first = (int)((long)p * ranges.Length / running);
+                    partition.Piece = first;
+                    await RunPartitionAsync(source, lane with { Rows = ranges[first] }, metrics, partition, token).ConfigureAwait(false);
+                }
+
+                // A lane that retired under pressure takes no more ranges past its own, the others
+                // taking them with the memory its table gave back.
+                int at;
+                while (p < running && !partition.Retiring && (at = Interlocked.Increment(ref next[0])) < ranges.Length)
+                {
+                    if (taken is not null && Interlocked.Exchange(ref taken[at], 1) != 0)
                     {
-                        if (taken is not null)
-                        {
-                            partition.Piece = first;
-                            await RunPartitionAsync(source, lane with { Rows = ranges[first] }, metrics, partition, token).ConfigureAwait(false);
-                        }
-
-                        // A lane that retired under pressure takes no more ranges past its own, the others
-                        // taking them with the memory its table gave back.
-                        int at;
-                        while (!partition.Retiring && (at = Interlocked.Increment(ref next[0])) < ranges.Length)
-                        {
-                            if (taken is not null && Interlocked.Exchange(ref taken[at], 1) != 0)
-                            {
-                                continue;
-                            }
-
-                            if (settling is not null)
-                            {
-                                partition.Settle(settling, ranges[at]);
-                            }
-
-                            partition.Piece = at;
-                            await RunPartitionAsync(source, lane with { Rows = ranges[at] }, metrics, partition, token).ConfigureAwait(false);
-                        }
-
-                        pool?.Finished(shared);
-                        partition.DropUnmet();
-                        if (partition.Retiring)
-                        {
-                            await partition.RetireAsync(token).ConfigureAwait(false);
-                        }
-
-                        await partition.EndedAsync(token).ConfigureAwait(false);
-                        partition.FoldsNoMore();
+                        continue;
                     }
-                    catch
+
+                    if (settling is not null)
                     {
-                        // One lane's failure stops the others rather than letting them read to the end.
-                        await failed.CancelAsync().ConfigureAwait(false);
-                        throw;
+                        partition.Settle(settling, ranges[at]);
                     }
-                },
-                token);
+
+                    partition.Piece = at;
+                    await RunPartitionAsync(source, lane with { Rows = ranges[at] }, metrics, partition, token).ConfigureAwait(false);
+                }
+
+                pool?.Finished(shared);
+                partition.DropUnmet();
+                if (partition.Retiring)
+                {
+                    await partition.RetireAsync(token).ConfigureAwait(false);
+                }
+
+                await partition.EndedAsync(token).ConfigureAwait(false);
+                partition.FoldsNoMore();
+            }
+            catch
+            {
+                // One lane's failure stops the others rather than letting them read to the end.
+                await failed.CancelAsync().ConfigureAwait(false);
+                throw;
+            }
         }
 
+        // The partitions left without a lane end first, empty, on the caller.
+        for (int p = running; p < partitions.Length; p++)
+        {
+            await ReadAsync(p).ConfigureAwait(false);
+        }
+
+        Task[] lanes = new Task[running];
+        for (int p = 1; p < running; p++)
+        {
+            int partition = p;
+            lanes[p] = Execution.LaneWorkers.RunOnAsync(source.Session.Lanes, entered[p - 1], () => ReadAsync(partition));
+        }
+
+        lanes[0] = ReadAsync(0);
         await Task.WhenAll(lanes).ConfigureAwait(false);
     }
 }

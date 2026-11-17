@@ -231,13 +231,17 @@ internal static class GrowthReads
 
         try
         {
-            Task<bool>[] tasks = new Task<bool>[lanes];
-            for (int l = 0; l < lanes; l++)
+            // Lane 0 on the caller's flow, each other on a lane of the session's it holds, as many as are free; a lane left
+            // without one is read on the caller after its own.
+            long[] entered = lanes > 1 ? Execution.LaneWorkers.Take(source.Session.Lanes, lanes - 1) : [];
+            Task[] tasks = new Task[1 + entered.Length];
+            for (int l = 1; l <= entered.Length; l++)
             {
                 Lane lane = read[l];
-                tasks[l] = lanes == 1 ? lane.ReadAsync(cancellationToken).AsTask() : Task.Run(() => lane.ReadAsync(cancellationToken).AsTask(), cancellationToken);
+                tasks[l] = Execution.LaneWorkers.RunOnAsync(source.Session.Lanes, entered[l - 1], () => lane.ReadAsync(cancellationToken).AsTask());
             }
 
+            tasks[0] = ReadLeftAsync(read, entered.Length, cancellationToken);
             await Task.WhenAll(tasks).ConfigureAwait(false);
             long done = 0;
             bool all = true;
@@ -278,6 +282,16 @@ internal static class GrowthReads
         ScanCounters Metrics, ScanSpec Pass);
 
     /// <summary>A lane of a read again: a stretch of the ranges, read in order, its keys numbered in a table of its own.</summary>
+    /// <summary>Reads lane 0 on the caller's flow, then each lane past <paramref name="started"/> that found no lane of the session's free, one after another.</summary>
+    private static async Task ReadLeftAsync(Lane[] read, int started, CancellationToken cancellationToken)
+    {
+        await read[0].ReadAsync(cancellationToken).ConfigureAwait(false);
+        for (int l = started + 1; l < read.Length; l++)
+        {
+            await read[l].ReadAsync(cancellationToken).ConfigureAwait(false);
+        }
+    }
+
     private sealed class Lane(Reading reading, GrowthPoints points, List<RowRange> ranges)
     {
         private readonly FilterMasks? _masks = reading.Filter >= 0 ? new FilterMasks(reading.Plan.Filters) : null;

@@ -942,11 +942,11 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         _parts[component].CompareKeys(Id(_keys[a], component), Id(((PackedKeys<TKey>)other)._keys[b], component), 0);
 
     /// <summary>
-    /// The indexes of the columns of every partition merged into this one's, a task per column, then
-    /// each partition's words rewritten with their numbers there, a task per partition: the indexes
-    /// are merged once, not once per part of the merge.
+    /// The indexes of the columns of every partition merged into this one's, an item per column, then
+    /// each partition's words rewritten with their numbers there, an item per partition, on lanes of the
+    /// session's: the indexes are merged once, not once per part of the merge.
     /// </summary>
-    internal override async Task RebaseAsync(GroupKeys[] partitions, CancellationToken cancellationToken)
+    internal override async Task RebaseAsync(GroupKeys[] partitions, Execution.FlowCore core, int lanes, CancellationToken cancellationToken)
     {
         _lentParts = true;
         int[][][] maps = new int[partitions.Length][][];
@@ -955,34 +955,24 @@ internal sealed class PackedKeys<TKey> : GroupKeys
             maps[l] = new int[_parts.Length][];
         }
 
-        Task[] columns = new Task[_parts.Length];
-        for (int p = 0; p < _parts.Length; p++)
-        {
-            int part = p;
-            columns[p] = Task.Run(
-                () =>
+        await Execution.CoreFor.RunAsync(
+            core, lanes, _parts.Length,
+            part =>
+            {
+                for (int l = 1; l < partitions.Length; l++)
                 {
-                    for (int l = 1; l < partitions.Length; l++)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        GroupKeys from = ((PackedKeys<TKey>)partitions[l])._parts[part];
-                        maps[l][part] = new int[from.Count];
-                        from.MergeInto(_parts[part], maps[l][part]);
-                    }
-                },
-                cancellationToken);
-        }
+                    cancellationToken.ThrowIfCancellationRequested();
+                    GroupKeys from = ((PackedKeys<TKey>)partitions[l])._parts[part];
+                    maps[l][part] = new int[from.Count];
+                    from.MergeInto(_parts[part], maps[l][part]);
+                }
+            },
+            cancellationToken).ConfigureAwait(false);
 
-        await Task.WhenAll(columns).ConfigureAwait(false);
-        Task[] rewrites = new Task[partitions.Length - 1];
-        for (int l = 1; l < partitions.Length; l++)
-        {
-            PackedKeys<TKey> lane = (PackedKeys<TKey>)partitions[l];
-            int[][] laneMaps = maps[l];
-            rewrites[l - 1] = Task.Run(() => lane.Rewrite(laneMaps, _parts), cancellationToken);
-        }
-
-        await Task.WhenAll(rewrites).ConfigureAwait(false);
+        await Execution.CoreFor.RunAsync(
+            core, lanes, partitions.Length - 1,
+            item => ((PackedKeys<TKey>)partitions[item + 1]).Rewrite(maps[item + 1], _parts),
+            cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Every word with each part's number taken through <paramref name="maps"/>, and the indexes of the columns those numbers are in.</summary>

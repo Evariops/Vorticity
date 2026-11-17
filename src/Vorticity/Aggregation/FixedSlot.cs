@@ -984,7 +984,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     /// <summary>The pairs held; none for a slot of sets by group, which merges in series, group by group, as a streaming group by's ranges follow one another.</summary>
     public long Pairs => _set?.Count ?? (_sets is not null ? 0 : _pairs.Count);
 
-    public async Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken)
+    public async Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, Execution.Spread degree, QueryMemory? memory, CancellationToken cancellationToken)
     {
         if (_set is not null)
         {
@@ -1117,7 +1117,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     /// top bits of their hash: a run of homes, which a part's worker walks in every lane's slots, in
     /// order, with nothing placed or cut before.
     /// </summary>
-    private async Task MergeSetsInPartsAsync(AggregateSlot[] slots, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken)
+    private async Task MergeSetsInPartsAsync(AggregateSlot[] slots, int parts, Execution.Spread degree, QueryMemory? memory, CancellationToken cancellationToken)
     {
         DistinctValues<TValue>[] all = new DistinctValues<TValue>[slots.Length];
         bool zero = false;
@@ -1345,7 +1345,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
     /// its own, sized by what its sections count, which never doubles; as many parts as make one a
     /// quarter of the room the budget leaves at most, as many at once as half that room holds.
     /// </summary>
-    internal override async Task MergeSpilledAsync(AggregateSlot[] lanes, SpillScope scope, int degree, QueryMemory memory, CancellationToken cancellationToken)
+    internal override async Task MergeSpilledAsync(AggregateSlot[] lanes, SpillScope scope, Execution.Spread spread, QueryMemory memory, CancellationToken cancellationToken)
     {
         List<SpillRun> runs = [];
         bool zero = false;
@@ -1378,6 +1378,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         }
 
         int parts = 1 << bits;
+        int degree = spread.Degree;
         long share = DistinctValues<TValue>.FootprintOf((int)Math.Min(total >> bits, int.MaxValue / 4)) + SpillBuffer.PageOf(memory, degree);
         int workers = (int)Math.Clamp(room / 2 / Math.Max(1, share), 1, Math.Max(1, degree));
         long[] counts = new long[parts];
@@ -1423,7 +1424,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
                     memory.LetGo(bytes);
                 }
             },
-            workers,
+            spread with { Degree = workers },
             cancellationToken).ConfigureAwait(false);
 
         // The value of zero bits, which no section holds, once.

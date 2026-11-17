@@ -358,9 +358,10 @@ internal abstract class GroupKeys
     /// <summary>
     /// Readies the indexes of a parallel merge's partitions, this one the first of them, for their
     /// hashes and their merge in parts: what they share is merged once, a composite's indexes of its
-    /// columns, so that a key has the same words in every partition. Nothing for a key of one column.
+    /// columns, so that a key has the same words in every partition. Nothing for a key of one column. The work spreads over
+    /// <paramref name="lanes"/> lanes of <paramref name="core"/> at most, the caller's included.
     /// </summary>
-    internal virtual Task RebaseAsync(GroupKeys[] partitions, CancellationToken cancellationToken) => Task.CompletedTask;
+    internal virtual Task RebaseAsync(GroupKeys[] partitions, Execution.FlowCore core, int lanes, CancellationToken cancellationToken) => Task.CompletedTask;
 
     /// <summary>
     /// Group <paramref name="a"/> here and group <paramref name="b"/> of <paramref name="other"/>, an

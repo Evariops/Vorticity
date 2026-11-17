@@ -32,12 +32,14 @@ public sealed partial class ParallelLaunchTests
     /// commit; a file that reaches zero leaves the table.
     /// </summary>
     /// <remarks>
-    /// On a compaction job's path: the plan's step that removes each. <c>DatasetCompactor.Ranges.cs</c>, the ranges' lanes
-    /// (C2, once C3). <c>SlicedMerge.cs</c>, the slices merged ahead on lanes free, each an async flow of its own until a
+    /// On a compaction job's path: the plan's step that removes each. <c>DatasetCompactor.Ranges.cs</c>, a piece's ranges'
+    /// lanes (C2). <c>SlicedMerge.cs</c>, the slices merged ahead on lanes free, each an async flow of its own until a
     /// slice is a unit of the core. <c>DatasetCompactor.cs</c>, the inputs opened side by side and the census's lanes (B2, C5).
-    /// <c>VortexFileWriter.cs</c>, the flight of a staged block (B4a). <c>KeyIndexBuilder.cs</c>,
+    /// <c>VortexFileWriter.cs</c>, the flight of a block a writer sends through alone (B4a). <c>KeyIndexBuilder.cs</c>,
     /// the sort of a spilled bucket ahead (B5). <c>BatchAsyncEnumerable.cs</c>, a split's decode on a lane it takes (C1).
-    /// The questions' starts go with D1, a part's with D2.
+    /// A question's aggregations run on the core (D1): their synchronous items as items of a piece of the core
+    /// (<c>Execution.CoreFor</c>), their workers that wait as they go on lanes of the session's they hold
+    /// (<c>Execution.LaneWorkers</c>). The dataset's questions' starts go with D1 too, a part's with D2.
     /// </remarks>
     private static readonly Dictionary<string, int> Ceilings = new(StringComparer.Ordinal)
     {
@@ -51,16 +53,6 @@ public sealed partial class ParallelLaunchTests
         ["Vorticity.Dataset/LevelZeroMemo.cs"] = 1,
         ["Vorticity.Dataset/ObjectCache.cs"] = 1,
         ["Vorticity.Dataset/SlicedMerge.cs"] = 2,
-        ["Vorticity/Aggregation/AggregationEngine.cs"] = 3,
-        ["Vorticity/Aggregation/AggregationEstimates.cs"] = 1,
-        ["Vorticity/Aggregation/DistinctQuery.cs"] = 1,
-        ["Vorticity/Aggregation/GroupBatches.cs"] = 1,
-        ["Vorticity/Aggregation/GroupCore.cs"] = 3,
-        ["Vorticity/Aggregation/GrowthReads.cs"] = 1,
-        ["Vorticity/Aggregation/MergedParts.cs"] = 1,
-        ["Vorticity/Aggregation/PackedKeys.cs"] = 2,
-        ["Vorticity/Aggregation/Slots.cs"] = 2,
-        ["Vorticity/Aggregation/StreamingGroups.cs"] = 1,
         ["Vorticity/Buffers/HeldMemory.cs"] = 1,
         ["Vorticity/IO/LocalFileSource.cs"] = 1,
         ["Vorticity/Parquet/Codecs/PageLanes.cs"] = 1,

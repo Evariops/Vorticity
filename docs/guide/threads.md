@@ -161,7 +161,10 @@ ScanOptions four = new ScanOptions { DegreeOfParallelism = 4 };   // 0, the defa
 ```
 
 The session's degree is the number of cores its work takes beside its callers' own threads, all of it
-together: the writers' helpers, the scans' decodes ahead of their loops, and the compaction jobs. Your
+together: the writers' helpers, the scans' decodes ahead of their loops, an aggregation's lanes and its
+merge, and the compaction jobs. An aggregation's lane past the first, which runs on your thread, starts
+only on a lane of the session's that is free, and holds it until it ends: a group by and a job run
+together never take more cores than the degree beside your thread. Your
 thread is one of a scan's degree: a scan at 4 decodes on three pool threads at most beside your loop.
 A compaction job has no caller, and holds one of the session's lanes for its own flow, its reads'
 decodes and its writer's helpers taking the others: at a degree of 8, a maintainer's jobs compute on

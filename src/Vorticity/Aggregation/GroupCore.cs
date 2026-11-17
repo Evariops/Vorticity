@@ -919,8 +919,9 @@ internal sealed partial class GroupCore
     {
         using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         CancellationToken token = failed.Token;
-        await CloseAsync(lanes, failed).ConfigureAwait(false);
+        await CloseAsync(Core, lanes, failed).ConfigureAwait(false);
 
+        // The parts applied by the caller and by workers beside it, each on a lane of the session's it holds.
         int[] queue = [-1];
         int workers = Math.Clamp(degree, 1, PartCount);
         if (workers == 1)
@@ -929,13 +930,7 @@ internal sealed partial class GroupCore
         }
         else
         {
-            Task[] applying = new Task[workers];
-            for (int w = 0; w < workers; w++)
-            {
-                applying[w] = Task.Run(() => ApplyPartsAsync(queue, token).AsTask(), token);
-            }
-
-            await AggregationEngine.GuardedAsync(applying, failed).ConfigureAwait(false);
+            await Execution.LaneWorkers.RunAsync(Core.Lanes, workers, _ => ApplyPartsAsync(queue, token).AsTask(), failed).ConfigureAwait(false);
         }
 
         long bytes = (Interlocked.Read(ref _batches) * _batchWords * sizeof(ulong)) + MergeNulls(lanes);
@@ -1022,23 +1017,11 @@ internal sealed partial class GroupCore
     internal long PeakGroups => Volatile.Read(ref _peakGroups);
 
     /// <summary>Every lane's cache and open batches deposited, the lanes side by side, for the end to apply.</summary>
-    private static async ValueTask CloseAsync(AggregationPartition[] lanes, CancellationTokenSource failed)
-    {
-        if (lanes.Length == 1)
-        {
-            lanes[0].Core!.Close(lanes[0]);
-            return;
-        }
+    private static ValueTask CloseAsync(Execution.FlowCore core, AggregationPartition[] lanes, CancellationTokenSource failed) =>
+        Execution.CoreFor.RunAsync(core, lanes.Length, lanes.Length, l => lanes[l].Core!.Close(lanes[l]), failed.Token);
 
-        Task[] closing = new Task[lanes.Length];
-        for (int l = 0; l < lanes.Length; l++)
-        {
-            AggregationPartition lane = lanes[l];
-            closing[l] = Task.Run(() => lane.Core!.Close(lane), failed.Token);
-        }
-
-        await AggregationEngine.GuardedAsync(closing, failed).ConfigureAwait(false);
-    }
+    /// <summary>The session's core, whose lanes the end of the pass spreads over; the process's for a core of no source.</summary>
+    private Execution.FlowCore Core => _source?.Session.Core ?? Execution.FlowCore.Process;
 
     /// <summary>
     /// A lane's cache, and the partition it bypasses it with, keep their null group, which no batch
@@ -1075,7 +1058,7 @@ internal sealed partial class GroupCore
         CancellationTokenSource stopping = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         try
         {
-            await CloseAsync(lanes, stopping).ConfigureAwait(false);
+            await CloseAsync(Core, lanes, stopping).ConfigureAwait(false);
         }
         catch
         {
@@ -1092,12 +1075,9 @@ internal sealed partial class GroupCore
         Channel<PartResult> built = Channel.CreateBounded<PartResult>(new BoundedChannelOptions(Math.Max(1, workers)) { SingleReader = true });
         int[] queue = [-1];
         CancellationToken token = stopping.Token;
-        Task[] applying = new Task[workers];
-        for (int w = 0; w < workers; w++)
-        {
-            applying[w] = Task.Run(() => PublishPartsAsync(queue, built.Writer, builder, token).AsTask(), token);
-        }
 
+        // Each worker on a lane of the session's it holds, as many as are free: the reader builds the parts none took.
+        Task[] applying = Execution.LaneWorkers.Start(Core.Lanes, workers, _ => PublishPartsAsync(queue, built.Writer, builder, token).AsTask());
         _ = CompleteAsync(applying, built.Writer, stopping);
         return new CoreParts(this, built.Reader, queue, stopping, plan, builder, nulls);
     }
