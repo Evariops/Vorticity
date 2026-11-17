@@ -146,8 +146,14 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         ReadOnlySpan<int> ids = _sheet.RowIds;
         _values &= !ids.IsEmpty;
         _measured = _measured && (_own is not null || _plan.Measures[_measure].Live);
-        _granuleNulls += Nulls(arena, nodeIndex, start, count);
-        if (_values)
+        long nulls = Nulls(arena, nodeIndex, start, count);
+        _granuleNulls += nulls;
+        if (_values && nulls * 2 > count && ValidityMask.OneBitmap(arena, nodeIndex, out ReadOnlySpan<byte> bits, out int bitOffset))
+        {
+            // Most rows hold no value, a shredded key's: the rows that do, found a word of the bitmap at a time.
+            CountValid(ids[..count], bits, bitOffset + start);
+        }
+        else if (_values)
         {
             Count(ids[..count]);
         }
@@ -171,17 +177,25 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     /// The nulls among rows <c>[start, start + count)</c> of the batch's column node <paramref name="nodeIndex"/>: by its
     /// validity and that of the extension around it, as the sheet reads them.
     /// </summary>
+    /// <remarks>
+    /// A bitmap is counted eight bytes at a time (<see cref="BitmapKernels.CountSet"/>) when the other validity holds every
+    /// row, as it does for any column but an extension, whose two are the same. Tested a row at a time, the nulls of the
+    /// hundreds of shredded keys of a log's attributes, absent from most rows, made this builder the first of a tier merge's
+    /// profile at degree 14, 11.2 % of its samples (2026-11-17).
+    /// </remarks>
     private static long Nulls(CanonicalArena arena, int nodeIndex, int start, int count)
     {
         CanonicalNode outer = arena.GetNode(nodeIndex);
         CanonicalNode node = outer;
+        bool extension = false;
         while (node.Kind == CanonicalKind.Extension)
         {
             node = arena.GetNode(node.StorageIndex);
+            extension = true;
         }
 
         ValidityMask own = ValidityMask.From(arena, node.Validity);
-        ValidityMask wrapper = ValidityMask.From(arena, outer.Validity);
+        ValidityMask wrapper = extension ? ValidityMask.From(arena, outer.Validity) : own;
         if (own.AllInvalid || wrapper.AllInvalid)
         {
             return count;
@@ -190,6 +204,16 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         if (own.AllValid && wrapper.AllValid)
         {
             return 0;
+        }
+
+        if (!extension || wrapper.AllValid)
+        {
+            return count - BitmapKernels.CountSet(own.Bits, own.BitOffset + start, count);
+        }
+
+        if (own.AllValid)
+        {
+            return count - BitmapKernels.CountSet(wrapper.Bits, wrapper.BitOffset + start, count);
         }
 
         long nulls = 0;
@@ -233,6 +257,23 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
             }
 
             rowsOf[id]++;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="Count"/> over the rows <paramref name="bits"/> says hold a value, from bit <paramref name="bitOffset"/>,
+    /// sixty-four rows a word: the rows without one, most of a shredded key's, skipped a word at a time.
+    /// </summary>
+    private void CountValid(ReadOnlySpan<int> ids, ReadOnlySpan<byte> bits, int bitOffset)
+    {
+        for (int at = 0; at < ids.Length; at += 64)
+        {
+            ulong word = BitmapKernels.Word(bits, bitOffset + at, Math.Min(64, ids.Length - at));
+            while (word != 0)
+            {
+                Count(ids.Slice(at + BitOperations.TrailingZeroCount(word), 1));
+                word &= word - 1;
+            }
         }
     }
 

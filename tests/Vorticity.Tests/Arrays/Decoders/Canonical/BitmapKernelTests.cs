@@ -55,6 +55,26 @@ public sealed class BitmapKernelTests
         }
     }
 
+    /// <summary>A word of up to 64 bits from any bit holds those bits, the first lowest, at every start up to the bitmap's end.</summary>
+    [Fact]
+    public void WordHoldsTheBitsFromItsStart()
+    {
+        byte[] bits = Pattern(20, 11);
+        for (int start = 0; start < bits.Length * 8; start++)
+        {
+            for (int count = 1; count <= 64 && start + count <= bits.Length * 8; count++)
+            {
+                ulong expected = 0;
+                for (int i = 0; i < count; i++)
+                {
+                    expected |= BitAt(bits, start + i) ? 1UL << i : 0;
+                }
+
+                Assert.Equal(expected, BitmapKernels.Word(bits, start, count));
+            }
+        }
+    }
+
     [Fact]
     public void CountSetCountsLongBitmapsAsTheirWordsDo()
     {
