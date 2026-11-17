@@ -426,9 +426,10 @@ internal static class BacklogBench
 
     /// <summary>
     /// What the jobs wrote, byte for byte: each data object of the dataset's last version read through the dataset's own
-    /// store, decrypted, in frames of 4 MiB, each frame hashed and the frames' hashes hashed in turn; the objects' hashes
-    /// added and xored, since their keys change from one run to the next and the walk's order with them. Two runs that wrote
-    /// the same bytes print the same line, in a fraction of the time the rows' digest takes.
+    /// store, decrypted, and the segments its footer lists hashed one after another, the footer left out, since it holds the
+    /// object's identity, drawn afresh at each write; the objects' hashes added and xored, since their keys change from one
+    /// run to the next and the walk's order with them. Two runs that wrote the same bytes print the same line, in a fraction
+    /// of the time the rows' digest takes. The bytes counted are the objects', footers included.
     /// </summary>
     private static async Task<string> BytesDigestAsync(VortexDataset dataset)
     {
@@ -436,32 +437,35 @@ internal static class BacklogBench
         ulong xor = 0;
         long total = 0;
         int objects = 0;
-        byte[] frame = new byte[4 << 20];
+        string copy = Path.Combine(Path.GetTempPath(), $"vorticity-digest-{Environment.ProcessId}.vortex");
         await foreach (DataObject entry in dataset.ListObjectsAsync())
         {
-            ulong running = 0;
-            long offset = 0;
-            while (true)
+            // Copied to a file as the store holds it, and opened in the dataset's session, whose keyring opens a sealed object:
+            // its segments are read decrypted, a segment at a time.
+            long length;
+            await using (FileStream file = new FileStream(copy, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20, FileOptions.Asynchronous))
             {
-                ObjectRead read = await dataset.Store.ReadAsync(entry.Key, offset, frame, null, CancellationToken.None);
-                if (read.BytesRead == 0)
-                {
-                    break;
-                }
+                length = await dataset.Store.CopyToAsync(entry.Key, 0, long.MaxValue, file, null, CancellationToken.None);
+            }
 
-                running = (running * 0x9E3779B97F4A7C15UL) ^ Vorticity.Aggregating.CardinalitySlot.Hash(frame.AsSpan(0, read.BytesRead));
-                offset += read.BytesRead;
-                if (offset >= read.ObjectLength)
+            ulong running = 0;
+            await using (VortexFile file = await dataset.Session.OpenAsync(copy))
+            {
+                ISegmentReader reader = file;
+                foreach (VortexSegment segment in file.SegmentMap)
                 {
-                    break;
+                    using SegmentOwner owner = await reader.ReadRangeAsync((long)segment.Offset, (int)segment.Length, 1, CancellationToken.None);
+                    running = (running * 0x9E3779B97F4A7C15UL) ^ Vorticity.Aggregating.CardinalitySlot.Hash(owner.Buffer.Span);
                 }
             }
 
             sum += running;
             xor ^= running;
-            total += offset;
+            total += length;
             objects++;
         }
+
+        System.IO.File.Delete(copy);
 
         return string.Create(CultureInfo.InvariantCulture, $"bytes: {objects} objects, {total:N0} bytes, sum {sum:x16}, xor {xor:x16}");
     }
