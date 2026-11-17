@@ -318,27 +318,28 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     /// <summary>Folds the measure's values of the batch's rows <c>[start, start + count)</c> into the open granule's record.</summary>
     private void Fold(int start, int count)
     {
-        // A batch whose values are all null leaves the plan's arrays as they were, perhaps shorter, and holds no value.
-        CountedMeasure measure = _plan.Measures[_measure];
-        if ((measure.Kind == MeasureKind.Float ? measure.Floats.Length : measure.Integers.Length) < start + count)
+        // A batch whose values are all null leaves the batch's arrays as they were, perhaps shorter, and holds no value.
+        MeasureKind kind = _plan.Measures[_measure].Kind;
+        MeasureRows measure = Counted?.Measure(_measure) ?? throw new InvalidOperationException("The statistics were fed a batch without its counted rows.");
+        if ((kind == MeasureKind.Float ? measure.Floats.Length : measure.Integers.Length) < start + count)
         {
             return;
         }
 
-        ReadOnlySpan<byte> valid = measure.Valid is { } flags ? flags.AsSpan(start, count) : default;
+        ReadOnlySpan<byte> valid = measure.ValidOf(start, count);
         ref long state = ref MemoryMarshal.GetArrayDataReference(_state);
-        if (measure.Kind == MeasureKind.Float)
+        if (kind == MeasureKind.Float)
         {
             ColumnCountsBuilder.FoldFloats(ref state, Zeros(count), measure.Splits.AsSpan(start, count), measure.Floats.AsSpan(start, count), valid);
         }
         else
         {
-            ColumnCountsBuilder.Reduce(ref state, measure.Integers.AsSpan(start, count), valid, measure.Kind == MeasureKind.Signed);
+            ColumnCountsBuilder.Reduce(ref state, measure.Integers.AsSpan(start, count), valid, kind == MeasureKind.Signed);
         }
 
         if (_histogram is { } histogram)
         {
-            Sketch(histogram, measure, start, count, valid);
+            Sketch(histogram, kind, measure, start, count, valid);
         }
     }
 
@@ -346,7 +347,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     /// Adds the measure's values of the rows <c>[start, start + count)</c>, those <paramref name="valid"/> keeps, to the
     /// granule's histogram, each run of valid rows in one call: every row at once when none is null.
     /// </summary>
-    private static void Sketch(QuantileSketch histogram, CountedMeasure measure, int start, int count, ReadOnlySpan<byte> valid)
+    private static void Sketch(QuantileSketch histogram, MeasureKind kind, MeasureRows measure, int start, int count, ReadOnlySpan<byte> valid)
     {
         int from = 0;
         while (from < count)
@@ -365,7 +366,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
                 to = run < 0 ? count : from + run;
             }
 
-            switch (measure.Kind)
+            switch (kind)
             {
                 case MeasureKind.Float:
                     histogram.AddAll<double>(measure.Floats.AsSpan(start + from, to - from));

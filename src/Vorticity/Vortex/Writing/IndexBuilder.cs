@@ -49,6 +49,13 @@ internal abstract class IndexBuilder : IDisposable
     /// <summary>What the builder has built but still holds unqueued.</summary>
     protected virtual long OpenBytes => 0;
 
+    /// <summary>
+    /// What the batch being fed holds beside the column, which the counts, the statistics over the granules and a wide
+    /// column's sheet read or write (<see cref="CountedRows"/>): handed over by the writer before it feeds the builder the
+    /// batch, the batch's own. Null for a file that keeps no counts.
+    /// </summary>
+    internal CountedRows? Counted { get; set; }
+
     /// <summary>Feeds rows <c>[start, start + count)</c> of the column's node.</summary>
     internal abstract void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count);
 

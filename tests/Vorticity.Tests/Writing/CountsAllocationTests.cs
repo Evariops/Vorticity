@@ -61,6 +61,8 @@ public sealed class CountsAllocationTests
             }
         }
 
+        // The batches' measures, read into rows the batches share here, as a writer's batches one after another do.
+        using CountedRows batch = new CountedRows();
         for (int warm = 0; warm < 3; warm++)
         {
             Assert.Equal(Values, Feed(arenas.Length));
@@ -78,10 +80,10 @@ public sealed class CountsAllocationTests
         int Feed(int parts)
         {
             ColumnSheetBuilder sheet = new ColumnSheetBuilder();
-            ColumnCountsBuilder counts = new ColumnCountsBuilder(sheet, plan, field: 0, TestAccount.Shared);
+            ColumnCountsBuilder counts = new ColumnCountsBuilder(sheet, plan, field: 0, TestAccount.Shared) { Counted = batch };
             for (int part = 0; part < parts; part++)
             {
-                plan.Prepare(arenas[part], nodes[part], Part);
+                plan.Prepare(batch, arenas[part], nodes[part], Part);
                 sheet.Accumulate(arenas[part], nodes[part][0], 0, Part);
                 counts.Accumulate(arenas[part], nodes[part][0], 0, Part);
             }

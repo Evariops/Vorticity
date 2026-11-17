@@ -96,11 +96,15 @@ public sealed class CountsRegistersTests
         plan.RowBound = rowBound;
         ColumnSheetBuilder service = new ColumnSheetBuilder();
         ColumnSheetBuilder host = new ColumnSheetBuilder();
-        service.HashRows();
-        host.HashRows();
+        service.HashRows(0);
+        host.HashRows(1);
         plan.Wide.Add(new WideColumn(0, service));
         plan.Wide.Add(new WideColumn(1, host));
         ColumnCountsBuilder counts = new ColumnCountsBuilder(service, plan, field: 0, TestAccount.Shared);
+        using CountedRows counted = new CountedRows();
+        service.Counted = counted;
+        host.Counted = counted;
+        counts.Counted = counted;
         DType utf8 = types.Utf8(Nullability.NonNullable);
         DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
         long most = 0;
@@ -117,7 +121,7 @@ public sealed class CountsRegistersTests
                     Strings(arena, utf8, start, count, row => $"host-{row % 2_000}"),
                     Integers(arena, i64, start, count),
                 ];
-                plan.Prepare(arena, nodes, count);
+                plan.Prepare(counted, arena, nodes, count);
                 service.Accumulate(arena, nodes[0], 0, count);
                 host.Accumulate(arena, nodes[1], 0, count);
                 counts.Accumulate(arena, nodes[0], 0, count);

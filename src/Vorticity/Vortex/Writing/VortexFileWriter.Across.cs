@@ -281,6 +281,9 @@ public sealed partial class VortexFileWriter
         CoreBatch fan = Fan!;
         try
         {
+            // The counts read the chunk's measures, read once for every column, as an ingest does (IngestAsync).
+            _indexes?.PrepareCounts(Counted, arena, _fieldNodes, rows);
+
             // A column's frames compressed ahead are items before every accumulator, and its compression waits for them too.
             int ahead = columns.PlanAhead(arena, _fieldNodes, withColumns: false);
             Span<int> items = fan.Items(ahead + (_fieldCount * 4));
@@ -289,6 +292,7 @@ public sealed partial class VortexFileWriter
             int count = FeedItems(ingest, IngestItems(arena, ingest));
             columns.Fuse(ingest[..count], rows, firstBlock, blocks);
             await fan.RunAsync(columns, ahead + count, arena, rows).ConfigureAwait(false);
+            _indexes?.AttachCounts(Counted, rows);
             _blockFilled = (_blockFilled + rows) % _blockRows;
             BatchesIngestedAcross++;
             await WriteColumnBlobsAsync(columns, firstBlock, blocks, cancellationToken).ConfigureAwait(false);

@@ -992,16 +992,18 @@ internal sealed class IndexWriter : IDisposable
     /// Whether the keys the column shreds are fed too; false where they are fed apart, read once and written in groups
     /// (<see cref="ReadKeys"/>, <see cref="FeedKeys"/>).
     /// </param>
-    internal void Accumulate(int field, CanonicalArena arena, int nodeIndex, int start, int count, bool keys = true)
+    /// <param name="counted">What the batch's counts read beside the column, the batch's own; null for a file that keeps no counts.</param>
+    internal void Accumulate(int field, CanonicalArena arena, int nodeIndex, int start, int count, bool keys = true, CountedRows? counted = null)
     {
         foreach (IndexBuilder builder in _builders[field])
         {
+            builder.Counted = counted;
             builder.Accumulate(arena, nodeIndex, start, count);
         }
 
         if (keys && _variantFeeds?[field] is { } feed && count > 0)
         {
-            FeedVariant(feed, arena, nodeIndex, start, count);
+            FeedVariant(feed, arena, nodeIndex, start, count, counted);
         }
     }
 
@@ -2102,7 +2104,7 @@ internal sealed class IndexWriter : IDisposable
         {
             if (plan.MeasureOf(field) < 0 && SheetOf(field) is { } sheet)
             {
-                sheet.HashRows();
+                sheet.HashRows(plan.Wide.Count);
                 plan.Wide.Add(new WideColumn(field, sheet));
             }
         }
@@ -2209,7 +2211,7 @@ internal sealed class IndexWriter : IDisposable
     /// Once a batch of <paramref name="rows"/> is in, every column's sheet having hashed its rows: the wide columns settled,
     /// and each column of few values's registers of them raised.
     /// </summary>
-    internal void AttachCounts(int rows)
+    internal void AttachCounts(CountedRows? counted, int rows)
     {
         if (_counts is not { Wide.Count: > 0 } plan)
         {
@@ -2221,14 +2223,29 @@ internal sealed class IndexWriter : IDisposable
         {
             foreach (IndexBuilder builder in builders)
             {
-                (builder as ColumnCountsBuilder)?.Attach(rows);
+                if (builder is ColumnCountsBuilder counts)
+                {
+                    counts.Counted = counted;
+                    counts.Attach(rows);
+                }
             }
         }
     }
 
-    /// <summary>Reads a batch's instants and measures once for every column's counts, before the columns are fed.</summary>
-    internal void PrepareCounts(CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int rows) =>
-        _counts?.Prepare(arena, fieldNodes, rows);
+    /// <summary>
+    /// Reads a batch's measures once for every column's counts into <paramref name="into"/>, the batch's own, before the
+    /// columns are fed.
+    /// </summary>
+    internal void PrepareCounts(CountedRows? into, CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int rows)
+    {
+        if (_counts is { } plan && into is not null)
+        {
+            plan.Prepare(into, arena, fieldNodes, rows);
+        }
+    }
+
+    /// <summary>What a batch's counts read beside their columns, for a file that keeps counts: new, to be held by the batch's writer; null otherwise.</summary>
+    internal CountedRows? NewCountedRows() => _counts is null ? null : new CountedRows();
 
     /// <summary>
     /// The counts builder of column <paramref name="field"/>, or null when it has none; asked once every row is in, it
@@ -2444,7 +2461,7 @@ internal sealed class IndexWriter : IDisposable
     /// the rows sliced once and every top-level key read in one pass over them (<see cref="Compute.VariantFieldExpr.ApplyKeys"/>),
     /// where a key at a time read every row's dictionary again; a nested path through its own walk.
     /// </summary>
-    private void FeedVariant(VariantFeed feed, CanonicalArena arena, int nodeIndex, int start, int count)
+    private void FeedVariant(VariantFeed feed, CanonicalArena arena, int nodeIndex, int start, int count, CountedRows? counted)
     {
         CanonicalArena rows = feed.Rows;
         try
@@ -2464,6 +2481,7 @@ internal sealed class IndexWriter : IDisposable
             {
                 foreach (IndexBuilder builder in _builders[feed.Slots[k]])
                 {
+                    builder.Counted = counted;
                     builder.Accumulate(rows, feed.Nodes[k], 0, count);
                 }
             }

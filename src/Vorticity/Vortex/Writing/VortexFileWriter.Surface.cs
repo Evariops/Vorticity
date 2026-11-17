@@ -546,8 +546,11 @@ public sealed partial class VortexFileWriter
             }
         }
 
-        // The index builders hold pooled hash sets and a payload arena; their results survive.
+        // The index builders hold pooled hash sets and a payload arena; their results survive. The batches' counted rows hold
+        // the wide columns' hashes in blocks of the pool.
         _indexes?.Dispose();
+        _counted?.Dispose();
+        _counted = null;
         ReleaseBuilders();
 
         // The blob workspace's builder and metadata writer rent from the shared pool, and the threads

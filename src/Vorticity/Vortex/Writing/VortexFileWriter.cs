@@ -2530,12 +2530,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         int rows = root.Length;
-        _indexes?.PrepareCounts(arena, _fieldNodes, rows);
+        _indexes?.PrepareCounts(Counted, arena, _fieldNodes, rows);
         await IngestRowsAsync(arena, rows).ConfigureAwait(false);
 
         // Once every column's builders took the batch: the distinct values the columns of few values keep of the wide ones.
-        _indexes?.AttachCounts(rows);
+        _indexes?.AttachCounts(Counted, rows);
     }
+
+    /// <summary>What the batch being ingested holds for the counts beside its columns: its measures, its wide columns' hashes; null for a file that keeps no counts.</summary>
+    private CountedRows? Counted => _indexes is null ? null : _counted ??= _indexes.NewCountedRows();
+
+    private CountedRows? _counted;
 
     /// <summary>Folds the batch's <paramref name="rows"/> into the open block of every column and feeds the indexes, crossing the blocks.</summary>
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
@@ -2825,7 +2830,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
             else
             {
-                indexes.Accumulate(field, arena, node, offset, take, keys: !apart);
+                indexes.Accumulate(field, arena, node, offset, take, keys: !apart, Counted);
             }
 
             offset += take;
@@ -2897,7 +2902,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         for (int field = 0; field < _fieldCount; field++)
         {
-            indexes.Accumulate(field, arena, _fieldNodes[field], start, count);
+            indexes.Accumulate(field, arena, _fieldNodes[field], start, count, counted: Counted);
         }
 
         indexes.AccumulateKeys(arena, _fieldNodes, start, count);

@@ -54,6 +54,8 @@ public sealed class GranuleStatsAllocationTests
             }
         }
 
+        // The batches' measures, read into rows the batches share here, as a writer's one after another do.
+        using CountedRows batch = new CountedRows();
         Built();
         long returned = 0;
         long before = GC.GetAllocatedBytesForCurrentThread();
@@ -68,10 +70,10 @@ public sealed class GranuleStatsAllocationTests
         long Built()
         {
             ColumnSheetBuilder sheet = new ColumnSheetBuilder();
-            GranuleStatsBuilder stats = new GranuleStatsBuilder(sheet, plan, 0, i64);
+            GranuleStatsBuilder stats = new GranuleStatsBuilder(sheet, plan, 0, i64) { Counted = batch };
             for (int part = 0; part < Parts; part++)
             {
-                plan.Prepare(arenas[part], nodes[part], Part);
+                plan.Prepare(batch, arenas[part], nodes[part], Part);
                 sheet.Accumulate(arenas[part], nodes[part][0], 0, Part);
                 stats.Accumulate(arenas[part], nodes[part][0], 0, Part);
                 sheet.CloseBlock();

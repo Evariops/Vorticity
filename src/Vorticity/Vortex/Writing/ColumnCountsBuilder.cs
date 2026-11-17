@@ -12,7 +12,7 @@ using Vorticity.Types;
 
 namespace Vorticity.Writing;
 
-/// <summary>A number column the counts of every other column carry the states of, and its values in the batch being fed.</summary>
+/// <summary>A number column the counts of every other column carry the states of; its values in a batch are the batch's (<see cref="MeasureRows"/>).</summary>
 internal sealed class CountedMeasure(int field, MeasureKind kind, int width)
 {
     /// <summary>The top-level column.</summary>
@@ -30,7 +30,11 @@ internal sealed class CountedMeasure(int field, MeasureKind kind, int width)
     /// counts stopped carrying is written by none, whatever each folded of it before.
     /// </summary>
     internal volatile bool Live = true;
+}
 
+/// <summary>A measure's values in one batch, read once for every column's counts (<see cref="CountsPlan.Prepare"/>).</summary>
+internal sealed class MeasureRows
+{
     /// <summary>The batch's integers, unsigned ones as their bits, by row.</summary>
     internal long[] Integers = [];
 
@@ -42,6 +46,76 @@ internal sealed class CountedMeasure(int field, MeasureKind kind, int width)
 
     /// <summary>Whether each row of the batch holds a value, 1 or 0; null when every one does.</summary>
     internal byte[]? Valid;
+
+    /// <summary>Whether each of the rows <c>[start, start + count)</c> holds a value; empty when every one does.</summary>
+    internal ReadOnlySpan<byte> ValidOf(int start, int count) => Valid is { } valid ? valid.AsSpan(start, count) : default;
+}
+
+/// <summary>
+/// What a batch's counts read beside their own column, read or written once for every column: each measure's values
+/// (<see cref="CountsPlan.Prepare"/>) and each wide column's hash of each row, which its sheet writes as it takes the rows
+/// (<see cref="ColumnSheetBuilder.HashRows"/>). The batch's own, not the plan's, so that the columns of one batch read
+/// the values of that batch whatever another batch is doing; handed to each builder that reads them before it is fed
+/// (<see cref="IndexBuilder.Counted"/>).
+/// </summary>
+internal sealed class CountedRows : IDisposable
+{
+    private MeasureRows?[] _measures = [];
+    private Block<ulong>[] _hashes = [];
+    private bool[] _whole = [];
+
+    /// <summary>The values of measure <paramref name="measure"/>, by its number in the plan.</summary>
+    internal MeasureRows Measure(int measure)
+    {
+        if (_measures.Length <= measure)
+        {
+            Array.Resize(ref _measures, measure + 1);
+        }
+
+        return _measures[measure] ??= new MeasureRows();
+    }
+
+    /// <summary>
+    /// Room for the hashes of wide column <paramref name="wide"/>'s rows <c>[start, start + count)</c>, those before
+    /// <paramref name="start"/> kept: a batch's first rows start its hashes, its next pieces keep those before them.
+    /// </summary>
+    internal Span<ulong> Hashes(int wide, int start, int count)
+    {
+        if (_hashes.Length <= wide)
+        {
+            Array.Resize(ref _hashes, wide + 1);
+            Array.Resize(ref _whole, wide + 1);
+        }
+
+        _whole[wide] = start == 0 || _whole[wide];
+        ref Block<ulong> hashes = ref _hashes[wide];
+        if (hashes.Length < start + count)
+        {
+            Block<ulong> grown = Blocks.RentCleared<ulong>((int)System.Numerics.BitOperations.RoundUpToPowerOf2((uint)Math.Max(start + count, Math.Max(1_024, hashes.Length * 2))));
+            hashes.AsSpan(0, Math.Min(start, hashes.Length)).CopyTo(grown);
+            Blocks.Return(hashes);
+            hashes = grown;
+        }
+
+        return hashes.AsSpan();
+    }
+
+    /// <summary>Says that a row of the batch fed to wide column <paramref name="wide"/> has no hash: none of its rows is read.</summary>
+    internal void Unhashed(int wide) => _whole[wide] = false;
+
+    /// <summary>The hash of each row of the batch of wide column <paramref name="wide"/>, 0 for a null; empty when a row of it has none.</summary>
+    internal ReadOnlySpan<ulong> RowHashes(int wide) =>
+        wide < _hashes.Length && _whole[wide] ? _hashes[wide].AsSpan() : default;
+
+    /// <summary>The hashes' blocks back to the pool.</summary>
+    public void Dispose()
+    {
+        for (int w = 0; w < _hashes.Length; w++)
+        {
+            Blocks.Return(_hashes[w]);
+            _hashes[w] = default;
+        }
+    }
 }
 
 /// <summary>
@@ -149,37 +223,41 @@ internal sealed class CountsPlan
     /// <summary>The measure column <paramref name="field"/> is, or -1.</summary>
     internal int MeasureOf(int field) => Array.FindIndex(Measures, m => m.Field == field);
 
-    /// <summary>Reads the batch's measures' values, before its columns are counted.</summary>
-    internal void Prepare(CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int rows)
+    /// <summary>Reads the batch's measures' values into <paramref name="into"/>, the batch's, before its columns are counted.</summary>
+    internal void Prepare(CountedRows into, CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int rows)
     {
-        foreach (CountedMeasure measure in Measures)
+        for (int m = 0; m < Measures.Length; m++)
         {
-            if (measure.Live && !Read(measure, arena, fieldNodes[measure.Field], rows))
+            CountedMeasure measure = Measures[m];
+            if (measure.Live && !Read(measure, into.Measure(m), arena, fieldNodes[measure.Field], rows))
             {
                 measure.Live = false;
             }
         }
     }
 
-    /// <summary>The values of measure <paramref name="measure"/>'s node <paramref name="nodeIndex"/>; false for a form it does not read.</summary>
-    private static bool Read(CountedMeasure measure, CanonicalArena arena, int nodeIndex, int rows)
+    /// <summary>
+    /// The values of measure <paramref name="measure"/>'s node <paramref name="nodeIndex"/>, into <paramref name="held"/>;
+    /// false for a form it does not read.
+    /// </summary>
+    private static bool Read(CountedMeasure measure, MeasureRows held, CanonicalArena arena, int nodeIndex, int rows)
     {
         CanonicalNode node = arena.GetNode(nodeIndex);
         ValidityMask valid = ValidityMask.From(arena, node.Validity);
         if (valid.AllInvalid)
         {
-            Valid(measure, rows).Clear();
+            Valid(held, rows).Clear();
             return true;
         }
 
         bool floats = measure.Kind == MeasureKind.Float;
-        if (floats && measure.Floats.Length < rows)
+        if (floats && held.Floats.Length < rows)
         {
-            measure.Floats = new double[Math.Max(rows, measure.Floats.Length * 2)];
+            held.Floats = new double[Math.Max(rows, held.Floats.Length * 2)];
         }
-        else if (!floats && measure.Integers.Length < rows)
+        else if (!floats && held.Integers.Length < rows)
         {
-            measure.Integers = new long[Math.Max(rows, measure.Integers.Length * 2)];
+            held.Integers = new long[Math.Max(rows, held.Integers.Length * 2)];
         }
 
         if (node.Kind == CanonicalKind.Constant)
@@ -187,11 +265,11 @@ internal sealed class CountsPlan
             ReadOnlySpan<byte> element = node.ConstantElement;
             if (floats)
             {
-                measure.Floats.AsSpan(0, rows).Fill(Float(element, measure.Width, 0));
+                held.Floats.AsSpan(0, rows).Fill(Float(element, measure.Width, 0));
             }
             else
             {
-                measure.Integers.AsSpan(0, rows).Fill(Integer(element, measure.Width, 0, measure.Kind == MeasureKind.Signed));
+                held.Integers.AsSpan(0, rows).Fill(Integer(element, measure.Width, 0, measure.Kind == MeasureKind.Signed));
             }
         }
         else if (node.Kind == CanonicalKind.Primitive)
@@ -199,7 +277,7 @@ internal sealed class CountsPlan
             ReadOnlySpan<byte> values = node.Values.Span;
             if (floats)
             {
-                Span<double> into = measure.Floats.AsSpan(0, rows);
+                Span<double> into = held.Floats.AsSpan(0, rows);
                 if (measure.Width == 8)
                 {
                     MemoryMarshal.Cast<byte, double>(values)[..rows].CopyTo(into);
@@ -215,7 +293,7 @@ internal sealed class CountsPlan
             }
             else
             {
-                Span<long> into = measure.Integers.AsSpan(0, rows);
+                Span<long> into = held.Integers.AsSpan(0, rows);
                 bool signed = measure.Kind == MeasureKind.Signed;
                 switch (measure.Width)
                 {
@@ -251,13 +329,13 @@ internal sealed class CountsPlan
         if (floats)
         {
             // Each float split once, for the entries of every column its row falls in.
-            if (measure.Splits.Length < rows)
+            if (held.Splits.Length < rows)
             {
-                measure.Splits = new IndexedSum.Split[Math.Max(rows, measure.Splits.Length * 2)];
+                held.Splits = new IndexedSum.Split[Math.Max(rows, held.Splits.Length * 2)];
             }
 
-            ReadOnlySpan<double> values = measure.Floats.AsSpan(0, rows);
-            Span<IndexedSum.Split> splits = measure.Splits.AsSpan(0, rows);
+            ReadOnlySpan<double> values = held.Floats.AsSpan(0, rows);
+            Span<IndexedSum.Split> splits = held.Splits.AsSpan(0, rows);
             for (int row = 0; row < rows; row++)
             {
                 splits[row] = IndexedSum.SplitOf(values[row]);
@@ -266,11 +344,11 @@ internal sealed class CountsPlan
 
         if (valid.AllValid)
         {
-            measure.Valid = null;
+            held.Valid = null;
             return true;
         }
 
-        Span<byte> flags = Valid(measure, rows);
+        Span<byte> flags = Valid(held, rows);
         for (int row = 0; row < rows; row++)
         {
             flags[row] = valid.IsValid(row) ? (byte)1 : (byte)0;
@@ -279,11 +357,11 @@ internal sealed class CountsPlan
         return true;
     }
 
-    private static Span<byte> Valid(CountedMeasure measure, int rows)
+    private static Span<byte> Valid(MeasureRows held, int rows)
     {
-        if (measure.Valid is not { } valid || valid.Length < rows)
+        if (held.Valid is not { } valid || valid.Length < rows)
         {
-            measure.Valid = valid = new byte[Math.Max(rows, (measure.Valid?.Length ?? 0) * 2)];
+            held.Valid = valid = new byte[Math.Max(rows, (held.Valid?.Length ?? 0) * 2)];
         }
 
         return valid.AsSpan(0, rows);
@@ -634,18 +712,18 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
 
         for (int k = 0; k < _measures.Length; k++)
         {
-            CountedMeasure measure = _plan.Measures[_measures[k]];
+            MeasureRows held = BatchRows.Measure(_measures[k]);
             ref long states = ref Unsafe.Add(ref words, _at[k]);
-            switch (measure.Kind)
+            switch (_kinds[k])
             {
                 case MeasureKind.Float:
-                    FoldFloats(ref states, entries, measure.Splits.AsSpan(start, count), measure.Floats.AsSpan(start, count), Valid(measure, start, count));
+                    FoldFloats(ref states, entries, held.Splits.AsSpan(start, count), held.Floats.AsSpan(start, count), held.ValidOf(start, count));
                     break;
                 case MeasureKind.Signed:
-                    FoldSigned(ref states, entries, measure.Integers.AsSpan(start, count), Valid(measure, start, count));
+                    FoldSigned(ref states, entries, held.Integers.AsSpan(start, count), held.ValidOf(start, count));
                     break;
                 default:
-                    FoldUnsigned(ref states, entries, measure.Integers.AsSpan(start, count), Valid(measure, start, count));
+                    FoldUnsigned(ref states, entries, held.Integers.AsSpan(start, count), held.ValidOf(start, count));
                     break;
             }
         }
@@ -724,7 +802,9 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         for (int w = 0; w < distinct.Length; w++)
         {
             WideColumn wide = _plan.Wide[w];
-            ReadOnlySpan<ulong> hashes = wide.Sheet.RowHashes;
+
+            // The batch's hashes of the wide column's rows, while its sheet still counts: past it, its counts went.
+            ReadOnlySpan<ulong> hashes = wide.Sheet.Counting ? BatchRows.RowHashes(w) : default;
             if (!wide.Live || wide.Field == _field)
             {
                 Release(ref distinct[w]);
@@ -852,9 +932,10 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
         int count = indexes.Length;
         for (int k = 0; k < _measures.Length; k++)
         {
-            CountedMeasure measure = _plan.Measures[_measures[k]];
+            MeasureRows held = BatchRows.Measure(_measures[k]);
+            MeasureKind kind = _kinds[k];
             EntrySketches sketches = _sketches![k];
-            ReadOnlySpan<byte> valid = Valid(measure, start, count);
+            ReadOnlySpan<byte> valid = held.ValidOf(start, count);
             for (int i = 0; i < count; i++)
             {
                 if (!valid.IsEmpty && valid[i] == 0)
@@ -862,11 +943,11 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
                     continue;
                 }
 
-                sketches.Add(indexes[i], measure.Kind switch
+                sketches.Add(indexes[i], kind switch
                 {
-                    MeasureKind.Float => measure.Floats[start + i],
-                    MeasureKind.Signed => measure.Integers[start + i],
-                    _ => (ulong)measure.Integers[start + i],
+                    MeasureKind.Float => held.Floats[start + i],
+                    MeasureKind.Signed => held.Integers[start + i],
+                    _ => (ulong)held.Integers[start + i],
                 });
             }
         }
@@ -875,9 +956,8 @@ internal sealed class ColumnCountsBuilder : IndexBuilder
     /// <summary>The encoded sketch of measure <paramref name="k"/> over entry <paramref name="entry"/>, once sealed; null for none.</summary>
     private byte[]? SketchBytes(int k, int entry) => _sketches?[k].Encoded(entry);
 
-    /// <summary>Whether each of the rows <c>[start, start + count)</c> holds a value of <paramref name="measure"/>; empty when every one does.</summary>
-    private static ReadOnlySpan<byte> Valid(CountedMeasure measure, int start, int count) =>
-        measure.Valid is { } valid ? valid.AsSpan(start, count) : default;
+    /// <summary>The batch being fed's measures and hashes, which the writer hands the builder before it feeds it.</summary>
+    private CountedRows BatchRows => Counted ?? throw new InvalidOperationException("The counts were fed a batch without its counted rows.");
 
     /// <summary>
     /// Folds the rows' floats into the states that start at <paramref name="states"/> past each row's entry: the values,
