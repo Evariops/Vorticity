@@ -365,7 +365,7 @@ public sealed partial class VortexFileWriter
             }
             else if (root.Committed >= _rowBlock)
             {
-                await HandOffAsync(root.Committed / _rowBlock * _rowBlock, seal: true, cancellationToken).ConfigureAwait(false);
+                await HandOffAsync(root.Committed / _rowBlock * _rowBlock, seal: !_blocksExactly, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -406,7 +406,7 @@ public sealed partial class VortexFileWriter
         _completed = true;
         if (_root is { Committed: > 0 } whole && _rowBlock > 0 && whole.Committed >= _rowBlock)
         {
-            await HandOffAsync(whole.Committed / _rowBlock * _rowBlock, seal: true, cancellationToken).ConfigureAwait(false);
+            await HandOffAsync(whole.Committed / _rowBlock * _rowBlock, seal: !_blocksExactly, cancellationToken).ConfigureAwait(false);
         }
 
         CanonicalArena? tail = null;
@@ -532,8 +532,10 @@ public sealed partial class VortexFileWriter
             _landed = null;
         }
 
-        // The stagings and counted rows the line's flights left, and the passes over the keys they kept.
+        // The stagings and counted rows the line's flights left, and the passes over the keys they kept, and the rows its
+        // shredded columns' chains took of chunks not compressed.
         ReleaseLine();
+        ReleaseChains();
 
         if (_gathering is { } gathering)
         {
@@ -651,9 +653,11 @@ public sealed partial class VortexFileWriter
 
         if (_automaticChunks)
         {
+            // A writer that takes its rows a block at a time takes the builder's whole blocks, a chunk's worth at least, not
+            // sealed: they go through its line as any caller's rows, several blocks at once.
             long chunk = ChunkRows(root);
             return committed >= chunk
-                ? HandOffAsync((int)(committed / chunk * chunk), seal: true, cancellationToken)
+                ? HandOffAsync((int)(_blocksExactly ? committed / _rowBlock * _rowBlock : committed / chunk * chunk), seal: !_blocksExactly, cancellationToken)
                 : ValueTask.CompletedTask;
         }
 

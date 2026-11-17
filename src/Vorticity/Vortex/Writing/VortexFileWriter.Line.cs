@@ -217,6 +217,9 @@ public sealed partial class VortexFileWriter
     /// <summary>The item that counts the flight's paths into each variant column's census.</summary>
     private const int CensusItem = 1 << 26;
 
+    /// <summary>An item that takes the flight's rows of a shredded column along its chain (<see cref="ShredChain"/>), its field in the low twenty bits.</summary>
+    private const int ShredItem = 1 << 25;
+
     /// <summary>
     /// Whether the line takes the block of <paramref name="rows"/> rows assembled at node <paramref name="node"/> of
     /// <paramref name="arena"/> beside others, <paramref name="pending"/> rows in transit before it: a whole block from a
@@ -292,6 +295,7 @@ public sealed partial class VortexFileWriter
 
         flight.Take(arena, nodes, rows, filled: 0, counted);
         _indexes?.PrepareCounts(counted, arena, flight.FieldNodes, rows);
+        PlanShreds(flight, arena, rows, pending);
 
         // The wide columns' distinct values of the flight before, which this flight's counts attach first: none when a chunk's
         // emission or a block alone attached them since.
@@ -318,9 +322,77 @@ public sealed partial class VortexFileWriter
         return true;
     }
 
+    /// <summary>
+    /// Plans the take of <paramref name="flight"/>'s <paramref name="rows"/> rows along the chain of each shredded column whose
+    /// chunks are compressed ahead: at their place in the column's chunk, its rows gathered so far and the
+    /// <paramref name="pending"/> rows in transit before them, made ready for its item to take them.
+    /// </summary>
+    /// <remarks>
+    /// In the order of the flights, after every chunk of the file before this one was emitted: the line runs the prologue of
+    /// a flight after one that ends a chunk once that one landed, so the rows a column gathered, and the chunk they are of,
+    /// are those its block's rows follow.
+    /// </remarks>
+    private void PlanShreds(Flight flight, CanonicalArena arena, int rows, long pending)
+    {
+        if (Chains() is not { } chains)
+        {
+            return;
+        }
+
+        if (flight.ShredAt.Length != _fieldCount)
+        {
+            flight.ShredAt = new int[_fieldCount];
+            flight.Shred = new VariantShredder.Shredding.Rows[_fieldCount];
+        }
+
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            flight.ShredAt[field] = -1;
+            if (chains[field] is { } chain && _gathering![field] is { } gathering)
+            {
+                long position = gathering.Rows + pending;
+                if (chain.Plan(gathering.Generation, position, rows))
+                {
+                    flight.Shred[field] = VariantShredder.Shredding.Prepare(arena, flight.FieldNodes[field]);
+                    flight.ShredAt[field] = checked((int)position);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Takes the rows of <paramref name="staging"/>, a block that goes through alone, along each shredded column's chain, at
+    /// their place in the column's chunk after the rows in transit: on the owner, every flight before it landed.
+    /// </summary>
+    private void TakeAlone(Staging staging)
+    {
+        if (Chains() is not { } chains || staging.Assembled < 0)
+        {
+            return;
+        }
+
+        CanonicalArena arena = staging.Context.Canonical;
+        CanonicalNode root = arena.GetNode(staging.Assembled);
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            if (chains[field] is { } chain && _gathering![field] is { } gathering)
+            {
+                long position = gathering.Rows + _pendingRows;
+                if (chain.Plan(gathering.Generation, position, staging.Rows))
+                {
+                    VariantShredder.Shredding.Rows taken = VariantShredder.Shredding.Prepare(arena, root.GetFieldIndex(field));
+                    chain.Shredding.TakeMore(in taken, checked((int)position));
+                }
+            }
+        }
+    }
+
     // The numbers of the states the items touch: four for each column (its statistics, its bounds, its distinct table, its
-    // builders), then the composite keys, the census, each variant column's nested paths and each group of its keys.
+    // builders), then the composite keys, the census, each variant column's nested paths, each group of its keys, and each
+    // shredded column's chain.
     private int StateBuilders(int field) => (field * 4) + 3;
+
+    private int StateShred(int field) => (_fieldCount * 5) + 2 + _groupTotal + field;
 
     private int StateComposite => _fieldCount * 4;
 
@@ -343,11 +415,15 @@ public sealed partial class VortexFileWriter
                 groups += _indexes?.KeyGroups(field) ?? 0;
             }
 
-            _stateCount = (_fieldCount * 5) + 2 + groups;
+            _groupTotal = groups;
+            _stateCount = (_fieldCount * 6) + 2 + groups;
         }
 
         return _stateCount;
     }
+
+    // The groups of keys every column's numbered together.
+    private int _groupTotal;
 
     /// <summary>The states item <paramref name="entry"/> touches, made once for the writer.</summary>
     private int[] OwnStates(int entry)
@@ -373,6 +449,10 @@ public sealed partial class VortexFileWriter
         else if ((entry & KeysItem) != 0)
         {
             own = [StateGroup(entry & 0xF_FFFF, ((entry >> 20) & 0x3FF) - 1)];
+        }
+        else if ((entry & ShredItem) != 0)
+        {
+            own = [StateShred(entry & 0xF_FFFF)];
         }
         else if ((entry & 7) == 0)
         {
@@ -436,7 +516,7 @@ public sealed partial class VortexFileWriter
         StateCount();
         IndexWriter? indexes = _indexes is { AsksNothing: false, Streams: true } streaming ? streaming : null;
         int groups = indexes is null ? 0 : KeysApart(indexes);
-        flight.Size((_fieldCount * 8) + groups + 2);
+        flight.Size((_fieldCount * 9) + groups + 2);
         flight.KeysApart = groups > 0;
         bool attaches = flight.AttachFrom is not null;
 
@@ -454,6 +534,15 @@ public sealed partial class VortexFileWriter
         if (flight.Census is not null)
         {
             Add(flight, CensusItem, [], -1);
+        }
+
+        // Each shredded column's rows taken along its chain, after the flight before's.
+        for (int field = 0; field < flight.ShredAt.Length; field++)
+        {
+            if (flight.ShredAt[field] >= 0)
+            {
+                Add(flight, ShredItem | field, [], -1);
+            }
         }
 
         Span<int> ingest = stackalloc int[(_fieldCount * 3) + 1];
@@ -543,6 +632,13 @@ public sealed partial class VortexFileWriter
             int field = entry & 0xF_FFFF;
             int group = ((entry >> 20) & 0x3FF) - 1;
             _indexes!.FeedGroup(field, group, flight.Keys[field]!, rows, 0, _blockRows);
+            return;
+        }
+
+        if ((entry & ShredItem) != 0)
+        {
+            int field = entry & 0xF_FFFF;
+            _chains![field]!.Shredding.TakeMore(in flight.Shred[field], flight.ShredAt[field]);
             return;
         }
 
@@ -668,6 +764,7 @@ public sealed partial class VortexFileWriter
         Staging staging = flight.Staging!;
         try
         {
+            TakeAlone(staging);
             await WriteStagedAsync(staging, cancellationToken).ConfigureAwait(false);
         }
         finally

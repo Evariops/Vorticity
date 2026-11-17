@@ -513,6 +513,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The shredded chunks whose leaves were written apart on the core and grafted into their blob, compressed ahead or not.</summary>
     internal int ChunksGrafted { get; private set; }
 
+    /// <summary>Of <see cref="ChunksCompressedAhead"/>, those whose rows the writer's line took block by block (<see cref="ShredChain"/>).</summary>
+    internal int ChunksTakenOnLine { get; private set; }
+
     // The rows staged before, going through on a lane of their own while the next ones stage (FlyAsync): their task, null
     // when none flies, and their staging, which the rows after the next ones stage in once they landed (LandAsync).
     private Task? _flight;
@@ -3747,7 +3750,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         /// <summary>The items of its piece, each a leaf of its blob written apart; made with its first.</summary>
         internal LeafWork? Work;
 
+        /// <summary>Its rows taken block by block on the writer's line (<see cref="ShredChain"/>), every row of it; null when they are taken here.</summary>
+        internal TakenChunk? Taken;
+
         protected override void Execute() => writer.Compress(this);
+    }
+
+    /// <summary>Gives back what <paramref name="chunk"/>'s rows taken on the line held, once: written or given up.</summary>
+    private void ReturnTaken(AheadChunk chunk)
+    {
+        if (chunk.Taken is { } taken)
+        {
+            chunk.Taken = null;
+            _chains![chunk.Field]!.Return(taken);
+        }
     }
 
     /// <summary>
@@ -3849,6 +3865,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // the writer past its price, and a consolidation was refused twice and narrowed to 8 inputs; written at a fixed
         // block half a chunk after this one, once (2026-11-17).
         chunk.Held = gathering.Held;
+
+        // Its rows taken block by block on the line, when they are exactly the chunk's.
+        chunk.Taken = _chains?[field]?.Hand(gathering.Generation, gathering.Rows);
+        gathering.Generation++;
         gathering.Context = null;
         gathering.Nodes.Clear();
         gathering.Rows = 0;
@@ -3885,7 +3905,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         chunk.KnownCount = known;
-        chunk.Bounds = AheadBoundsFor(chunk.Field);
+        chunk.Bounds = chunk.Taken is { } taken ? taken.Bounds : AheadBoundsFor(chunk.Field);
         if (_lanes > 1)
         {
             // A unit of the core: a pump compresses it while the writer goes on, or the writer does when it writes the chunk.
@@ -3930,8 +3950,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 return;
             }
 
-            VariantShredder.Shredding shredding = lane.Blobs.Shredding(_shredding![chunk.Field]!);
-            shredding.Take(lane.Arena, local, chunk.Bounds);
+            // Its rows taken on the line block by block, or here at once.
+            VariantShredder.Shredding shredding;
+            if (chunk.Taken is { } taken)
+            {
+                shredding = taken.Shredding;
+                shredding.Settle(lane.Arena, local);
+                ChunksTakenOnLine++;
+            }
+            else
+            {
+                shredding = lane.Blobs.Shredding(_shredding![chunk.Field]!);
+                shredding.Take(lane.Arena, local, chunk.Bounds);
+            }
+
             int leaves = shredding.PrepareLeaves(lane.Blobs.EncodesValidity, _compress);
             chunk.Lane = lane;
             chunk.Shredding = shredding;
@@ -3960,6 +3992,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 lane.Blobs.ColumnLevel = 0;
                 lane.Give();
                 Release(chunk);
+                ReturnTaken(chunk);
             }
         }
     }
@@ -3984,10 +4017,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>Lets go of what <paramref name="chunk"/>'s leaves written apart hold, grafted or not: its piece, its lane, its rows.</summary>
-    private static void DropLeaves(AheadChunk chunk)
+    private void DropLeaves(AheadChunk chunk)
     {
         if (chunk.Lane is not { } lane)
         {
+            ReturnTaken(chunk);
             return;
         }
 
@@ -4009,6 +4043,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         lane.Blobs.ColumnLevel = 0;
         lane.Give();
         Release(chunk);
+        ReturnTaken(chunk);
     }
 
     /// <summary>Notes the ids <paramref name="chunk"/>'s blob met past the file's as it began, which its landing makes the file's.</summary>
@@ -4201,6 +4236,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         int blocks = gathering.Blocks;
         gathering.Nodes.Clear();
         gathering.Rows = 0;
+        gathering.Generation++;
         gathering.Cut = gathering.Bytes;
         Interlocked.Add(ref _gatheredHeld, -gathering.Held);
         gathering.Held = 0;
@@ -4274,6 +4310,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         internal int FirstBlock;
         internal int Blocks;
 
+        /// <summary>The chunks it began, counted as it lets one go: what the rows a line took block by block were taken for (<see cref="ShredChain"/>).</summary>
+        internal long Generation;
+
         /// <summary>The bytes it holds: its values' as <see cref="Bytes"/> counts them, or its codes' for a column gathered as codes.</summary>
         internal long Held;
 
@@ -4319,6 +4358,22 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         // A file with no batches still has to start with the magic.
         await StartAsync(cancellationToken).ConfigureAwait(false);
+
+        // A writer that takes its rows a block at a time ends the chunk of its whole blocks before its last rows, short of a
+        // block, which then make the last chunk alone, as a sealed write's did: every chunk before the last is whole blocks,
+        // which a scan cuts at the zones. Folded into one last chunk, its rows cut evenly crossed the zones, and no block of
+        // the file settled by its zone maps. Not an append, which reads the file's last chunk and writes it again when the
+        // file ends inside a block: written apart there, an appended file's counts through its indexes came short of its
+        // rows' (AppendTests).
+        if (_blocksExactly && _append is null)
+        {
+            await LandAsync().ConfigureAwait(false);
+            if (_pendingRows >= _rowBlock)
+            {
+                await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         await UnstageAsync(cancellationToken).ConfigureAwait(false);
 
         bool direct = false;

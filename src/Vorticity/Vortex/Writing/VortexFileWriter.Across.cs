@@ -847,6 +847,7 @@ public sealed partial class VortexFileWriter
             _gatheredRows[field] = rows;
             gathering.Nodes.Clear();
             gathering.Rows = 0;
+            gathering.Generation++;
             gathering.Cut = gathering.Bytes;
             Interlocked.Add(ref writer._gatheredHeld, -gathering.Held);
             gathering.Held = 0;
@@ -1128,6 +1129,7 @@ public sealed partial class VortexFileWriter
                 {
                     Release(detached);
                     writer.Uncount(detached);
+                    writer.ReturnTaken(detached);
                 }
 
                 _detached[field] = null;

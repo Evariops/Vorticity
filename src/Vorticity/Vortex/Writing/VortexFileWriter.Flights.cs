@@ -63,6 +63,15 @@ public sealed partial class VortexFileWriter
         /// <summary>Each variant column's paths counted for its census, made ready for the flight's rows; null for a writer that counts none.</summary>
         internal PathCensus.Counting[]? Census;
 
+        /// <summary>
+        /// Per shredded column whose rows the line takes block by block (<see cref="ShredChain"/>), the flight's rows made ready
+        /// and where they fall in the column's chunk, -1 for a column whose chain does not take them.
+        /// </summary>
+        internal VariantShredder.Shredding.Rows[] Shred = [];
+
+        /// <inheritdoc cref="Shred"/>
+        internal int[] ShredAt = [];
+
         /// <summary>The flight's items, as the ingest across the lanes numbers them.</summary>
         internal int[] Entries = [];
 

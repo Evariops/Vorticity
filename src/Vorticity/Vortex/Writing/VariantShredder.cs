@@ -125,26 +125,74 @@ internal static class VariantShredder
         /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
         internal void Take(CanonicalArena arena, int node, Indexes.ChunkBlockBounds? bounds)
         {
-            CanonicalNode variant = arena.GetNode(node);
-            int rows = variant.Length;
-            int metadata = ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(0));
-            int value = ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(1));
-            CanonicalNode metadataNode = arena.GetNode(metadata);
-            CanonicalNode valueNode = arena.GetNode(value);
+            Begin(arena, bounds);
+            Rows rows = Prepare(arena, node);
+            TakeMore(in rows, 0);
             _arena = arena;
             _node = node;
-            _metadata = metadata;
-            _rows = rows;
-            _root.Clear(arena);
+            _metadata = rows.Metadata;
+            _rows = rows.Count;
+        }
+
+        /// <summary>
+        /// A variant column's rows made ready to take (<see cref="Prepare"/>): its arena, its node, its metadata and its
+        /// values in canonical form, and its rows. Taking them only reads the arena.
+        /// </summary>
+        internal readonly record struct Rows(CanonicalArena Arena, int Node, int Metadata, int Value, int Count);
+
+        /// <summary>
+        /// The variant column <paramref name="node"/> of <paramref name="arena"/> made ready to take: its metadata and its values
+        /// in canonical form, which may add nodes to the arena, on the thread that owns it.
+        /// </summary>
+        internal static Rows Prepare(CanonicalArena arena, int node)
+        {
+            CanonicalNode variant = arena.GetNode(node);
+            return new Rows(
+                arena, node, ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(0)), ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(1)), variant.Length);
+        }
+
+        /// <summary>
+        /// Begins a chunk taken in parts (<see cref="TakeMore"/>), what each node takes carved from <paramref name="store"/>,
+        /// which lasts as long as the chunk: nothing taken, the keys <paramref name="bounds"/> asks for counted block by block.
+        /// </summary>
+        internal void Begin(CanonicalArena store, Indexes.ChunkBlockBounds? bounds)
+        {
+            _root.Clear(store);
             if (_root is ObjectGroup keys)
             {
                 keys.Count(bounds);
             }
 
+            _epoch = -1;
+            Taken = 0;
+        }
+
+        /// <summary>The rows of the chunk taken since it began (<see cref="Begin"/>), every part's.</summary>
+        internal int Taken { get; private set; }
+
+        // The run of rows of the same metadata the last row taken was of, numbered across the parts: an object node looks its
+        // keys up once a run, by its number, which a part starting its own from nothing would give to another dictionary.
+        private int _epoch = -1;
+
+        /// <summary>
+        /// Takes what each node holds of <paramref name="rows"/>, as the chunk's rows from <paramref name="offset"/> on, after
+        /// the rows taken before, which they follow: a part of a chunk taken block by block, as a whole chunk taken at once
+        /// would have taken its rows. Reads the part's arena alone, which may go once it is taken.
+        /// </summary>
+        /// <exception cref="VortexFormatException">A row's value or metadata does not decode.</exception>
+        internal void TakeMore(in Rows rows, int offset)
+        {
+            CanonicalArena arena = rows.Arena;
+            int node = rows.Node;
+            int value = rows.Value;
+            CanonicalNode metadataNode = arena.GetNode(rows.Metadata);
+            CanonicalNode valueNode = arena.GetNode(value);
+
             // Rows in a run of the same metadata share its dictionary, which each object node looks its keys up in once: a run
             // a source's rows, which the slice's sort keeps together.
             ReadOnlySpan<byte> previous = default;
-            int epoch = -1;
+            int epoch = _epoch;
+            bool started = false;
 
             // A row whose value is the last row read's, under the same metadata, takes again what that row took, node by
             // node, without reading it: a metric's series repeats its attributes row after row, which were read again each, a
@@ -155,17 +203,19 @@ internal static class VariantShredder
             int lastEpoch = -1;
             int runStart = 0;
             int runCount = 0;
-            for (int row = 0; row < rows; row++)
+            for (int at = 0; at < rows.Count; at++)
             {
-                if (!ArenaWords.IsValid(arena, node, row))
+                if (!ArenaWords.IsValid(arena, node, at))
                 {
                     continue;
                 }
 
-                ReadOnlySpan<byte> bytes = ArenaWords.IsValid(arena, value, row) ? LiteralReader.ViewAt(valueNode, row) : VariantEncoding.NullValue;
-                ReadOnlySpan<byte> metadataBytes = LiteralReader.ViewAt(metadataNode, row);
-                if (epoch < 0 || !metadataBytes.SequenceEqual(previous))
+                int row = offset + at;
+                ReadOnlySpan<byte> bytes = ArenaWords.IsValid(arena, value, at) ? LiteralReader.ViewAt(valueNode, at) : VariantEncoding.NullValue;
+                ReadOnlySpan<byte> metadataBytes = LiteralReader.ViewAt(metadataNode, at);
+                if (!started || !metadataBytes.SequenceEqual(previous))
                 {
+                    started = true;
                     epoch++;
                     previous = metadataBytes;
                 }
@@ -200,6 +250,22 @@ internal static class VariantShredder
             {
                 _replay.Again(lastValue, runStart, runCount);
             }
+
+            _epoch = epoch;
+            Taken = offset + rows.Count;
+        }
+
+        /// <summary>
+        /// Settles a chunk taken in parts on its rows whole, node <paramref name="node"/> of <paramref name="arena"/>, once every
+        /// part is taken: what its blob's frames and its rows' metadata are written from.
+        /// </summary>
+        internal void Settle(CanonicalArena arena, int node)
+        {
+            CanonicalNode variant = arena.GetNode(node);
+            _arena = arena;
+            _node = node;
+            _metadata = ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(0));
+            _rows = variant.Length;
         }
 
         /// <summary>The chunk taken, shredded, every typed column laid out in its arena; the tree's dtypes made in <paramref name="types"/>.</summary>
