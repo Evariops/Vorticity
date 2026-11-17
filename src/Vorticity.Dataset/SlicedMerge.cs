@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Execution;
 using Vorticity.Writing;
 
@@ -26,6 +27,11 @@ namespace Vorticity.Dataset;
 /// The cuts are the job's, never the degree's: a merge of the same inputs gives the same runs at any degree, its slices
 /// merged ahead or not, and its objects are the same bytes.
 /// </para>
+/// <para>
+/// Each slice counts what its blocks hold apart (<see cref="SliceAccount"/>). The slices ahead start once the slice taken
+/// gave its first run, its inputs open: what it holds then prices them, and a slice ahead keeps runs waiting while it holds
+/// no more than it was admitted at, then merges a run as the taking flow takes one.
+/// </para>
 /// </remarks>
 internal sealed class SlicedMerge : IMergedRuns
 {
@@ -33,7 +39,7 @@ internal sealed class SlicedMerge : IMergedRuns
     private const int MostWaiting = 16_384;
 
     private readonly int _count;
-    private readonly Func<int, Action<KeyOrderedMerge.Window>?, KeyOrderedMerge> _merge;
+    private readonly Func<int, Action<KeyOrderedMerge.Window>?, MemoryAccount?, KeyOrderedMerge> _merge;
     private readonly RunLedger _ledger;
     private readonly LaneBudget _lanes;
     private readonly CancellationTokenSource _stop;
@@ -42,17 +48,23 @@ internal sealed class SlicedMerge : IMergedRuns
     private int _slice = -1;
     private int _started;
     private KeyOrderedMerge? _inline;
+    private SliceAccount? _inlineAccount;
     private Ahead? _taking;
+    private bool _aheadStarted;
+    private long _measured;
     private Run _run;
     private bool _disposed;
 
     /// <param name="count">The slices, two at least.</param>
-    /// <param name="merge">The merge of a slice, with what it calls as it moves past a window, for a slice merged ahead.</param>
+    /// <param name="merge">
+    /// The merge of a slice, with what it calls as it moves past a window, for a slice merged ahead, and the account its
+    /// inputs rent under, null for the job's inputs' own.
+    /// </param>
     /// <param name="ledger">The runs the job's writers keep in the inputs' batches.</param>
     /// <param name="lanes">The session's lanes the slices ahead merge on.</param>
     /// <param name="cancellationToken">Stops the slices ahead.</param>
     internal SlicedMerge(
-        int count, Func<int, Action<KeyOrderedMerge.Window>?, KeyOrderedMerge> merge, RunLedger ledger, LaneBudget lanes, CancellationToken cancellationToken)
+        int count, Func<int, Action<KeyOrderedMerge.Window>?, MemoryAccount?, KeyOrderedMerge> merge, RunLedger ledger, LaneBudget lanes, CancellationToken cancellationToken)
     {
         _count = count;
         _merge = merge;
@@ -71,8 +83,35 @@ internal sealed class SlicedMerge : IMergedRuns
     /// <summary>How many slices ahead of the one being taken may merge at once: as many as the room for their inputs holds.</summary>
     internal int MostAhead { get; init; } = int.MaxValue;
 
-    /// <summary>Whether the job's memory admits one more slice merged ahead now; null for always. A slice not admitted merges in its turn.</summary>
-    internal Func<bool>? Admits { get; init; }
+    /// <summary>
+    /// Whether the job's memory admits one more slice merged ahead now, given what it and the slices ahead merging may still
+    /// take past what they hold, each up to what it was admitted at; null for always. A slice not admitted merges in its turn.
+    /// </summary>
+    /// <remarks>
+    /// Admitted one after another as a slice starts, before any opened its inputs, slices took room the first had not filled
+    /// yet, and their inputs together passed the budget: what a slice ahead may still take counts until it is taken.
+    /// </remarks>
+    internal Func<long, bool>? Admits { get; init; }
+
+    /// <summary>
+    /// What a slice is priced at before one was measured: its inputs open at their batches. A slice ahead is admitted at
+    /// this or at what a slice held at its first run, an input open times <see cref="SliceInputs"/>, whichever is more, and
+    /// keeps runs waiting up to it.
+    /// </summary>
+    internal long Price { get; init; }
+
+    /// <summary>The most inputs a slice reads, which what an input open held at a slice's first run is counted by.</summary>
+    internal int SliceInputs { get; init; } = 1;
+
+    /// <summary>The account of the job's inputs, in which each slice's own counts (<see cref="SliceAccount"/>); null for none.</summary>
+    internal MemoryAccount? Inputs { get; init; }
+
+    /// <summary>
+    /// Has the writers copy the runs they keep of the inputs and have not handed through yet, the rows of the block they
+    /// stage: what a slice's end asks, so that its merge, every input of it open, goes before the next slice opens its own,
+    /// rather than once the next slice's first block is full; null for none.
+    /// </summary>
+    internal Func<ValueTask>? OwnRuns { get; init; }
 
     public int CurrentRows => _inline?.CurrentRows ?? _run.Rows;
 
@@ -96,10 +135,23 @@ internal sealed class SlicedMerge : IMergedRuns
     {
         while (true)
         {
+            // A slice taken whose runs the writers copied since goes now, its inputs with it, rather than at a slice's end.
+            if (_draining.Count > 0 && _draining[0].Mark <= _ledger.Copied)
+            {
+                await DrainAsync().ConfigureAwait(false);
+            }
+
             if (_inline is { } merge)
             {
                 if (await merge.MoveNextAsync().ConfigureAwait(false))
                 {
+                    // Its first run: what it holds by input open prices the slices ahead, which start now.
+                    if (!_aheadStarted)
+                    {
+                        Measured(_inlineAccount?.Held ?? 0, merge.MostOpen);
+                        StartAhead();
+                    }
+
                     return true;
                 }
 
@@ -110,11 +162,23 @@ internal sealed class SlicedMerge : IMergedRuns
             {
                 if (await TakeAsync(ahead).ConfigureAwait(false))
                 {
+                    if (!_aheadStarted)
+                    {
+                        StartAhead();
+                    }
+
                     return true;
                 }
 
                 _taking = null;
                 _draining.Add((ahead.Merge!, _ledger.Noted));
+            }
+
+            // The slice ended: the writers copy the runs of it they still stage, and its merge can go before the next one
+            // opens its inputs; those in blocks in flight are copied as the blocks are assembled.
+            if (OwnRuns is { } own && _ledger.Copied < _ledger.Noted)
+            {
+                await own().ConfigureAwait(false);
             }
 
             await DrainAsync().ConfigureAwait(false);
@@ -123,14 +187,15 @@ internal sealed class SlicedMerge : IMergedRuns
                 return false;
             }
 
-            StartAhead();
+            _aheadStarted = false;
             if (_ahead[_slice] is { } merged)
             {
                 _taking = merged;
             }
             else
             {
-                _inline = _merge(_slice, null);
+                _inlineAccount = Inputs is null ? null : new SliceAccount(Inputs);
+                _inline = _merge(_slice, null, _inlineAccount);
             }
         }
     }
@@ -150,7 +215,7 @@ internal sealed class SlicedMerge : IMergedRuns
                     continue;
                 }
 
-                if (Interlocked.Decrement(ref ahead.Waiting) == MostWaiting / 2)
+                if (Interlocked.Decrement(ref ahead.Waiting) <= Volatile.Read(ref ahead.ResumeAt))
                 {
                     ahead.Room();
                 }
@@ -159,54 +224,88 @@ internal sealed class SlicedMerge : IMergedRuns
                 return true;
             }
 
+            // Its merge ended once its runs are read: what failed it, which completed its runs, is thrown here.
             if (!await reader.WaitToReadAsync().ConfigureAwait(false))
             {
-                // Its merge ended: what failed it fails the merge here.
-#pragma warning disable VSTHRD003 // The slice's merge, started by this merge on a lane of its own.
-                await ahead.Merged.ConfigureAwait(false);
-#pragma warning restore VSTHRD003
                 return false;
             }
         }
     }
 
-    /// <summary>Starts the slices past the one being taken on lanes free now, as many as the room admits.</summary>
+    /// <summary>
+    /// Starts the slices past the one being taken on lanes free now, as many as the room admits at the price of a slice:
+    /// once the slice taken gave its first run.
+    /// </summary>
     private void StartAhead()
     {
+        _aheadStarted = true;
         _started = Math.Max(_started, _slice + 1);
         while (_started < _count && _started - _slice <= MostAhead && Execution.LaneWorkers.TryTake(_lanes, out long entered))
         {
             // A lane free, but not the room: the slice merges in its turn, and the lane goes back.
-            if (Admits?.Invoke() == false)
+            long price = Math.Max(Price, Volatile.Read(ref _measured));
+            if (Admits?.Invoke(price + StillToTake(price)) == false)
             {
                 _lanes.Exit(entered);
                 return;
             }
 
             int slice = _started++;
-            Ahead ahead = new Ahead();
+            Ahead ahead = new Ahead(Inputs is null ? null : new SliceAccount(Inputs), price);
             _ahead[slice] = ahead;
             SlicesAhead++;
             PeakAtOnce = Math.Max(PeakAtOnce, _started - _slice);
-            ahead.Merged = Execution.LaneWorkers.RunOnAsync(_lanes, entered, () => MergeAheadAsync(slice, ahead));
+            _ = MergedAheadAsync(slice, ahead, entered);
         }
     }
 
-    /// <summary>Merges slice <paramref name="slice"/> ahead, on the lane taken for it, its runs into <paramref name="ahead"/>.</summary>
+    /// <summary>
+    /// Runs the merge of slice <paramref name="slice"/> ahead on the lane <paramref name="entered"/>, which it gives back
+    /// at its end, then tells <paramref name="ahead"/> it ended: its failure went through its runs.
+    /// </summary>
+    private async Task MergedAheadAsync(int slice, Ahead ahead, long entered)
+    {
+        try
+        {
+            await Execution.LaneWorkers.RunOnAsync(_lanes, entered, () => MergeAheadAsync(slice, ahead)).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Its runs completed with it, and the flow that takes them throws it.
+        }
+        finally
+        {
+            ahead.Done.Release();
+        }
+    }
+
+    /// <summary>
+    /// Merges slice <paramref name="slice"/> ahead, on the lane taken for it, its runs into <paramref name="ahead"/>: while it
+    /// holds no more than it was admitted at, up to <see cref="MostWaiting"/> of them; past it, a run as the flow takes one.
+    /// </summary>
     private async Task MergeAheadAsync(int slice, Ahead ahead)
     {
         ChannelWriter<Run> writer = ahead.Runs.Writer;
         try
         {
-            KeyOrderedMerge merge = ahead.Merge = _merge(slice, window => writer.TryWrite(new Run(window, 0, 0, Retired: true)));
+            KeyOrderedMerge merge = ahead.Merge = _merge(slice, window => writer.TryWrite(new Run(window, 0, 0, Retired: true)), ahead.Account);
+            bool first = true;
             while (await merge.MoveNextAsync().ConfigureAwait(false))
             {
                 _stop.Token.ThrowIfCancellationRequested();
                 (KeyOrderedMerge.Window window, int row) = merge.CurrentWindow;
                 writer.TryWrite(new Run(window, row, merge.CurrentRows, Retired: false));
-                if (Interlocked.Increment(ref ahead.Waiting) >= MostWaiting)
+                long held = ahead.Account?.Held ?? 0;
+                if (first)
                 {
-                    await ahead.WaitForRoomAsync().ConfigureAwait(false);
+                    first = false;
+                    Measured(held, merge.MostOpen);
+                }
+
+                int waiting = Interlocked.Increment(ref ahead.Waiting);
+                if (waiting >= MostWaiting || held > ahead.Admitted)
+                {
+                    await ahead.WaitForRoomAsync(waiting / 2, _stop.Token).ConfigureAwait(false);
                 }
             }
 
@@ -216,6 +315,54 @@ internal sealed class SlicedMerge : IMergedRuns
         {
             writer.TryComplete(failure);
             throw;
+        }
+    }
+
+    /// <summary>How far the merge came, the most slices merging at once, and what a slice was priced and measured at: for a job's activity.</summary>
+    internal string Report() =>
+        string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"slice {_slice + 1} of {_count}, {PeakAtOnce} at once at most, a slice priced {Price >> 20} MiB and measured {Volatile.Read(ref _measured) >> 20}");
+
+    /// <summary>
+    /// What the slices merging may still take: the one taken, merged by the flow, up to <paramref name="price"/>, and each
+    /// merged ahead, the one taken among them, up to what it was admitted at.
+    /// </summary>
+    /// <remarks>
+    /// Its inputs open as its keys reach them: the slice taken held 16 MiB at its first run, its 23 inputs not all open, two
+    /// slices ahead were admitted at 152 MiB each, and the job's inputs reached 663 MiB, which gave it up (2026-11-18).
+    /// </remarks>
+    private long StillToTake(long price)
+    {
+        long still = _inline is not null ? Math.Max(0, price - (_inlineAccount?.Held ?? 0)) : 0;
+        for (int slice = Math.Max(_slice, 0); slice < _started; slice++)
+        {
+            if (_ahead[slice] is { } ahead)
+            {
+                still += Math.Max(0, ahead.Admitted - (ahead.Account?.Held ?? 0));
+            }
+        }
+
+        return still;
+    }
+
+    /// <summary>
+    /// Keeps what a slice held at its first run, <paramref name="held"/> over <paramref name="open"/> inputs open, as a
+    /// slice's price, its <see cref="SliceInputs"/> inputs counted at that, when it is the most one measured.
+    /// </summary>
+    private void Measured(long held, int open)
+    {
+        held = held / Math.Max(1, open) * SliceInputs;
+        long seen = Volatile.Read(ref _measured);
+        while (held > seen)
+        {
+            long was = Interlocked.CompareExchange(ref _measured, held, seen);
+            if (was == seen)
+            {
+                return;
+            }
+
+            seen = was;
         }
     }
 
@@ -253,18 +400,9 @@ internal sealed class SlicedMerge : IMergedRuns
                 continue;
             }
 
+            // Stopped, or failed: a failure that mattered failed the merge as its runs were taken.
             ahead.Room();
-            try
-            {
-#pragma warning disable VSTHRD003 // The slice's merge, started by this merge on a lane of its own.
-                await ahead.Merged.ConfigureAwait(false);
-#pragma warning restore VSTHRD003
-            }
-            catch (Exception)
-            {
-                // Stopped, or failed: a failure that mattered failed the merge as its runs were taken.
-            }
-
+            await ahead.Done.WaitAsync().ConfigureAwait(false);
             if (ahead.Merge is { } merge && ahead != _taking)
             {
                 bool drained = _draining.Exists(entry => ReferenceEquals(entry.Merge, merge));
@@ -297,8 +435,11 @@ internal sealed class SlicedMerge : IMergedRuns
     /// <summary>A run of a slice merged ahead, or the mark that its merge moved past a window.</summary>
     private readonly record struct Run(KeyOrderedMerge.Window Window, int Row, int Rows, bool Retired);
 
-    /// <summary>A slice merged ahead: its merge, its runs waiting, and the merge's own task.</summary>
-    private sealed class Ahead
+    /// <summary>
+    /// A slice merged ahead: the account its blocks count in, <paramref name="account"/>, what it was admitted at,
+    /// <paramref name="admitted"/>, its merge, its runs waiting, and its end.
+    /// </summary>
+    private sealed class Ahead(SliceAccount? account, long admitted)
     {
         private TaskCompletionSource? _room;
 
@@ -306,19 +447,30 @@ internal sealed class SlicedMerge : IMergedRuns
 
         internal KeyOrderedMerge? Merge;
 
-        internal Task Merged = Task.CompletedTask;
+        /// <summary>What its blocks hold, counted apart; null when the merge counts none.</summary>
+        internal SliceAccount? Account => account;
+
+        /// <summary>The bytes it was admitted at, up to which it keeps runs waiting.</summary>
+        internal long Admitted => admitted;
+
+        /// <summary>Released once its merge ended and its lane went back.</summary>
+        internal SemaphoreSlim Done { get; } = new SemaphoreSlim(0, 1);
 
         /// <summary>The runs waiting, past which the merge waits for room.</summary>
         internal int Waiting;
 
-        /// <summary>Waits until the taking flow made room, its runs halved.</summary>
-        internal Task WaitForRoomAsync()
+        /// <summary>The runs waiting at or below which the merge waiting for room goes on; -1 before it waited.</summary>
+        internal int ResumeAt = -1;
+
+        /// <summary>Waits until the taking flow took its runs down to <paramref name="resumeAt"/> waiting, or the merge stops.</summary>
+        internal Task WaitForRoomAsync(int resumeAt, CancellationToken stop)
         {
             TaskCompletionSource room = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             Volatile.Write(ref _room, room);
+            Interlocked.Exchange(ref ResumeAt, resumeAt);
 
-            // Room made since the count was read: no wait.
-            if (Volatile.Read(ref Waiting) < MostWaiting)
+            // Room made since the count was read, or the merge stopped before the stop could let it go: no wait.
+            if (Volatile.Read(ref Waiting) <= resumeAt || stop.IsCancellationRequested)
             {
                 room.TrySetResult();
             }

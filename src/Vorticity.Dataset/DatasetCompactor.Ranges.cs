@@ -541,12 +541,27 @@ internal static partial class DatasetCompactor
     private sealed class KeyRanges(byte[][] cuts, RowRange[][] rows)
     {
         /// <summary>
-        /// The slices a merge of <paramref name="job"/> is cut in, by its rows alone and never the degree, so that its runs are
-        /// the same at any degree: one a <see cref="DatasetOptions.SliceRows"/>, at most <see cref="MostSlices"/>; fewer than
-        /// two for none.
+        /// The slices a merge of <paramref name="job"/> is cut in, by its rows and its inputs' bytes and never the degree, so
+        /// that its runs are the same at any degree: one a <see cref="DatasetOptions.SliceRows"/>, at most
+        /// <see cref="MostSlices"/>, and no more than half the chunks an input holds of a column, about; fewer than two for
+        /// none.
         /// </summary>
-        internal static int SlicesOf(VortexDataset dataset, CompactionJob job) =>
-            (int)Math.Clamp(job.Rows / Math.Max(1, dataset.Options.SliceRows), 0, MostSlices);
+        /// <remarks>
+        /// A slice opens every input whose rows it holds and reads the chunks its range touches: at each cut, each such input's
+        /// chunk of each column is read by the two slices it falls in, so slices add about a chunk a column an input each, and
+        /// as many slices as an input holds chunks of a column read it twice over. Sixty appends of 30 000 rows, a chunk a
+        /// column each, cut in six slices by their rows, opened every append in every slice: four slices at once on fourteen
+        /// lanes held 671 MiB of inputs under a jobs' budget of 672 before the writer took a row, and the job was given up
+        /// (2026-11-17). Half the chunks keeps the reads within one and a half times a merge's in one piece.
+        /// </remarks>
+        internal static int SlicesOf(VortexDataset dataset, CompactionJob job)
+        {
+            long byRows = job.Rows / Math.Max(1, dataset.Options.SliceRows);
+            int columns = Math.Max(1, dataset.Snapshot.Schema.DType.FieldCount);
+            long perInput = job.Bytes / Math.Max(1, job.Inputs.Count);
+            long chunks = perInput / ((long)columns * Math.Max(1, dataset.Options.ChunkBytes));
+            return (int)Math.Clamp(Math.Min(byRows, chunks / 2), 0, MostSlices);
+        }
 
         /// <summary>The ranges.</summary>
         internal int Count => cuts.Length + 1;

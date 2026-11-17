@@ -2343,7 +2343,7 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         throw new VortexMemoryException(
             string.Create(
                 CultureInfo.InvariantCulture,
-                $"A compaction of {now.Job.Inputs.Count} objects, at its fewest inputs and shortest batches, needs more than the jobs' budget of {now.Budget:N0} bytes: its blocks held {now.Held:N0} when one was refused. Give the process more memory, or the session a larger JobMemoryBudget."),
+                $"A compaction of {now.Job.Inputs.Count} objects, at its fewest inputs and shortest batches, needs more than the jobs' budget of {now.Budget:N0} bytes: its blocks held {now.Held:N0} when one was refused{(now.Reason is { } reason ? $", {reason}" : "")}. Give the process more memory, or the session a larger JobMemoryBudget."),
             now);
     }
 

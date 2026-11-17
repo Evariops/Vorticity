@@ -2244,6 +2244,22 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     internal int MapRows => _rowBlock == 0 ? 0 : _stagedRows;
 
+    /// <summary>The rows of the block being staged, not yet sent through: what a block's map completes it from.</summary>
+    internal int StagingRows => _staging?.Rows ?? 0;
+
+    /// <summary>
+    /// Copies the rows the block being staged still keeps where they lie in a merge's inputs, and tells the merge's ledger:
+    /// what the end of a slice of a merge asks, so that the slice's inputs can go before the next slice opens its own. The
+    /// block's rows stay the same, and go through as it fills.
+    /// </summary>
+    internal void OwnStaged()
+    {
+        if (_staging is { } staging)
+        {
+            Own(staging);
+        }
+    }
+
     /// <summary>
     /// <see cref="Size"/>, with the rows of a block's map not yet handed over, which name <paramref name="mapBytes"/> bytes,
     /// counted as staged: what the size reads once the map is handed over, at the same rate.

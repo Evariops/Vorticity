@@ -64,6 +64,9 @@ public sealed record CompactionResult
     /// </summary>
     public long MemoryReserved { get; init; }
 
+    /// <summary>Of <see cref="MemoryReserved"/>, the most its inputs' blocks held, and its writer's, each at its own moment.</summary>
+    internal (long Inputs, long Writer) MemoryReservedBy { get; init; }
+
     /// <summary>
     /// The most ranges of the key a piece of a consolidation merged at once below its cut, the one its stream took and those
     /// merged ahead on lanes free, as many as the budget admitted; 1 for any other job.
@@ -400,6 +403,7 @@ internal static partial class DatasetCompactor
         ObjectStream? lateOutputs = null;
         long rows;
         int atOnce = 1;
+        int openAtOnce = 0;
         int batchRows = 0;
         long writer = WriterCost(dataset, schema, job, shreddings);
         memory.WriterPrice = writer;
@@ -467,6 +471,7 @@ internal static partial class DatasetCompactor
 
                         streams = [outputs];
                         atOnce = piece is not null ? outputs.SlicesAtOnce : 1;
+                        openAtOnce = slices is null ? 0 : slices.MostInputs * outputs.SlicesAtOnce;
                         break;
                     }
                     catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
@@ -532,15 +537,17 @@ internal static partial class DatasetCompactor
         dataset.LearnJobRate(ran.Bytes, dataset.Options.TimeProvider.GetUtcNow() - started);
         if (merge)
         {
-            KeyRanges? sideBySide = piece is { Merged: > 1 } ? piece.Ranges : null;
-            int open = sideBySide is null ? ran.Inputs.Count : Math.Max(1, sideBySide.MostInputs * atOnce);
+            // A merge in slices held the inputs of the slices merging at once, a slice's inputs as many times as slices merged
+            // at once: its peak over the inputs of one stream priced the next job's inputs as many times over. Its slices are
+            // one stream, one writer's.
+            int open = openAtOnce > 0 ? openAtOnce : ran.Inputs.Count;
             int width = 0;
             foreach (CompactionInput input in ran.Inputs)
             {
                 width += input.Level == 0 ? 1 : 0;
             }
 
-            dataset.LearnJobCosts(memory.InputsPeak / open, batchRows, memory.WriterPeak / atOnce, width);
+            dataset.LearnJobCosts(memory.InputsPeak / open, batchRows, memory.WriterPeak, width);
         }
 
         // A piece takes out the objects of level 1 it read and those of level 0 it emptied, and puts back at level 0 those it
@@ -724,6 +731,7 @@ internal static partial class DatasetCompactor
             BytesIn = ran.Bytes,
             BytesOut = bytesOut,
             MemoryReserved = reserved,
+            MemoryReservedBy = (memory.InputsPeak, memory.WriterPeak),
             RangesAtOnce = atOnce,
             ScratchBytes = scratch,
             Outcome = outcome,
@@ -1274,13 +1282,13 @@ internal static partial class DatasetCompactor
         int lanes = dataset.Session.Lanes.Lanes - 1;
         memory.WriterPrice = Math.Max(memory.WriterPrice, writer);
         Scanning.DecodeAhead? ahead = lanes <= 0 ? null : new Scanning.DecodeAhead(lanes, memory.AdmitsRead);
-        KeyOrderedMerge MergeOf(int slice, Action<KeyOrderedMerge.Window>? retiring)
+        KeyOrderedMerge MergeOf(int slice, Action<KeyOrderedMerge.Window>? retiring, Buffers.MemoryAccount? account)
         {
             // A slice counts what it takes of each input apart, slices merging at once (KeyOrderedMerge.Emitted).
             long[]? counts = sliceEmitted is null ? emitted : sliceEmitted[slice] = new long[emitted!.Length];
             KeyOrderedMerge one = InputsMerged(
                 dataset, schema, job, batchRows, cancellationToken, ranges: slices ?? ranges, range: slices is null ? range : slice, meter: meter,
-                memory: memory, emitted: counts, ledger: ledger, retiring: retiring, ahead: ahead);
+                memory: memory, emitted: counts, ledger: ledger, retiring: retiring, ahead: ahead, account: account);
 
             // As its inputs open, the job reprices the batches of those still to open from what the open ones hold; not a
             // merge in slices, whose slices open their inputs in an order its lanes decide, and whose batches, priced for the
@@ -1298,16 +1306,28 @@ internal static partial class DatasetCompactor
             return one;
         }
 
-        // A slice merges ahead on a lane of its own while the room left holds its inputs open at their batches, past what the
-        // writer may take (JobMemory.AdmitsMerge); otherwise the job's flow merges it in its turn, the same runs.
-        long sliceBytes = slices is null ? 0 : InputsBytes(dataset, schema, job, slices.MostInputs, batchRows);
+        // A slice merges ahead on a lane of its own while the room left holds its inputs open at their batches, or what the
+        // slice taken held at its first run when more, past what the writer may take (JobMemory.AdmitsMerge); otherwise the
+        // job's flow merges it in its turn, the same runs.
         IMergedRuns merge = slices is null
-            ? MergeOf(0, null)
+            ? MergeOf(0, null, null)
             : new SlicedMerge(sliceCount, MergeOf, ledger, dataset.Session.Lanes, cancellationToken)
             {
                 MostAhead = SlicesAheadPriced,
-                Admits = () => memory.AdmitsMerge(sliceBytes),
+                Price = InputsBytes(dataset, schema, job, slices.MostInputs, batchRows),
+                SliceInputs = slices.MostInputs,
+                Inputs = memory.InputsAccount,
+                Admits = memory.AdmitsMerge,
+                OwnRuns = async () =>
+                {
+                    await outputs.OwnRunsAsync(cancellationToken).ConfigureAwait(false);
+                    if (lateOutputs is not null)
+                    {
+                        await lateOutputs.OwnRunsAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                },
             };
+        memory.Slices = merge is SlicedMerge reported ? reported.Report : null;
         ValueCut? values = schema.Cut;
         long rows = 0;
         outputs.Ledger = ledger;
@@ -1495,7 +1515,7 @@ internal static partial class DatasetCompactor
     /// merge holds the rows of range <paramref name="range"/> alone: each input its keys meet reads the rows the range
     /// names of it, and leaves out those outside the range. With <paramref name="only"/>, it holds that input's rows alone,
     /// their keys beside them. Each input reads batches of <paramref name="batchRows"/>, which <paramref name="meter"/>
-    /// counts when given.
+    /// counts when given, under <paramref name="account"/>, a slice's own, or the job's inputs' when none is given.
     /// </remarks>
     private static KeyOrderedMerge InputsMerged(
         VortexDataset dataset,
@@ -1512,9 +1532,10 @@ internal static partial class DatasetCompactor
         long[]? emitted = null,
         Writing.RunLedger? ledger = null,
         Action<KeyOrderedMerge.Window>? retiring = null,
-        Scanning.DecodeAhead? ahead = null)
+        Scanning.DecodeAhead? ahead = null,
+        Buffers.MemoryAccount? account = null)
     {
-        Buffers.MemoryAccount? account = memory?.InputsAccount;
+        account ??= memory?.InputsAccount;
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
         Dictionary<string, RowRange>? rows = ranges is null ? null : new Dictionary<string, RowRange>(StringComparer.Ordinal);
         for (int i = 0; i < job.Inputs.Count; i++)
@@ -2258,18 +2279,35 @@ internal static partial class DatasetCompactor
                 return;
             }
 
+            // A map completes the block the writer stages: a slice's end hands it a short one (OwnRunsAsync).
             while (rows > 0)
             {
-                int take = Math.Min(rows, staged - _map.Rows);
+                int take = Math.Min(rows, staged - writer.StagingRows - _map.Rows);
                 _map.Add(arena, root, at, take, rowBytes);
                 _ledger?.Note(_map, ref _map.FirstRun);
                 at += take;
                 rows -= take;
-                if (_map.Rows >= staged)
+                if (writer.StagingRows + _map.Rows >= staged)
                 {
                     await HandMapAsync(writer, cancellationToken).ConfigureAwait(false);
                 }
             }
+        }
+
+        /// <summary>
+        /// Has the object's writer copy the runs it keeps of the merge's inputs and has not sent through yet, the block's map
+        /// handed to it short first: what a slice's end asks, so that the slice's merge and its inputs go before the next slice
+        /// opens its own (<see cref="SlicedMerge.OwnRuns"/>). The block's rows stay the same, the maps after completing it.
+        /// </summary>
+        internal async ValueTask OwnRunsAsync(CancellationToken cancellationToken)
+        {
+            if (_output is not { } output)
+            {
+                return;
+            }
+
+            await HandMapAsync(output.Writer, cancellationToken).ConfigureAwait(false);
+            output.Writer.OwnStaged();
         }
 
         /// <summary>Hands the block's map to <paramref name="writer"/>, full or short, when it holds rows.</summary>

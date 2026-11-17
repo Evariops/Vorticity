@@ -113,13 +113,19 @@ public sealed partial class DatasetCompactionLanesTests
             static random => $"svc-{random.Next(0, 60):D2}",
             session =>
             {
+                // Slices of a few thousand rows over inputs of chunks of 4 KiB, which they cut a column's chunks of: a merge
+                // takes no more slices than half the chunks an input holds of a column.
                 DatasetOptions options = OptionsOf(session) with { Write = new VortexWriteOptions { BlockRows = 256 } };
-                return sliceRows > 0 ? options with { SliceRows = sliceRows } : options;
+                return sliceRows > 0 ? options with { SliceRows = sliceRows, ChunkBytes = 4 << 10 } : options;
             });
 
-        // At four lanes and fourteen, the writers sent blocks through their line, several at once, and the bytes are those of one.
-        Assert.True(sliced.Sum(static job => job.WriterBlocksOnLine) > 0, "no block went through a writer's line");
-        if (sliceRows > 0)
+        // At four lanes and fourteen, the writers sent blocks through their line, several at once, and the bytes are those of
+        // one; with chunks of 4 KiB, a block is a chunk of its own, which goes through alone.
+        if (sliceRows == 0)
+        {
+            Assert.True(sliced.Sum(static job => job.WriterBlocksOnLine) > 0, "no block went through a writer's line");
+        }
+        else
         {
             Assert.True(sliced.Max(static job => job.MergeSlices) >= 2, "no merge was cut in slices");
             Assert.True(sliced.Sum(static job => job.MergeSlicesAhead) > 0, "no slice was merged ahead");
@@ -239,10 +245,12 @@ public sealed partial class DatasetCompactionLanesTests
         {
             memory.WriterPrice = 16L << 20;
 
-            // Room for all: 64 MiB free.
+            // Room for all: 64 MiB free. A slice is admitted with what the slices ahead may still take: two of 24 MiB leave
+            // the writer its 16, three would not.
             Assert.True(memory.AdmitsRead(8L << 20));
-            Assert.True(memory.AdmitsMerge(8L << 20));
             Assert.True(memory.AdmitsWrite(8L << 20));
+            Assert.True(memory.AdmitsMerge(48L << 20));
+            Assert.False(memory.AdmitsMerge(72L << 20));
 
             // Other work holds 44 MiB: 20 left, of which the writer may take 16 more; a window of 8 waits, a block goes.
             Assert.True(jobs.TryReserve(44L << 20));
@@ -252,7 +260,7 @@ public sealed partial class DatasetCompactionLanesTests
                 Assert.False(memory.AdmitsMerge(8L << 20));
                 Assert.True(memory.AdmitsWrite(8L << 20));
                 Assert.True(memory.AdmitsRead(4L << 20));
-                Assert.Equal((1, 1, 0), memory.HeldBack);
+                Assert.Equal((1, 2, 0), memory.HeldBack);
             }
             finally
             {

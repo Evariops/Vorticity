@@ -107,7 +107,10 @@ internal sealed class JobMemory : IAsyncDisposable
     internal string RefusalReason =>
         string.Create(
             System.Globalization.CultureInfo.InvariantCulture,
-            $"refused by the {(Inputs.WasRefused ? "inputs" : Writer.WasRefused ? "writer" : "job")}, inputs {Inputs.PeakBytes >> 20} MiB, writer {Writer.PeakBytes >> 20} MiB, batches of {Sizing.BatchRows} rows, {Sizing.Open} open");
+            $"refused by the {(Inputs.WasRefused ? "inputs" : Writer.WasRefused ? "writer" : "job")}, inputs {Inputs.PeakBytes >> 20} MiB, writer {Writer.PeakBytes >> 20} MiB, batches of {Sizing.BatchRows} rows, {Sizing.Open} open{(Slices?.Invoke() is { } slices ? ", " + slices : "")}");
+
+    /// <summary>What the slices of the job's merge hold and were priced at, for its activity; null for a merge in one piece.</summary>
+    internal Func<string>? Slices { get; set; }
 
     /// <summary>The most bytes its blocks held at once.</summary>
     internal long Peak => Job.PeakBytes;
@@ -149,8 +152,9 @@ internal sealed class JobMemory : IAsyncDisposable
     internal bool AdmitsRead(long bytes) => Admits(bytes, WriterKeep, ref _readsHeldBack);
 
     /// <summary>
-    /// Whether the job admits a slice of its merge of <paramref name="bytes"/> merged ahead on a lane of its own: the room left
-    /// holds it and still what the writer may take. Counted when refused.
+    /// Whether the job admits a slice of its merge merged ahead on a lane of its own, which with the slices ahead already
+    /// merging may still take <paramref name="bytes"/>: the room left holds them and still what the writer may take. Counted
+    /// when refused.
     /// </summary>
     internal bool AdmitsMerge(long bytes) => Admits(bytes, WriterKeep, ref _slicesHeldBack);
 
