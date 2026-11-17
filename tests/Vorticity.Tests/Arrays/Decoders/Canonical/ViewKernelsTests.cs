@@ -218,6 +218,10 @@ public sealed class ViewKernelsTests
             ViewKernels.BuildFromOffsets(
                 Int32s(Offsets(sizes)), PType.I32, heap, views, sizes.Length, requireUtf8, in mask, VarBinDecoder.Id);
             Assert.Equal(expected, views);
+
+            // The mask views the arena's slab by its address: kept alive past the kernel, or an optimized loop lets a
+            // collection give the slab's piece back while the kernel still reads it.
+            GC.KeepAlive(arena);
         }
     }
 
