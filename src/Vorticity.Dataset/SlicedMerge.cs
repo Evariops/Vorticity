@@ -68,6 +68,9 @@ internal sealed class SlicedMerge : IMergedRuns
     /// <summary>How many slices ahead of the one being taken may merge at once: as many as the room for their inputs holds.</summary>
     internal int MostAhead { get; init; } = int.MaxValue;
 
+    /// <summary>Whether the job's memory admits one more slice merged ahead now; null for always. A slice not admitted merges in its turn.</summary>
+    internal Func<bool>? Admits { get; init; }
+
     public int CurrentRows => _inline?.CurrentRows ?? _run.Rows;
 
     public (CanonicalArena Arena, int Root, int Row, double RowBytes) CurrentRun
@@ -170,6 +173,13 @@ internal sealed class SlicedMerge : IMergedRuns
         _started = Math.Max(_started, _slice + 1);
         while (_started < _count && _started - _slice <= MostAhead && Execution.LaneWorkers.TryTake(_lanes, out long entered))
         {
+            // A lane free, but not the room: the slice merges in its turn, and the lane goes back.
+            if (Admits?.Invoke() == false)
+            {
+                _lanes.Exit(entered);
+                return;
+            }
+
             int slice = _started++;
             Ahead ahead = new Ahead();
             _ahead[slice] = ahead;

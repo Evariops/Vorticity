@@ -219,6 +219,45 @@ public sealed partial class DatasetCompactionLanesTests
         }
     }
 
+    /// <summary>
+    /// A job's advances, its flows' units ahead of what they must do: admitted while the room the jobs' budget leaves it holds
+    /// them, a window decoded ahead and a slice merged ahead past what its writer was priced at and does not hold yet, a block
+    /// in flight past nothing; refused, and counted, once other work holds the room.
+    /// </summary>
+    [Fact]
+    public async Task AJobAdmitsItsUnitsAheadWhileItsRoomHoldsThemTheWriterFirst()
+    {
+        Vorticity.QueryMemoryBudget jobs = new Vorticity.QueryMemoryBudget(64L << 20);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexSession session = VortexSession.Create(options => options.JobMemoryBudget = jobs);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, OptionsOf(session), Ct);
+        JobMemory memory = new JobMemory(dataset);
+        await using (memory.ConfigureAwait(false))
+        {
+            memory.WriterPrice = 16L << 20;
+
+            // Room for all: 64 MiB free.
+            Assert.True(memory.AdmitsRead(8L << 20));
+            Assert.True(memory.AdmitsMerge(8L << 20));
+            Assert.True(memory.AdmitsWrite(8L << 20));
+
+            // Other work holds 44 MiB: 20 left, of which the writer may take 16 more; a window of 8 waits, a block goes.
+            Assert.True(jobs.TryReserve(44L << 20));
+            try
+            {
+                Assert.False(memory.AdmitsRead(8L << 20));
+                Assert.False(memory.AdmitsMerge(8L << 20));
+                Assert.True(memory.AdmitsWrite(8L << 20));
+                Assert.True(memory.AdmitsRead(4L << 20));
+                Assert.Equal((1, 1, 0), memory.HeldBack);
+            }
+            finally
+            {
+                jobs.Release(44L << 20);
+            }
+        }
+    }
+
     /// <summary>A store whose puts, when <paramref name="late"/>, answer once a millisecond went by.</summary>
     private sealed class LatePuts(IObjectStore inner, bool late) : ForwardingStore(inner)
     {

@@ -1188,7 +1188,7 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool contents = false, bool synopses = false,
         IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
         IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1, PartitionPostings? postings = null,
-        bool countsPaths = false, QueryMemoryBudget? budget = null, Execution.HeldLane? lane = null)
+        bool countsPaths = false, QueryMemoryBudget? budget = null, Execution.HeldLane? lane = null, Func<long, bool>? admitsAhead = null)
     {
         RequireConditionalCreation(_store);
         DateTimeOffset started = _options.TimeProvider.GetUtcNow();
@@ -1235,8 +1235,10 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             // A job's writer gathers its columns within its share of the jobs' budget, writing a chunk early past it.
             GatheredBytesCeiling = budget is null ? 0 : DatasetCompactor.GatherCeiling(this),
 
-            // And takes its merge's runs a block at a time, which its ingest then spreads over its lanes.
+            // And takes its merge's runs a block at a time, which its ingest then spreads over its lanes, as many blocks in
+            // flight as the job's memory admits.
             StagedRows = budget is null ? 0 : Math.Max(_options.Write.BlockRows, 1),
+            AdmitsAhead = admitsAhead,
         };
 
         // The variant columns a job shreds, each in long chunks of its own; an append shreds the declared paths when its

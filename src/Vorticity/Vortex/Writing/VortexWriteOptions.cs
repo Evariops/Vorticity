@@ -327,6 +327,13 @@ public sealed record VortexWriteOptions
     internal int StagedRows { get; init; }
 
     /// <summary>
+    /// Whether the memory of the work the writer is part of admits one more block of the given bytes in flight on its line past
+    /// the one that must go, or null for always: what a compaction job gives its writer (its write advance). A block not
+    /// admitted goes through once the blocks before it landed, which changes when, and not what, the writer writes.
+    /// </summary>
+    internal Func<long, bool>? AdmitsAhead { get; init; }
+
+    /// <summary>
     /// The bytes from which the file keeps a sheet of each top-level column (<see cref="Indexes.ColumnSheet"/>), which a
     /// file's table of contents names, counted before its sheets; null, the default, for none. A dataset's sealed
     /// objects keep them from the size at which its scans read an object's sheets before the object, under which a

@@ -126,6 +126,54 @@ internal sealed class JobMemory : IAsyncDisposable
     internal long Room => Math.Max(0, Jobs.CeilingBytes - Jobs.ReservedBytes + Job.GrantLeft);
 
     /// <summary>
+    /// The bytes the writer of the job was priced at (<see cref="DatasetCompactor.WriterCost"/>), which the flows upstream of
+    /// it leave it before they take room ahead: what it does not hold yet of them is kept for it.
+    /// </summary>
+    internal long WriterPrice { get; set; }
+
+    /// <summary>What the writer was priced at past what it holds now, which the reads and the merge ahead leave it.</summary>
+    private long WriterKeep => Math.Max(0, WriterPrice - Writer.ReservedBytes);
+
+    /// <summary>
+    /// Whether the job admits a window of <paramref name="bytes"/> decoded ahead by an input of its merge, past the two its
+    /// price counts: the room left holds it and still what the writer may take. Counted when refused.
+    /// </summary>
+    internal bool AdmitsRead(long bytes) => Admits(bytes, WriterKeep, ref _readsHeldBack);
+
+    /// <summary>
+    /// Whether the job admits a slice of its merge of <paramref name="bytes"/> merged ahead on a lane of its own: the room left
+    /// holds it and still what the writer may take. Counted when refused.
+    /// </summary>
+    internal bool AdmitsMerge(long bytes) => Admits(bytes, WriterKeep, ref _slicesHeldBack);
+
+    /// <summary>
+    /// Whether the job admits one more block of <paramref name="bytes"/> in flight on its writer's line past the one that must
+    /// go: the room left holds the block its writer stages next. The writer comes first: nothing is kept downstream of it.
+    /// Counted when refused.
+    /// </summary>
+    internal bool AdmitsWrite(long bytes) => Admits(bytes, 0, ref _flightsHeldBack);
+
+    /// <summary>The units each flow did not start ahead for want of room: windows decoded, slices merged, blocks in flight.</summary>
+    internal (int Reads, int Slices, int Flights) HeldBack =>
+        (Volatile.Read(ref _readsHeldBack), Volatile.Read(ref _slicesHeldBack), Volatile.Read(ref _flightsHeldBack));
+
+    private int _readsHeldBack;
+    private int _slicesHeldBack;
+    private int _flightsHeldBack;
+
+    /// <summary>Whether the room left holds <paramref name="bytes"/> past <paramref name="keep"/>; a refusal counted in <paramref name="refused"/>.</summary>
+    private bool Admits(long bytes, long keep, ref int refused)
+    {
+        if (Room - bytes >= keep)
+        {
+            return true;
+        }
+
+        Interlocked.Increment(ref refused);
+        return false;
+    }
+
+    /// <summary>
     /// Reads the inputs of <paramref name="job"/> through the local scratch when they are large enough
     /// (<see cref="JobInputs.FromBytes"/>), each copied once as the first pass asks for it; but those it reads a part of,
     /// <paramref name="partly"/>, from the store, a range of their rows each time.

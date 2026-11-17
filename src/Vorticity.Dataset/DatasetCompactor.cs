@@ -127,6 +127,12 @@ public sealed record CompactionResult
 
     /// <summary>The waits for the store its objects made with the job's lane given back (<see cref="Execution.HeldLane"/>).</summary>
     internal int StoreWaitsWithoutLane { get; init; }
+
+    /// <summary>
+    /// The units its flows did not start ahead for want of room in its memory (<see cref="JobMemory.HeldBack"/>): windows its
+    /// inputs did not decode ahead, slices its merge did not merge ahead, blocks its writers did not send through at once.
+    /// </summary>
+    internal (int Reads, int Slices, int Flights) AdvancesHeldBack { get; init; }
 }
 
 /// <summary>Runs one compaction: a k-way merge of the inputs on the sort key when there is
@@ -368,6 +374,7 @@ internal static partial class DatasetCompactor
             ran.ToLevel, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn))
         {
             Lane = lane,
+            AdmitsAhead = memory.AdmitsWrite,
             Budget = memory.Writer,
             Keys = indexed ? schema.Tree : null,
             Prefix = Math.Min(schema.Layout?.Layout.Prefix ?? 0, schema.Layout?.Components.Count ?? 0),
@@ -392,6 +399,7 @@ internal static partial class DatasetCompactor
         int atOnce = 1;
         int batchRows = 0;
         long writer = WriterCost(dataset, schema, job, shreddings);
+        memory.WriterPrice = writer;
 
         // What the inputs' batches weigh decoded, which the handle keeps for the next job's plan.
         RowMeter meter = new RowMeter();
@@ -432,6 +440,7 @@ internal static partial class DatasetCompactor
                         Arrival = Latest(ran),
                         Budget = memory.Writer,
                         Lane = memory.Lane,
+                        AdmitsAhead = memory.AdmitsWrite,
                     };
                     ObjectStream outputs = OutputsOf(ran, doublings, memory.Lane);
                     try
@@ -727,6 +736,7 @@ internal static partial class DatasetCompactor
             MergeSlicesAhead = slicesAhead,
             InputWindowsAhead = windowsAhead,
             StoreWaitsWithoutLane = memory.Lane?.GivenBack ?? 0,
+            AdvancesHeldBack = memory.HeldBack,
         };
     }
 
@@ -1249,11 +1259,11 @@ internal static partial class DatasetCompactor
 
         // The windows the inputs the merge reads decode ahead past their own two, on the session's lanes but the merge's: a
         // window is admitted while what the jobs' budget leaves the job, less it, still holds what the writer was priced at
-        // past what it holds now. The batches stay those of the inputs' splits, so the bytes written are the same.
+        // past what it holds now (JobMemory.AdmitsRead). The batches stay those of the inputs' splits, so the bytes written
+        // are the same.
         int lanes = dataset.Session.Lanes.Lanes - 1;
-        Scanning.DecodeAhead? ahead = lanes <= 0
-            ? null
-            : new Scanning.DecodeAhead(lanes, bytes => memory.Room - bytes >= Math.Max(0, writer - memory.Writer.ReservedBytes));
+        memory.WriterPrice = Math.Max(memory.WriterPrice, writer);
+        Scanning.DecodeAhead? ahead = lanes <= 0 ? null : new Scanning.DecodeAhead(lanes, memory.AdmitsRead);
         KeyOrderedMerge MergeOf(int slice, Action<KeyOrderedMerge.Window>? retiring)
         {
             KeyOrderedMerge one = InputsMerged(
@@ -1276,9 +1286,16 @@ internal static partial class DatasetCompactor
             return one;
         }
 
+        // A slice merges ahead on a lane of its own while the room left holds its inputs open at their batches, past what the
+        // writer may take (JobMemory.AdmitsMerge); otherwise the job's flow merges it in its turn, the same runs.
+        long sliceBytes = slices is null ? 0 : InputsBytes(dataset, schema, job, slices.MostInputs, batchRows);
         IMergedRuns merge = slices is null
             ? MergeOf(0, null)
-            : new SlicedMerge(slices.Count, MergeOf, ledger, dataset.Session.Lanes, cancellationToken) { MostAhead = SlicesAheadPriced };
+            : new SlicedMerge(slices.Count, MergeOf, ledger, dataset.Session.Lanes, cancellationToken)
+            {
+                MostAhead = SlicesAheadPriced,
+                Admits = () => memory.AdmitsMerge(sliceBytes),
+            };
         ValueCut? values = schema.Cut;
         long rows = 0;
         outputs.Ledger = ledger;
@@ -2155,6 +2172,12 @@ internal static partial class DatasetCompactor
         internal Execution.HeldLane? Lane { get; init; }
 
         /// <summary>
+        /// Whether the job's memory admits one more block in flight on an object's writer's line past the one that must go
+        /// (<see cref="JobMemory.AdmitsWrite"/>); null for always.
+        /// </summary>
+        internal Func<long, bool>? AdmitsAhead { get; init; }
+
+        /// <summary>
         /// Writes rows <paramref name="from"/> to <paramref name="to"/> of the merge's run, which the object takes next in the
         /// key's order: the first starts the next partition value's shredding when they start an object of another value,
         /// and the object's sparse index and blocks take them.
@@ -2306,7 +2329,7 @@ internal static partial class DatasetCompactor
             output = _dataset.StartObjectUnder(
                 _schema, _inKeyOrder, _rowBound, contents: Keys is not null, synopses: Keys is not null, shredded: shredding?.Shredded,
                 variantChunks: shredding?.VariantChunks, byteBound: _byteBound, countsPaths: shredding is not null, postings: Postings, budget: Budget,
-                lane: Lane);
+                lane: Lane, admitsAhead: AdmitsAhead);
             _output = output;
             output.Writer.Ledger = Ledger;
             output.Writer.LandLag = LandLagOf(output.Writer.BlockRows);

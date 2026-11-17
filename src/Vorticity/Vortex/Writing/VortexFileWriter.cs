@@ -556,6 +556,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     // (VortexWriteOptions.StagedRows); 0 for the writer's own bounds.
     private int _stagedRows;
 
+    // Whether the work the writer is part of admits a block in flight past the one that must go (VortexWriteOptions.AdmitsAhead).
+    private Func<long, bool>? _admitsAhead;
+
+    /// <summary>The blocks the line sent through only once the blocks before them landed, the memory of the work not admitting more in flight.</summary>
+    internal int FlightsHeldBack { get; private set; }
+
     /// <summary>
     /// Whether the writer takes its caller's rows a block at a time, as a merge hands its writer its blocks: a table of several
     /// columns cut into chunks by their bytes, whose caller stages nothing of its own. Its blocks go through its line, several
@@ -1123,6 +1129,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         writer._groupRows = writer._gathering is null ? 0 : options.GatheredGroupRows;
         writer._stagedRows = options.StagedRows;
+        writer._admitsAhead = options.AdmitsAhead;
 
         // A table of several columns cut into chunks by their bytes takes its caller's rows a block at a time, whatever its
         // degree, and sends them through its line, four at once: its blocks go as a merge's do, and nothing reads its size
@@ -2472,7 +2479,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         BatchesFlown++;
         line.Admit(staging, flight);
         (staging.Assembly ??= new AssemblyUnit(this, staging)).Offer(_core, Flow.Write);
-        await line.SettleAsync(flight - LandLag + 1, quietly: false, cancellationToken).ConfigureAwait(false);
+
+        // Up to LandLag blocks in flight while the work's memory admits them, the blocks before this one landed otherwise: the
+        // size read LandLag blocks back is the same either way.
+        long settled = flight - LandLag + 1;
+        if (settled < flight && _admitsAhead is { } admits && !admits(staging.Bytes))
+        {
+            settled = flight;
+            FlightsHeldBack++;
+        }
+
+        await line.SettleAsync(settled, quietly: false, cancellationToken).ConfigureAwait(false);
         SizeAtFlight(flight);
     }
 

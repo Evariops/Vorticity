@@ -64,13 +64,31 @@ public sealed class BlockWriteTests
         }
     }
 
+    /// <summary>
+    /// The rows written on four lanes by a writer whose work admits no block in flight past the one that must go (its write
+    /// advance refused): each block goes through once the one before landed, and the file is the bytes of one lane.
+    /// </summary>
+    [Fact]
+    public async Task AWriterAdmittedNoBlockAheadWritesTheBytesOfOneLane()
+    {
+        (DType schema, CanonicalArena arena, int root) = Build();
+        (byte[] alone, _) = await WriteAsync(schema, arena, root, Rows, degree: 1);
+        int heldBack = 0;
+        (byte[] held, int onLine) = await WriteAsync(
+            schema, arena, root, Rows, degree: 4, Options with { AdmitsAhead = static _ => false }, writer => heldBack = writer.FlightsHeldBack);
+        Assert.True(onLine > 0, "no block went through the line");
+        Assert.True(heldBack > 0, "no block was held back");
+        Assert.True(alone.AsSpan().SequenceEqual(held), $"{held.Length} bytes against {alone.Length}");
+    }
+
     /// <summary>The file of <paramref name="root"/>'s rows written in calls of <paramref name="calls"/> rows at <paramref name="degree"/>, and the blocks that went through its line.</summary>
-    private static async Task<(byte[] File, int OnLine)> WriteAsync(DType schema, CanonicalArena arena, int root, int calls, int degree)
+    private static async Task<(byte[] File, int OnLine)> WriteAsync(
+        DType schema, CanonicalArena arena, int root, int calls, int degree, VortexWriteOptions? options = null, Action<VortexFileWriter>? seen = null)
     {
         await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
         using MemoryStream stream = new MemoryStream();
         int onLine;
-        await using (VortexFileWriter writer = VortexFileWriter.Create(new StreamSegmentSink(stream, ownsStream: false), schema, Options, session))
+        await using (VortexFileWriter writer = VortexFileWriter.Create(new StreamSegmentSink(stream, ownsStream: false), schema, options ?? Options, session))
         {
             CanonicalArena windows = new CanonicalArena();
             for (int start = 0; start < Rows; start += calls)
@@ -87,6 +105,7 @@ public sealed class BlockWriteTests
 
             onLine = writer.BlocksOnLine;
             await writer.CompleteAsync();
+            seen?.Invoke(writer);
         }
 
         return (stream.ToArray(), onLine);
