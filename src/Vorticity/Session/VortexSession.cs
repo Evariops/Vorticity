@@ -99,16 +99,17 @@ public sealed class VortexSessionOptions
 
     /// <summary>
     /// How many chunks a scan of the session decodes and aggregates at once, unless its
-    /// <see cref="ScanOptions.DegreeOfParallelism"/> says otherwise, and how many threads the writes
-    /// of the session compute on at once, all of them together: the lanes every writer of the
-    /// session shares, whose helpers join a piece of work only on a lane free. A writer spreads its
-    /// work over as many of them as its <see cref="VortexWriteOptions.DegreeOfParallelism"/> asks.
+    /// <see cref="ScanOptions.DegreeOfParallelism"/> says otherwise, and how many threads the session computes on at once
+    /// beside its callers' own, all of its work together: the lanes every writer, every scan's decode ahead of its consumer
+    /// and every compaction job of the session share, whose helpers join a piece of work only on a lane free. A writer
+    /// spreads its work over as many of them as its <see cref="VortexWriteOptions.DegreeOfParallelism"/> asks.
     /// 1 by default: a library does not take a host's cores without being asked.
     /// </summary>
     /// <remarks>
-    /// A scan at 1 still decodes the batch after the one the caller holds, on the thread pool, as
-    /// <see cref="ScanOptions.Prefetch"/> asks by default: one thread of the pool beside the
-    /// caller's. A <see cref="ScanOptions.Prefetch"/> of 0 keeps the scan on the caller's thread.
+    /// A caller's thread is one of the degree. A scan at 1 decodes on the caller's thread alone, a batch when it asks for
+    /// it, whatever its <see cref="ScanOptions.Prefetch"/>; at <c>N</c>, on <c>N − 1</c> threads of the pool at most
+    /// beside it. A compaction job, which has no caller, holds a lane for its own flow: at a degree of 8, the jobs of a
+    /// maintainer compute on 8 threads at most, their reads' decodes and their writers' helpers included.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
     public int MaxDegreeOfParallelism
@@ -348,7 +349,7 @@ public sealed class VortexSession : IAsyncDisposable
     {
         Options = options;
         ReadGate = new SemaphoreSlim(options.MaxConcurrentReads, options.MaxConcurrentReads);
-        WriteLanes = new Writing.LaneBudget(options.MaxDegreeOfParallelism);
+        Lanes = new Writing.LaneBudget(options.MaxDegreeOfParallelism);
         Mappings = options.MapFiles && options.MappedFileCacheCount > 0 && FileInode.IsSupported
             ? new MappedFileCache(options.MappedFileCacheCount)
             : null;
@@ -368,10 +369,17 @@ public sealed class VortexSession : IAsyncDisposable
     internal SemaphoreSlim ReadGate { get; }
 
     /// <summary>
-    /// The lanes every write of the session computes on, <see cref="VortexSessionOptions.MaxDegreeOfParallelism"/> of
-    /// them, shared by all its writers: the bound reads in flight have in <see cref="ReadGate"/>, on the processors.
+    /// The lanes everything the session computes on beside its callers' own threads takes,
+    /// <see cref="VortexSessionOptions.MaxDegreeOfParallelism"/> of them: a writer's helpers and its blocks in flight, a
+    /// scan's splits decoded ahead of its consumer, a compaction job's merge and its inputs' decodes. The bound reads in
+    /// flight have in <see cref="ReadGate"/>, on the processors.
     /// </summary>
-    internal Writing.LaneBudget WriteLanes { get; }
+    /// <remarks>
+    /// A caller's thread is one of the degree: a scan at degree <c>N</c> decodes on <c>N − 1</c> lanes at most beside the
+    /// loop that consumes it, and a writer's helpers join its caller up to the degree. A job, which has no caller, holds a
+    /// lane for its own flow. Whatever holds a lane never waits for another: it takes one free now, or does the work itself.
+    /// </remarks>
+    internal Writing.LaneBudget Lanes { get; }
 
     /// <summary>The files kept mapped once closed, or null when the session keeps none.</summary>
     internal MappedFileCache? Mappings { get; }

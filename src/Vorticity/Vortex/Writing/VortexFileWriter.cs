@@ -1070,7 +1070,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _metadata = UserMetadata.Ordered(options.Metadata),
             _automaticChunks = options.AutomaticChunks,
             _lanes = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : session?.Options.MaxDegreeOfParallelism ?? 1,
-            _budget = session?.WriteLanes,
+            _budget = session?.Lanes,
             _located = options.Located,
             _zones = options.Zones,
             _zoneMapsOfOneZone = options.ZoneMapsOfOneZone,

@@ -20,7 +20,7 @@ lines = open(path, errors="replace").read().splitlines()
 if kind == "compact":
     jobs = [l for l in lines if re.match(r"(round \d+ )?job \d+:", l)]
     def job_of(line):
-        m = re.search(r"job \d+: \w+ L\d->L\d, (\d+) -> .*?, ([\d,]+) rows, [\d.]+ -> ([\d.]+) MB, .*?scratch (\d+) MiB, ([\d.]+) s, ([\d.]+) s of processor, ([\d.]+) s of write lanes", line)
+        m = re.search(r"job \d+: \w+ L\d->L\d, (\d+) -> .*?, ([\d,]+) rows, [\d.]+ -> ([\d.]+) MB, .*?scratch (\d+) MiB, ([\d.]+) s, ([\d.]+) s of processor, ([\d.]+) s of (?:write )?lanes", line)
         if not m:
             return None
         d = {"inputs": m.group(1), "rows": m.group(2).replace(",", ""), "out_MB": m.group(3), "scratch_MiB": m.group(4),
@@ -59,7 +59,7 @@ if kind == "compact":
                 v["digest"] = m.group(1)
 elif kind == "append":
     for l in lines:
-        m = re.search(r"backlog of (\d+) appends of (\d+) rows, ([\d.]+) MB, built in ([\d.]+) s, ([\d.]+) s of processor, ([\d.]+) s of write lanes", l)
+        m = re.search(r"backlog of (\d+) appends of (\d+) rows, ([\d.]+) MB, built in ([\d.]+) s, ([\d.]+) s of processor, ([\d.]+) s of (?:write )?lanes", l)
         if m:
             v.update({"rows": str(int(m.group(1)) * int(m.group(2))), "out_MB": m.group(3), "job_s": m.group(4), "cpu_s": m.group(5),
                       "lanes_s": m.group(6)})

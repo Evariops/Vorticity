@@ -159,10 +159,24 @@ internal static partial class DatasetCompactor
     private static async ValueTask PriceAsync(VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
     {
         bool merge = job.Style is CompactionStyle.Leveled || (job.Style is CompactionStyle.Tiered && dataset.Snapshot.Schema.Keyed);
-        if (merge && (dataset.InputJobBytes == 0 || dataset.DecodedRowBytes == 0)
-            && await MeasureInputAsync(dataset, job, cancellationToken).ConfigureAwait(false)
-            && job.Trigger == CompactionTrigger.Tier
-            && MemoryWidth(dataset, job.Inputs) is int fits && fits < job.Inputs.Count)
+        if (!merge || (dataset.InputJobBytes != 0 && dataset.DecodedRowBytes != 0))
+        {
+            return;
+        }
+
+        // The measure merges an input, which computes: on a lane of the session's, as the job does after it.
+        bool measured;
+        long lane = await dataset.Session.Lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            measured = await MeasureInputAsync(dataset, job, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            dataset.Session.Lanes.Exit(lane);
+        }
+
+        if (measured && job.Trigger == CompactionTrigger.Tier && MemoryWidth(dataset, job.Inputs) is int fits && fits < job.Inputs.Count)
         {
             dataset.CapJobWidth(fits);
             throw new JobTooWideException(job, fits, JobBudget(dataset));
@@ -189,6 +203,21 @@ internal static partial class DatasetCompactor
             throw;
         }
 
+        // The job's own flow computes, its merge first: it holds a lane of the session's for as long as it runs, taken once
+        // its memory is, so that a job waiting for memory holds no lane. Everything it starts beside it takes a lane free now
+        // or runs on this one, and never waits for one, which this lane, held by the waiter, would never free.
+        Writing.LaneBudget lanes = dataset.Session.Lanes;
+        long lane;
+        try
+        {
+            lane = await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            await memory.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
         try
         {
             return await RewriteUnderAsync(dataset, job, memory, cancellationToken).ConfigureAwait(false);
@@ -200,6 +229,7 @@ internal static partial class DatasetCompactor
         }
         finally
         {
+            lanes.Exit(lane);
             await memory.DisposeAsync().ConfigureAwait(false);
         }
     }
@@ -957,15 +987,18 @@ internal static partial class DatasetCompactor
         batchRows = batchRows > 0 ? (int)Math.Clamp(rows?.Length ?? entry.PhysicalRows, 1, batchRows) : batchRows;
         VortexFile file = lease.File;
         FieldMask projection = fields is null ? FieldMask.All : Layouts.FieldMasks.Of(fields);
+
+        // Every reader of a job's input runs on a lane of the session's, the job's or one its census took: the batches it
+        // asks ahead decode on lanes free now beside it, and on its own flow when none is.
         if (schema.ColumnsOf(file.DType, entry.Key) is not { } columns)
         {
-            ScanBuilder whole = file.ScanBuilder().WithAccount(account).WithPrefetch(prefetch);
+            ScanBuilder whole = file.ScanBuilder().WithAccount(account).WithPrefetch(prefetch).WithConsumerLane();
             return LiveRowsAsync(Ranged(Batched(fields is null ? whole : whole.ProjectMask(projection), batchRows), rows), entry, cancellationToken);
         }
 
         ObjectReadPlan read = columns.Read(null, projection);
         return ObjectColumns.ReshapeAsync(
-            LiveRowsAsync(Ranged(Batched(file.ScanBuilder().WithAccount(account).WithPrefetch(prefetch).ProjectMask(read.Shape.Source).WithEncodings(false, false), batchRows), rows), entry, cancellationToken),
+            LiveRowsAsync(Ranged(Batched(file.ScanBuilder().WithAccount(account).WithPrefetch(prefetch).WithConsumerLane().ProjectMask(read.Shape.Source).WithEncodings(false, false), batchRows), rows), entry, cancellationToken),
             read.Shape,
             null,
             0,
@@ -1376,10 +1409,10 @@ internal static partial class DatasetCompactor
         int most = Math.Min(Math.Max(1, dataset.Session.Options.MaxDegreeOfParallelism), job.Inputs.Count);
         int admitted = (int)Math.Clamp(memory.Room / perLane, 1, most);
 
-        // The job's thread, and beside it the lanes of the session's that are free now (LaneBudget), as many as the room
+        // The job's own lane, and beside it the lanes of the session's that are free now (LaneBudget), as many as the room
         // admits: the job holds the session's degree with its writers' helpers and every other job's, where the census took
         // its own threads past it.
-        Writing.LaneBudget budget = dataset.Session.WriteLanes;
+        Writing.LaneBudget budget = dataset.Session.Lanes;
         List<long> held = [];
         while (held.Count < admitted - 1 && budget.TryEnter(out long entered))
         {

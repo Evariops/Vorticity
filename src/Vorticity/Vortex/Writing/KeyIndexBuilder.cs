@@ -727,29 +727,31 @@ internal sealed class KeyIndexBuilder : IndexBuilder
 
     /// <summary>
     /// Bucket <paramref name="bucket"/> read back and sorted into <paramref name="buffers"/>, on a lane of the session's of
-    /// its own when <paramref name="aside"/>, on the caller's thread otherwise.
+    /// its own when <paramref name="aside"/> and one is free now, on the caller's thread otherwise: the caller holds a lane
+    /// already, a job's or a block's in flight, and a wait for another could wait for the very lane it holds.
     /// </summary>
     private Task<int> SortAheadAsync(
         HashedBuckets buckets, int bucket, RunScratch scratch, BucketBuffers buffers, bool aside, CancellationToken cancellationToken)
     {
-        if (!aside)
+        LaneBudget? lanes = Lanes;
+        long entered = 0;
+        if (!aside || lanes is null || !lanes.TryEnter(out entered))
         {
             return buckets.SortedAsync(bucket, scratch, buffers, cancellationToken).AsTask();
         }
 
-        LaneBudget lanes = Lanes!;
+        // Started whatever the token says, so that the lane it took is given back by the work and never left behind.
         Func<int, Task>? held = BeforeSort;
         return Task.Run(
             async () =>
             {
-                if (held is not null)
-                {
-                    await held(bucket).ConfigureAwait(false);
-                }
-
-                long entered = await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
                 try
                 {
+                    if (held is not null)
+                    {
+                        await held(bucket).ConfigureAwait(false);
+                    }
+
                     return await buckets.SortedAsync(bucket, scratch, buffers, cancellationToken).ConfigureAwait(false);
                 }
                 finally
@@ -757,7 +759,7 @@ internal sealed class KeyIndexBuilder : IndexBuilder
                     lanes.Exit(entered);
                 }
             },
-            cancellationToken);
+            CancellationToken.None);
     }
 
     /// <summary>

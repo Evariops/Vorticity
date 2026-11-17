@@ -138,7 +138,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live: null, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: ReadsAhead, account: Account));
+            readAhead: ReadsAhead, account: Account, decoders: Decoders));
 
     /// <summary>
     /// The chunks of the variant columns the scan reads through some shredded keys alone; null when it
@@ -203,8 +203,23 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </summary>
     internal bool SinkDecodes { get; init; }
 
-    /// <summary>The lanes the scan runs on: the degree, widened by the read-ahead.</summary>
+    /// <summary>
+    /// Whether the consumer holds a lane of the session's for its own flow, a compaction job's merge: the splits it asks
+    /// ahead (<see cref="Prefetch"/>) then decode on lanes of the session's beside it, where a caller's own thread is one of
+    /// the degree.
+    /// </summary>
+    internal bool ConsumerHoldsLane { get; init; }
+
+    /// <summary>The splits the scan keeps going at once: the degree, widened by the read-ahead.</summary>
     private int Lanes => _reverse ? 1 : Math.Max(_degree, Prefetch > 0 ? Prefetch + 1 : 1);
+
+    /// <summary>
+    /// The splits of those that may decode at once beside the consumer, each on a lane of the session's: the degree but the
+    /// caller's thread, which decodes the splits none took, so that a scan at a degree of 1 decodes on its caller's flow
+    /// alone; every split but the consumer's for a consumer that holds a lane of the session's itself. A split reads on
+    /// no lane: its reads wait for the store, not for a core.
+    /// </summary>
+    private int Decoders => _reverse ? 0 : ConsumerHoldsLane ? Lanes - 1 : Math.Max(_degree, 1) - 1;
 
     /// <summary>
     /// The splits a scan keeps in flight, decoding or decoded and waiting for the consumer: its
@@ -240,7 +255,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            zones: zones, widenRows: WidenRows, readAhead: ReadsAhead, account: Account));
+            zones: zones, widenRows: WidenRows, readAhead: ReadsAhead, account: Account, decoders: Decoders));
 
     /// <summary>
     /// The most rows a run of zones the zone maps prove whole is read in as one batch, rather than
@@ -262,7 +277,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(proven), _filter, proven, live, _metrics,
             cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: ReadsAhead, account: Account));
+            readAhead: ReadsAhead, account: Account, decoders: Decoders));
 #pragma warning restore VSTHRD200
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
@@ -363,10 +378,12 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
     private long _started;
     private long _delivered;
 
-    // The decodes the scan's degree still allows, and the splits started and waiting for one, the
-    // last `_queued` of them: both under the lock of the splits in flight (see EnterLanes).
+    // The decodes the scan's degree still allows beside its consumer, under the lock of the splits in flight (see
+    // EnterLanes). A split reads on no lane, and decodes on a lane of the session's (_budget) it takes once read, handed
+    // from split to split while some wait read (Lane.Parked), and given back once none does; a split none took, the
+    // consumer decodes when it reaches it.
     private int _free;
-    private int _queued;
+    private readonly Writing.LaneBudget _budget;
 
     /// <summary>
     /// The bytes the lanes of the splits in flight may hold together: what a share of the pool's size class let them hold
@@ -514,7 +531,8 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         ZonePruner? zones = null,
         int widenRows = 0,
         int readAhead = 0,
-        Buffers.MemoryAccount? account = null)
+        Buffers.MemoryAccount? account = null,
+        int decoders = -1)
         : base(QueryMemoryBudget.Of(file.Session), "scan")
     {
         // The question's account when the scan serves one, the scan holding nothing of its own to give back; else the scan
@@ -560,7 +578,8 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         _extras = own > 0 && window == 1 && !file.Source.ReadsInPlace
             ? new AheadReads(Math.Min(own, splits), pool is null ? 0 : Math.Max(0, Math.Min(ReadAheadPool.Most, splits) - own), pool)
             : window > 1 ? NewWindow(file, schema, plan, window) : null;
-        _segments = new ScanSegments(Ahead is { } ahead ? ahead.Lanes.Length : degree);
+        // Every split of the window reads at once, a take's window wider than the degree: each may wait for a segment.
+        _segments = new ScanSegments(Ahead is { } ahead ? ahead.Lanes.Length : window);
 
         // Before the first read, the file's reader learns whether the plan reads data, and chooses
         // how to read it.
@@ -577,8 +596,10 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         _prunedBlocks = new BlockTally(blockRows);
 
         // The first lane now, the others at the first split they are given: a take's window is
-        // wider than the splits of a small one.
-        _free = degree;
+        // wider than the splits of a small one. The consumer is one of the degree: the others decode beside it, each on a
+        // lane of the session's it takes once its split is read, and a split none took the consumer decodes itself.
+        _free = decoders >= 0 ? decoders : Math.Max(0, degree - 1);
+        _budget = file.Session.Lanes;
         _lanes = new Lane?[window];
         _lanes[0] = NewLane(file, live, metrics, keepEncodings);
         if (_extras is LaneWindow lanes)
@@ -2627,12 +2648,27 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         }
 
         Lane lane = _lanes[(int)(_delivered % _lanes.Length)]!;
-        _delivered++;
 
+        // The next split read and waiting for a lane, none of the session's free: the consumer, one of the degree, decodes
+        // it on its own flow, rather than wait for a lane another work holds. Still reading, it is awaited, and says so once
+        // read if no lane took it, for the consumer to decode it then.
+        bool parked;
+        using (EnterLanes())
+        {
+            parked = lane.Parked;
+            lane.Parked = false;
+            lane.Awaited = !parked;
+        }
+
+        _delivered++;
         int root;
         try
         {
-            root = await lane.Completion.ConfigureAwait(false);
+            root = parked ? ReadRootOnly : await lane.Completion.ConfigureAwait(false);
+            if (root == ReadRootOnly)
+            {
+                root = DecodeSplit(lane);
+            }
         }
         catch
         {
@@ -2791,37 +2827,84 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         finally
         {
             // Published even when a split or a lane fails to come: a lane assigned and never
-            // counted would be awaited by the dispose, and run by no one.
+            // counted would be awaited by the dispose, and run by no one. Each split starts its reads at once, on no lane.
             using (EnterLanes())
             {
-                _queued += (int)(assigned - _started);
-                _started = assigned;
-                while (_free > 0 && _queued > 0)
+                for (long split = _started; split < assigned; split++)
                 {
-                    _free--;
-                    _lanes[(int)((_started - _queued) % window)]!.Go();
-                    _queued--;
+                    _lanes[(int)(split % window)]!.Go();
                 }
+
+                _started = assigned;
             }
         }
     }
 
     /// <summary>
-    /// Hands the decode a lane has finished to the next split waiting for one, in the order of the
-    /// splits, or gives it back when none waits.
+    /// What a split's loop reports when its split is read and no lane decoded it, for the consumer to decode it: a root no
+    /// decode returns.
     /// </summary>
-    private void HandOff()
+    private const int ReadRootOnly = int.MinValue;
+
+    /// <summary>
+    /// Takes a decode and a lane of the session's for the split <paramref name="lane"/> has read, or else leaves it to the
+    /// consumer: reported at once when the consumer awaits it, else parked for the next decode to end or the consumer to
+    /// reach it, whichever comes first.
+    /// </summary>
+    /// <returns>Whether the split decodes on its own loop now.</returns>
+    private bool TryDecodeRead(Lane lane)
     {
         using (EnterLanes())
         {
-            if (_queued > 0)
+            if (_free > 0 && _budget.TryEnter(out long entered))
             {
-                _lanes[(int)((_started - _queued) % _lanes.Length)]!.Go();
-                _queued--;
+                _free--;
+                lane.Entered = entered;
+                return true;
+            }
+
+            if (lane.Awaited)
+            {
+                lane.Done(ReadRootOnly);
+            }
+            else
+            {
+                lane.Parked = true;
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Hands the decode <paramref name="lane"/> has finished, and the lane of the session's it held, to the oldest split read
+    /// and waiting for one, or gives both back when none waits.
+    /// </summary>
+    private void HandOff(Lane lane)
+    {
+        using (EnterLanes())
+        {
+            Lane? next = null;
+            for (long split = _delivered; split < _started; split++)
+            {
+                if (_lanes[(int)(split % _lanes.Length)] is { Parked: true } parked)
+                {
+                    next = parked;
+                    break;
+                }
+            }
+
+            if (next is not null)
+            {
+                next.Parked = false;
+                next.Entered = lane.Entered;
+                next.Decodes = true;
+                next.Go();
             }
             else
             {
                 _free++;
+                _budget.Exit(lane.Entered);
             }
         }
     }
@@ -2842,25 +2925,56 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         while (await lane.NextAsync().ConfigureAwait(false))
         {
             lane.Taken();
+
+            // Its split's reads first, on no lane; then its decode, on a lane of the session's it takes, or one a decode
+            // that ended handed it (Decodes), or by the consumer.
+            if (!lane.Decodes)
+            {
+                try
+                {
+                    await ReadSplitAsync(lane).ConfigureAwait(false);
+                }
+                catch (Exception error)
+                {
+                    lane.Failed(error);
+                    continue;
+                }
+
+                if (!TryDecodeRead(lane))
+                {
+                    continue;
+                }
+            }
+
+            lane.Decodes = false;
             int root;
             try
             {
-                root = await RunLaneAsync(lane).ConfigureAwait(false);
+                root = DecodeSplit(lane);
             }
             catch (Exception error)
             {
-                HandOff();
+                HandOff(lane);
                 lane.Failed(error);
                 continue;
             }
 
-            HandOff();
+            HandOff(lane);
             lane.Done(root);
         }
     }
 
+    /// <summary>A split read and decoded on the caller's flow: what a scan run inline does.</summary>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<int> RunLaneAsync(Lane lane)
+    {
+        await ReadSplitAsync(lane).ConfigureAwait(false);
+        return DecodeSplit(lane);
+    }
+
+    /// <summary>The reads of the split <paramref name="lane"/> was given: what it waits for from the store, and no core.</summary>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask ReadSplitAsync(Lane lane)
     {
         ScanContext context = lane.Context;
         RowRange rows = lane.Rows;
@@ -2896,7 +3010,22 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
             {
                 _segments.Publish(context.Segments, batch);
             }
+        }
+        catch
+        {
+            _segments.Abandon(batch);
+            context.ResetBatch();
+            throw;
+        }
+    }
 
+    /// <summary>The decode of the split <paramref name="lane"/> has read: computes, on whichever lane or flow runs it.</summary>
+    private int DecodeSplit(Lane lane)
+    {
+        ScanContext context = lane.Context;
+        RowRange rows = lane.Rows;
+        try
+        {
             // A split the consumer runs, which no lane runs beside, says when its decode began.
             if (_extras is LaneWindow { Inline: true } window)
             {
@@ -2913,7 +3042,7 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         }
         catch
         {
-            _segments.Abandon(batch);
+            _segments.Abandon(lane.Sequence);
             context.ResetBatch();
             throw;
         }
@@ -2923,17 +3052,25 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
     {
         ReleaseCurrent();
 
-        // The splits no loop has started are withdrawn, since nothing would ever run them; the
-        // lanes running one are awaited.
+        // The splits read and waiting for a decode are withdrawn, since nothing would ever decode them; the lanes still
+        // reading one are awaited, and report it read rather than wait for a decode.
         using (EnterLanes())
         {
-            for (long split = _started - _queued; split < _started; split++)
+            for (long split = _delivered; split < _started; split++)
             {
-                _lanes[(int)(split % _lanes.Length)]!.Running = false;
+                Lane lane = _lanes[(int)(split % _lanes.Length)]!;
+                if (lane.Parked)
+                {
+                    // Read and published, it claims nothing: what it holds goes as a decoded split's does.
+                    lane.Parked = false;
+                    lane.Running = false;
+                    lane.Context.ResetBatch();
+                }
+                else
+                {
+                    lane.Awaited = true;
+                }
             }
-
-            _started -= _queued;
-            _queued = 0;
         }
 
         for (int i = 0; i < MadeLaneCount; i++)
@@ -3119,6 +3256,18 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
 
         internal ScanContext Context { get; }
 
+        /// <summary>When the lane of the session's the split in flight decodes on was taken, for its giving back.</summary>
+        internal long Entered { get; set; }
+
+        /// <summary>Whether the split is read and waits for a decode: a lane of the session's freed, or the consumer.</summary>
+        internal bool Parked { get; set; }
+
+        /// <summary>Whether the consumer awaits the split, which once read is reported to it rather than parked.</summary>
+        internal bool Awaited { get; set; }
+
+        /// <summary>Whether the loop's next signal is the decode of its split read, on a lane a decode that ended handed it.</summary>
+        internal bool Decodes { get; set; }
+
         internal RowRange Rows { get; set; }
 
         /// <summary>The number of the split in <see cref="Rows"/> among the splits the scan started, in the order it walks them.</summary>
@@ -3137,6 +3286,9 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         internal void Assign(BatchAsyncEnumerator owner)
         {
             Running = true;
+            Parked = false;
+            Awaited = false;
+            Decodes = false;
             _done.Reset();
             _loop ??= owner.LaneLoopAsync(this);
         }

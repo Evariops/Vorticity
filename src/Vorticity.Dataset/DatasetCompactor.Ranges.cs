@@ -848,6 +848,16 @@ internal static partial class DatasetCompactor
             lanes = Math.Clamp(open / Math.Max(1, ranges.MostInputs), 1, lanes);
         }
 
+        // Each range merges on a lane of the session's: the first on the job's own, the others on lanes free now, as many as
+        // the room admits, and no more.
+        Writing.LaneBudget budget = dataset.Session.Lanes;
+        List<long> held = [];
+        while (held.Count < lanes - 1 && budget.TryEnter(out long entered))
+        {
+            held.Add(entered);
+        }
+
+        lanes = held.Count + 1;
         memory.Sizing = (batchRows, ranges.MostInputs * lanes);
 
         using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -867,6 +877,13 @@ internal static partial class DatasetCompactor
         {
             // The failure that stopped the other ranges, rather than how they stopped.
             ExceptionDispatchInfo.Throw(failed);
+        }
+        finally
+        {
+            foreach (long entered in held)
+            {
+                budget.Exit(entered);
+            }
         }
 
         long written = 0;

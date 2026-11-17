@@ -59,13 +59,30 @@ internal sealed class ScanBuilder
         return this;
     }
 
-    /// <summary>Decodes <paramref name="batches"/> ahead of the consumer, so the decode overlaps the caller's work.</summary>
+    /// <summary>
+    /// Decodes up to <paramref name="batches"/> ahead of the consumer, so the decode overlaps the caller's work, within the
+    /// degree: a caller's thread is one of the degree, and at a degree of 1 nothing is decoded ahead. A consumer that holds
+    /// a lane of the session's itself (<see cref="WithConsumerLane"/>) decodes ahead on lanes of the session's free now.
+    /// </summary>
     internal ScanBuilder WithPrefetch(int batches)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(batches);
         _prefetch = batches;
         return this;
     }
+
+    /// <summary>
+    /// Says that the scan's consumer holds a lane of the session's for its own flow, a compaction job's merge: the batches
+    /// it asks ahead (<see cref="WithPrefetch"/>) are decoded on lanes of the session's free now, beside it, whatever the
+    /// scan's degree, and on its own flow when none is.
+    /// </summary>
+    internal ScanBuilder WithConsumerLane()
+    {
+        _consumerLane = true;
+        return this;
+    }
+
+    private bool _consumerLane;
 
     /// <summary>Whether a filtered batch is compacted; false delivers whole blocks with the passing rows marked.</summary>
     internal ScanBuilder WithCompaction(bool compact)
@@ -792,6 +809,7 @@ internal sealed class ScanBuilder
         {
             Account = _account,
             Prefetch = _prefetch,
+            ConsumerHoldsLane = _consumerLane,
             Compact = _compact,
             KeepEncodings = _keepEncodings,
             SinkDecodes = _sinkDecodes,

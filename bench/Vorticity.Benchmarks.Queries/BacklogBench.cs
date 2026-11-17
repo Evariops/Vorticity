@@ -152,14 +152,14 @@ internal static class BacklogBench
             Fresh(backlog);
             using Process builder = Process.GetCurrentProcess();
             TimeSpan buildProcessor = builder.TotalProcessorTime;
-            long buildLanes = session.WriteLanes.HeldTicks;
+            long buildLanes = session.Lanes.HeldTicks;
             (long read, int made) = logs
                 ? await BuildLogsAsync(session, backlog, appends, rows, bytes)
                 : await BuildAsync(session, backlog, appends, rows, series, scans, bytes);
             builder.Refresh();
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"backlog of {made} appends of {rows} rows, {BytesOf(backlog) / 1e6:F0} MB, built in {clock.Elapsed.TotalSeconds:F1} s, {(builder.TotalProcessorTime - buildProcessor).TotalSeconds:F1} s of processor, {(double)(session.WriteLanes.HeldTicks - buildLanes) / Stopwatch.Frequency:F1} s of write lanes, {(double)made * rows / Math.Max(clock.Elapsed.TotalSeconds, 1e-3):F0} rows a second, {scans} scans reading {read:N0} rows meanwhile; {sampler.Peaks()}; {Sampler.Now()}"));
+                $"backlog of {made} appends of {rows} rows, {BytesOf(backlog) / 1e6:F0} MB, built in {clock.Elapsed.TotalSeconds:F1} s, {(builder.TotalProcessorTime - buildProcessor).TotalSeconds:F1} s of processor, {(double)(session.Lanes.HeldTicks - buildLanes) / Stopwatch.Frequency:F1} s of lanes, {(double)made * rows / Math.Max(clock.Elapsed.TotalSeconds, 1e-3):F0} rows a second, {scans} scans reading {read:N0} rows meanwhile; {sampler.Peaks()}; {Sampler.Now()}"));
             if (buildOnly)
             {
                 return 0;
@@ -230,7 +230,8 @@ internal static class BacklogBench
             Stopwatch job = Stopwatch.StartNew();
             process.Refresh();
             TimeSpan processor = process.TotalProcessorTime;
-            long lanes = session.WriteLanes.HeldTicks;
+            long lanes = session.Lanes.HeldTicks;
+            session.Lanes.ResetPeak();
             long slabsMade = Slabs.Slab.Made;
             int fullCollections = GC.CollectionCount(2);
             await maintainer.RefreshAsync();
@@ -243,14 +244,14 @@ internal static class BacklogBench
             jobs++;
             process.Refresh();
             double processorSeconds = (process.TotalProcessorTime - processor).TotalSeconds;
-            double laneSeconds = (double)(session.WriteLanes.HeldTicks - lanes) / Stopwatch.Frequency;
+            double laneSeconds = (double)(session.Lanes.HeldTicks - lanes) / Stopwatch.Frequency;
             mostHeld = Math.Max(mostHeld, result.MemoryReserved);
             bytesRead += result.BytesIn;
             bytesWritten += result.BytesOut;
             refusals += Interlocked.Read(ref s_refused);
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"{(repeat > 1 ? $"round {round} " : "")}job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB, {result.RangesAtOnce} at once, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of write lanes, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {GC.CollectionCount(2) - fullCollections} full collections, {Slabs.Slab.Made - slabsMade} slabs made; passes: {PassesOfJob()}; {sampler.Peaks()}"));
+                $"{(repeat > 1 ? $"round {round} " : "")}job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB, {result.RangesAtOnce} at once, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of lanes, {session.Lanes.PeakHeld} of {session.Lanes.Lanes} lanes at most, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {GC.CollectionCount(2) - fullCollections} full collections, {Slabs.Slab.Made - slabsMade} slabs made; passes: {PassesOfJob()}; {sampler.Peaks()}"));
         }
 
         Console.WriteLine(string.Create(

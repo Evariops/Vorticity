@@ -137,7 +137,7 @@ public sealed partial class DatasetCompactionLanesTests
         long[] taken = new long[held];
         for (int i = 0; i < held; i++)
         {
-            Assert.True(session.WriteLanes.TryEnter(out taken[i]));
+            Assert.True(session.Lanes.TryEnter(out taken[i]));
         }
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, OptionsOf(session), Ct);
         for (int a = 0; a < 6; a++)
@@ -159,7 +159,7 @@ public sealed partial class DatasetCompactionLanesTests
         List<Doc> read = [.. (await dataset.Scan<Doc>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(static row => row.Sequence)];
         foreach (long entered in taken)
         {
-            session.WriteLanes.Exit(entered);
+            session.Lanes.Exit(entered);
         }
 
         return (objects, read, results.Sum(static result => result.WriterBatchesFlown));
