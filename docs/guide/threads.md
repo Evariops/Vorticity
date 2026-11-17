@@ -160,6 +160,15 @@ The host asks once, with `MaxDegreeOfParallelism` on its session, and a single s
 ScanOptions four = new ScanOptions { DegreeOfParallelism = 4 };   // 0, the default, is the session's
 ```
 
+The session's degree is the number of cores its work takes beside its callers' own threads, all of it
+together: the writers' helpers, the scans' decodes ahead of their loops, and the compaction jobs. Your
+thread is one of a scan's degree: a scan at 4 decodes on three pool threads at most beside your loop.
+A compaction job has no caller, and holds one of the session's lanes for its own flow, its reads'
+decodes and its writer's helpers taking the others: at a degree of 8, a maintainer's jobs compute on
+eight threads at most, however many run at once. The runtime's own work comes on top: the garbage
+collector, and the thread pool's idle spin (below). Whatever holds a lane takes another only when one
+is free, or does the work itself, so that a session never waits on its own degree.
+
 A writer uses the session's degree too, and `VortexWriteOptions.DegreeOfParallelism` overrides it
 for one file. When a batch of a block or more comes in, the writer summarizes its columns side by
 side: each column's statistics, plus a text column's bounds and the distinct values a dictionary is
@@ -260,12 +269,14 @@ A host that runs the library on many lanes, a maintainer compacting a dataset or
 
 ## Prefetch
 
-`ScanOptions.Prefetch` is the number of batches decoded ahead of the loop, 1 by default, so that
-decoding the next batch overlaps your work on the current one. The scan holds at most that many extra
-batches. The batch ahead is decoded on the thread pool, so a scan at the default degree of 1 uses one
-pool thread beside yours, and `Prefetch = 0` keeps everything on your thread. On a mapped file with a
-loop that works on every value it changed nothing measurable, about 3.1 ms at 0, 1 and 2. It pays
-off when the source has latency to hide, as a remote one does.
+`ScanOptions.Prefetch` is the number of batches read ahead of the loop, 1 by default, so that the
+next batch's reads overlap your work on the current one. The scan holds at most that many extra
+batches. A batch ahead is decoded within the degree, of which your thread is one: at the default degree
+of 1 it is decoded on your thread when your loop asks for it, its reads already in, and nothing runs on
+the pool beside you; at a degree of 4, up to three pool threads decode ahead of your loop, each on a
+lane of the session's. On a mapped file with a loop that works on every value it changed nothing
+measurable, about 3.1 ms at 0, 1 and 2. It pays off when the source has latency to hide, as a remote
+one does.
 
 A batch that costs less to decode than the trip to a pool thread and back is decoded on your thread
 instead, whatever the degree and the prefetch: a column of a few thousand values read from a local

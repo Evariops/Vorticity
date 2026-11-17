@@ -349,7 +349,8 @@ public sealed class VortexSession : IAsyncDisposable
     {
         Options = options;
         ReadGate = new SemaphoreSlim(options.MaxConcurrentReads, options.MaxConcurrentReads);
-        Lanes = new Writing.LaneBudget(options.MaxDegreeOfParallelism);
+        Lanes = new Execution.LaneBudget(options.MaxDegreeOfParallelism);
+        Core = new Execution.FlowCore(Lanes);
         Mappings = options.MapFiles && options.MappedFileCacheCount > 0 && FileInode.IsSupported
             ? new MappedFileCache(options.MappedFileCacheCount)
             : null;
@@ -379,7 +380,13 @@ public sealed class VortexSession : IAsyncDisposable
     /// loop that consumes it, and a writer's helpers join its caller up to the degree. A job, which has no caller, holds a
     /// lane for its own flow. Whatever holds a lane never waits for another: it takes one free now, or does the work itself.
     /// </remarks>
-    internal Writing.LaneBudget Lanes { get; }
+    internal Execution.LaneBudget Lanes { get; }
+
+    /// <summary>
+    /// The pumps that run the session's units on its <see cref="Lanes"/>: a writer's pieces spread over its degree, its
+    /// chunks compressed ahead, its census's slices.
+    /// </summary>
+    internal Execution.FlowCore Core { get; }
 
     /// <summary>The files kept mapped once closed, or null when the session keeps none.</summary>
     internal MappedFileCache? Mappings { get; }

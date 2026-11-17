@@ -206,7 +206,7 @@ internal static partial class DatasetCompactor
         // The job's own flow computes, its merge first: it holds a lane of the session's for as long as it runs, taken once
         // its memory is, so that a job waiting for memory holds no lane. Everything it starts beside it takes a lane free now
         // or runs on this one, and never waits for one, which this lane, held by the waiter, would never free.
-        Writing.LaneBudget lanes = dataset.Session.Lanes;
+        Execution.LaneBudget lanes = dataset.Session.Lanes;
         long lane;
         try
         {
@@ -1412,7 +1412,7 @@ internal static partial class DatasetCompactor
         // The job's own lane, and beside it the lanes of the session's that are free now (LaneBudget), as many as the room
         // admits: the job holds the session's degree with its writers' helpers and every other job's, where the census took
         // its own threads past it.
-        Writing.LaneBudget budget = dataset.Session.Lanes;
+        Execution.LaneBudget budget = dataset.Session.Lanes;
         List<long> held = [];
         while (held.Count < admitted - 1 && budget.TryEnter(out long entered))
         {

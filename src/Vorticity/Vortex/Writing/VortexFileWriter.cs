@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Layouts;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Execution;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Indexes;
@@ -34,7 +35,7 @@ namespace Vorticity;
 /// A writer is used by one thread at a time. Disposing it without <see cref="CompleteAsync"/>
 /// abandons the file, as <see cref="Abandon"/> does.
 /// </remarks>
-public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, IFanWork
+public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, IBatchWork
 {
     private readonly ISegmentSink _sink;
     private readonly DType _schema;
@@ -541,7 +542,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// By column, the censuses of the lanes that count slices of a call's rows beside the column's own, merged into it in
-    /// order (<see cref="CountSlicesAsync"/>); null until a call is cut in slices.
+    /// order (<see cref="CountedPathsAsync"/>); null until a call is cut in slices.
     /// </summary>
     private PathCensus?[][]? _sliceCensus;
 
@@ -774,8 +775,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The session's lanes its helpers compute on, shared with every writer of the session; null outside one.</summary>
     private LaneBudget? _budget;
 
-    /// <summary>The threads above one, rented with the first piece of work that uses them.</summary>
-    private WorkFan? _fan;
+    /// <summary>
+    /// The core whose pumps run the writer's pieces and units beside its caller: the session's, or the process's for a
+    /// writer made without one.
+    /// </summary>
+    private FlowCore _core = FlowCore.Process;
+
+    /// <summary>The lanes above one, rented with the first piece of work that uses them.</summary>
+    private CoreBatch? _fan;
     private WriteBytes _reportBytes;
 
     /// <summary>The sink position the write meter has counted to; an append starts it at the file's length.</summary>
@@ -1071,6 +1078,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _automaticChunks = options.AutomaticChunks,
             _lanes = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : session?.Options.MaxDegreeOfParallelism ?? 1,
             _budget = session?.Lanes,
+            _core = session?.Core ?? FlowCore.Process,
             _located = options.Located,
             _zones = options.Zones,
             _zoneMapsOfOneZone = options.ZoneMapsOfOneZone,
@@ -1478,26 +1486,26 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // The rows waiting go through first, counted first, the rows of each call following those of the call before.
         await UnstageAsync(cancellationToken).ConfigureAwait(false);
 
-        // The paths of the variant columns counted on another lane while the rows are taken, and done counting before the
+        // The paths of the variant columns counted on other lanes while the rows are taken, and done counting before the
         // caller may reset the arena.
-        Task? counting = _census is null ? null : CountPathsAsync(arena, root, rows);
+        bool counting = _census is not null && CountPaths(arena, root, rows);
         try
         {
             await WriteCountedAsync(arena, root, rows, seal, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
-            if (counting is not null)
+            if (counting)
             {
-                await counting.ContinueWith(static _ => { }, TaskScheduler.Default).ConfigureAwait(false);
+                await CountedPathsAsync(quietly: true).ConfigureAwait(false);
             }
 
             throw;
         }
 
-        if (counting is not null)
+        if (counting)
         {
-            await counting.ConfigureAwait(false);
+            await CountedPathsAsync(quietly: false).ConfigureAwait(false);
         }
 
         // Nothing flies now, and the size is read as it stands until rows staged next go through.
@@ -1518,16 +1526,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// Counts the paths of the rows of <paramref name="root"/> into each variant column's census, made ready here, which may
-    /// add nodes to the arena; with lanes to spare, on others while the writer takes the same rows, returning what they run
-    /// on; inline otherwise, returning null. With lanes to spare and rows enough, the rows are cut in slices, the first
-    /// counted by the census, each other by a census of its own merged into it in order (<see cref="PathCensus.Merge"/>):
-    /// the census the rows counted in order make.
+    /// add nodes to the arena: on one lane, here, at once; on more, in slices offered to the core, which its pumps count
+    /// while the writer takes the same rows, and which <see cref="CountedPathsAsync"/> waits for, counting itself those no
+    /// pump took. The first slice counts into the census, each other into a census of its own merged into it in order
+    /// (<see cref="PathCensus.Merge"/>): the census the rows counted in order make.
     /// </summary>
+    /// <returns>Whether slices are offered, which <see cref="CountedPathsAsync"/> must then wait for.</returns>
     /// <remarks>
     /// One lane counting the rows of an append of 16 lanes left 109 to 117 ms of a 617 ms append unhidden: its rows cost
     /// some 190 ns each, the writer's own work at 16 lanes less.
     /// </remarks>
-    private Task? CountPathsAsync(CanonicalArena arena, int root, int rows)
+    private bool CountPaths(CanonicalArena arena, int root, int rows)
     {
         PathCensus?[] census = _census!;
         PathCensus.Counting[] ready = new PathCensus.Counting[census.Length];
@@ -1541,136 +1550,141 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         if (_lanes <= 1)
         {
-            Count(census, ready, 0, rows);
-            return null;
+            CountSlice(ready, 0, 0, rows);
+            return false;
         }
 
+        System.Diagnostics.Debug.Assert(_censusOffered == 0, "A census is counted while the one before is still offered.");
         int slices = Math.Max(1, Math.Min(_lanes, rows / CensusSliceRows));
-        if (_budget is not { } budget)
+        if (slices > 1)
         {
-            return slices <= 1 ? Task.Run(() => Count(census, ready, 0, rows)) : CountSlicesAsync(census, ready, rows, slices, null);
-        }
-
-        // Each slice on a lane of the session's it holds, as many as are free; none free, the rows are counted here, where
-        // their tasks took threads past the session's degree.
-        long[] entered = new long[slices];
-        int lanes = 0;
-        while (lanes < slices && budget.TryEnter(out entered[lanes]))
-        {
-            lanes++;
-        }
-
-        if (lanes == 0)
-        {
-            Count(census, ready, 0, rows);
-            return null;
-        }
-
-        if (lanes == 1)
-        {
-            long lane = entered[0];
-            return Task.Run(() =>
-            {
-                try
-                {
-                    Count(census, ready, 0, rows);
-                }
-                finally
-                {
-                    budget.Exit(lane);
-                }
-            });
-        }
-
-        return CountSlicesAsync(census, ready, rows, lanes, (budget, entered));
-
-        static void Count(PathCensus?[] census, PathCensus.Counting[] ready, int start, int count)
-        {
+            Interlocked.Increment(ref CensusesSliced);
+            PathCensus?[][] sliced = _sliceCensus ??= new PathCensus?[census.Length][];
             for (int field = 0; field < census.Length; field++)
             {
-                census[field]?.Add(in ready[field], start, count);
+                if (census[field] is null)
+                {
+                    continue;
+                }
+
+                PathCensus?[] kept = sliced[field] ??= [];
+                if (kept.Length < slices)
+                {
+                    Array.Resize(ref kept, slices);
+                    sliced[field] = kept;
+                }
+
+                for (int slice = 1; slice < slices; slice++)
+                {
+                    kept[slice] ??= new PathCensus(census[field]!.StringBoundBytes, CensusGroupRows);
+                }
+            }
+        }
+
+        if (_censusSlices.Length < slices)
+        {
+            Array.Resize(ref _censusSlices, slices);
+        }
+
+        for (int slice = 0; slice < slices; slice++)
+        {
+            CensusSlice unit = _censusSlices[slice] ??= new CensusSlice(this);
+            unit.Ready = ready;
+            unit.At = slice;
+            unit.Start = (int)((long)rows * slice / slices);
+            unit.End = (int)((long)rows * (slice + 1) / slices);
+            unit.Offer(_core, Flow.Write);
+        }
+
+        _censusOffered = slices;
+        return true;
+    }
+
+    /// <summary>
+    /// Waits for the slices <see cref="CountPaths"/> offered, counting here those no pump took, then merges them in order;
+    /// <paramref name="quietly"/>, for a write that failed, without the merge and without throwing.
+    /// </summary>
+    private async ValueTask CountedPathsAsync(bool quietly)
+    {
+        int slices = _censusOffered;
+        _censusOffered = 0;
+        Exception? failed = null;
+        for (int slice = 0; slice < slices; slice++)
+        {
+            try
+            {
+                await _censusSlices[slice]!.RunOrWaitAsync(_core).ConfigureAwait(false);
+            }
+            catch (Exception error)
+            {
+                failed ??= error;
+            }
+        }
+
+        for (int slice = 0; slice < slices; slice++)
+        {
+            _censusSlices[slice]!.Ready = [];
+        }
+
+        if (quietly)
+        {
+            return;
+        }
+
+        if (failed is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failed);
+        }
+
+        PathCensus?[] census = _census!;
+        for (int field = 0; field < census.Length; field++)
+        {
+            for (int slice = 1; census[field] is { } own && slice < slices; slice++)
+            {
+                own.Merge(_sliceCensus![field]![slice]!);
             }
         }
     }
 
     /// <summary>
-    /// Counts <paramref name="rows"/> rows made ready in <paramref name="slices"/> slices on lanes of their own: the first into
-    /// <paramref name="census"/>, each other into a census of its lane, cleared first, then merged into it in order.
+    /// Counts rows <c>[start, end)</c> of those made ready: slice <paramref name="at"/>, the first into each column's
+    /// census, any other into its own census of the slice, cleared first.
     /// </summary>
-    /// <param name="census">The censuses the rows count into, by column, null for a column counted by none.</param>
-    /// <param name="ready">The rows made ready for each column's census.</param>
-    /// <param name="rows">The rows.</param>
-    /// <param name="slices">The slices, a task each.</param>
-    /// <param name="lanes">The session's lanes each slice holds and gives back when counted, by slice; null outside a session.</param>
-    private async Task CountSlicesAsync(
-        PathCensus?[] census, PathCensus.Counting[] ready, int rows, int slices, (Writing.LaneBudget Budget, long[] Entered)? lanes)
+    private void CountSlice(PathCensus.Counting[] ready, int at, int start, int end)
     {
-        Interlocked.Increment(ref CensusesSliced);
-        PathCensus?[][] sliced = _sliceCensus ??= new PathCensus?[census.Length][];
+        PathCensus?[] census = _census!;
         for (int field = 0; field < census.Length; field++)
         {
-            if (census[field] is null)
+            if (census[field] is not { } own)
             {
                 continue;
             }
 
-            PathCensus?[] kept = sliced[field] ??= [];
-            if (kept.Length < slices)
+            PathCensus into = at == 0 ? own : _sliceCensus![field]![at]!;
+            if (at > 0)
             {
-                Array.Resize(ref kept, slices);
-                sliced[field] = kept;
+                into.Clear();
             }
 
-            for (int slice = 1; slice < slices; slice++)
-            {
-                kept[slice] ??= new PathCensus(census[field]!.StringBoundBytes, CensusGroupRows);
-            }
+            into.Add(in ready[field], start, end - start);
         }
+    }
 
-        Task[] counting = new Task[slices];
-        for (int slice = 0; slice < slices; slice++)
-        {
-            int at = slice;
-            int start = (int)((long)rows * at / slices);
-            int end = (int)((long)rows * (at + 1) / slices);
-            counting[at] = Task.Run(() =>
-            {
-                try
-                {
-                    for (int field = 0; field < census.Length; field++)
-                    {
-                        if (census[field] is not { } own)
-                        {
-                            continue;
-                        }
+    /// <summary>The census's slices, kept from one call to the next, the first <see cref="_censusOffered"/> of them offered.</summary>
+    private CensusSlice?[] _censusSlices = [];
 
-                        PathCensus into = at == 0 ? own : sliced[field][at]!;
-                        if (at > 0)
-                        {
-                            into.Clear();
-                        }
+    /// <summary>The slices of the census offered and not yet waited for; 0 when none is.</summary>
+    private int _censusOffered;
 
-                        into.Add(in ready[field], start, end - start);
-                    }
-                }
-                finally
-                {
-                    if (lanes is { } held)
-                    {
-                        held.Budget.Exit(held.Entered[at]);
-                    }
-                }
-            });
-        }
+    /// <summary>A slice of a call's rows, counted into the census of its slice by a pump of the core, or by the writer.</summary>
+    private sealed class CensusSlice(VortexFileWriter writer) : CoreUnit
+    {
+        internal PathCensus.Counting[] Ready = [];
+        internal int At;
+        internal int Start;
+        internal int End;
 
-        await Task.WhenAll(counting).ConfigureAwait(false);
-        for (int field = 0; field < census.Length; field++)
-        {
-            for (int slice = 1; census[field] is { } own && slice < slices; slice++)
-            {
-                own.Merge(sliced[field][slice]!);
-            }
-        }
+        protected override void Execute() => writer.CountSlice(Ready, At, Start, End);
     }
 
     /// <summary><see cref="WriteCoreAsync"/> for rows checked against the schema and decoded, their paths counted aside.</summary>
@@ -2445,25 +2459,25 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         staging.Bytes = 0;
         try
         {
-            // Their paths counted on another lane while they are taken, done before their arena is reset.
-            Task? counting = _census is null ? null : CountPathsAsync(context.Canonical, node, rows);
+            // Their paths counted on other lanes while they are taken, done before their arena is reset.
+            bool counting = _census is not null && CountPaths(context.Canonical, node, rows);
             try
             {
                 await WriteDecodedAsync(context.Canonical, node, rows, seal: false, cancellationToken).ConfigureAwait(false);
             }
             catch
             {
-                if (counting is not null)
+                if (counting)
                 {
-                    await counting.ContinueWith(static _ => { }, TaskScheduler.Default).ConfigureAwait(false);
+                    await CountedPathsAsync(quietly: true).ConfigureAwait(false);
                 }
 
                 throw;
             }
 
-            if (counting is not null)
+            if (counting)
             {
-                await counting.ConfigureAwait(false);
+                await CountedPathsAsync(quietly: false).ConfigureAwait(false);
             }
         }
         finally
@@ -2589,7 +2603,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// feeds them the batch block by block as the ingest on one thread does.
     /// </remarks>
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
-    private async ValueTask IngestAcrossAsync(WorkFan fan, CanonicalArena arena, int rows)
+    private async ValueTask IngestAcrossAsync(CoreBatch fan, CanonicalArena arena, int rows)
     {
         _ingestGathered = _gatherInIngest;
         if (_indexes is { AsksNothing: false, Streams: true } indexes && KeysApart(indexes) is int groups and > 0)
@@ -2629,7 +2643,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// ingested their column, held every block of a merge of log records at fourteen lanes.
     /// </summary>
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
-    private async ValueTask IngestKeysApartAsync(WorkFan fan, IndexWriter indexes, CanonicalArena arena, int rows, int groups)
+    private async ValueTask IngestKeysApartAsync(CoreBatch fan, IndexWriter indexes, CanonicalArena arena, int rows, int groups)
     {
         try
         {
@@ -2682,7 +2696,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private bool _keysApart;
 
     /// <summary>The items of an ingest across <paramref name="fan"/>'s threads, laid in its room: how many there are.</summary>
-    private int ItemsOf(WorkFan fan, CanonicalArena arena)
+    private int ItemsOf(CoreBatch fan, CanonicalArena arena)
     {
         Span<int> items = fan.Items((_fieldCount * 5) + 1);
         int count = GatherItems(items, 0);
@@ -2758,7 +2772,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>Runs one accumulator of <see cref="IngestAcrossAsync"/> over the batch, block by block, or one column's index builders.</summary>
-    void IFanWork.Run(WorkFan fan, int item)
+    void IBatchWork.Run(CoreBatch fan, int item)
     {
         int entry = fan.Item(item);
         if ((entry & GatherItem) != 0)
@@ -2979,7 +2993,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     };
 
     /// <summary>The writer's threads, or null when it has one.</summary>
-    private WorkFan? Fan => _lanes > 1 ? _fan ??= WorkFan.Rent(_lanes, _budget) : null;
+    private CoreBatch? Fan => _lanes > 1 ? _fan ??= CoreBatch.Rent(_core, _lanes) : null;
 
     /// <summary>The arena the pending rows live in, created on first use.</summary>
     private CanonicalArena Transit()
@@ -3509,7 +3523,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// file's blocks, the canonical bytes its segment measures the rate against, what <see cref="Held"/> counts it at; and
     /// once compressed, its blob, the ids it met past the file's when it began, and its shredded keys' block bounds.
     /// </summary>
-    private sealed class AheadChunk
+    private sealed class AheadChunk(VortexFileWriter writer) : CoreUnit
     {
         internal int Field;
         internal ScanContext? Context;
@@ -3525,7 +3539,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         internal string[] Fresh = [];
         internal ChunkBlockBounds? Bounds;
         internal ArrayBlobWriter.BlobLease Blob;
-        internal Task? Compression;
+
+        /// <summary>Whether its compression was offered to the core, to be waited for before it is written.</summary>
+        internal bool Offered;
+
+        protected override void Execute() => writer.Compress(this);
     }
 
     /// <summary>
@@ -3549,7 +3567,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             ? gathering.Nodes[0]
             : CanonicalConcat.Concat(
                 context.Decode, ChunkType(field), rows, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(gathering.Nodes));
-        AheadChunk chunk = new AheadChunk
+        AheadChunk chunk = new AheadChunk(this)
         {
             Field = field,
             Context = context,
@@ -3603,21 +3621,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         chunk.KnownCount = known;
         chunk.Bounds = AheadBoundsFor(chunk.Field);
-        if (_lanes > 1 && _budget is { } budget && budget.TryEnter(out long entered))
+        if (_lanes > 1)
         {
-            chunk.Compression = Task.Run(
-                () =>
-                {
-                    try
-                    {
-                        Compress(chunk);
-                    }
-                    finally
-                    {
-                        budget.Exit(entered);
-                    }
-                },
-                CancellationToken.None);
+            // A unit of the core: a pump compresses it while the writer goes on, or the writer does when it writes the chunk.
+            chunk.Offered = true;
+            chunk.Offer(_core, Flow.Write);
             return;
         }
 
@@ -3697,11 +3705,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         _aheadBytes -= chunk.Counted;
         Uncount(chunk);
-        if (chunk.Compression is { } compression)
+        if (chunk.Offered)
         {
+            chunk.Offered = false;
             try
             {
-                await compression.ConfigureAwait(false);
+                await chunk.RunOrWaitAsync(_core).ConfigureAwait(false);
             }
             catch
             {
@@ -3766,9 +3775,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
             foreach (AheadChunk chunk in chunks)
             {
-                if (chunk.Compression is { } compression)
+                if (chunk.Offered)
                 {
-                    await compression.ContinueWith(static done => _ = done.Exception, TaskScheduler.Default).ConfigureAwait(false);
+                    chunk.Offered = false;
+                    try
+                    {
+                        await chunk.RunOrWaitAsync(_core).ConfigureAwait(false);
+                    }
+                    catch (Exception)
+                    {
+                        // Given up with the writer: its failure has no one to report to.
+                    }
                 }
 
                 Release(chunk);
@@ -3927,9 +3944,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
             // The last rows' paths counted as every call's are: a census that missed them writes no directory, as a builder's
             // rows past its last whole block left a writer's of seventy thousand rows without one.
-            if (_census is not null && CountPathsAsync(tailArena, tailRoot, tailRows) is { } counting)
+            if (_census is not null && CountPaths(tailArena, tailRoot, tailRows))
             {
-                await counting.ConfigureAwait(false);
+                await CountedPathsAsync(quietly: false).ConfigureAwait(false);
             }
 
             await IngestAsync(tailArena, tailRoot).ConfigureAwait(false);

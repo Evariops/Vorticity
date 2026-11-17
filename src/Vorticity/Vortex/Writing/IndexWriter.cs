@@ -6,6 +6,7 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
+using Vorticity.Execution;
 using Vorticity.Expressions;
 using Vorticity.Indexes;
 using Vorticity.Layouts;

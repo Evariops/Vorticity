@@ -9,6 +9,7 @@ using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Compute;
+using Vorticity.Execution;
 using Vorticity.Indexes;
 using Vorticity.Types;
 

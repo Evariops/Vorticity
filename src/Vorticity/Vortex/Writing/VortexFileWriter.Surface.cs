@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Execution;
 using Vorticity.Layouts;
 using Vorticity.Writing;
 
@@ -555,7 +556,7 @@ public sealed partial class VortexFileWriter
         if (_fan is { } fan)
         {
             _fan = null;
-            WorkFan.Return(fan);
+            CoreBatch.Return(fan);
         }
 
         // What the columns kept per block, which the zone maps and the statistics have read, and

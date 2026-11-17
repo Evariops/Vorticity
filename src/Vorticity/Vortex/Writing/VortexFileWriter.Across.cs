@@ -6,6 +6,7 @@ using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Editions;
+using Vorticity.Execution;
 using Vorticity.Writing;
 
 namespace Vorticity;
@@ -122,7 +123,7 @@ public sealed partial class VortexFileWriter
             }
         }
 
-        WorkFan fan = Fan!;
+        CoreBatch fan = Fan!;
         try
         {
             // A column's frames compressed ahead are items before every column's, and its compression waits for them.
@@ -168,7 +169,7 @@ public sealed partial class VortexFileWriter
         columns.Spread(checked((int)rows), firstBlock, blocks);
         columns.PreGathered = true;
         CanonicalNode root = arena.GetNode(rootIndex);
-        WorkFan fan = Fan!;
+        CoreBatch fan = Fan!;
         try
         {
             Span<int> items = fan.Items(due);
@@ -199,7 +200,7 @@ public sealed partial class VortexFileWriter
     /// one thread puts them.
     /// </summary>
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
-    private async ValueTask EmitGatheredAcrossAsync(Gathering?[] gathering, WorkFan fan, CancellationToken cancellationToken)
+    private async ValueTask EmitGatheredAcrossAsync(Gathering?[] gathering, CoreBatch fan, CancellationToken cancellationToken)
     {
         ChunkColumns columns = _chunkColumns ??= ChunkColumns.Take(this);
         columns.Prepare(_fieldCount, _arrayEncodings);
@@ -277,7 +278,7 @@ public sealed partial class VortexFileWriter
 
         ChunkColumns columns = _chunkColumns ??= ChunkColumns.Take(this);
         columns.Prepare(_fieldCount, _arrayEncodings);
-        WorkFan fan = Fan!;
+        CoreBatch fan = Fan!;
         try
         {
             // A column's frames compressed ahead are items before every accumulator, and its compression waits for them too.
@@ -354,7 +355,7 @@ public sealed partial class VortexFileWriter
     /// The columns of one chunk, compressed on the writer's threads: what each reads, the blob each
     /// wrote and the ids it met, and how long each took the chunk before.
     /// </summary>
-    private sealed class ChunkColumns : IFanWork
+    private sealed class ChunkColumns : IBatchWork
     {
         /// <summary>The writer whose chunks the columns are, for the one write that holds them.</summary>
         private VortexFileWriter? _writer;
@@ -707,7 +708,7 @@ public sealed partial class VortexFileWriter
         /// and compresses what that holds once it reaches its target; or, in an ingest across, runs
         /// one of a column's accumulators and compresses the column when it was the last of them.
         /// </summary>
-        public void Run(WorkFan fan, int item)
+        public void Run(CoreBatch fan, int item)
         {
             CanonicalArena? state = fan.State as CanonicalArena;
             int entry = fan.Item(item);

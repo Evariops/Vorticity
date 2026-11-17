@@ -383,7 +383,7 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
     // from split to split while some wait read (Lane.Parked), and given back once none does; a split none took, the
     // consumer decodes when it reaches it.
     private int _free;
-    private readonly Writing.LaneBudget _budget;
+    private readonly Execution.LaneBudget _budget;
 
     /// <summary>
     /// The bytes the lanes of the splits in flight may hold together: what a share of the pool's size class let them hold

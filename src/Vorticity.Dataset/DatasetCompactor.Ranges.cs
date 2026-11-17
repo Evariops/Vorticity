@@ -850,7 +850,7 @@ internal static partial class DatasetCompactor
 
         // Each range merges on a lane of the session's: the first on the job's own, the others on lanes free now, as many as
         // the room admits, and no more.
-        Writing.LaneBudget budget = dataset.Session.Lanes;
+        Execution.LaneBudget budget = dataset.Session.Lanes;
         List<long> held = [];
         while (held.Count < lanes - 1 && budget.TryEnter(out long entered))
         {
