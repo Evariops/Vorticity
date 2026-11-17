@@ -80,5 +80,43 @@ internal sealed class RunLedger
         }
     }
 
+    /// <summary>
+    /// Hands the runs <paramref name="from"/> holds over to <paramref name="to"/>: a block's map whose runs a writer's
+    /// staging takes. The staging holds them from then on, under the older of the two first runs.
+    /// </summary>
+    internal void Transfer(object from, ref long fromFirst, object to, ref long toFirst)
+    {
+        if (fromFirst < 0)
+        {
+            return;
+        }
+
+        lock (_gate)
+        {
+            int at = -1;
+            for (int i = 0; i < _open.Count; i++)
+            {
+                if (ReferenceEquals(_open[i].Holder, from))
+                {
+                    at = i;
+                    break;
+                }
+            }
+
+            if (toFirst < 0)
+            {
+                _open[at] = new Opened(to, fromFirst);
+                toFirst = fromFirst;
+            }
+            else
+            {
+                // The staging was open already, before the map: its first run is the older, and covers the map's.
+                _open.RemoveAt(at);
+            }
+
+            fromFirst = -1;
+        }
+    }
+
     private readonly record struct Opened(object Holder, long First);
 }

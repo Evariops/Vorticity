@@ -83,7 +83,10 @@ public sealed record CompactionResult
     /// <summary>Whether it was a piece of a consolidation, which leaves the partition's next keys in level 0 for the next job.</summary>
     internal bool Piece { get; init; }
 
-    /// <summary>The batches its rows reached the writers of its objects in, a call each: a diagnostic of how its merge cuts them.</summary>
+    /// <summary>
+    /// The calls its rows reached the writers of its objects in: a block's map each, or a run of a block or more, or a batch
+    /// of a concatenation. A diagnostic of how its merge cuts them.
+    /// </summary>
     internal long WriterBatches { get; init; }
 
     /// <summary>Of <see cref="WriterBatches"/>, those the writers ingested on their lanes rather than on the job's thread.</summary>
@@ -1219,10 +1222,10 @@ internal static partial class DatasetCompactor
                     rows = await MergeRunsAsync(merge, outputs, late, lateOutputs, values, cancellationToken).ConfigureAwait(false);
 
                     // The merge ends: its writers copy what they still keep of its inputs, which then go.
-                    await outputs.LetGoOfInputsAsync().ConfigureAwait(false);
+                    await outputs.LetGoOfInputsAsync(cancellationToken).ConfigureAwait(false);
                     if (lateOutputs is not null)
                     {
-                        await lateOutputs.LetGoOfInputsAsync().ConfigureAwait(false);
+                        await lateOutputs.LetGoOfInputsAsync(cancellationToken).ConfigureAwait(false);
                     }
                 }
                 catch
@@ -1989,8 +1992,11 @@ internal static partial class DatasetCompactor
         /// <summary>The inputs' batches whose keys the merges' thread encoded rather than their decode.</summary>
         internal long WindowsKeyedHere { get; set; }
 
-        /// <summary>Whether the object being written has reached the destination's size.</summary>
-        internal bool WantsRoll => _output is not null && _output.Writer.Size >= _target;
+        /// <summary>
+        /// Whether the object being written has reached the destination's size: its writer's, with the rows of the block's map
+        /// counted as the writer counts the rows it stages.
+        /// </summary>
+        internal bool WantsRoll => _output is not null && _output.Writer.SizeWith(_map.Bytes) >= _target;
 
         /// <summary>Whether the last row written carries this key, which must not be split.</summary>
         internal bool HoldsKey(ReadOnlySpan<byte> key) =>
@@ -2069,13 +2075,52 @@ internal static partial class DatasetCompactor
             _firstKey ??= merge.KeyAt(from).ToArray();
             _lastKeyLength = SortedRows.Keep(ref _lastKey, merge.KeyAt(to - 1));
 
-            // The rows where they lie in the input's batch: the writer keeps a window on them and copies them with the block
-            // they fall in, on its lane; the merge keeps the batch until the ledger says every run on it is copied.
+            // The rows where they lie in the input's batch, into the map of the block they fall in, the run that crosses a block
+            // cut there: the writer takes a block's map at once, keeps a window on its runs and copies them as the block goes
+            // through; the merge keeps the batch until the ledger says every run on it is copied. A run of a block or more goes
+            // to the writer whole, once the rows mapped before it went.
             (Vorticity.Arrays.CanonicalArena arena, int root, int row, double rowBytes) = merge.CurrentRun;
-            _rows += to - from;
-            Batches++;
-            await output.Writer.WriteRunAsync(arena, root, row + from, to - from, rowBytes, cancellationToken).ConfigureAwait(false);
+            int rows = to - from;
+            int at = row + from;
+            _rows += rows;
+            VortexFileWriter writer = output.Writer;
+            int staged = writer.MapRows;
+            if (staged == 0 || rows >= staged)
+            {
+                await HandMapAsync(writer, cancellationToken).ConfigureAwait(false);
+                Batches++;
+                await writer.WriteRunAloneAsync(arena, root, at, rows, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            while (rows > 0)
+            {
+                int take = Math.Min(rows, staged - _map.Rows);
+                _map.Add(arena, root, at, take, rowBytes);
+                _ledger?.Note(_map, ref _map.FirstRun);
+                at += take;
+                rows -= take;
+                if (_map.Rows >= staged)
+                {
+                    await HandMapAsync(writer, cancellationToken).ConfigureAwait(false);
+                }
+            }
         }
+
+        /// <summary>Hands the block's map to <paramref name="writer"/>, full or short, when it holds rows.</summary>
+        private ValueTask HandMapAsync(VortexFileWriter writer, CancellationToken cancellationToken)
+        {
+            if (_map.Rows == 0)
+            {
+                return ValueTask.CompletedTask;
+            }
+
+            Batches++;
+            return writer.WriteBlockAsync(_map, cancellationToken);
+        }
+
+        // The runs of the block the merge fills, which the writer of the object being written takes once the block is full.
+        private readonly Writing.BlockMap _map = new Writing.BlockMap();
 
         /// <summary>
         /// The runs the merge's writers keep where they lie in its inputs: each object's writer notes its own there, which the
@@ -2096,13 +2141,29 @@ internal static partial class DatasetCompactor
 
         private Writing.RunLedger? _ledger;
 
-        /// <summary>Has the writer of the object being written copy every row it keeps in the merge's inputs, as the merge ends.</summary>
-        internal ValueTask LetGoOfInputsAsync() =>
-            _output is { } output ? output.Writer.LetGoOfInputsAsync() : ValueTask.CompletedTask;
+        /// <summary>
+        /// Hands the writer of the object being written the block's map, short, and has it copy every row it keeps in the
+        /// merge's inputs, as the merge ends.
+        /// </summary>
+        internal async ValueTask LetGoOfInputsAsync(CancellationToken cancellationToken)
+        {
+            if (_output is { } output)
+            {
+                await HandMapAsync(output.Writer, cancellationToken).ConfigureAwait(false);
+                await output.Writer.LetGoOfInputsAsync().ConfigureAwait(false);
+            }
+        }
 
-        /// <summary>Waits for the rows the object's writer has in flight, whatever becomes of them, as a failed merge ends.</summary>
-        internal ValueTask SettleAsync() =>
-            _output is { } output ? output.Writer.SettleAsync() : ValueTask.CompletedTask;
+        /// <summary>
+        /// Waits for the rows the object's writer has in flight, whatever becomes of them, as a failed merge ends; the block's
+        /// map, which reads the inputs, goes.
+        /// </summary>
+        internal ValueTask SettleAsync()
+        {
+            _map.Clear();
+            _map.FirstRun = -1;
+            return _output is { } output ? output.Writer.SettleAsync() : ValueTask.CompletedTask;
+        }
 
         /// <summary>Writes <paramref name="batch"/>'s rows after those written: in no key's order, they index nothing.</summary>
         internal async ValueTask WriteAsync(RecordBatch batch, CancellationToken cancellationToken)
@@ -2180,6 +2241,9 @@ internal static partial class DatasetCompactor
 
             output.Arrival = Arrival;
             output.Partition = _inKeyOrder ? null : Partition;
+
+            // The block's map goes to the object it falls in, short, before the object is sealed.
+            await HandMapAsync(output.Writer, cancellationToken).ConfigureAwait(false);
             _output = null;
             _firstKey = null;
             _lastKeyLength = -1;

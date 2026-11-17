@@ -84,6 +84,12 @@ public sealed partial class DatasetCompactionLanesTests
             Assert.True(results.Sum(static result => result.InputWindowsTaken) > 0, $"at {lanes} lanes, no batch was taken over");
             Assert.Equal(0, results.Sum(static result => result.InputWindowsCopied));
             Assert.Equal(0, results.Sum(static result => result.InputWindowsKeyedByMerge));
+
+            // The merge hands its writers a block's map at a time, short as an object ends, and never a run: runs of a few
+            // rows, the services of two days interleaved, made thousands of calls.
+            long calls = results.Sum(static result => result.WriterBatches);
+            long merged = results.Sum(static result => result.Rows);
+            Assert.True(merged >= calls * 256, $"at {lanes} lanes, {calls} calls of the writers for {merged} rows");
             Assert.Equal(48_000, await dataset.ScanBuilder().CountAsync(Ct));
         }
     }

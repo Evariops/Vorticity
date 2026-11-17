@@ -466,7 +466,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <paramref name="rate"/>, the rate of what the columns hold, their mean rate when they hold nothing, a first guess with
     /// none.
     /// </summary>
-    private long Held(out double rate)
+    private long Held(out double rate, long mapBytes = 0)
     {
         long canonical = 0;
         double encoded = 0;
@@ -487,7 +487,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         rate = canonical > 0 ? encoded / canonical : columns > 0 ? rates / columns : Gathering.FirstRate;
-        return (long)(encoded + _aheadBytes + ((_pendingBytes + (_staging?.Bytes ?? 0)) * rate));
+        return (long)(encoded + _aheadBytes + ((_pendingBytes + (_staging?.Bytes ?? 0) + mapBytes) * rate));
     }
 
     // Whether a shredded variant column compresses its chunk ahead of its writing (VortexWriteOptions.CompressesShreddedAhead);
@@ -2106,61 +2106,81 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         !_automaticChunks && _pendingRows + staging.Rows >= _rowBlock && _pendingBytes + staging.Bytes >= _blockBytes;
 
     /// <summary>
-    /// Takes rows <paramref name="row"/> to <paramref name="row"/> + <paramref name="rows"/> of node <paramref name="root"/> of
-    /// <paramref name="source"/>, a merge's input batch whose rows name <paramref name="rowBytes"/> bytes each on average, in
-    /// the key's order after the rows taken before: a merge's writer (<see cref="VortexWriteOptions.StagedRows"/>) keeps a
-    /// window on them and copies them when the block they complete goes through, on that block's lane, and says so to the
-    /// merge's <see cref="Ledger"/>; any other writer takes them as a batch now. The source stays as it is until the ledger
-    /// says every run noted on it is copied.
+    /// Takes the runs of <paramref name="map"/>, a block of a merge's output where its rows lie in the merge's input batches,
+    /// in the key's order after the rows taken before: the writer keeps a window on them and copies them when the block they
+    /// complete goes through, on that block's lane, and says so to the merge's <see cref="Ledger"/>, which held them under
+    /// the map until now. A full map's block goes through at once; a map the merge hands over short, as an object or the
+    /// merge ends, waits with the rows after it. The map is empty once taken, for the merge's next block.
     /// </summary>
     /// <remarks>
-    /// The merge's thread copied each run into the writer's staging as it chose it, beside choosing it: a ninth of a
-    /// consolidation's processor, on the chain every lane of the writer waited for (2026-11-16). Then it copied what the
-    /// staging still held of an input before the input moved on, and waited for the blocks in flight to copy theirs: 2.7 s
-    /// over two rounds of a consolidation, and 0.85 s of copies a round on its thread.
+    /// The merge handed its writer one run at a time, 1.5 million calls a consolidation of the metrics, each a call of its
+    /// own through the writer's checks (2026-11-17). Before, its thread copied each run into the writer's staging as it chose
+    /// it, a ninth of a consolidation's processor (2026-11-16), then what the staging still held of an input before the input
+    /// moved on, and waited for the blocks in flight to copy theirs: 2.7 s over two rounds of a consolidation.
     /// </remarks>
-    internal async ValueTask WriteRunAsync(CanonicalArena source, int root, int row, int rows, double rowBytes, CancellationToken cancellationToken)
+    internal async ValueTask WriteBlockAsync(BlockMap map, CancellationToken cancellationToken)
     {
         ThrowIfDone();
         Carry();
         await DrainAsync(cancellationToken).ConfigureAwait(false);
-        _acceptedRows += rows;
-        if (_stagedRows == 0 || _rowBlock == 0 || rows >= _stagedRows)
-        {
-            // A run of a block or more goes through as a batch of its own, as it did, once the rows staged before it went:
-            // nothing flies then, so the window is cut in the source itself, on the merge's thread alone. A level's objects,
-            // whose keys do not interleave, give runs of whole batches.
-            await UnstageAsync(cancellationToken).ConfigureAwait(false);
-            await WriteCoreAsync(source, CanonicalSlice.SliceAcross(source, source, root, row, rows), seal: false, cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
+        _acceptedRows += map.Rows;
         if (!_started)
         {
             await StartAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        while (rows > 0)
+        Staging staging = StagingOf();
+        List<MapRun> runs = map.Runs;
+        if (staging.Parts.Count == 0 && runs.Count > 0)
         {
-            Staging staging = StagingOf();
-            if (staging.Parts.Count == 0)
-            {
-                RequireMatchingSchema(source.GetNode(root).DType);
-            }
+            RequireMatchingSchema(runs[0].Source.GetNode(runs[0].Root).DType);
+        }
 
-            int take = Math.Min(rows, _stagedRows - staging.Rows);
-            staging.Parts.Add(new StagedPart(source, root, row, take, -1));
-            Ledger?.Note(staging, ref staging.FirstRun);
-            staging.Rows += take;
-            staging.Bytes += (long)(take * rowBytes);
-            row += take;
-            rows -= take;
-            if (staging.Rows >= _stagedRows)
-            {
-                await FlyAsync(cancellationToken).ConfigureAwait(false);
-            }
+        for (int i = 0; i < runs.Count; i++)
+        {
+            MapRun run = runs[i];
+            staging.Parts.Add(new StagedPart(run.Source, run.Root, run.Row, run.Rows, -1));
+        }
+
+        staging.Rows += map.Rows;
+        staging.Bytes += map.Bytes;
+        Ledger?.Transfer(map, ref map.FirstRun, staging, ref staging.FirstRun);
+        map.Clear();
+        if (staging.Rows >= _stagedRows)
+        {
+            await FlyAsync(cancellationToken).ConfigureAwait(false);
         }
     }
+
+    /// <summary>
+    /// Takes rows <paramref name="row"/> to <paramref name="row"/> + <paramref name="rows"/> of node <paramref name="root"/> of
+    /// <paramref name="source"/>, a merge's input batch, as a batch of their own, once the rows staged before them went: a run
+    /// of a block or more, which a merge hands its writer whole, or any run of a writer that stages none. Nothing flies then,
+    /// so the window is cut in the source itself, on the merge's thread alone. A level's objects, whose keys do not
+    /// interleave, give runs of whole batches.
+    /// </summary>
+    internal async ValueTask WriteRunAloneAsync(CanonicalArena source, int root, int row, int rows, CancellationToken cancellationToken)
+    {
+        ThrowIfDone();
+        Carry();
+        await DrainAsync(cancellationToken).ConfigureAwait(false);
+        _acceptedRows += rows;
+        await UnstageAsync(cancellationToken).ConfigureAwait(false);
+        await WriteCoreAsync(source, CanonicalSlice.SliceAcross(source, source, root, row, rows), seal: false, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The rows of a block a merge hands this writer at once (<see cref="WriteBlockAsync"/>), its staged rows; 0 for a writer
+    /// that stages none, which takes every run alone (<see cref="WriteRunAloneAsync"/>).
+    /// </summary>
+    internal int MapRows => _rowBlock == 0 ? 0 : _stagedRows;
+
+    /// <summary>
+    /// <see cref="Size"/>, with the rows of a block's map not yet handed over, which name <paramref name="mapBytes"/> bytes,
+    /// counted as staged: what the size reads once the map is handed over, at the same rate.
+    /// </summary>
+    internal long SizeWith(long mapBytes) =>
+        _sized ? _sizedBytes + (long)(((_staging?.Bytes ?? 0) + mapBytes) * _sizedRate) : _sink.Position + Held(out _, mapBytes);
 
     /// <summary>
     /// The runs of a merge this writer and the merge's other writers keep where they lie in its inputs' batches, which the
