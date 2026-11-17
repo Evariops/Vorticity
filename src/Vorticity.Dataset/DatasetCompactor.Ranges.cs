@@ -592,18 +592,15 @@ internal static partial class DatasetCompactor
     }
 
     /// <summary>
-    /// The ranges of the key a consolidation cuts its rows into, of equal weight, as many as the session's lanes and its bytes
-    /// in objects of its target let, at most <see cref="MostRanges"/>; null for one. The cuts are first keys of the inputs'
-    /// granules, which their sparse indexes give, a granule weighing its object's bytes over its granules: the rows of a key,
-    /// and of an indexed prefix, all fall in one range, which reads of each input the granules that may hold its keys alone.
-    /// Null too when the inputs keep no index, or hold more than one partition.
+    /// The slices of the key a merge cuts its rows into, of equal weight, <paramref name="most"/> at most (<see cref="KeyRanges.SlicesOf"/>);
+    /// null for one. The cuts are first keys of the inputs' granules, which their sparse indexes give, a granule weighing its
+    /// object's bytes over its granules: the rows of a key, and of an indexed prefix, all fall in one slice, which reads of
+    /// each input the granules that may hold its keys alone. Null too when the inputs keep no index, or hold more than one
+    /// partition.
     /// </summary>
     private static async ValueTask<KeyRanges?> KeyRangesAsync(
-        VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken, int slices = 0)
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, int most, CancellationToken cancellationToken)
     {
-        int most = slices > 0
-            ? slices
-            : (int)Math.Min(Math.Min(MostRanges, dataset.Session.Options.MaxDegreeOfParallelism), job.Bytes / Math.Max(job.TargetBytes, 1));
         if (most < 2)
         {
             return null;

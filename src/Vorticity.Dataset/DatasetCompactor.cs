@@ -64,7 +64,10 @@ public sealed record CompactionResult
     /// </summary>
     public long MemoryReserved { get; init; }
 
-    /// <summary>The most ranges of the key it ran side by side, as many as the budget held; 1 for a job in one piece.</summary>
+    /// <summary>
+    /// The most ranges of the key a piece of a consolidation ran side by side below its cut, as many as the budget held; 1
+    /// for any other job, whose merge is one stream of objects.
+    /// </summary>
     public int RangesAtOnce { get; init; } = 1;
 
     /// <summary>
@@ -363,18 +366,12 @@ internal static partial class DatasetCompactor
             Postings = postings,
         };
 
-        // A merge of several objects' worth runs in ranges of the key side by side, on the session's lanes, each reading of
-        // its inputs the granules of its range alone (KeyRanges): a consolidation's, and a level's, which ran on one lane
-        // whatever the session gave it, 336 ms for level 0's sixteen objects of 2 M rows at eight lanes, 93 ms in ranges.
-        // Not one of a value, since each object of a range shreds the paths of the first.
-        KeyRanges? ranges = null;
-        if (late is null && merge && shreddings is not { Count: > 1 } && piece is null)
-        {
-            using Activity? cutting = DatasetTelemetry.StartCompactionPass("ranges");
-            ranges = await KeyRangesAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false);
-        }
-
-        // The destination's objects, in the key's order: those of one stream, or of one a range.
+        // A merge of several objects' worth, a consolidation's or a level's, runs as one stream of objects cut in slices of the
+        // key, merged ahead on the lanes free (SlicedMerge), its writer sending several blocks through at once: the same
+        // objects at any degree. It ran in ranges of the key side by side, as many as the session's lanes, each writing
+        // objects of its own, so that one consolidation wrote 12 objects on one lane and 14 on four (2026-11-17). A piece of a
+        // consolidation still merges the ranges below its cut side by side.
+        // The destination's objects, in the key's order: those of one stream, or of one a range of a piece.
         ObjectStream[] streams;
         ObjectStream? lateOutputs = null;
         long rows;
@@ -388,12 +385,7 @@ internal static partial class DatasetCompactor
         Activity? writing = DatasetTelemetry.StartCompactionPass("write");
         try
         {
-            if (ranges is not null)
-            {
-                (streams, rows, atOnce, batchRows) =
-                    await RangesAsync(dataset, schema, job, ranges, writer, meter, memory, doublings => OutputsOf(job, doublings), cancellationToken).ConfigureAwait(false);
-            }
-            else if (piece is { Merged: > 1 })
+            if (piece is { Merged: > 1 })
             {
                 // A piece of several ranges below its cut merges them side by side, and counts what each took of each input.
                 (streams, rows, atOnce, batchRows) = await RangesAsync(
@@ -411,7 +403,7 @@ internal static partial class DatasetCompactor
                 if (merge && piece is null && KeyRanges.SlicesOf(dataset, ran) >= 2)
                 {
                     using Activity? cutting = DatasetTelemetry.StartCompactionPass("slices");
-                    slices = await KeyRangesAsync(dataset, schema, ran, cancellationToken, KeyRanges.SlicesOf(dataset, ran)).ConfigureAwait(false);
+                    slices = await KeyRangesAsync(dataset, schema, ran, KeyRanges.SlicesOf(dataset, ran), cancellationToken).ConfigureAwait(false);
                 }
 
                 int open = !merge ? 1 : slices is null ? ran.Inputs.Count : slices.MostInputs * (1 + SlicesAheadPriced);
@@ -512,7 +504,7 @@ internal static partial class DatasetCompactor
         dataset.LearnJobRate(ran.Bytes, dataset.Options.TimeProvider.GetUtcNow() - started);
         if (merge)
         {
-            KeyRanges? sideBySide = ranges ?? (piece is { Merged: > 1 } ? piece.Ranges : null);
+            KeyRanges? sideBySide = piece is { Merged: > 1 } ? piece.Ranges : null;
             int open = sideBySide is null ? ran.Inputs.Count : Math.Max(1, sideBySide.MostInputs * atOnce);
             int width = 0;
             foreach (CompactionInput input in ran.Inputs)
