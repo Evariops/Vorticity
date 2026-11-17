@@ -51,7 +51,7 @@ internal sealed class StringZones : IReadOnlyList<ZoneString>
 
     internal int Limit { get; }
 
-    /// <summary>Folds a varbinview range into the open block.</summary>
+    /// <summary>Folds a varbinview range, or a constant's, into the open block.</summary>
     internal void Accumulate(CanonicalArena arena, CanonicalNode node, int start, int count)
     {
         _open ??= new StringBounds(Limit, node.DType.Kind == DTypeKind.Utf8);
@@ -184,7 +184,7 @@ internal sealed class StringBounds
         _max = new byte[limit + 1];
     }
 
-    /// <summary>Folds the valid rows <c>[start, start + count)</c> of a varbinview into the block.</summary>
+    /// <summary>Folds the valid rows <c>[start, start + count)</c> of a varbinview, or of a constant of a text, into the block.</summary>
     /// <remarks>
     /// <para>
     /// A row is compared with the bounds by key first: two strings whose keys differ compare as
@@ -204,6 +204,17 @@ internal sealed class StringBounds
         ValidityMask mask = ValidityMask.From(arena, node.Validity);
         if (mask.AllInvalid)
         {
+            return;
+        }
+
+        if (node.Kind == CanonicalKind.Constant)
+        {
+            // Its value, once, where a row of the range holds it.
+            if (mask.AllValid || BitmapKernels.CountSet(mask.Bits, mask.BitOffset + start, count) > 0)
+            {
+                FoldValue(node.ConstantElement);
+            }
+
             return;
         }
 
@@ -557,8 +568,26 @@ internal sealed class StringBounds
         int size = BinaryPrimitives.ReadInt32LittleEndian(view);
         int length = Math.Min(size, _limit + 1);
         ReadOnlySpan<byte> whole = size <= 12 ? view.Slice(4, 12) : BlockStatsPass.Value(buffers, views, row);
-        ReadOnlySpan<byte> value = whole[..length];
-        ulong key = Key(whole, length);
+        Take(whole[..length], Key(whole, length));
+    }
+
+    /// <summary>
+    /// Folds <paramref name="whole"/>, a value read whole, into the bounds: a constant's, which every valid row of its range
+    /// holds, so that a block whose rows came as a constant has the bounds the same rows have as views.
+    /// </summary>
+    internal void FoldValue(ReadOnlySpan<byte> whole)
+    {
+        int length = Math.Min(whole.Length, _limit + 1);
+        Span<byte> padded = stackalloc byte[Math.Max(length, 8)];
+        padded.Clear();
+        whole[..length].CopyTo(padded);
+        Take(padded[..length], Key(padded, length));
+    }
+
+    /// <summary>Takes <paramref name="value"/>, a value cut to the bound's length, whose key is <paramref name="key"/>, as a new extreme where it is one.</summary>
+    private void Take(ReadOnlySpan<byte> value, ulong key)
+    {
+        int length = value.Length;
         if (_minLength < 0
             || key < _minKey
             || (key == _minKey && Tie(value, _min.AsSpan(0, _minLength)) < 0))

@@ -152,7 +152,10 @@ public sealed partial class ObjectKeyBoundsTests
         Console.Out.Write(FormattableString.Invariant(
             $"TEXT NEIGHBOURS: {appended} rows of {tenants.Length} tenants in appends of 60; objects above level 0 by tenant: {string.Join(", ", objects.Select(pair => $"{pair.Key} {pair.Value}"))}.\n"));
         Assert.Equal(appended, dataset.RowCount);
-        Assert.All(objects, pair => Assert.True(pair.Value <= 6, $"{pair.Value} objects hold {pair.Key}'s 1440 rows"));
+
+        // The 24 objects each tenant's appends left merge into a third of them at most. The tenant is the partition, so each
+        // block of its column is a constant, whose zone keeps the text's bounds: 8 objects under these kibibyte targets.
+        Assert.All(objects, pair => Assert.True(pair.Value <= 8, $"{pair.Value} objects hold {pair.Key}'s 1440 rows"));
     }
 
     /// <summary>Holds every object's entry to its rows: its last key the largest key they hold, encoded as the key encodes it.</summary>

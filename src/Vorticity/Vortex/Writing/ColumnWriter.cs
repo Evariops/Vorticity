@@ -203,7 +203,10 @@ internal sealed class ColumnWriter
             BlockStatsPass.Accumulate(arena, nodeIndex, start, count, ref _open, _previous, widths);
         }
 
-        if ((parts & IngestParts.Bounds) != 0 && _stringZones is not null && node.Kind == CanonicalKind.VarBinView)
+        // A text's rows as views, or as a constant: a block of rows that are all one value comes as either, as the batches it
+        // was cut from came, and its bounds are the same. Kept for views alone, a constant block had none, and its file's zone
+        // map then had none for its column, as a merge's runs cut the block at any degree.
+        if ((parts & IngestParts.Bounds) != 0 && _stringZones is not null && node.Kind is CanonicalKind.VarBinView or CanonicalKind.Constant)
         {
             _stringZones.Accumulate(arena, node, start, count);
         }
