@@ -292,6 +292,47 @@ public sealed partial class DatasetCompactionLanesTests
         Assert.Equal(60_000, await dataset.ScanBuilder().CountAsync(Ct));
     }
 
+    /// <summary>
+    /// A consolidation of appends whose keys do not interleave, so that its merge takes long runs of one input: its writer
+    /// takes them a block's map at a time and sends the blocks through its line on four lanes, and the objects are those of
+    /// one lane.
+    /// </summary>
+    [Fact]
+    public async Task LongRunsGoThroughTheWritersLineABlockAtATime()
+    {
+        List<long>? first = null;
+        foreach (int lanes in new[] { 1, 4 })
+        {
+            Random random = new Random(53);
+            await using MemoryObjectStore store = new MemoryObjectStore();
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);
+            DatasetOptions options = OptionsOf(session) with { Write = new VortexWriteOptions { BlockRows = 256 } };
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, options, Ct);
+            for (int a = 0; a < 4; a++)
+            {
+                // Each append's services in two bands of its own, the bands of the appends one after another: their ranges
+                // overlap, so they merge, and the merge takes an input's rows a long run at a time.
+                Doc[] rows = [.. Enumerable.Range(a * 30_000, 30_000).Select(i => new Doc(0, $"svc-{(random.Next(2) == 0 ? a : a + 4)}-{random.Next(0, 10)}", i, Attributes(random)))];
+                await using ObjectDraft draft = dataset.StartObject();
+                await draft.Writer.WriteAsync<Doc>(rows, Ct);
+                await dataset.AppendAsync(draft, Ct);
+            }
+
+            IReadOnlyList<CompactionResult> results = await dataset.ConsolidateAsync(Ct);
+            long onLine = results.Sum(static result => result.WriterBlocksOnLine);
+            Assert.True(lanes == 1 ? onLine == 0 : onLine > 0, $"{lanes} lanes: {onLine} blocks on a writer's line");
+            List<long> sizes = [];
+            await foreach (PositionedObject positioned in dataset.ScanBuilder().ObjectsAsync(Ct))
+            {
+                sizes.Add(positioned.Entry.Rows);
+            }
+
+            first ??= sizes;
+            Assert.Equal(first, sizes);
+            Assert.Equal(120_000, await dataset.ScanBuilder().CountAsync(Ct));
+        }
+    }
+
     /// <summary>A store whose puts, when <paramref name="late"/>, answer once a millisecond went by.</summary>
     private sealed class LatePuts(IObjectStore inner, bool late) : ForwardingStore(inner)
     {

@@ -87,8 +87,8 @@ public sealed record CompactionResult
     internal bool Piece { get; init; }
 
     /// <summary>
-    /// The calls its rows reached the writers of its objects in: a block's map each, or a run of a block or more, or a batch
-    /// of a concatenation. A diagnostic of how its merge cuts them.
+    /// The calls its rows reached the writers of its objects in: a block's map each, a run of a block or more cut in maps too,
+    /// or a batch of a concatenation. A diagnostic of how its merge cuts them.
     /// </summary>
     internal long WriterBatches { get; init; }
 
@@ -2220,15 +2220,16 @@ internal static partial class DatasetCompactor
 
             // The rows where they lie in the input's batch, into the map of the block they fall in, the run that crosses a block
             // cut there: the writer takes a block's map at once, keeps a window on its runs and copies them as the block goes
-            // through; the merge keeps the batch until the ledger says every run on it is copied. A run of a block or more goes
-            // to the writer whole, once the rows mapped before it went.
+            // through its line; the merge keeps the batch until the ledger says every run on it is copied. A run of a block or
+            // more goes the same way, a block's map at a time: a level's objects, whose keys do not interleave, give runs of
+            // whole batches, which went to the writer whole, past its line, their chunks ingested in turns of its lanes.
             (Vorticity.Arrays.CanonicalArena arena, int root, int row, double rowBytes) = merge.CurrentRun;
             int rows = to - from;
             int at = row + from;
             _rows += rows;
             VortexFileWriter writer = output.Writer;
             int staged = writer.MapRows;
-            if (staged == 0 || rows >= staged)
+            if (staged == 0)
             {
                 await HandMapAsync(writer, cancellationToken).ConfigureAwait(false);
                 Batches++;
