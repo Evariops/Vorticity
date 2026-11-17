@@ -185,12 +185,7 @@ hands batches to your loop gains little: it still delivers them one at a time an
 (which the sample checks at degree 4), and most of its cost here is walking 123 blocks. Measure on
 your own files. Timings vary from run to run on a busy machine, so read the ratios.
 
-When your loop is the larger part of the work, run it on the lanes too. A fold that keeps a state
-goes through `AggregateAsync<TAggregator, TState>()` with an `IBatchAggregator` of your own
-([aggregates.md](aggregates.md#an-aggregator-of-your-own)). Work that keeps no state, an export or a
-copy into another store, takes the scan in parts: `SplitAsync(n)` cuts it into at most `n` scans of
-disjoint rows, each starting where every column it reads starts a chunk, and each part is a scan you
-enumerate on a task of your own.
+When your loop is the larger part of the work, run it on the lanes too. A fold that keeps a state goes through `AggregateAsync<TAggregator, TState>()` with an `IBatchAggregator` of your own ([aggregates.md](aggregates.md#an-aggregator-of-your-own)). Work that keeps no state, an export or a copy into another store, takes the scan in parts: `SplitAsync(n)`, on a typed scan or an untyped one, cuts it into at most `n` scans of disjoint rows, a file's where every column it reads starts a chunk and a dataset's at its objects, and each part is a scan you enumerate on a task of your own.
 
 ```csharp
 IReadOnlyList<Scan<Reading>> parts = await file.Scan<Reading>().SplitAsync(4);
@@ -203,10 +198,7 @@ await Parallel.ForEachAsync(parts, async (part, ct) =>
 });
 ```
 
-A writer has the same limit the other way: you fill its builder on one thread. Fill it in parts
-instead, `writer.CreatePartAsync<TRecord>()`, each a builder of its own on a thread of yours, written
-in the order the parts were created, or hand it records already in memory with
-`writer.WriteRecordsAsync(records)`, which fills a part a lane ([write-rows.md](write-rows.md)).
+A writer has the same limit the other way: you fill its builder on one thread. Fill it in parts instead, `writer.CreatePartAsync<TRecord>()`, each a builder of its own on a thread of yours, written in the order the parts were created, or hand it records already in memory with `writer.WriteRecordsAsync(records)`, which fills a part a lane ([write-rows.md](write-rows.md)).
 
 ## Many questions at once
 
@@ -259,6 +251,12 @@ on every core and pauses the process a fraction as long.
 * A host that keeps the workstation collector can give its youngest generation a larger budget:
   `DOTNET_GCgen0size=0x8000000` (128 MiB) answered 900 questions a second at 16 clients and 829 at 32,
   paused 3 % and 7 % of the time.
+
+## The thread pool's idle spin
+
+A thread of .NET's pool that runs out of work spins for a while before it sleeps, in case more arrives. A writer or a scan on many lanes hands the pool short items in waves, so its idle threads spin between them: 17 % of a write's processor time at 14 lanes, in a profile of a file of ten million rows on an M4 Pro (2026-11-17). The spin does no work, and the cores it takes are ones the write had left idle.
+
+A host that runs the library on many lanes, a maintainer compacting a dataset or a batch job writing files, can turn it off with `DOTNET_ThreadPool_UnfairSemaphoreSpinLimit=0` in its environment. Measured on that write at 14 lanes, two runs each, the time stayed the same (58.7 and 69.4 ms a round with the spin, 59.1 and 63.7 without), and the processor time fell by a quarter (406.8 and 483.4 ms a round, against 313.2 and 361.8). Keep the default in a process whose threads answer requests one at a time, where a thread that spins answers the next one sooner.
 
 ## Prefetch
 

@@ -235,7 +235,7 @@ in no promised order without one.
 | `GroupBy(…).Select(g => r)` | `Aggregation<T>`, one value per group | one state per group, only the open groups on a key that streams, and `k` groups for a top-k | the first group closed on a key that streams, the end of the pass otherwise |
 | `GroupBy(…).Select(g => (…)).As<TRecord>()` | a `Scan<TRecord>` over the groups, its batches borrowed | the same, and nothing per batch or per group | the same |
 | `AggregateAsync<TAggregator, TState>()` with an `IBatchAggregator<TRecord, TState>` of one's own | one state, folded from whole batches | a state per part of the scan, the parts cut where every column it reads starts a chunk, each read and folded on a lane of the scan's degree, merged in the parts' order | at the end of the pass |
-| `SplitAsync(n)` | at most `n` scans of disjoint rows, in the rows' order, each cut where every column it reads starts a chunk | nothing until a part is enumerated | the first split of each part |
+| `SplitAsync(n)` | at most `n` scans of disjoint rows, in the rows' order: a file's cut where every column it reads starts a chunk, a dataset's at its objects. On `Scan<TRecord>` and on the untyped `Scan` | nothing until a part is enumerated | the first split of each part |
 | `writer.WriteAsync(scan)` | the batches of any scan, written as they come | the writer's own work, and a rollup builds no record | |
 | `ExplainAsync()` | the `ScanPlan` | statistics and zone maps, never data | |
 

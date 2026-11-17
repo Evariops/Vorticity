@@ -8,6 +8,7 @@
 #   metrics  one consolidation of 74 appends of metric records, 51.84 M rows, 2 GiB    (~20 s a round)
 #   append   24 appends of 65 536 metric records into a dataset with variants          (seconds)
 #   scan, filter, write   the report's scenarios on its 10 485 760-row file, in the framework-dependent runner, 12 rounds
+#   parts    the scan's reads done by the caller on the scan's parts (SplitAsync), a task a part, on the same file
 #
 # What a run brings back, all at once (the ledger's columns): the cold and the warm time (two rounds in one process, the
 # second compared), the passes, the processor and write-lane seconds, the occupancy (processor over wall over degree),
@@ -75,7 +76,7 @@ measured() { awk -F'\t' -v t="$tree" -v b="$1" -v d="$2" -v m="$mode" '$2==t && 
 for bench in ${only//,/ }; do
   case $bench in
     logs|metrics|append) [ $built_queries = 0 ] && { build bench/Vorticity.Benchmarks.Queries; built_queries=1; } ;;
-    scan|filter|write)
+    scan|filter|write|parts)
       [ $built_runner = 0 ] && { build bench/Vorticity.Benchmarks.Runner; built_runner=1; }
       if [ ! -f "$fixture" ]; then
         build bench/Vorticity.Benchmarks
@@ -97,6 +98,7 @@ for bench in ${only//,/ }; do
       scan) kind=runner; args=(--scenario scan "$fixture" 10485760 --repeat 12 --threads "$degree") ;;
       filter) kind=runner; args=(--scenario filter-wide "$fixture" 10485760 --repeat 12 --threads "$degree") ;;
       write) kind=runner; args=(--scenario write "$fixture" 10485760 --repeat 12 --threads "$degree") ;;
+      parts) kind=runner; args=(--scenario scan-parts "$fixture" 10485760 --repeat 12 --threads "$degree") ;;
       *) echo "no bench named $bench" >&2; exit 2 ;;
     esac
     [ $digest = 1 ] && [ $kind = compact ] && args+=(--digest)

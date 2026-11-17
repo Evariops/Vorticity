@@ -39,6 +39,20 @@ public sealed class PartsContractTests
         Assert.Equal(Enumerable.Range(0, 200_000).Select(static i => i % 365), days);
         IReadOnlyList<Scan<Reading>> one = await file.Scan<Reading>().SplitAsync(1, Ct);
         Assert.Single(one);
+
+        // The untyped scan cuts at the same rows.
+        IReadOnlyList<Vorticity.Scan> untyped = await file.Scan([]).SplitAsync(4, Ct);
+        Assert.Equal(parts.Count, untyped.Count);
+        long rows = 0;
+        foreach (Vorticity.Scan part in untyped)
+        {
+            await foreach (BatchView batch in part.WithCancellation(Ct))
+            {
+                rows += batch.RowCount;
+            }
+        }
+
+        Assert.Equal(200_000, rows);
     }
 
     /// <summary>

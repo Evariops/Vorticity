@@ -128,6 +128,55 @@ public sealed partial class Scan<TRecord>
         };
 }
 
+/// <summary>The untyped scan cut into parts a caller reads side by side, as <see cref="Scan{TRecord}.SplitAsync"/> cuts a typed one.</summary>
+public sealed partial class Scan
+{
+    /// <summary>A scan of <paramref name="of"/>'s source, columns, filter and options over <paramref name="rows"/>: a part of it.</summary>
+    private Scan(Scan of, RowRange rows)
+    {
+        _source = of._source;
+        _projection = of._projection;
+        _counters = new ScanCounters();
+        Schema = of.Schema;
+        _filter = of._filter;
+        _rows = rows;
+        _options = of._options;
+        _cancellation = of._cancellation;
+    }
+
+    /// <summary>
+    /// The scan cut into at most <paramref name="count"/> scans of disjoint rows that together read every row it reads, in
+    /// the rows' order: a file's at the starts of its chunks, a dataset's at its objects. Each part is a scan of its own,
+    /// its columns, its filter and its options this one's, enumerated by whoever takes it.
+    /// </summary>
+    /// <param name="count">The most parts, one at least; a source that cannot be cut gives one part, this scan.</param>
+    /// <param name="cancellationToken">Cancels what cutting the rows reads.</param>
+    /// <returns>The parts, in the rows' order.</returns>
+    /// <exception cref="InvalidOperationException">The scan takes rows by index: its rows are not cut.</exception>
+    public async ValueTask<IReadOnlyList<Scan>> SplitAsync(int count, CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(count);
+        if (_take is not null)
+        {
+            throw new InvalidOperationException("A scan of rows taken by index is read whole: it is not split.");
+        }
+
+        RowRange[] ranges = await AggregationPartials.RowPartsAsync(_source, Spec(), count, cancellationToken).ConfigureAwait(false);
+        if (ranges.Length <= 1)
+        {
+            return [this];
+        }
+
+        Scan[] parts = new Scan[ranges.Length];
+        for (int i = 0; i < parts.Length; i++)
+        {
+            parts[i] = new Scan(this, ranges[i]);
+        }
+
+        return parts;
+    }
+}
+
 /// <summary>
 /// A caller's aggregate over whole batches of a scan's records, folded into a <typeparamref name="TState"/>: seeded once a
 /// part of the scan, stepped once a batch on the thread that decoded it, merged in the parts' order at the end
