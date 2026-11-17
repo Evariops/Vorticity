@@ -10,8 +10,10 @@ namespace Vorticity.Execution;
 /// </summary>
 /// <remarks>
 /// Only the flow that holds it gives it back and takes it again, in its own order. Taken again, it is waited for while the
-/// flow holds none, which is what a work that holds no lane may do (<see cref="LaneBudget.EnterAsync"/>): what holds a lane
-/// never waits for the flow, so the lanes it waits for come back.
+/// flow holds none, which is what a work that holds no lane may do (<see cref="LaneBudget.EnterAsync"/>), and a lane given
+/// back goes to the works that wait for one before any work takes a free one: the flow is served by the next lane anyone
+/// gives back, a unit's end, a worker's, another flow waiting on its store, even while its slices merged ahead hold theirs
+/// waiting for it.
 /// </remarks>
 internal sealed class HeldLane(LaneBudget lanes, long entered)
 {
