@@ -19,6 +19,16 @@ internal static partial class DatasetCompactor
     /// <summary>The most ranges of the key a consolidation runs side by side.</summary>
     private const int MostRanges = 8;
 
+    /// <summary>The most slices a merge is cut in.</summary>
+    private const int MostSlices = 64;
+
+    /// <summary>
+    /// The slices ahead of the one being taken a sliced merge prices its inputs' batches for, whatever the degree, so that
+    /// the batches, and the runs they cut, are the same at any degree: the slices that merge ahead are as many as lanes free
+    /// and this, whichever is fewer.
+    /// </summary>
+    private const int SlicesAheadPriced = 3;
+
     /// <summary>
     /// What an open input holds besides its batch, at least: its reader, its footer parsed, the segments of the chunks it
     /// reads. Measured at 0.10 to 0.15 MB an input, linear from 8 to 3 283 open inputs of 24 KB (2026-11-13).
@@ -540,6 +550,14 @@ internal static partial class DatasetCompactor
     /// </summary>
     private sealed class KeyRanges(byte[][] cuts, RowRange[][] rows)
     {
+        /// <summary>
+        /// The slices a merge of <paramref name="job"/> is cut in, by its rows alone and never the degree, so that its runs are
+        /// the same at any degree: one a <see cref="DatasetOptions.SliceRows"/>, at most <see cref="MostSlices"/>; fewer than
+        /// two for none.
+        /// </summary>
+        internal static int SlicesOf(VortexDataset dataset, CompactionJob job) =>
+            (int)Math.Clamp(job.Rows / Math.Max(1, dataset.Options.SliceRows), 0, MostSlices);
+
         /// <summary>The ranges.</summary>
         internal int Count => cuts.Length + 1;
 
@@ -581,10 +599,11 @@ internal static partial class DatasetCompactor
     /// Null too when the inputs keep no index, or hold more than one partition.
     /// </summary>
     private static async ValueTask<KeyRanges?> KeyRangesAsync(
-        VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken)
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken, int slices = 0)
     {
-        int most = (int)Math.Min(
-            Math.Min(MostRanges, dataset.Session.Options.MaxDegreeOfParallelism), job.Bytes / Math.Max(job.TargetBytes, 1));
+        int most = slices > 0
+            ? slices
+            : (int)Math.Min(Math.Min(MostRanges, dataset.Session.Options.MaxDegreeOfParallelism), job.Bytes / Math.Max(job.TargetBytes, 1));
         if (most < 2)
         {
             return null;

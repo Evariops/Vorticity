@@ -395,7 +395,12 @@ public sealed class PathAllocationTests
         // enumerator each hold it, and a scan of no question is its own account, the enumerator carrying its budget, its name
         // and what it holds, where an account of its own took 72 bytes: 56 bytes on this axis, which had 16 to spare
         // (2026-11-15).
-        ("selective filter, pruning on", File, 35_192, PrunedFilter),
+        //
+        // A scan's decode takes a lane of the session's degree, which its lane notes when it took, and a split read waits
+        // for a decode or for the consumer, which its lane notes too; a lane of a consumer that takes batches over keeps
+        // them behind one reference, and the enumerable says whether its consumer takes them, and holds a lane of its own:
+        // 40 bytes on this axis and on the three below that had none to spare (2026-11-17).
+        ("selective filter, pruning on", File, 35_232, PrunedFilter),
 
         // THE SAME FILTER WITH PRUNING OFF, because it is a different path and not a slower one:
         // pruning on reads the zone map and skips whole splits, pruning off decodes every split and
@@ -431,16 +436,20 @@ public sealed class PathAllocationTests
         //
         // A scan names the account its blocks count in, and a scan of no question is its own: 48 bytes on each of the three
         // axes below that had none to spare, as on the pruned filter above (2026-11-15).
-        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 3_072, FullScan),
+        // The lane's note of the session's lane it decodes on and of its split waiting, and the enumerable's handover, 40
+        // bytes, as on the pruned filter above (2026-11-17).
+        ("scan, fastlanes.delta", "encodings/fastlanes_delta", 3_112, FullScan),
         // The page sizes are read in place from the node's metadata rather than into a list a
         // chunk, and the chunk metadata with its ANS tables and the latent states are kept from one
         // decode to the next rather than built by each: 1 536 bytes less on this file's one chunk,
         // and on a column of many chunks of many-bin tables a few hundred kilobytes a chunk.
-        ("scan, vortex.pco", "encodings/pco", 3_000, FullScan),
+        // The lane's notes and the enumerable's handover, 40 bytes, as above (2026-11-17).
+        ("scan, vortex.pco", "encodings/pco", 3_040, FullScan),
         // A node's frames go through one ManagedCompressions.Zstd decompressor rather than one each,
         // and the decompressor is the process's, taken for each decode and given back after it,
         // so a warm scan builds none: its tables and buffers are 160 KB at least.
-        ("scan, vortex.zstd", "encodings/zstd", 3_000, FullScan),
+        // The lane's notes and the enumerable's handover, 40 bytes, as above (2026-11-17).
+        ("scan, vortex.zstd", "encodings/zstd", 3_040, FullScan),
         // The tail an open reads is 64 KiB, which puts this file's tail at an offset the mapping can
         // lend as it is: the open holds a 48-byte owner of the view where it would copy the tail.
         // The walk of the reads along is behind a reference of the enumerator, 8 bytes, as on every

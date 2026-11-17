@@ -25,7 +25,7 @@ internal readonly record struct MergeObject(ObjectEntry Entry, ReadOnlyMemory<by
 /// rank, so a run's input is the top and the key that ends its run is the smaller of the top's two
 /// children: a run costs the logarithm of the inputs open rather than passes over all of them.
 /// </summary>
-internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
+internal sealed class KeyOrderedMerge : IMergedRuns
 {
     private readonly DatasetSnapshot _version;
     private readonly IAsyncEnumerator<MergeObject> _objects;
@@ -146,14 +146,14 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
     }
 
     /// <summary>The rows of the run the merge is on.</summary>
-    internal int CurrentRows => _emitting is not null ? _count : throw new InvalidOperationException("The merge is not on a run.");
+    public int CurrentRows => _emitting is not null ? _count : throw new InvalidOperationException("The merge is not on a run.");
 
     /// <summary>
     /// Where the run the merge is on lies: the arena and the root of its input's batch, its first row there, and the bytes a
     /// row of the batch names on average. Valid, under a <see cref="Ledger"/>, until the ledger says every run noted on the
     /// batch is copied; else until the next step.
     /// </summary>
-    internal (Vorticity.Arrays.CanonicalArena Arena, int Root, int Row, double RowBytes) CurrentRun
+    public (Vorticity.Arrays.CanonicalArena Arena, int Root, int Row, double RowBytes) CurrentRun
     {
         get
         {
@@ -162,6 +162,24 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
             return (window.Batch!.Arena, window.Batch.RootIndex, input.Row, window.RowBytes());
         }
     }
+
+    /// <summary>The window of the input's batch the run lies in, and the run's first row there: what a slice hands on.</summary>
+    internal (Window Window, int Row) CurrentWindow
+    {
+        get
+        {
+            MergeInput input = Emitting();
+            return (input.Current, input.Row);
+        }
+    }
+
+    /// <summary>
+    /// What the merge calls as an input moves past a window it took runs of, for a merge whose runs another flow takes later
+    /// (<see cref="SlicedMerge"/>): that flow says when it has taken every run of the window, by setting the window's
+    /// <see cref="Window.CitedUpTo"/> to the runs the ledger had noted then; the merge gives the window back once those are
+    /// copied. Null for a merge whose caller takes each run as it comes.
+    /// </summary>
+    internal Action<Window>? Retiring { get; init; }
 
     /// <summary>The key of the run's row <paramref name="row"/>, row-encoded.</summary>
     public ReadOnlySpan<byte> KeyAt(int row)
@@ -197,7 +215,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         RowSortField.Ascending.WithNullsLast().WithDescending(descending);
 
     /// <summary>Moves to the next run, opening what could hold it.</summary>
-    internal async ValueTask<bool> MoveNextAsync()
+    public async ValueTask<bool> MoveNextAsync()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         await StepAsync().ConfigureAwait(false);
@@ -376,6 +394,15 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
             return GiveBackAsync(window);
         }
 
+        // Its runs taken later by another flow, which dates them as it takes the last: until then, no number covers them.
+        if (Retiring is { } retiring)
+        {
+            window.CitedUpTo = long.MaxValue;
+            _retired.Enqueue(window);
+            retiring(window);
+            return ValueTask.CompletedTask;
+        }
+
         window.CitedUpTo = ledger.Noted;
         _retired.Enqueue(window);
         return ValueTask.CompletedTask;
@@ -390,7 +417,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         }
 
         long copied = ledger.Copied;
-        while (_retired.TryPeek(out Window? oldest) && oldest.CitedUpTo <= copied)
+        while (_retired.TryPeek(out Window? oldest) && Volatile.Read(ref oldest.CitedUpTo) <= copied)
         {
             _retired.Dequeue();
             await GiveBackAsync(oldest).ConfigureAwait(false);
@@ -746,7 +773,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
     /// One input of the merge: an object's batches in key order, and their keys row-encoded; under a window, its rows from the
     /// low bound to before the high one.
     /// </summary>
-    private sealed class MergeInput : IAsyncDisposable
+    internal sealed class MergeInput : IAsyncDisposable
     {
         private readonly KeyOrderedMerge _merge;
         private readonly ObjectLease _lease;
@@ -1033,7 +1060,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
     /// One batch of an input, which the merge keeps until no writer reads it: the batch, its rows' keys row-encoded, and
     /// the runs noted on the ledger when the input moved past it.
     /// </summary>
-    private sealed class Window
+    internal sealed class Window
     {
         /// <summary>The input it is a batch of.</summary>
         internal MergeInput? Input;

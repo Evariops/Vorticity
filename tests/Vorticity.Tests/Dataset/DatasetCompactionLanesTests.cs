@@ -98,13 +98,17 @@ public sealed partial class DatasetCompactionLanesTests
     /// One store of six appends, copied four times and consolidated on each copy at one lane, one lane again, four lanes
     /// and fourteen: every segment of every object is the same bytes. The rows of one key come in the order of the job's
     /// inputs whatever the batches its inputs are read in, which the memory the job measures decides; an input that ran
-    /// through the keys equal to another's wrote them first or not depending on where its batch ended.
+    /// through the keys equal to another's wrote them first or not depending on where its batch ended. Cut in slices of
+    /// 2 048 rows, the merge is the same at any degree too, its slices merged ahead on the lanes free or by the job's flow.
     /// </summary>
-    [Fact]
-    public async Task AConsolidationWritesTheSameSegmentsAtAnyDegreeAndOnAnyRun()
+    [Theory]
+    [InlineData(0)]
+    [InlineData(2_048)]
+    public async Task AConsolidationWritesTheSameSegmentsAtAnyDegreeAndOnAnyRun(int sliceRows)
     {
         int[] degrees = [1, 1, 4, 14];
         List<List<(string Path, byte[] Bytes)>> runs = [];
+        List<CompactionResult> sliced = [];
         await using MemoryObjectStore built = new MemoryObjectStore();
         {
             Random random = new Random(29);
@@ -132,8 +136,9 @@ public sealed partial class DatasetCompactionLanesTests
 
             int degree = degrees[run];
             await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
-            await using VortexDataset dataset = await VortexDataset.OpenAsync(copy, OptionsOf(session), Ct);
-            await dataset.ConsolidateAsync(Ct);
+            DatasetOptions options = sliceRows > 0 ? OptionsOf(session) with { SliceRows = sliceRows } : OptionsOf(session);
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(copy, options, Ct);
+            sliced.AddRange(await dataset.ConsolidateAsync(Ct));
             List<(string Path, byte[] Bytes)> segments = [];
             int index = 0;
             await foreach (PositionedObject positioned in dataset.ScanBuilder().ObjectsAsync(Ct))
@@ -164,6 +169,11 @@ public sealed partial class DatasetCompactionLanesTests
         }
 
         Assert.Equal(string.Empty, differ.ToString());
+        if (sliceRows > 0)
+        {
+            Assert.True(sliced.Max(static job => job.MergeSlices) >= 2, "no merge was cut in slices");
+            Assert.True(sliced.Sum(static job => job.MergeSlicesAhead) > 0, "no slice was merged ahead");
+        }
     }
 
     private static async Task<(List<long> Objects, List<Doc> Rows, long Flown)> ConsolidateAsync(int lanes, int held = 0)

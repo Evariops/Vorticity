@@ -103,6 +103,12 @@ public sealed record CompactionResult
 
     /// <summary>The inputs' batches whose keys its merge's thread encoded, rather than the decode that made them.</summary>
     internal long InputWindowsKeyedByMerge { get; init; }
+
+    /// <summary>The slices of the key its merge was cut in (<see cref="SlicedMerge"/>), 0 for a merge in one piece.</summary>
+    internal int MergeSlices { get; init; }
+
+    /// <summary>Of <see cref="MergeSlices"/>, those merged ahead on lanes of their own rather than by the job's flow.</summary>
+    internal int MergeSlicesAhead { get; init; }
 }
 
 /// <summary>Runs one compaction: a k-way merge of the inputs on the sort key when there is
@@ -393,7 +399,16 @@ internal static partial class DatasetCompactor
                 // A job in one piece takes what its blocks hold, never past the jobs' budget: a block refused gives the job up,
                 // and the handle's next plan takes fewer inputs. Its inputs' batches take what the budget leaves of it once its
                 // writer and its open inputs are counted.
-                int open = merge ? ran.Inputs.Count : 1;
+                // A merge of slices' worth is cut in slices of the key, merged side by side on lanes free and taken in order
+                // into one stream (SlicedMerge): its batches priced for the slices ahead it may merge, whatever the degree.
+                KeyRanges? slices = null;
+                if (merge && piece is null && KeyRanges.SlicesOf(dataset, ran) >= 2)
+                {
+                    using Activity? cutting = DatasetTelemetry.StartCompactionPass("slices");
+                    slices = await KeyRangesAsync(dataset, schema, ran, cancellationToken, KeyRanges.SlicesOf(dataset, ran)).ConfigureAwait(false);
+                }
+
+                int open = !merge ? 1 : slices is null ? ran.Inputs.Count : slices.MostInputs * (1 + SlicesAheadPriced);
                 batchRows = InputBatchRows(dataset, schema, ran, open, JobBudget(dataset), writer);
                 memory.Sizing = (batchRows, open);
                 for (int doublings = 0; ; doublings++)
@@ -417,7 +432,7 @@ internal static partial class DatasetCompactor
                         rows = merge
                             ? await MergeAsync(
                                 dataset, schema, ran, outputs, late, lateOutputs, batchRows, meter, memory, cancellationToken,
-                                piece?.Ranges, 0, piece?.Emitted, writer).ConfigureAwait(false)
+                                piece?.Ranges, 0, piece?.Emitted, writer, slices).ConfigureAwait(false)
                             : await ConcatenateAsync(dataset, schema, ran, outputs, memory, cancellationToken).ConfigureAwait(false);
                         await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
                         if (lateOutputs is not null)
@@ -647,6 +662,8 @@ internal static partial class DatasetCompactor
         long windowsTaken = 0;
         long windowsCopied = 0;
         long windowsKeyed = 0;
+        int slicesCut = 0;
+        int slicesAhead = 0;
         foreach (ObjectStream outputs in streams)
         {
             objectsOut += outputs.Written.Count;
@@ -658,6 +675,8 @@ internal static partial class DatasetCompactor
             windowsTaken += outputs.WindowsTaken;
             windowsCopied += outputs.WindowsCopied;
             windowsKeyed += outputs.WindowsKeyedHere;
+            slicesCut += outputs.Slices;
+            slicesAhead += outputs.SlicesAhead;
         }
 
         return new CompactionResult
@@ -683,6 +702,8 @@ internal static partial class DatasetCompactor
             InputWindowsTaken = windowsTaken,
             InputWindowsCopied = windowsCopied,
             InputWindowsKeyedByMerge = windowsKeyed,
+            MergeSlices = slicesCut,
+            MergeSlicesAhead = slicesAhead,
         };
     }
 
@@ -1195,18 +1216,41 @@ internal static partial class DatasetCompactor
         KeyRanges? ranges = null,
         int range = 0,
         long[]? emitted = null,
-        long writer = 0)
+        long writer = 0,
+        KeyRanges? slices = null)
     {
         // The writers keep the runs where they lie in the inputs' batches, and note them in one ledger, which the merge reads
         // to give a batch back once every run on it is copied: the merge's thread neither copies runs nor waits for copies.
         Writing.RunLedger ledger = new Writing.RunLedger();
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, batchRows, cancellationToken, ranges: ranges, range: range, meter: meter, memory: memory, emitted: emitted, ledger: ledger);
+        List<KeyOrderedMerge> made = [];
+        int atOnce = ranges is null ? OpenAtOnce(job) : ranges.MostInputs;
+        KeyOrderedMerge MergeOf(int slice, Action<KeyOrderedMerge.Window>? retiring)
+        {
+            KeyOrderedMerge one = InputsMerged(
+                dataset, schema, job, batchRows, cancellationToken, ranges: slices ?? ranges, range: slices is null ? range : slice, meter: meter,
+                memory: memory, emitted: emitted, ledger: ledger, retiring: retiring);
+
+            // As its inputs open, the job reprices the batches of those still to open from what the open ones hold; not a
+            // merge in slices, whose slices open their inputs in an order its lanes decide, and whose batches, priced for the
+            // slices ahead, are what they are at any degree.
+            if (slices is null)
+            {
+                one.Opened = open => memory.Reprice(open, atOnce, batchRows, writer, LeastBatchRows);
+            }
+
+            lock (made)
+            {
+                made.Add(one);
+            }
+
+            return one;
+        }
+
+        IMergedRuns merge = slices is null
+            ? MergeOf(0, null)
+            : new SlicedMerge(slices.Count, MergeOf, ledger, dataset.Session.Lanes, cancellationToken) { MostAhead = SlicesAheadPriced };
         ValueCut? values = schema.Cut;
         long rows = 0;
-
-        // As its inputs open, the job reprices the batches of those still to open from what the open ones hold.
-        int atOnce = ranges is null ? OpenAtOnce(job) : ranges.MostInputs;
-        merge.Opened = open => memory.Reprice(open, atOnce, batchRows, writer, LeastBatchRows);
         outputs.Ledger = ledger;
         if (lateOutputs is not null)
         {
@@ -1244,9 +1288,22 @@ internal static partial class DatasetCompactor
         finally
         {
             outputs.Ledger = null;
-            outputs.WindowsTaken += merge.WindowsTaken;
-            outputs.WindowsCopied += merge.WindowsCopied;
-            outputs.WindowsKeyedHere += merge.WindowsKeyedHere;
+            lock (made)
+            {
+                foreach (KeyOrderedMerge one in made)
+                {
+                    outputs.WindowsTaken += one.WindowsTaken;
+                    outputs.WindowsCopied += one.WindowsCopied;
+                    outputs.WindowsKeyedHere += one.WindowsKeyedHere;
+                }
+            }
+
+            if (merge is SlicedMerge sliced)
+            {
+                outputs.SlicesAhead += sliced.SlicesAhead;
+                outputs.Slices += slices!.Count;
+            }
+
             if (lateOutputs is not null)
             {
                 lateOutputs.Ledger = null;
@@ -1258,7 +1315,7 @@ internal static partial class DatasetCompactor
 
     /// <summary>The merge's runs, one after another, into the objects they fall in: the rows that came late apart.</summary>
     private static async ValueTask<long> MergeRunsAsync(
-        KeyOrderedMerge merge, ObjectStream outputs, LateRows? late, ObjectStream? lateOutputs, ValueCut? values, CancellationToken cancellationToken)
+        IMergedRuns merge, ObjectStream outputs, LateRows? late, ObjectStream? lateOutputs, ValueCut? values, CancellationToken cancellationToken)
     {
         long rows = 0;
         {
@@ -1323,7 +1380,7 @@ internal static partial class DatasetCompactor
     /// The first row from <paramref name="from"/> to <paramref name="to"/> of the merge's run whose key is not the key of
     /// row <paramref name="from"/>, or <paramref name="to"/>: found by halves, the run's keys ascending.
     /// </summary>
-    private static int EndOfKey(KeyOrderedMerge merge, int from, int to)
+    private static int EndOfKey(IMergedRun merge, int from, int to)
     {
         if (merge.KeyAt(from).SequenceEqual(merge.KeyAt(to - 1)))
         {
@@ -1383,7 +1440,8 @@ internal static partial class DatasetCompactor
         RowMeter? meter = null,
         JobMemory? memory = null,
         long[]? emitted = null,
-        Writing.RunLedger? ledger = null)
+        Writing.RunLedger? ledger = null,
+        Action<KeyOrderedMerge.Window>? retiring = null)
     {
         Buffers.MemoryAccount? account = memory?.InputsAccount;
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
@@ -1434,6 +1492,7 @@ internal static partial class DatasetCompactor
             Rent = memory is null ? null : memory.RentAsync,
             Emitted = emitted,
             Ledger = ledger,
+            Retiring = retiring,
         };
 
         int RowsNow() => memory is { InputRows: > 0 } repriced && batchRows > 0 ? Math.Min(batchRows, repriced.InputRows) : batchRows;
@@ -1992,6 +2051,12 @@ internal static partial class DatasetCompactor
         /// <summary>The inputs' batches whose keys the merges' thread encoded rather than their decode.</summary>
         internal long WindowsKeyedHere { get; set; }
 
+        /// <summary>The slices the merges into this stream were cut in, and those merged ahead on lanes of their own.</summary>
+        internal int Slices { get; set; }
+
+        /// <inheritdoc cref="Slices"/>
+        internal int SlicesAhead { get; set; }
+
         /// <summary>
         /// Whether the object being written has reached the destination's size: its writer's, with the rows of the block's map
         /// counted as the writer counts the rows it stages.
@@ -2063,7 +2128,7 @@ internal static partial class DatasetCompactor
         /// key's order: the first starts the next partition value's shredding when they start an object of another value,
         /// and the object's sparse index and blocks take them.
         /// </summary>
-        internal async ValueTask WriteAsync(KeyOrderedMerge merge, int from, int to, CancellationToken cancellationToken)
+        internal async ValueTask WriteAsync(IMergedRun merge, int from, int to, CancellationToken cancellationToken)
         {
             Starts(merge.KeyAt(from));
             ObjectOutput output = Open();

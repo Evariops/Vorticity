@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
@@ -13,6 +14,29 @@ internal interface IOrderedKeys
 {
     /// <summary>The key of row <paramref name="row"/>.</summary>
     ReadOnlySpan<byte> KeyAt(int row);
+}
+
+/// <summary>
+/// A run of rows of a merge in the key's order, as a job's output takes it: its rows, their keys, and where they lie in an
+/// input's batch. A merge's own (<see cref="KeyOrderedMerge"/>), or one of a merge cut in slices (<see cref="SlicedMerge"/>).
+/// </summary>
+internal interface IMergedRun : IOrderedKeys
+{
+    /// <summary>The rows of the run the merge is on.</summary>
+    int CurrentRows { get; }
+
+    /// <summary>
+    /// Where the run lies: the arena and the root of its input's batch, its first row there, and the bytes a row of the batch
+    /// names on average.
+    /// </summary>
+    (Vorticity.Arrays.CanonicalArena Arena, int Root, int Row, double RowBytes) CurrentRun { get; }
+}
+
+/// <summary>The runs of a merge in the key's order, one at a time, as a job's output takes them.</summary>
+internal interface IMergedRuns : IMergedRun, IAsyncDisposable
+{
+    /// <summary>Moves to the next run.</summary>
+    ValueTask<bool> MoveNextAsync();
 }
 
 /// <summary>

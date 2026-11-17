@@ -108,7 +108,7 @@ internal sealed class ValueCut
     /// <paramref name="to"/> whose key holds another value, or <paramref name="to"/>. The keys of a run are in order, and
     /// so their values, so a bisection finds it.
     /// </summary>
-    internal int EndOfValue(KeyOrderedMerge merge, int from, int to)
+    internal int EndOfValue(IMergedRun merge, int from, int to)
     {
         if (Same(merge.KeyAt(from), merge.KeyAt(to - 1)))
         {

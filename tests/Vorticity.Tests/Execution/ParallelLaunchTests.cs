@@ -33,7 +33,8 @@ public sealed partial class ParallelLaunchTests
     /// </summary>
     /// <remarks>
     /// On a compaction job's path: the plan's step that removes each. <c>DatasetCompactor.Ranges.cs</c>, the ranges' lanes
-    /// (B3). <c>DatasetCompactor.cs</c>, the inputs opened side by side and the census's lanes (B2, C5).
+    /// (C2, once C3). <c>SlicedMerge.cs</c>, the slices merged ahead on lanes free, each an async flow of its own until a
+    /// slice is a unit of the core. <c>DatasetCompactor.cs</c>, the inputs opened side by side and the census's lanes (B2, C5).
     /// <c>VortexFileWriter.cs</c>, the flight of a staged block (B4a). <c>KeyIndexBuilder.cs</c>,
     /// the sort of a spilled bucket ahead (B5). <c>BatchAsyncEnumerable.cs</c>, a split's decode on a lane it takes (C1).
     /// The questions' starts go with D1, a part's with D2.
@@ -49,6 +50,7 @@ public sealed partial class ParallelLaunchTests
         ["Vorticity.Dataset/DatasetScanSource.Top.cs"] = 1,
         ["Vorticity.Dataset/LevelZeroMemo.cs"] = 1,
         ["Vorticity.Dataset/ObjectCache.cs"] = 1,
+        ["Vorticity.Dataset/SlicedMerge.cs"] = 2,
         ["Vorticity/Aggregation/AggregationEngine.cs"] = 3,
         ["Vorticity/Aggregation/AggregationEstimates.cs"] = 1,
         ["Vorticity/Aggregation/DistinctQuery.cs"] = 1,
