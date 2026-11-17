@@ -95,8 +95,11 @@ public sealed record CompactionResult
     /// <summary>The inputs' batches its merge took over from their scans and kept until its writers copied their runs.</summary>
     internal long InputWindowsTaken { get; init; }
 
-    /// <summary>The inputs' batches its merge copied to keep: an input of deleted rows, or of another schema.</summary>
+    /// <summary>The inputs' batches its merge copied to keep, not taken over from their scans.</summary>
     internal long InputWindowsCopied { get; init; }
+
+    /// <summary>The inputs' batches whose keys its merge's thread encoded, rather than the decode that made them.</summary>
+    internal long InputWindowsKeyedByMerge { get; init; }
 }
 
 /// <summary>Runs one compaction: a k-way merge of the inputs on the sort key when there is
@@ -640,6 +643,7 @@ internal static partial class DatasetCompactor
         long flown = lateOutputs?.BatchesFlown ?? 0;
         long windowsTaken = 0;
         long windowsCopied = 0;
+        long windowsKeyed = 0;
         foreach (ObjectStream outputs in streams)
         {
             objectsOut += outputs.Written.Count;
@@ -650,6 +654,7 @@ internal static partial class DatasetCompactor
             flown += outputs.BatchesFlown;
             windowsTaken += outputs.WindowsTaken;
             windowsCopied += outputs.WindowsCopied;
+            windowsKeyed += outputs.WindowsKeyedHere;
         }
 
         return new CompactionResult
@@ -674,6 +679,7 @@ internal static partial class DatasetCompactor
             WriterBatchesFlown = flown,
             InputWindowsTaken = windowsTaken,
             InputWindowsCopied = windowsCopied,
+            InputWindowsKeyedByMerge = windowsKeyed,
         };
     }
 
@@ -1002,33 +1008,41 @@ internal static partial class DatasetCompactor
 
         // Every reader of a job's input runs on a lane of the session's, the job's or one its census took: the batches it
         // asks ahead decode on lanes free now beside it, and on its own flow when none is.
-        if (schema.ColumnsOf(file.DType, entry.Key) is not { } columns)
+        ObjectColumns? columns = schema.ColumnsOf(file.DType, entry.Key);
+        ObjectReadPlan? read = columns?.Read(null, projection);
+        ScanBuilder scan = Ranged(Batched(file.ScanBuilder().WithAccount(account).WithPrefetch(prefetch).WithConsumerLane(), batchRows), rows);
+        if (read is { } plan)
         {
-            // Its deleted rows left out, its batches are views of the scan's in their arena, which the merge takes over with it.
-            ScanBuilder whole = Handed(file.ScanBuilder().WithAccount(account).WithPrefetch(prefetch).WithConsumerLane(), handover);
-            return LiveRowsAsync(Ranged(Batched(fields is null ? whole : whole.ProjectMask(projection), batchRows), rows), entry, cancellationToken);
+            scan.ProjectMask(plan.Shape.Source).WithEncodings(false, false);
+        }
+        else if (fields is not null)
+        {
+            scan.ProjectMask(projection);
         }
 
-        // Reshaped, its batches are views of the scan's in their arena, which the merge takes over with it.
-        ObjectReadPlan read = columns.Read(null, projection);
-        ScanBuilder shaped = Handed(
-            file.ScanBuilder().WithAccount(account).WithPrefetch(prefetch).WithConsumerLane().ProjectMask(read.Shape.Source).WithEncodings(false, false),
-            handover);
-        return ObjectColumns.ReshapeAsync(
-            LiveRowsAsync(Ranged(Batched(shaped, batchRows), rows), entry, cancellationToken),
-            read.Shape,
-            null,
-            0,
-            compact: true,
-            cancellationToken);
+        // A merge's input hands its batches over, each shaped by its decode, on the lane that decoded it: its deleted rows
+        // left out, its columns reshaped as the version holds them. Wrappers did both on the merge's thread.
+        if (handover is not null)
+        {
+            if (entry.HasDeletions)
+            {
+                scan.WithCompaction(false).WithEncodings(false, false);
+            }
+
+            if (entry.HasDeletions || read is not null)
+            {
+                handover.State = new InputShaping(entry.HasDeletions ? entry.Deletions : null, read?.Shape);
+            }
+
+            return scan.WithHandover(handover).ExecuteAsync();
+        }
+
+        IAsyncEnumerable<RecordBatch> live = LiveRowsAsync(scan, entry, cancellationToken);
+        return read is { } reshaped ? ObjectColumns.ReshapeAsync(live, reshaped.Shape, null, 0, compact: true, cancellationToken) : live;
     }
 
     /// <summary>The scan of <paramref name="rows"/> alone, or of every row.</summary>
     private static ScanBuilder Ranged(ScanBuilder scan, RowRange? rows) => rows is { } range ? scan.Rows(range) : scan;
-
-    /// <summary>The scan handing its batches over to <paramref name="handover"/>'s merge, when given one.</summary>
-    private static ScanBuilder Handed(ScanBuilder scan, Scanning.BatchHandover? handover) =>
-        handover is null ? scan : scan.WithHandover(handover);
 
     /// <summary>The scan in batches of <paramref name="rows"/> rows, each decoded on its own, or of the scan's own size when 0.</summary>
     private static ScanBuilder Batched(ScanBuilder scan, int rows) => rows > 0 ? scan.WithMaxBatchRows(rows).WithWindowRows(rows) : scan;
@@ -1229,6 +1243,7 @@ internal static partial class DatasetCompactor
             outputs.Ledger = null;
             outputs.WindowsTaken += merge.WindowsTaken;
             outputs.WindowsCopied += merge.WindowsCopied;
+            outputs.WindowsKeyedHere += merge.WindowsKeyedHere;
             if (lateOutputs is not null)
             {
                 lateOutputs.Ledger = null;
@@ -1970,6 +1985,9 @@ internal static partial class DatasetCompactor
 
         /// <inheritdoc cref="WindowsTaken"/>
         internal long WindowsCopied { get; set; }
+
+        /// <summary>The inputs' batches whose keys the merges' thread encoded rather than their decode.</summary>
+        internal long WindowsKeyedHere { get; set; }
 
         /// <summary>Whether the object being written has reached the destination's size.</summary>
         internal bool WantsRoll => _output is not null && _output.Writer.Size >= _target;

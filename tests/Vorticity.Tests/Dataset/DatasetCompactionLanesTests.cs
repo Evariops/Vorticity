@@ -59,8 +59,9 @@ public sealed partial class DatasetCompactionLanesTests
 
     /// <summary>
     /// A consolidation's merge keeps each input's batch as its scan decoded it, its keys encoded beside the decode, until
-    /// the writers have copied the runs they keep of it: it takes every batch over from its scan and copies none, at one
-    /// lane and at four.
+    /// the writers have copied the runs they keep of it: it takes every batch over from its scan, copies none, and encodes
+    /// no key on its own thread, at one lane and at four. A consolidation in pieces leaves deletion vectors on its inputs,
+    /// which the decode applies.
     /// </summary>
     [Fact]
     public async Task AConsolidationsMergeTakesItsInputsBatchesOverAndCopiesNone()
@@ -82,6 +83,7 @@ public sealed partial class DatasetCompactionLanesTests
             IReadOnlyList<CompactionResult> results = await dataset.ConsolidateAsync(Ct);
             Assert.True(results.Sum(static result => result.InputWindowsTaken) > 0, $"at {lanes} lanes, no batch was taken over");
             Assert.Equal(0, results.Sum(static result => result.InputWindowsCopied));
+            Assert.Equal(0, results.Sum(static result => result.InputWindowsKeyedByMerge));
             Assert.Equal(48_000, await dataset.ScanBuilder().CountAsync(Ct));
         }
     }

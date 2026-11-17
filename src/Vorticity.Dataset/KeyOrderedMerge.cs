@@ -179,6 +179,9 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
     /// <summary>The inputs' batches copied to be kept, under a <see cref="Ledger"/>: not their scan's own.</summary>
     internal long WindowsCopied { get; private set; }
 
+    /// <summary>The inputs' batches whose keys the merge's thread encoded, under a <see cref="Ledger"/>: none their decode did.</summary>
+    internal long WindowsKeyedHere { get; private set; }
+
     /// <summary>The key in the store of the object the run comes from.</summary>
     internal string CurrentObject => Emitting().Object;
 
@@ -278,6 +281,8 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
             spare.OwnKeys?.Dispose();
         }
 
+        _shapeState?.Dispose();
+        _shapeState = null;
         await _objects.DisposeAsync().ConfigureAwait(false);
     }
 
@@ -293,45 +298,70 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         input.LiveWindows++;
         if (input.Handover is { } handover && handover.TryTake(batch, out object? prepared, out RecordBatch? taken))
         {
-            // The scan's batch itself, or a view of it in its arena, an object's columns reshaped: a view of the window's
-            // own then, since the wrapper binds its own again at its next step. Its keys are the scan's batch's, its rows
-            // the same; its bytes a row are counted on it.
             WindowsTaken++;
             window.Taken = taken;
-            bool same = ReferenceEquals(taken, batch);
-            window.Batch = same ? batch : window.View = RecordBatch.Over(batch.Arena, batch.RootIndex, batch.StartRow, window.View);
-            if (prepared is WindowKeys { Keys: { } keys } made && keys.RowCount == batch.RowCount)
+            if (ReferenceEquals(taken, batch) && prepared is WindowKeys made)
             {
-                window.Keys = keys;
-                window.Bytes = same ? made.RowBytes : -1;
+                // Shaped, its keys encoded and its bytes counted, by its decode, on its lane: the lane's view is the window's
+                // until it is given back. No row left of it, it is an empty window.
+                window.Batch = made.View is { RowCount: > 0 } view ? view : null;
+                window.Keys = made.Keys;
+                window.Bytes = made.RowBytes;
                 return window;
             }
+
+            // A view a wrapper made of the scan's batch in its arena: a view of the window's own, since the wrapper binds its
+            // own again at its next step.
+            window.Batch = window.View = RecordBatch.Over(batch.Arena, batch.RootIndex, batch.StartRow, window.View);
         }
         else if (Ledger is not null)
         {
+            // Not its scan's own: shaped here, then copied to be kept.
             WindowsCopied++;
+            RecordBatch? shaped = input.Handover?.State is InputShaping shaping ? shaping.Shape(batch, _shapeState ??= new InputShapeState()) : batch;
+            if (shaped is not { RowCount: > 0 })
+            {
+                return window;
+            }
+
             Vorticity.Arrays.ScanContext copy = Vorticity.Arrays.ScanContexts.Shared.Rent(lease.File, Account);
             window.Copy = copy;
-            window.Batch = new RecordBatch(copy, copy.Canonical.CopyFrom(batch.Arena, batch.RootIndex), batch.StartRow);
+            window.Batch = new RecordBatch(copy, copy.Canonical.CopyFrom(shaped.Arena, shaped.RootIndex), shaped.StartRow);
         }
         else
         {
             window.Batch = batch;
         }
 
+        if (Ledger is not null)
+        {
+            WindowsKeyedHere++;
+        }
+
         window.Keys = window.OwnKeys = _key.Encode(window.Batch, window.OwnKeys);
         return window;
     }
 
+    // What the merge shapes an input's batch with when its scan did not, the batch not taken over.
+    private InputShapeState? _shapeState;
+
     /// <summary>
     /// What a merge's input adds to each batch its scan decodes, on the lane that decodes it (<see cref="BatchHandover"/>):
-    /// its keys, and the bytes a row names, given what the lane's batch before had.
+    /// the batch shaped as <paramref name="shaping"/> says, its keys, and the bytes a row names, given what the lane's
+    /// batch before had.
     /// </summary>
-    private object? Prepare(RecordBatch batch, object? previous)
+    private object? Prepare(RecordBatch batch, object? previous, InputShaping? shaping)
     {
         WindowKeys made = previous as WindowKeys ?? new WindowKeys();
-        made.Keys = _key.Encode(batch, made.Keys);
-        made.RowBytes = Window.BytesPerRow(batch);
+        RecordBatch? view = shaping is null ? batch : shaping.Shape(batch, made);
+        made.View = view;
+        if (view is null || view.RowCount == 0)
+        {
+            return made;
+        }
+
+        made.Keys = _key.Encode(view, made.Keys);
+        made.RowBytes = Window.BytesPerRow(view);
         return made;
     }
 
@@ -376,9 +406,10 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         MergeInput input = window.Input!;
         if (window.Taken is { } taken)
         {
-            if (!ReferenceEquals(window.Batch, taken))
+            // A view of the window's own goes; one its lane shaped is the lane's, bound again with its next batch.
+            if (window.Batch is not null && ReferenceEquals(window.Batch, window.View))
             {
-                window.Batch!.Dispose();
+                window.View.Dispose();
             }
 
             input.Handover!.GiveBack(taken);
@@ -743,11 +774,14 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
             Object = key;
             Rank = rank;
             FirstRow = firstRow;
-            Handover = merge.Ledger is null ? null : new BatchHandover(merge.Prepare);
+            Handover = merge.Ledger is null ? null : new BatchHandover(Prepare);
         }
 
         /// <summary>What its scan hands its batches over through, under a ledger; null otherwise.</summary>
         internal BatchHandover? Handover { get; }
+
+        /// <summary>What the decode of each batch of its scan adds beside it: the batch shaped, its keys, the bytes a row names.</summary>
+        private object? Prepare(RecordBatch batch, object? previous) => _merge.Prepare(batch, previous, Handover!.State as InputShaping);
 
         /// <summary>Its windows not given back yet: the current one and those set aside.</summary>
         internal int LiveWindows { get; set; }
@@ -905,10 +939,17 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
                     continue;
                 }
 
+                // Its rows as shaped: its deleted rows left out, its columns reshaped. None left, it goes back at once.
                 Window window = _merge.OpenWindow(this, batch, _lease);
+                if (window.Batch is not { RowCount: > 0 } held)
+                {
+                    await _merge.GiveBackAsync(window).ConfigureAwait(false);
+                    continue;
+                }
+
                 RowKeys keys = window.Keys!;
                 int from = 0;
-                int to = batch.RowCount;
+                int to = held.RowCount;
                 if (!_low.IsEmpty)
                 {
                     from = FirstAtOrPast(keys, 0, to, _low.Span);
@@ -963,9 +1004,9 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
     {
         if (window.Taken is { } taken)
         {
-            if (!ReferenceEquals(window.Batch, taken))
+            if (window.Batch is not null && ReferenceEquals(window.Batch, window.View))
             {
-                window.Batch!.Dispose();
+                window.View.Dispose();
             }
 
             window.Input!.Handover!.GiveBack(taken);
@@ -1041,16 +1082,24 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         }
     }
 
-    /// <summary>What the decode of an input's batch encodes beside it, on its lane: its keys, and the bytes a row names.</summary>
-    private sealed class WindowKeys : IDisposable
+    /// <summary>
+    /// What the decode of an input's batch makes beside it, on its lane: the batch shaped (<see cref="InputShaping"/>), its
+    /// keys, and the bytes a row names.
+    /// </summary>
+    private sealed class WindowKeys : InputShapeState
     {
+        /// <summary>The batch the merge reads: the scan's, or a view of it shaped; null when no row of it is left.</summary>
+        internal RecordBatch? View;
+
         internal RowKeys? Keys;
         internal double RowBytes;
 
-        public void Dispose()
+        public override void Dispose()
         {
             Keys?.Dispose();
             Keys = null;
+            View = null;
+            base.Dispose();
         }
     }
 }

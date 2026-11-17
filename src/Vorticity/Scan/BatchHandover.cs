@@ -26,6 +26,9 @@ internal sealed class BatchHandover
     /// <summary>What the decode of each batch adds, on its lane, given what the lane's batch before had.</summary>
     internal Func<RecordBatch, object?, object?>? Prepare { get; }
 
+    /// <summary>What the consumer keeps with the scan for <see cref="Prepare"/> to read: a job's input, how its batches are shaped.</summary>
+    internal object? State { get; set; }
+
     /// <summary>The scan that hands its batches over, once started.</summary>
     internal BatchAsyncEnumerator? Scan { get; set; }
 
