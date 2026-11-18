@@ -1206,7 +1206,8 @@ internal partial class CanonicalArena
     /// <summary>
     /// <see cref="AddVarBinView(DType, int, Validity, VortexBuffer, ReadOnlySpan{VortexBuffer})"/>, saying
     /// whether this library's kernels wrote the views, every inline value zero past its bytes
-    /// (<see cref="CanonicalRecord.PaddedViews"/>).
+    /// (<see cref="CanonicalRecord.PaddedViews"/>), and, when its data buffers keep a run of repeated values' bytes once,
+    /// the data bytes it stands for (<see cref="CanonicalRecord.SharesBytes"/>), -1 for none.
     /// </summary>
     internal int AddVarBinView(
         DType dtype,
@@ -1214,12 +1215,18 @@ internal partial class CanonicalArena
         Validity validity,
         VortexBuffer views,
         ReadOnlySpan<VortexBuffer> dataBuffers,
-        bool padded)
+        bool padded,
+        long standsFor = -1)
     {
         RequireExactLength(views.Length, length, 16, "VarBinView");
         CanonicalRecord r = New(CanonicalKind.VarBinView, dtype, length, validity);
         r.BufferA = views;
         r.PaddedViews = padded;
+        if (standsFor >= 0)
+        {
+            r.SharesBytes = true;
+            r.SharedDataBytes = checked((uint)standsFor);
+        }
         r.DataBufferStart = _dataBufferCount;
         r.DataBufferCount = dataBuffers.Length;
         for (int i = 0; i < dataBuffers.Length; i++)
@@ -1680,6 +1687,37 @@ internal partial class CanonicalArena
     /// <returns>The bytes its rows hold.</returns>
     /// <exception cref="VortexFormatException"><paramref name="nodeIndex"/> is out of range.</exception>
     internal long NamedBytes(int nodeIndex) => Size(nodeIndex, named: true);
+
+    /// <summary>
+    /// The bytes the views of <see cref="CanonicalKind.VarBinView"/> node <paramref name="nodeIndex"/> name in its data
+    /// buffers, those past an inline value's, however its buffers keep them: what a copy of each row's bytes holds.
+    /// </summary>
+    internal long NamedDataBytes(int nodeIndex)
+    {
+        ref readonly CanonicalRecord record = ref RecordRef(nodeIndex);
+        return ViewedBytes(record.BufferA.Span, record.Length);
+    }
+
+    /// <summary>
+    /// The data bytes <see cref="CanonicalKind.VarBinView"/> node <paramref name="nodeIndex"/> stands for when its buffers
+    /// keep a run of repeated values' bytes once (<see cref="CanonicalRecord.SharesBytes"/>); -1 when they hold what it holds.
+    /// </summary>
+    internal long StandsFor(int nodeIndex)
+    {
+        ref readonly CanonicalRecord record = ref RecordRef(nodeIndex);
+        return record.SharesBytes ? record.SharedDataBytes : -1;
+    }
+
+    /// <summary>
+    /// Marks <see cref="CanonicalKind.VarBinView"/> node <paramref name="nodeIndex"/>, whose buffers keep a run of repeated
+    /// values' bytes once, as standing for <paramref name="bytes"/> data bytes (<see cref="CanonicalRecord.SharesBytes"/>).
+    /// </summary>
+    internal void StandFor(int nodeIndex, long bytes)
+    {
+        ref CanonicalRecord record = ref RecordRefMutable(nodeIndex);
+        record.SharesBytes = true;
+        record.SharedDataBytes = checked((uint)bytes);
+    }
 
     private long Size(int nodeIndex, bool named)
     {
@@ -2312,6 +2350,22 @@ internal struct CanonicalRecord
     /// as it lies; false for views read as they came, whose padding nothing promises.
     /// </summary>
     internal bool PaddedViews;
+
+    /// <summary>
+    /// For a <see cref="CanonicalKind.VarBinView"/>: whether its data buffers keep the bytes of a run of rows of one value
+    /// once, its rows' views naming the same bytes, so that an encoder sizes it by the data bytes it stands for
+    /// (<see cref="SharedDataBytes"/>), those of the buffers it held before it shared them, and writes the same bytes. A
+    /// window of it, or a filter, stands for the same bytes, as it kept those buffers whole; a concatenation, for its
+    /// chunks'.
+    /// </summary>
+    internal bool SharesBytes;
+
+    /// <summary>The data bytes a <see cref="CanonicalKind.VarBinView"/> that <see cref="SharesBytes"/> stands for, kept where a constant keeps its element's size.</summary>
+    internal uint SharedDataBytes
+    {
+        readonly get => FixedSize;
+        set => FixedSize = value;
+    }
 
     /// <summary>
     /// For a <see cref="CanonicalKind.Constant"/>, <see cref="CanonicalKind.Dictionary"/> or

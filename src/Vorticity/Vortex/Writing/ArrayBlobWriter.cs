@@ -2188,10 +2188,19 @@ internal static class ArrayBlobWriter
         Workspace blob, CanonicalArena arena, CanonicalNode node, EncodingDictionary encodings)
     {
         int dataCount = node.DataBufferCount;
-        long viewForm = ((long)node.Length * ViewSize) + DataBufferBytes(node, dataCount);
+        long shared = node.Arena.StandsFor(node.Index);
+        long viewForm = ((long)node.Length * ViewSize) + (shared >= 0 ? shared : DataBufferBytes(node, dataCount));
         if (TryWriteVarBin(blob, arena, node, encodings, viewForm, out int varbin))
         {
             return varbin;
+        }
+
+        // Views that share their repeats' bytes are written in the view form from a copy of each row's bytes, as they were
+        // before they shared them.
+        if (shared >= 0)
+        {
+            node = node.Arena.GetNode(node.Arena.CopyFrom(node.Arena, node.Index, viewRepeats: true));
+            dataCount = node.DataBufferCount;
         }
 
         // Data buffers first, views last: the reader reaches for views at index `dataBufferCount`.

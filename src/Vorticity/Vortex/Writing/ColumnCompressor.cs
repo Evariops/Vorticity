@@ -2012,7 +2012,14 @@ internal static class ColumnCompressor
 
             default:
             {
+                // Views that share their repeats' bytes are sized as the copy of each row's bytes they stand for, as they were
+                // before they shared them: the same plan, the same bytes.
                 long total = node.Views.Length;
+                if (node.Kind == CanonicalKind.VarBinView && node.Arena.StandsFor(node.Index) is long shared and >= 0)
+                {
+                    return total + shared;
+                }
+
                 for (int i = 0; i < node.DataBufferCount; i++)
                 {
                     total += node.GetDataBuffer(i).Length;

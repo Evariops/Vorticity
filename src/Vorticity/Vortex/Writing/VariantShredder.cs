@@ -267,10 +267,10 @@ internal static class VariantShredder
         /// part is taken: what its blob's frames and its rows' metadata are written from.
         /// </summary>
         /// <remarks>
-        /// Rows gathered thin keep a run of rows' metadata once (<c>VortexFileWriter.Thin</c>), where the encoders of its leaf
-        /// size it by its buffers: it is written from a copy that holds each row's bytes, as the metadata of a chunk gathered
-        /// whole does, the same leaf. Held so as the rows gathered, a consolidation of metric records' shredded columns held
-        /// 14.6 GiB of their rows' metadata over the job, 1.8 GiB once shared (2026-11-18).
+        /// Rows gathered thin keep a run of rows' metadata once (<c>VortexFileWriter.Thin</c>), which the encoders of its leaf
+        /// size by what its rows name (<see cref="CanonicalRecord.SharesBytes"/>), the same leaf as a chunk gathered whole
+        /// writes. Copied again whole here, the metadata of a consolidation of metric records' chunks took 4.3 % of its
+        /// processor (2026-11-18).
         /// </remarks>
         internal void Settle(CanonicalArena arena, int node)
         {
@@ -278,8 +278,7 @@ internal static class VariantShredder
             _arena = arena;
             _node = node;
             _rows = variant.Length;
-            int metadata = ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(0));
-            _metadata = arena.ByteSize(metadata) < arena.NamedBytes(metadata) ? arena.CopyFrom(arena, metadata, viewRepeats: true) : metadata;
+            _metadata = ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(0));
         }
 
         /// <summary>The chunk taken, shredded, every typed column laid out in its arena; the tree's dtypes made in <paramref name="types"/>.</summary>
@@ -1453,8 +1452,7 @@ internal static class VariantShredder
         private readonly Appended<int> _lengths = new Appended<int>();
         private readonly Appended<byte> _bytes = new Appended<byte>();
 
-        // The text taken last, which a row that repeats it takes again: its bytes in the list may lie across two blocks.
-        private byte[] _last = new byte[64];
+        // The length of the text taken last, which a row that repeats it takes again.
         private int _lastLength;
 
         internal override void Clear(CanonicalArena arena)
@@ -1471,27 +1469,13 @@ internal static class VariantShredder
             ReadOnlySpan<byte> text = scalar.Bytes;
             _lengths.Add(text.Length);
             _bytes.AddRange(text);
-            if (_last.Length < text.Length)
-            {
-                _last = new byte[Math.Max(text.Length, 2 * _last.Length)];
-            }
-
-            text.CopyTo(_last);
             _lastLength = text.Length;
         }
 
-        // A repeat's length is complemented, which tells Binary that it views the bytes of the value it repeats.
-        protected override void Repeat()
-        {
-            _lengths.Add(~_lastLength);
-            _bytes.AddRange(_last.AsSpan(0, _lastLength));
-        }
+        // A repeat's length is complemented, which tells Binary that it views the bytes of the value it repeats, kept once.
+        protected override void Repeat() => _lengths.Add(~_lastLength);
 
-        protected override void Repeat(int count)
-        {
-            _lengths.AddRepeated(~_lastLength, count);
-            _bytes.AddTiled(_last.AsSpan(0, _lastLength), count);
-        }
+        protected override void Repeat(int count) => _lengths.AddRepeated(~_lastLength, count);
 
         protected override int Lay(CanonicalArena arena, DType dtype, int rows, Validity validity) =>
             Binary(arena, dtype, rows, validity, Rows, _lengths, _bytes);
@@ -1588,14 +1572,16 @@ internal static class VariantShredder
     /// <summary>
     /// A column of byte strings over <paramref name="rows"/> rows, as views and one data buffer: each of
     /// <paramref name="lengths"/>' strings, end to end in <paramref name="bytes"/>, at its row of <paramref name="at"/>,
-    /// or at the next row when <paramref name="at"/> is null. A length complemented is a repeat of the string before,
-    /// whose bytes follow again, and its view names the bytes of the string it repeats.
+    /// or at the next row when <paramref name="at"/> is null. A length complemented is a repeat of the string before, whose
+    /// bytes are not there again: its view names the bytes of the string it repeats.
     /// </summary>
     /// <remarks>
     /// A series' attribute repeats row after row, and each row viewing its own copy of the bytes, every search for the
     /// column's runs compared the bytes of each row with the row before's: 362 M rows of the 828 M a consolidation of metric
     /// records searched, 1.9 s of its processor (2026-11-18). Its rows view one copy now, and their views are equal. The
-    /// copies stay in the buffer, which the encoders size the column by. The views are zero past an inline value's bytes, as
+    /// column keeps a repeat's bytes once and stands for every row's bytes (<see cref="CanonicalRecord.SharesBytes"/>), as
+    /// its buffer held them before, so that its encoders choose what they chose. The views are zero past an inline value's
+    /// bytes, as
     /// <see cref="CanonicalSupport.WriteView(Span{byte}, ReadOnlySpan{byte}, int, int, int)"/> writes them into zeroed room.
     /// </remarks>
     private static int Binary(
@@ -1618,6 +1604,8 @@ internal static class VariantShredder
 
         // A repeat's view is the one written for the string it repeats, kept as its two words: stored again, not composed.
         Int128 view = default;
+        bool shares = false;
+        long standsFor = used;
         ref Int128 views0 = ref Unsafe.As<byte, Int128>(ref MemoryMarshal.GetReference(into));
         for (int i = 0; i < lengths.Count; i++)
         {
@@ -1636,7 +1624,8 @@ internal static class VariantShredder
             }
             else
             {
-                start += ~count;
+                shares = true;
+                standsFor += ~count;
             }
 
             if ((uint)to >= (uint)rows)
@@ -1647,7 +1636,7 @@ internal static class VariantShredder
             Unsafe.Add(ref views0, to) = view;
         }
 
-        return arena.AddVarBinView(dtype, rows, validity, views, [data], padded: true);
+        return arena.AddVarBinView(dtype, rows, validity, views, [data], padded: true, shares ? standsFor : -1);
     }
 
     /// <summary>

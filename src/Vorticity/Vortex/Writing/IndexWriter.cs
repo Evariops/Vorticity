@@ -688,7 +688,7 @@ internal sealed class IndexWriter : IDisposable
             data[i] = node.GetDataBuffer(i);
         }
 
-        return slices.AddVarBinView(dtype, count, validity, node.Views, data);
+        return slices.AddVarBinView(dtype, count, validity, node.Views, data, padded: false, standsFor: node.Arena.StandsFor(node.Index));
     }
 
     // Both created by the call that fills them: a plain write allocates neither.

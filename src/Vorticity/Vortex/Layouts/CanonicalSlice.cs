@@ -355,10 +355,11 @@ internal static class CanonicalSlice
                 buffers[i] = node.GetDataBuffer(i);
             }
 
-            // A window of views zero past their bytes is one too, which the kernels that read views whole rely on.
+            // A window of views zero past their bytes is one too, which the kernels that read views whole rely on; and of a
+            // node that shares its repeats' bytes, one that stands for the same bytes, as it keeps the same buffers.
             return destination.AddVarBinView(
                 dtype, length, validity, node.Views.Slice(start * ViewWidth, length * ViewWidth), buffers,
-                padded: node.Arena.RecordRef(node.Index).PaddedViews);
+                padded: node.Arena.RecordRef(node.Index).PaddedViews, standsFor: node.Arena.StandsFor(node.Index));
         }
         finally
         {

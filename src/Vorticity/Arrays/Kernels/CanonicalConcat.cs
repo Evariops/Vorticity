@@ -733,14 +733,34 @@ internal static class CanonicalConcat
                 bufferBase += chunk.DataBufferCount;
             }
 
-            // Views copied as they lay, rebased past their own bytes: padded where every chunk's were.
+            // Views copied as they lay, rebased past their own bytes: padded where every chunk's were. Where a chunk's shared
+            // its repeats' bytes, they stand for the bytes every chunk's buffers or the bytes it stood for add up to.
             bool padded = true;
+            bool shares = false;
             for (int i = 0; i < chunks.Length; i++)
             {
                 padded &= arena.RecordRef(chunks[i]).PaddedViews;
+                shares |= arena.RecordRef(chunks[i]).SharesBytes;
             }
 
-            return arena.AddVarBinView(dtype, length, validity, views, buffers, padded);
+            long standsFor = shares ? 0 : -1;
+            for (int i = 0; shares && i < chunks.Length; i++)
+            {
+                long stood = arena.StandsFor(chunks[i]);
+                if (stood < 0)
+                {
+                    CanonicalNode chunk = arena.GetNode(chunks[i]);
+                    stood = 0;
+                    for (int b = 0; b < chunk.DataBufferCount; b++)
+                    {
+                        stood += chunk.GetDataBuffer(b).Length;
+                    }
+                }
+
+                standsFor += stood;
+            }
+
+            return arena.AddVarBinView(dtype, length, validity, views, buffers, padded, standsFor);
         }
         finally
         {

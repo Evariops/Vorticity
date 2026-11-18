@@ -4027,7 +4027,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 validity = Validity.Bitmap(into.CopyFrom(arena, validity.CanonicalNodeIndex));
             }
 
+            // Standing for a copy of each row's bytes, as a column gathered whole holds them, so that its leaf is the same.
             metadata = into.CopyFrom(arena, metadata, shareRepeats: true);
+            if (into.GetNode(metadata).Kind == CanonicalKind.VarBinView)
+            {
+                into.StandFor(metadata, into.NamedDataBytes(metadata));
+            }
         }
 
         int none = into.AddConstant(values, length, Validity.FromNullability(values.Nullability), []);

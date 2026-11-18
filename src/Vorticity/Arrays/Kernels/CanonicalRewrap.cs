@@ -86,7 +86,9 @@ internal static class CanonicalRewrap
                 buffers[i] = source.GetDataBuffer(i);
             }
 
-            return arena.AddVarBinView(dtype, length, validity, source.Views, buffers);
+            // Standing for the bytes the source stood for, where it shared its repeats' bytes.
+            return arena.AddVarBinView(
+                dtype, length, validity, source.Views, buffers, padded: false, standsFor: source.Arena.StandsFor(source.Index));
         }
         finally
         {
