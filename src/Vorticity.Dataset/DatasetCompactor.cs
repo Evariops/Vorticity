@@ -68,6 +68,12 @@ public sealed record CompactionResult
     internal (long Inputs, long Writer) MemoryReservedBy { get; init; }
 
     /// <summary>
+    /// The times the job began its objects again under a doubled bound, an object having passed its inputs' bytes times the
+    /// bound (<see cref="ObjectPastBoundException"/>): each the whole of its writing done again.
+    /// </summary>
+    internal int BoundRestarts { get; init; }
+
+    /// <summary>
     /// The most ranges of the key a piece of a consolidation merged at once below its cut, the one its stream took and those
     /// merged ahead on lanes free, as many as the budget admitted; 1 for any other job.
     /// </summary>
@@ -404,6 +410,7 @@ internal static partial class DatasetCompactor
         long rows;
         int atOnce = 1;
         int openAtOnce = 0;
+        int boundRestarts = 0;
         int batchRows = 0;
         long writer = WriterCost(dataset, schema, job, shreddings);
         memory.WriterPrice = writer;
@@ -477,6 +484,7 @@ internal static partial class DatasetCompactor
                     catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
                     {
                         await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
+                        boundRestarts++;
                     }
                     catch (LateRows.Overflow)
                     {
@@ -732,6 +740,7 @@ internal static partial class DatasetCompactor
             BytesOut = bytesOut,
             MemoryReserved = reserved,
             MemoryReservedBy = (memory.InputsPeak, memory.WriterPeak),
+            BoundRestarts = boundRestarts,
             RangesAtOnce = atOnce,
             ScratchBytes = scratch,
             Outcome = outcome,
