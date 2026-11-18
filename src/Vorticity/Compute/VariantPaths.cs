@@ -467,10 +467,31 @@ internal sealed class VariantFieldExpr : FieldExpr
             int ids = 0;
             int previous = -1;
             ReadOnlySpan<byte> previousValue = default;
+
+            // A row whose value and metadata views are the row before's, which was read under the metadata resolved, repeats
+            // its bytes: taken as a repeat without reading them. A block's rows view a value that repeats the row before's
+            // once, and the bytes of each repeat compared with the row before's were most of a consolidation of metric
+            // records' key reads (2026-11-18).
+            ReadOnlySpan<Int128> rowViews = MemoryMarshal.Cast<byte, Int128>(valueViews);
+            ReadOnlySpan<Int128> rowMetadataViews = MemoryMarshal.Cast<byte, Int128>(metadataViews);
             for (int row = 0; row < rows; row++)
             {
                 if (!Valid(valid, row) || !Valid(valueValid, row))
                 {
+                    continue;
+                }
+
+                if (previous >= 0 && previous == row - 1
+                    && rowViews[row] == rowViews[previous] && rowMetadataViews[row] == rowMetadataViews[previous])
+                {
+                    if (origin.IsEmpty)
+                    {
+                        origin = Blocks.Rent<int>(rows);
+                        origin.AsSpan(0, rows).Fill(-1);
+                    }
+
+                    origin[row] = origin[previous] >= 0 ? origin[previous] : previous;
+                    previous = row;
                     continue;
                 }
 

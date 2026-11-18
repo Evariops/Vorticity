@@ -210,6 +210,13 @@ internal static class VariantShredder
             ViewValues metadata = new ViewValues(metadataNode);
             bool everyRow = arena.GetNode(node).Validity.IsAllValid;
             bool everyValue = valueNode.Validity.IsAllValid;
+
+            // A row whose value and metadata views are the row before's, which was taken, repeats its bytes: taken with its run
+            // without reading them. A block's rows view a value that repeats the row before's once, and comparing each repeat's
+            // bytes with the last value's was a third of the take of a consolidation of metric records (2026-11-18).
+            ReadOnlySpan<Int128> valueViews = everyValue ? MemoryMarshal.Cast<byte, Int128>(valueNode.Views.Span) : default;
+            ReadOnlySpan<Int128> metadataViews = everyValue ? MemoryMarshal.Cast<byte, Int128>(metadataNode.Views.Span) : default;
+            int taken = -2;
             for (int at = 0; at < rows.Count; at++)
             {
                 if (!everyRow && !ArenaWords.IsValid(arena, node, at))
@@ -218,6 +225,22 @@ internal static class VariantShredder
                 }
 
                 int row = offset + at;
+                if (taken == at - 1 && epoch == lastEpoch && everyValue
+                    && valueViews[at] == valueViews[at - 1] && metadataViews[at] == metadataViews[at - 1])
+                {
+                    if (runCount > 0 && runStart + runCount != row)
+                    {
+                        _replay.Again(lastValue, runStart, runCount);
+                        runCount = 0;
+                    }
+
+                    runStart = runCount == 0 ? row : runStart;
+                    runCount++;
+                    taken = at;
+                    continue;
+                }
+
+                taken = at;
                 ReadOnlySpan<byte> bytes = everyValue || ArenaWords.IsValid(arena, value, at) ? values.At(at) : VariantEncoding.NullValue;
                 ReadOnlySpan<byte> metadataBytes = metadata.At(at);
                 if (!started || !metadataBytes.SequenceEqual(previous))
