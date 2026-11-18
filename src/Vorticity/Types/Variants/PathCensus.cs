@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
+using System.Runtime.InteropServices;
 using System.Text;
 using Vorticity.Buffers;
 
@@ -234,6 +235,15 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         // The validities read only where some row is null: each read looks the node's record up.
         bool everyRow = arena.GetNode(counting.Column).Validity.IsAllValid;
         bool everyValue = arena.GetNode(counting.Value).Validity.IsAllValid;
+
+        // A row whose value and metadata views are the row before's, which the census counted, repeats its bytes: counted as
+        // a repeat without reading them. A block's rows view a value that repeats the row before's once, and comparing each
+        // repeat's bytes with the last value's was most of the census of a consolidation of metric records (2026-11-18).
+        ReadOnlySpan<Int128> valueViews = MemoryMarshal.Cast<byte, Int128>(arena.GetNode(counting.Value).Views.Span);
+        ReadOnlySpan<Int128> metadataViews = arena.GetNode(counting.Metadata).Kind == Arrays.CanonicalKind.VarBinView
+            ? MemoryMarshal.Cast<byte, Int128>(arena.GetNode(counting.Metadata).Views.Span)
+            : default;
+        int counted = -2;
         for (int row = start; row < end; row++)
         {
             if (!selection.IsEmpty && ((selection[row >> 6] >> (row & 63)) & 1) == 0)
@@ -247,8 +257,26 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                 continue;
             }
 
-            Add(metadata.At(row), everyValue || Arrays.ArenaWords.IsValid(arena, counting.Value, row) ? values.At(row) : VariantEncoding.NullValue);
+            bool valid = everyValue || Arrays.ArenaWords.IsValid(arena, counting.Value, row);
+            if (valid && counted == row - 1 && !metadataViews.IsEmpty
+                && valueViews[row] == valueViews[row - 1] && metadataViews[row] == metadataViews[row - 1])
+            {
+                Again((int)(uint)valueViews[row]);
+                counted = row;
+                continue;
+            }
+
+            Add(metadata.At(row), valid ? values.At(row) : VariantEncoding.NullValue);
+            counted = valid ? row : -2;
         }
+    }
+
+    /// <summary>Counts a row that repeats the last row's value, of <paramref name="length"/> bytes, under its metadata.</summary>
+    private void Again(int length)
+    {
+        Rows++;
+        ValueBytes += length;
+        _repeats++;
     }
 
     /// <summary>
