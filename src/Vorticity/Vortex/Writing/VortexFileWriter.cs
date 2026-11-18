@@ -2364,8 +2364,19 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private static bool Windowed(Staging staging)
     {
         List<StagedPart> parts = staging.Parts;
-        Dictionary<(CanonicalArena, int), int> windowOf = staging.WindowOf;
-        List<RunWindow> windows = staging.Windows;
+        int first = 0;
+        while (first < parts.Count && parts[first].Source is null)
+        {
+            first++;
+        }
+
+        if (first == parts.Count)
+        {
+            return false;
+        }
+
+        Dictionary<(CanonicalArena, int), int> windowOf = staging.WindowOf ??= [];
+        List<RunWindow> windows = staging.Windows ??= [];
         if (staging.RunWindows.Length < parts.Count)
         {
             staging.RunWindows = new int[Math.Max(parts.Count, staging.RunWindows.Length * 2)];
@@ -2373,7 +2384,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         int runs = 0;
         long rows = 0;
-        for (int i = 0; i < parts.Count; i++)
+        for (int i = first; i < parts.Count; i++)
         {
             StagedPart part = parts[i];
             if (part.Source is not { } from)
@@ -2436,7 +2447,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private void OwnWindows(Staging staging)
     {
         CanonicalArena into = staging.Context.Canonical;
-        Span<RunWindow> windows = CollectionsMarshal.AsSpan(staging.Windows);
+        Span<RunWindow> windows = CollectionsMarshal.AsSpan(staging.Windows!);
         for (int w = 0; w < windows.Length; w++)
         {
             ref RunWindow window = ref windows[w];
@@ -2455,7 +2466,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
         }
 
-        staging.Windows.Clear();
+        staging.Windows!.Clear();
         staging.Gathers = true;
     }
 
@@ -2506,7 +2517,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         ScanContext context = staging.Context;
         CanonicalArena into = context.Canonical;
         List<StagedPart> parts = staging.Parts;
-        Dictionary<int, int> starts = staging.NodeStarts;
+        Dictionary<int, int> starts = staging.NodeStarts ??= [];
         if (staging.Order.Length < parts.Count)
         {
             staging.Order = new int[Math.Max(parts.Count, staging.Order.Length * 2)];
@@ -2872,16 +2883,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         /// <summary>Whether its block on the line is assembled, under the line's lock.</summary>
         internal bool Ready;
 
-        // The parts' nodes in order, for their concatenation, kept from one block to the next.
-        internal int[] Order = new int[256];
+        // The parts' nodes in order, for their concatenation, kept from one block to the next: made with the first block of
+        // several parts, none for a writer whose blocks lie where its caller's rows do. A writer makes four to six stagings,
+        // as its flights come and go, and a kilobyte each made up front moved what a write on four lanes allocated by two.
+        internal int[] Order = [];
 
         // The windows of a merge's input batches its runs are copied in (Windowed), each run's window by its part, the window
         // of each batch, and where each node of the arena its parts name starts once concatenated: kept from one block to the
-        // next.
-        internal readonly List<RunWindow> Windows = [];
+        // next, made with the first run of a merge's input it holds, none for a writer whose rows are its own.
+        internal List<RunWindow>? Windows;
         internal int[] RunWindows = [];
-        internal readonly Dictionary<(CanonicalArena, int), int> WindowOf = [];
-        internal readonly Dictionary<int, int> NodeStarts = [];
+        internal Dictionary<(CanonicalArena, int), int>? WindowOf;
+        internal Dictionary<int, int>? NodeStarts;
 
         /// <summary>Whether its parts name rows of the windows they were copied in, which its block gathers (<see cref="Gathered"/>).</summary>
         internal bool Gathers;
@@ -3564,7 +3577,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // Every column's chunk due leaves for an emission of its own once the file holds an encoding id; before, on this
         // thread, which interns the file's first. A column that would gather past int.MaxValue rows writes what it holds
         // first, as the loop below does it: a chunk that would make one do so is written on this thread.
-        if (EmitsApart && !GatheringOverflows(rows))
+        if (EmitsApart && (_gatheredInIngest || !GatheringOverflows(rows)))
         {
             await EmitApartAsync(arena, rootIndex, rows, blocks, cancellationToken).ConfigureAwait(false);
         }
@@ -3888,6 +3901,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _columns[field].ReleaseChunk(firstBlock, blocks);
         }
     }
+
+    /// <summary>
+    /// Whether a block of <paramref name="rows"/> rows that makes a whole chunk on the writer's line copies its columns in with
+    /// what each gathers in its own items, rather than in a pass of the chunk's emission: a column gathers, and the chunk's
+    /// emission takes the columns that gather apart (<see cref="EmitApartAsync"/>), the only one that finds them gathered.
+    /// </summary>
+    /// <remarks>
+    /// The pass of the emission copied the columns side by side on the lanes while the writer's owner waited, and the next
+    /// block waited for the owner: of the 1.48 ms each of the 6 328 blocks of a consolidation of metric records took through
+    /// the line at degree 14, 0.28 ms (2026-11-18).
+    /// </remarks>
+    private bool GathersOnLine(int rows) => _gathering is not null && EmitsApart && !GatheringOverflows(rows);
 
     /// <summary>Whether a column that gathers would hold more than <see cref="int.MaxValue"/> rows with <paramref name="rows"/> more.</summary>
     private bool GatheringOverflows(long rows)

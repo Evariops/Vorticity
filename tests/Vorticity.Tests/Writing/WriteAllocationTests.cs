@@ -318,7 +318,9 @@ public sealed class WriteAllocationTests
     /// The line a writer of more than four blocks makes once on several lanes, to send its blocks through several at once:
     /// its flights, their stagings and counted rows, the states of its items; and its first four blocks, each sent through
     /// alone on a task of its own before the line is made. 11,368 to 13,624 bytes past one thread measured at 262,144 rows,
-    /// over four runs, and 12,672 at twice that (2026-11-17): a writer's, not a row's.
+    /// over four runs, and 12,672 at twice that (2026-11-17): a writer's, not a row's. Its stagings, four to six as its
+    /// flights come and go, made their arrays up front, and the bytes past one thread reached 15,300 to 17,450 over eight
+    /// runs; made as a block needs them, 9,970 to 12,740 (2026-11-18).
     /// </summary>
     private const long LineState = 14 << 10;
 

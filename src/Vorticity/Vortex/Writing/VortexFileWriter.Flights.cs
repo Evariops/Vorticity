@@ -54,6 +54,9 @@ public sealed partial class VortexFileWriter
         /// <summary>Whether the rows held once it lands complete a chunk of the file, which the writer emits before the next flight ingests.</summary>
         internal bool EndsChunk;
 
+        /// <summary>Whether its items copy its block's columns in with what each gathers, its block a whole chunk of the file, which its emission then finds gathered.</summary>
+        internal bool Gathers;
+
         /// <summary>The counted rows of the flight before, whose wide columns' distinct values this flight's counts attach first; null for none.</summary>
         internal CountedRows? AttachFrom;
 

@@ -230,6 +230,10 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         // The views and their data resolved once: a row's through the node's accessors were a sixth of what a row cost.
         Arrays.ViewValues metadata = new Arrays.ViewValues(arena.GetNode(counting.Metadata));
         Arrays.ViewValues values = new Arrays.ViewValues(arena.GetNode(counting.Value));
+
+        // The validities read only where some row is null: each read looks the node's record up.
+        bool everyRow = arena.GetNode(counting.Column).Validity.IsAllValid;
+        bool everyValue = arena.GetNode(counting.Value).Validity.IsAllValid;
         for (int row = start; row < end; row++)
         {
             if (!selection.IsEmpty && ((selection[row >> 6] >> (row & 63)) & 1) == 0)
@@ -237,13 +241,13 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                 continue;
             }
 
-            if (!Arrays.ArenaWords.IsValid(arena, counting.Column, row))
+            if (!everyRow && !Arrays.ArenaWords.IsValid(arena, counting.Column, row))
             {
                 AddNull();
                 continue;
             }
 
-            Add(metadata.At(row), Arrays.ArenaWords.IsValid(arena, counting.Value, row) ? values.At(row) : VariantEncoding.NullValue);
+            Add(metadata.At(row), everyValue || Arrays.ArenaWords.IsValid(arena, counting.Value, row) ? values.At(row) : VariantEncoding.NullValue);
         }
     }
 

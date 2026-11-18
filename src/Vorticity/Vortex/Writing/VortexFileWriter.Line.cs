@@ -272,6 +272,7 @@ public sealed partial class VortexFileWriter
         int node = staging.Assembled;
         int rows = staging.Rows;
         long pending = first ? _pendingRows : _planPending;
+        flight.Gathers = false;
         if (node < 0 || !LineTakes(arena, node, rows, pending, out bool endsChunk))
         {
             return false;
@@ -280,6 +281,15 @@ public sealed partial class VortexFileWriter
         flight.Node = node;
         flight.EndsChunk = endsChunk;
         _planPending = endsChunk ? 0 : pending + rows;
+
+        // A block that makes a whole chunk alone copies its columns in with what each gathers in its items, the column that
+        // writes early chosen first, as the emission chooses it before it gathers: no rows wait in transit, so every flight
+        // before it landed, and its chunk's emission with them.
+        flight.Gathers = endsChunk && pending == 0 && GathersOnLine(rows);
+        if (flight.Gathers)
+        {
+            Over();
+        }
 
         CanonicalNode root = arena.GetNode(node);
         Span<int> nodes = stackalloc int[_fieldCount];
@@ -393,15 +403,17 @@ public sealed partial class VortexFileWriter
     }
 
     // The numbers of the states the items touch: four for each column (its statistics, its bounds, its distinct table, its
-    // builders), then the composite keys, the census, each variant column's nested paths, each group of its keys, and each
-    // shredded column's chain.
+    // builders), then the composite keys, one no item touches, each variant column's nested paths, each group of its keys,
+    // each shredded column's chain, each column's gathering, and each variant column's census.
     private int StateBuilders(int field) => (field * 4) + 3;
 
     private int StateShred(int field) => (_fieldCount * 5) + 2 + _groupTotal + field;
 
+    private int StateGather(int field) => (_fieldCount * 6) + 2 + _groupTotal + field;
+
     private int StateComposite => _fieldCount * 4;
 
-    private int StateCensus => (_fieldCount * 4) + 1;
+    private int StateCensus(int field) => (_fieldCount * 7) + 2 + _groupTotal + field;
 
     private int StateNested(int field) => (_fieldCount * 4) + 2 + field;
 
@@ -421,7 +433,7 @@ public sealed partial class VortexFileWriter
             }
 
             _groupTotal = groups;
-            _stateCount = (_fieldCount * 6) + 2 + groups;
+            _stateCount = (_fieldCount * 8) + 2 + groups;
         }
 
         return _stateCount;
@@ -449,11 +461,15 @@ public sealed partial class VortexFileWriter
         }
         else if ((entry & CensusItem) != 0)
         {
-            own = [StateCensus];
+            own = [StateCensus(entry & 0xF_FFFF)];
         }
         else if ((entry & KeysItem) != 0)
         {
             own = [StateGroup(entry & 0xF_FFFF, ((entry >> 20) & 0x3FF) - 1)];
+        }
+        else if ((entry & GatherItem) != 0)
+        {
+            own = [StateGather(entry & 0xF_FFFF)];
         }
         else if ((entry & ShredItem) != 0)
         {
@@ -515,7 +531,16 @@ public sealed partial class VortexFileWriter
         return _wideAfter[field];
     }
 
-    /// <summary>Lays out <paramref name="flight"/>'s items, the longest first: the keys' reads, the census, the columns' accumulators, their builders, then the groups of keys.</summary>
+    /// <summary>
+    /// Lays out <paramref name="flight"/>'s items, the longest first: the shredded columns' takes, the keys' reads, the census,
+    /// the columns' gatherings, their accumulators, their builders, then the groups of keys.
+    /// </summary>
+    /// <remarks>
+    /// The core runs a flight's items in the order they are laid out, as lanes come free. Laid out behind the reads, the
+    /// census and the gatherings, the take of a consolidation of metric records' widest variant column, 0.79 ms of a block,
+    /// started once ten items before it had started, on lanes the emissions of the chunks before also took, and the items of
+    /// a block spanned 1.03 ms (2026-11-18).
+    /// </remarks>
     private void LayItems(Flight flight)
     {
         StateCount();
@@ -524,6 +549,24 @@ public sealed partial class VortexFileWriter
         flight.Size((_fieldCount * 9) + groups + 2);
         flight.KeysApart = groups > 0;
         bool attaches = flight.AttachFrom is not null;
+
+        // Each shredded column's rows taken along its chain, after the flight before's.
+        for (int field = 0; field < flight.ShredAt.Length; field++)
+        {
+            if (flight.ShredAt[field] >= 0)
+            {
+                Add(flight, ShredItem | field, [], -1);
+            }
+        }
+
+        // Each column's copy in with what it gathers, after the flight before's, for a block that makes a whole chunk alone.
+        for (int field = 0; flight.Gathers && field < _fieldCount; field++)
+        {
+            if (_gathering![field] is not null)
+            {
+                Add(flight, GatherItem | field, [], -1);
+            }
+        }
 
         Span<int> reads = stackalloc int[_fieldCount];
         reads.Fill(-1);
@@ -536,17 +579,13 @@ public sealed partial class VortexFileWriter
             }
         }
 
-        if (flight.Census is not null)
+        // Each variant column's census an item of its own: counted in one, the two variant columns of a metric record took
+        // 0.44 ms of a block, the longest of its items once the shredded columns' takes were quicker (2026-11-18).
+        for (int field = 0; flight.Census is not null && field < _fieldCount; field++)
         {
-            Add(flight, CensusItem, [], -1);
-        }
-
-        // Each shredded column's rows taken along its chain, after the flight before's.
-        for (int field = 0; field < flight.ShredAt.Length; field++)
-        {
-            if (flight.ShredAt[field] >= 0)
+            if (_census![field] is not null)
             {
-                Add(flight, ShredItem | field, [], -1);
+                Add(flight, CensusItem | field, [], -1);
             }
         }
 
@@ -628,7 +667,8 @@ public sealed partial class VortexFileWriter
 
         if ((entry & CensusItem) != 0)
         {
-            CountSlice(flight.Census!, 0, 0, rows);
+            int field = entry & 0xF_FFFF;
+            _census![field]!.Add(in flight.Census![field], 0, rows);
             return;
         }
 
@@ -637,6 +677,13 @@ public sealed partial class VortexFileWriter
             int field = entry & 0xF_FFFF;
             int group = ((entry >> 20) & 0x3FF) - 1;
             _indexes!.FeedGroup(field, group, flight.Keys[field]!, rows, 0, _blockRows);
+            return;
+        }
+
+        if ((entry & GatherItem) != 0)
+        {
+            int field = entry & 0xF_FFFF;
+            Gather(field, _gathering![field]!, flight.Arena, flight.FieldNodes[field], rows, ChunkBlocks(rows, _blockRows));
             return;
         }
 
@@ -762,7 +809,16 @@ public sealed partial class VortexFileWriter
     {
         FlushAttach();
         _planPending = 0;
-        await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
+        _gatheredInIngest = flight.Gathers;
+        try
+        {
+            await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gatheredInIngest = false;
+        }
+
         ChunksEndedOnLine++;
         RecordLand(flight.Index);
     }
