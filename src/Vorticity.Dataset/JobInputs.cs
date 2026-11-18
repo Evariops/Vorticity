@@ -44,6 +44,9 @@ internal sealed class JobInputs : IAsyncDisposable
     private readonly DatasetSnapshot _snapshot;
     private readonly string _directory;
     private readonly IObjectStore _source;
+
+    // The store over the job's directory, which keeps the copies it read open for the reads after: closed with the job.
+    private readonly FileObjectStore _local;
     private readonly ObjectCache _cache;
     private readonly ScratchBudget? _budget;
     private readonly long _reserved;
@@ -60,8 +63,8 @@ internal sealed class JobInputs : IAsyncDisposable
 
         // The store's own bytes: under a sealed dataset, those under its sealing, which the copy keeps sealed.
         _source = dataset.Store is SealedObjectStore sealedStore ? sealedStore.Inner : dataset.Store;
-        FileObjectStore local = new FileObjectStore(directory);
-        IObjectStore reading = dataset.Store is SealedObjectStore sealing ? sealing.ReadingFrom(local) : local;
+        _local = new FileObjectStore(directory);
+        IObjectStore reading = dataset.Store is SealedObjectStore sealing ? sealing.ReadingFrom(_local) : _local;
         _cache = new ObjectCache(reading, int.MaxValue, dataset.Session);
     }
 
@@ -194,10 +197,18 @@ internal sealed class JobInputs : IAsyncDisposable
         }
     }
 
-    /// <summary>Closes the copies, removes the job's directory, and gives back what the job reserved of the scratch.</summary>
+    /// <summary>
+    /// Closes the copies, and the files the store over them kept open, removes the job's directory, and gives back what the
+    /// job reserved of the scratch.
+    /// </summary>
+    /// <remarks>
+    /// The store was left open: the copies it kept open for the reads after, up to 64 a job, were closed by the collector's
+    /// finalizers, one thread for every job, 26 s of a profile of 20 merges of 60 appends at degree 14 (2026-11-18).
+    /// </remarks>
     public async ValueTask DisposeAsync()
     {
         await _cache.DisposeAsync().ConfigureAwait(false);
+        await _local.DisposeAsync().ConfigureAwait(false);
         try
         {
             Directory.Delete(_directory, recursive: true);
