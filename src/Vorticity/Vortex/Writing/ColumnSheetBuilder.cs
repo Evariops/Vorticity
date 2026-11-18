@@ -524,8 +524,17 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         // every row of every block.
         ReadOnlySpan<byte> bits = default;
         int bitOffset = 0;
-        bool sparse = !allValid && OneBitmap(own, wrapper, out bits, out bitOffset)
-            && BitmapKernels.CountSet(bits, bitOffset + start, count) * 2 < count;
+        bool one = !allValid && OneBitmap(own, wrapper, out bits, out bitOffset);
+        bool sparse = one && BitmapKernels.CountSet(bits, bitOffset + start, count) * 2 < count;
+
+        // A row that views what the valid row before viewed holds its value: it and the valid rows after it that view the same
+        // are counted at once as that row was, by the cache of views met or as a longer view's repeats. A metric's attributes
+        // repeat row after row, and the 772 M rows a consolidation of metric records' keys fed here each looked their view up
+        // and read their validity twice, 7.6 % of its processor (2026-11-18).
+        int runRow = -1;
+        ulong runLow = 0;
+        ulong runHigh = 0;
+        int end = start + count;
         if (sparse)
         {
             _nulls += count - BitmapKernels.CountSet(bits, bitOffset + start, count);
@@ -560,7 +569,7 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 row = start + wordAt + BitOperations.TrailingZeroCount(word);
                 word &= word - 1;
             }
-            else if (!allValid && !(own.IsValid(row) && wrapper.IsValid(row)))
+            else if (!allValid && !(one ? Bit(bits, bitOffset + row) : own.IsValid(row) && wrapper.IsValid(row)))
             {
                 _nulls++;
                 if (numbering)
@@ -579,6 +588,24 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
             ulong low = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref origin, row * 16));
             ulong high = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref origin, (row * 16) + 8));
 
+            // The stretch of rows from this one that hold its value as the row before held it: one row, or, past the sparse
+            // walk, each valid row after it whose view is the same.
+            int rows = 1;
+            if (runRow == row - 1 && low == runLow && high == runHigh && !sparse)
+            {
+                while (row + rows < end
+                    && Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref origin, (row + rows) * 16)) == low
+                    && Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref origin, ((row + rows) * 16) + 8)) == high
+                    && (allValid || (one ? Bit(bits, bitOffset + row + rows) : own.IsValid(row + rows) && wrapper.IsValid(row + rows))))
+                {
+                    rows++;
+                }
+            }
+
+            runRow = row + rows - 1;
+            runLow = low;
+            runHigh = high;
+
             // A view of twelve bytes or fewer is its value, which an equal view names again; a longer one names its bytes'
             // place, which another copy of them does not share, and is looked up by its hash alone.
             bool inline = (uint)low <= 12;
@@ -589,31 +616,32 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 if (slot > 1)
                 {
                     ref Slot held = ref _slots[(int)(slot - 2)];
-                    held.Count++;
+                    held.Count += rows;
                     if (numbering)
                     {
-                        ids[row - start] = (int)(held.Count >> IdShift);
+                        ids.Slice(row - start, rows).Fill((int)(held.Count >> IdShift));
                     }
 
                     if (hashing)
                     {
-                        rowHashes[row] = held.Key;
+                        rowHashes.Slice(row, rows).Fill(held.Key);
                     }
                 }
                 else if (!_slots.IsEmpty)
                 {
-                    _zeroRows++;
+                    _zeroRows += rows;
                     if (numbering)
                     {
-                        ids[row - start] = _zeroId;
+                        ids.Slice(row - start, rows).Fill(_zeroId);
                     }
 
                     if (hashing)
                     {
-                        rowHashes[row] = 0;
+                        rowHashes.Slice(row, rows).Clear();
                     }
                 }
 
+                row += rows - 1;
                 continue;
             }
 
@@ -623,25 +651,30 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
             {
                 if (lastAt >= 0)
                 {
-                    _slots[lastAt].Count++;
+                    _slots[lastAt].Count += rows;
                 }
                 else if (!_slots.IsEmpty)
                 {
-                    _zeroRows++;
+                    _zeroRows += rows;
                 }
 
                 if (numbering)
                 {
-                    ids[row - start] = lastAt >= 0 ? IdAt(lastAt) : _zeroId;
+                    ids.Slice(row - start, rows).Fill(lastAt >= 0 ? IdAt(lastAt) : _zeroId);
                 }
 
                 if (hashing)
                 {
-                    rowHashes[row] = lastHash;
+                    rowHashes.Slice(row, rows).Fill(lastHash);
                 }
 
+                row += rows - 1;
                 continue;
             }
+
+            // A row the stretch reached is one of the two above, the row before having left its view met or repeated: this
+            // one is taken alone whatever the stretch.
+            runRow = row;
 
             ReadOnlySpan<byte> value = BloomBuilder.ValueAt(views, buffers, row);
             ulong valueHash = SplitBlockBloom.Hash(value, BloomHash.XxHash3);
@@ -670,6 +703,10 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
             }
         }
     }
+
+    /// <summary>Bit <paramref name="at"/> of <paramref name="bits"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool Bit(ReadOnlySpan<byte> bits, int at) => ((bits[at >> 3] >> (at & 7)) & 1) != 0;
 
     /// <summary>
     /// The one bitmap that says which rows hold a value, of <paramref name="own"/> and <paramref name="wrapper"/> read together:
