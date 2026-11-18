@@ -113,6 +113,9 @@ public sealed record CompactionResult
     /// <summary>The chunks of the file the blocks on the writers' lines ended, each emitted before the next block ingested.</summary>
     internal long WriterChunksEndedOnLine { get; init; }
 
+    /// <summary>Of <see cref="WriterChunksEndedOnLine"/>, those cut column by column, each column emitted once cut while the blocks after it went through.</summary>
+    internal long WriterChunksCutOnLine { get; init; }
+
     /// <summary>The inputs' batches its merge took over from their scans and kept until its writers copied their runs.</summary>
     internal long InputWindowsTaken { get; init; }
 
@@ -705,6 +708,7 @@ internal static partial class DatasetCompactor
         long flown = lateOutputs?.BatchesFlown ?? 0;
         long onLine = lateOutputs?.BlocksOnLine ?? 0;
         long chunksOnLine = lateOutputs?.ChunksEndedOnLine ?? 0;
+        long chunksCut = lateOutputs?.ChunksCutOnLine ?? 0;
         long windowsTaken = 0;
         long windowsCopied = 0;
         long windowsKeyed = 0;
@@ -722,6 +726,7 @@ internal static partial class DatasetCompactor
             flown += outputs.BatchesFlown;
             onLine += outputs.BlocksOnLine;
             chunksOnLine += outputs.ChunksEndedOnLine;
+            chunksCut += outputs.ChunksCutOnLine;
             windowsTaken += outputs.WindowsTaken;
             windowsCopied += outputs.WindowsCopied;
             windowsKeyed += outputs.WindowsKeyedHere;
@@ -753,6 +758,7 @@ internal static partial class DatasetCompactor
             WriterBatchesFlown = flown,
             WriterBlocksOnLine = onLine,
             WriterChunksEndedOnLine = chunksOnLine,
+            WriterChunksCutOnLine = chunksCut,
             InputWindowsTaken = windowsTaken,
             InputWindowsCopied = windowsCopied,
             InputWindowsKeyedByMerge = windowsKeyed,
@@ -2331,6 +2337,9 @@ internal static partial class DatasetCompactor
         /// <summary>The chunks of the file the blocks on those writers' lines ended.</summary>
         internal long ChunksEndedOnLine { get; private set; }
 
+        /// <summary>Of <see cref="ChunksEndedOnLine"/>, those cut column by column, the flights after them going through meanwhile.</summary>
+        internal long ChunksCutOnLine { get; private set; }
+
         /// <summary>The inputs' batches the merges into this stream took over, and those they copied to keep.</summary>
         internal long WindowsTaken { get; set; }
 
@@ -2670,6 +2679,7 @@ internal static partial class DatasetCompactor
                     BatchesFlown += output.Writer.BatchesFlown;
                     BlocksOnLine += output.Writer.BlocksOnLine;
                     ChunksEndedOnLine += output.Writer.ChunksEndedOnLine;
+                    ChunksCutOnLine += output.Writer.ChunksCutOnLine;
                 }
 
                 written = await _dataset.SealAsync(output, _rows, _firstRow, cancellationToken).ConfigureAwait(false);

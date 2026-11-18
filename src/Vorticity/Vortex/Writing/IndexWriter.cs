@@ -1374,6 +1374,21 @@ internal sealed class IndexWriter : IDisposable
     /// <summary>The bytes of the data of each of the first <paramref name="fields"/> columns, the top-level ones, by their place.</summary>
     internal long[] ColumnBytes(int fields) => _columnBytes[..fields];
 
+    /// <summary>
+    /// Closes the chunk in the builders of slot <paramref name="slot"/> alone (<see cref="Slots"/>): a writer that cuts its
+    /// chunks column by column closes each column's as the column is emitted, in the slots' order, as
+    /// <see cref="CloseChunkAsync(int, int, long, long, CancellationToken)"/> closes them all.
+    /// </summary>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    internal async ValueTask CloseChunkAsync(int slot, int firstBlock, int blocks, long firstRow, long rows, CancellationToken cancellationToken)
+    {
+        foreach (IndexBuilder builder in _builders[slot])
+        {
+            await builder.CloseChunkAsync(firstBlock, blocks, firstRow, rows, cancellationToken).ConfigureAwait(false);
+            builder.Freeze();
+        }
+    }
+
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     internal async ValueTask CloseChunkAsync(int firstBlock, int blocks, long firstRow, long rows, CancellationToken cancellationToken)
     {
@@ -1382,6 +1397,7 @@ internal sealed class IndexWriter : IDisposable
             foreach (IndexBuilder builder in builders)
             {
                 await builder.CloseChunkAsync(firstBlock, blocks, firstRow, rows, cancellationToken).ConfigureAwait(false);
+                builder.Freeze();
             }
         }
     }
@@ -1483,6 +1499,7 @@ internal sealed class IndexWriter : IDisposable
             foreach (IndexBuilder builder in builders)
             {
                 await builder.EndOfDataAsync(cancellationToken).ConfigureAwait(false);
+                builder.Freeze();
             }
         }
     }

@@ -221,6 +221,15 @@ public sealed partial class VortexFileWriter
     private const int ShredItem = 1 << 25;
 
     /// <summary>
+    /// An item that cuts a column's chunk, its field in the low twenty bits, in a flight cut column by column
+    /// (<see cref="Flight.Cuts"/>). Below the bits of a group of keys, which a keys item sets: told apart after it.
+    /// </summary>
+    private const int CloseItem = 1 << 23;
+
+    /// <summary>The item that decides which column writes its chunk early in a flight cut after one cut too (<see cref="Over"/>); told apart after a keys item.</summary>
+    private const int OverItem = 1 << 22;
+
+    /// <summary>
     /// Whether the line takes the block of <paramref name="rows"/> rows assembled at node <paramref name="node"/> of
     /// <paramref name="arena"/> beside others, <paramref name="pending"/> rows in transit before it: a whole block from a
     /// block's start, the file's first block posed, whose rows go into transit without crossing a chunk of the file; and
@@ -272,7 +281,22 @@ public sealed partial class VortexFileWriter
         int node = staging.Assembled;
         int rows = staging.Rows;
         long pending = first ? _pendingRows : _planPending;
+        if (first)
+        {
+            // Every flight before landed: the chunks emitted are those the writer counted.
+            _planBlocks = _emittedBlocks;
+            _planRows = _rowCount;
+            _planGroupTaken = _groupTaken;
+        }
+
+        // The flight before cut column by column, which its prologue let this one start before it landed: what the columns
+        // hold now is the lanes' to change, and this flight decides only from what is its own and what the cuts recorded.
+        bool afterCut = _lastCut;
+        _lastCut = false;
         flight.Gathers = false;
+        flight.Cuts = false;
+        flight.AfterCut = false;
+        flight.OverField = -1;
         if (node < 0 || !LineTakes(arena, node, rows, pending, out bool endsChunk))
         {
             return false;
@@ -284,11 +308,42 @@ public sealed partial class VortexFileWriter
 
         // A block that makes a whole chunk alone copies its columns in with what each gathers in its items, the column that
         // writes early chosen first, as the emission chooses it before it gathers: no rows wait in transit, so every flight
-        // before it landed, and its chunk's emission with them.
-        flight.Gathers = endsChunk && pending == 0 && GathersOnLine(rows);
+        // before it landed, and its chunk's emission with them, or was cut column by column. After a cut, no column can have
+        // gathered past int.MaxValue rows, the cut being taken only while the object's blocks could not hold that many
+        // (CutsAt), and a block that would end its chunk without being cut goes into transit, its chunk gathered in its
+        // emission once every flight before landed.
+        flight.Gathers = endsChunk && pending == 0 && (afterCut ? _gathering is not null && EmitsApart : GathersOnLine(rows));
+        // Cut column by column only while the job's memory has room for what cuts keep beside the next flights: the chunks cut
+        // and not yet emitted, their owner behind, and the columns the flights after them gather meanwhile, up to a gathering
+        // ceiling past two blocks. Cut on every block, a consolidation of 74 appends under 2 GiB held 400 MiB in its writer
+        // and was refused every time, with or without a room of two blocks asked (2026-11-18). Cut or not, the bytes are the
+        // same.
+        flight.Cuts = flight.Gathers && CutsAt(flight.Index, rows)
+            && (_admitsAhead is null || _admitsAhead((2 * staging.Bytes) + _gatheredCeiling));
+        flight.AfterCut = afterCut;
         if (flight.Gathers)
         {
+            // Where its chunk starts, in the order of the flights: after a cut, the owner counts the chunks before as it goes.
+            flight.ChunkFirstBlock = _planBlocks;
+            flight.ChunkFirstRow = _planRows;
+        }
+
+        if (flight.Cuts)
+        {
+            MakeCutRecords();
+            flight.SizeCuts(_fieldCount);
+            _planBlocks += ChunkBlocks(rows, _blockRows);
+            _planRows += rows;
+            _planGroupTaken += rows;
+            _lastCut = true;
+        }
+
+        // The column that writes early: after a cut, decided once that cut ran (OverItem); otherwise now, every flight before
+        // landed.
+        if (flight.Gathers && !afterCut)
+        {
             Over();
+            flight.OverField = _over is { } over ? Array.IndexOf(_gathering!, over) : -1;
         }
 
         CanonicalNode root = arena.GetNode(node);
@@ -310,13 +365,22 @@ public sealed partial class VortexFileWriter
 
         flight.Take(arena, nodes, rows, filled: 0, counted);
         _indexes?.PrepareCounts(counted, arena, flight.FieldNodes, rows);
-        PlanShreds(flight, arena, rows, pending);
+        if (afterCut)
+        {
+            PlanShredsAfterCut(flight);
+        }
+        else
+        {
+            PlanShreds(flight, arena, rows, pending);
+        }
 
         // The wide columns' distinct values of the flight before, which this flight's counts attach first: none when a chunk's
-        // emission or a block alone attached them since.
+        // emission or a block alone attached them since. A flight cut column by column has its own attached by its owner as
+        // it emits each column, as a chunk's emission attaches the last flight's, and hands none to the next.
         flight.AttachFrom = _attachDue;
         flight.AttachRows = _attachDueRows;
-        _attachDue = counted;
+        flight.OwnCounted = flight.Cuts ? counted : null;
+        _attachDue = flight.Cuts ? null : counted;
         _attachDueRows = rows;
 
         if (_census is { } census)
@@ -376,6 +440,40 @@ public sealed partial class VortexFileWriter
     }
 
     /// <summary>
+    /// Marks which of <paramref name="flight"/>'s shredded columns take its rows along their chains, after a flight cut column
+    /// by column: each column with a chain when the flight is cut too, placed by its item from that flight's cut
+    /// (<see cref="TakeOnLine"/>), none otherwise, the chain then broken and the chunk shredded as it is emitted.
+    /// </summary>
+    private void PlanShredsAfterCut(Flight flight)
+    {
+        if (Chains() is not { } chains)
+        {
+            return;
+        }
+
+        if (flight.ShredAt.Length != _fieldCount)
+        {
+            flight.ShredAt = new int[_fieldCount];
+            flight.Shred = new VariantShredder.Shredding.Rows[_fieldCount];
+        }
+
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            flight.ShredAt[field] = -1;
+            if (flight.Gathers && chains[field] is not null && _gathering?[field] is not null)
+            {
+                // Made ready here, in the order of the flights: it materializes the column's children in the block's arena,
+                // which the flight's other items read, its gathering among them.
+                flight.Shred[field] = VariantShredder.Shredding.Prepare(flight.Arena, flight.FieldNodes[field]);
+                flight.ShredAt[field] = PlacedByCut;
+            }
+        }
+    }
+
+    /// <summary>A take placed by its item from the cut of the flight before (<see cref="TakeOnLine"/>), in <see cref="Flight.ShredAt"/>.</summary>
+    private const int PlacedByCut = -2;
+
+    /// <summary>
     /// Takes the rows of <paramref name="staging"/>, a block that goes through alone, along each shredded column's chain, at
     /// their place in the column's chunk after the rows in transit: on the owner, every flight before it landed.
     /// </summary>
@@ -415,6 +513,19 @@ public sealed partial class VortexFileWriter
 
     private int StateCensus(int field) => (_fieldCount * 7) + 2 + _groupTotal + field;
 
+    /// <summary>A column's cut on the line (<see cref="CloseItem"/>), which the flight after waits for before it decides its own.</summary>
+    private int StateCut(int field) => (_fieldCount * 8) + 2 + _groupTotal + field;
+
+    /// <summary>
+    /// A column's chunk emitted by the owner as its flight was cut (<see cref="EmitCutColumnsAsync"/>), posed by the owner
+    /// alone, for every flight in its order, never by an epilogue: the next flight's ingest and builders of the column wait
+    /// for it, since a landing hands the column what its emission decided, and the next cut, for the rate it reads.
+    /// </summary>
+    private int StateOwned(int field) => (_fieldCount * 9) + 2 + _groupTotal + field;
+
+    /// <summary>Whether <paramref name="state"/> is a column's <see cref="StateOwned"/>, which only the owner poses.</summary>
+    private bool IsOwnedState(int state) => state >= (_fieldCount * 9) + 2 + _groupTotal;
+
     private int StateNested(int field) => (_fieldCount * 4) + 2 + field;
 
     private int StateGroup(int field, int group) => (_fieldCount * 5) + 2 + _groupBase![field] + group;
@@ -433,7 +544,7 @@ public sealed partial class VortexFileWriter
             }
 
             _groupTotal = groups;
-            _stateCount = (_fieldCount * 8) + 2 + groups;
+            _stateCount = (_fieldCount * 10) + 2 + groups;
         }
 
         return _stateCount;
@@ -474,6 +585,16 @@ public sealed partial class VortexFileWriter
         else if ((entry & ShredItem) != 0)
         {
             own = [StateShred(entry & 0xF_FFFF)];
+        }
+        else if ((entry & CloseItem) != 0)
+        {
+            // What a column's cut reads and leaves: its ingest's summaries (Freeze), its gathering, its chain, and its cut.
+            int field = entry & 0xF_FFFF;
+            own = [field * 4, (field * 4) + 1, (field * 4) + 2, StateGather(field), StateShred(field), StateCut(field)];
+        }
+        else if ((entry & OverItem) != 0)
+        {
+            own = [];
         }
         else if ((entry & 7) == 0)
         {
@@ -546,16 +667,24 @@ public sealed partial class VortexFileWriter
         StateCount();
         IndexWriter? indexes = _indexes is { AsksNothing: false, Streams: true } streaming ? streaming : null;
         int groups = indexes is null ? 0 : KeysApart(indexes);
-        flight.Size((_fieldCount * 9) + groups + 2);
+        flight.Size((_fieldCount * 11) + groups + 4);
         flight.KeysApart = groups > 0;
         bool attaches = flight.AttachFrom is not null;
+
+        // After a flight cut column by column, the columns' ingest and builders wait for the owner to have emitted their
+        // column of it (StateOwned), and the column that writes early is decided once every cut of it ran.
+        bool afterCut = flight.AfterCut;
+        int over = afterCut && flight.Gathers ? Add(flight, OverItem, CutStates(), -1) : -1;
+        List<int>[]? before = flight.Cuts ? CutBefores() : null;
 
         // Each shredded column's rows taken along its chain, after the flight before's.
         for (int field = 0; field < flight.ShredAt.Length; field++)
         {
-            if (flight.ShredAt[field] >= 0)
+            if (flight.ShredAt[field] != -1)
             {
-                Add(flight, ShredItem | field, [], -1);
+                // Laid first, then noted for the cut: a null-conditional call would skip laying it too.
+                int item = before is null ? Add(flight, ShredItem | field, [], -1) : AddBeforeCut(flight, ShredItem | field, false);
+                before?[field].Add(item);
             }
         }
 
@@ -564,7 +693,8 @@ public sealed partial class VortexFileWriter
         {
             if (_gathering![field] is not null)
             {
-                Add(flight, GatherItem | field, [], -1);
+                int item = before is null ? Add(flight, GatherItem | field, [], -1) : AddBeforeCut(flight, GatherItem | field, false);
+                before?[field].Add(item);
             }
         }
 
@@ -593,47 +723,195 @@ public sealed partial class VortexFileWriter
         int count = IngestItems(flight.Arena, flight.FieldNodes, ingest);
         for (int i = 0; i < count; i++)
         {
-            Add(flight, ingest[i], [], -1);
+            int field = ingest[i] >> 3;
+            int item = before is null ? Add(flight, ingest[i], afterCut ? OwnedOf(field) : [], -1) : AddBeforeCut(flight, ingest[i], afterCut);
+            before?[field].Add(item);
         }
 
-        if (indexes is null)
+        if (indexes is not null)
         {
-            flight.Remaining = flight.Count;
-            return;
-        }
-
-        for (int field = 0; field < _fieldCount; field++)
-        {
-            if (indexes.Feeds(field))
+            int last = _fieldCount - 1;
+            for (int field = 0; field < _fieldCount; field++)
             {
-                Add(flight, field << 3, attaches ? WideAfter(field) : [], -1);
+                if (indexes.Feeds(field))
+                {
+                    int[] after = attaches ? (afterCut ? WideAfterOwned(field) : WideAfter(field)) : afterCut ? OwnedOf(field) : [];
+                    int item = Add(flight, field << 3, after, -1);
+                    before?[field].Add(item);
+
+                    // A wide column's counts of the flight are what the owner attaches to every column as it emits it: each
+                    // column's cut waits for them, as the chunk's emission came once every item of the flight ran.
+                    for (int other = 0; before is not null && other < _fieldCount; other++)
+                    {
+                        if (other != field && IsWide(field))
+                        {
+                            before[other].Add(item);
+                        }
+                    }
+                }
+            }
+
+            // The builders past the columns close once the owner emitted the last column.
+            if (indexes.FeedsKeys)
+            {
+                int item = Add(flight, _fieldCount << 3, afterCut ? OwnedOf(last) : [], -1);
+                before?[last].Add(item);
+            }
+
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                if (reads[field] < 0)
+                {
+                    continue;
+                }
+
+                if (indexes.FeedsNested(field))
+                {
+                    int item = Add(flight, NestedItem | field, afterCut ? OwnedOf(last) : [], reads[field]);
+                    before?[field].Add(item);
+                    before?[last].Add(item);
+                }
+
+                for (int group = 0; group < indexes.KeyGroups(field); group++)
+                {
+                    int item = Add(flight, KeysItem | ((group + 1) << 20) | field, afterCut ? OwnedOf(last) : [], reads[field]);
+                    before?[field].Add(item);
+                    before?[last].Add(item);
+                }
             }
         }
 
-        if (indexes.FeedsKeys)
+        // Each column's cut, once the column's items of the flight ran and the owner emitted the column of the flight before.
+        for (int field = 0; before is not null && field < _fieldCount; field++)
         {
-            Add(flight, _fieldCount << 3, [], -1);
-        }
-
-        for (int field = 0; field < _fieldCount; field++)
-        {
-            if (reads[field] < 0)
-            {
-                continue;
-            }
-
-            if (indexes.FeedsNested(field))
-            {
-                Add(flight, NestedItem | field, [], reads[field]);
-            }
-
-            for (int group = 0; group < indexes.KeyGroups(field); group++)
-            {
-                Add(flight, KeysItem | ((group + 1) << 20) | field, [], reads[field]);
-            }
+            int item = Add(flight, CloseItem | field, OwnedOf(field), over);
+            flight.Befores[item] = flight.CutWaits(field, before[field]);
         }
 
         flight.Remaining = flight.Count;
+    }
+
+    /// <summary>
+    /// Adds item <paramref name="entry"/>, a column's ingest, gathering or take, to <paramref name="flight"/>, cut column by
+    /// column: the states it would touch it only waits for, the column's cut touching them after it, so that the next
+    /// flight's items of the column wait for the cut and not for the first of them to end; and after a flight cut too, the
+    /// column's owned state as well (<paramref name="afterCut"/>).
+    /// </summary>
+    private int AddBeforeCut(Flight flight, int entry, bool afterCut)
+    {
+        int index = Add(flight, entry, [], -1);
+        flight.Own[index] = [];
+        flight.After[index] = WaitsBeforeCut(entry, afterCut);
+        return index;
+    }
+
+    // By item and whether the flight before was cut, the states an item that comes before a column's cut waits for; made once.
+    private Dictionary<(int Entry, bool AfterCut), int[]>? _waitsBeforeCut;
+
+    private int[] WaitsBeforeCut(int entry, bool afterCut)
+    {
+        _waitsBeforeCut ??= [];
+        if (!_waitsBeforeCut.TryGetValue((entry, afterCut), out int[]? waits))
+        {
+            int[] own = OwnStates(entry);
+            int field = (entry & (GatherItem | ShredItem)) != 0 ? entry & 0xF_FFFF : entry >> 3;
+            waits = afterCut ? [.. own, StateOwned(field)] : own;
+            _waitsBeforeCut[(entry, afterCut)] = waits;
+        }
+
+        return waits;
+    }
+
+    // By column, the items of a flight cut column by column its cut waits for; made once, emptied for each flight.
+    private List<int>[]? _cutBefores;
+
+    // The columns' cut states, which a flight's decision of the column that writes early waits for; and by column, its
+    // owned state alone. Made once.
+    private int[]? _cutStates;
+    private int[][]? _ownedOf;
+
+    private List<int>[] CutBefores()
+    {
+        if (_cutBefores is null)
+        {
+            _cutBefores = new List<int>[_fieldCount];
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                _cutBefores[field] = [];
+            }
+        }
+
+        foreach (List<int> items in _cutBefores)
+        {
+            items.Clear();
+        }
+
+        return _cutBefores;
+    }
+
+    private int[] CutStates()
+    {
+        if (_cutStates is null)
+        {
+            _cutStates = new int[_fieldCount];
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                _cutStates[field] = StateCut(field);
+            }
+        }
+
+        return _cutStates;
+    }
+
+    // By column, whether its counts are wide (IndexWriter.WideFields), made once.
+    private bool[]? _wide;
+
+    private bool IsWide(int field)
+    {
+        if (_wide is null)
+        {
+            _wide = new bool[_fieldCount];
+            foreach (int wide in _indexes?.WideFields ?? [])
+            {
+                if (wide < _fieldCount)
+                {
+                    _wide[wide] = true;
+                }
+            }
+        }
+
+        return _wide[field];
+    }
+
+    // By column, the wide columns' builders its counts' attachment waits for and its owned state, made once.
+    private int[][]? _wideAfterOwned;
+
+    private int[] WideAfterOwned(int field)
+    {
+        if (_wideAfterOwned is null)
+        {
+            _wideAfterOwned = new int[_fieldCount][];
+            for (int f = 0; f < _fieldCount; f++)
+            {
+                _wideAfterOwned[f] = [.. WideAfter(f), StateOwned(f)];
+            }
+        }
+
+        return _wideAfterOwned[field];
+    }
+
+    private int[] OwnedOf(int field)
+    {
+        if (_ownedOf is null)
+        {
+            _ownedOf = new int[_fieldCount][];
+            for (int f = 0; f < _fieldCount; f++)
+            {
+                _ownedOf[f] = [StateOwned(f)];
+            }
+        }
+
+        return _ownedOf[field];
     }
 
     /// <summary>Adds item <paramref name="entry"/> to <paramref name="flight"/>, the states of other columns it waits for, and the item of the flight before it.</summary>
@@ -644,6 +922,7 @@ public sealed partial class VortexFileWriter
         flight.Own[index] = OwnStates(entry);
         flight.After[index] = after;
         flight.Before[index] = before;
+        flight.Befores[index] = [];
         return index;
     }
 
@@ -683,14 +962,25 @@ public sealed partial class VortexFileWriter
         if ((entry & GatherItem) != 0)
         {
             int field = entry & 0xF_FFFF;
-            Gather(field, _gathering![field]!, flight.Arena, flight.FieldNodes[field], rows, ChunkBlocks(rows, _blockRows));
+            Gather(field, _gathering![field]!, flight.Arena, flight.FieldNodes[field], rows, ChunkBlocks(rows, _blockRows), flight.Cuts || flight.AfterCut ? flight.ChunkFirstBlock : -1);
             return;
         }
 
         if ((entry & ShredItem) != 0)
         {
-            int field = entry & 0xF_FFFF;
-            _chains![field]!.Shredding.TakeMore(in flight.Shred[field], flight.ShredAt[field]);
+            TakeOnLine(flight, entry & 0xF_FFFF);
+            return;
+        }
+
+        if ((entry & CloseItem) != 0)
+        {
+            CutColumn(flight, entry & 0xF_FFFF);
+            return;
+        }
+
+        if ((entry & OverItem) != 0)
+        {
+            DecideOver(flight);
             return;
         }
 
@@ -735,7 +1025,12 @@ public sealed partial class VortexFileWriter
         if (!failed)
         {
             // A block that makes its chunk alone is adopted where it was assembled; one that joins rows in transit is copied.
-            if (flight.EndsChunk && _pendingRows == 0 && !_mayShareChildren)
+            // One cut column by column goes to no transit: its columns all gathered it in its items.
+            if (flight.Cuts)
+            {
+                Interlocked.Increment(ref _cutFlights);
+            }
+            else if (flight.EndsChunk && _pendingRows == 0 && !_mayShareChildren)
             {
                 Adopt(staging, flight.Node);
             }
@@ -760,7 +1055,18 @@ public sealed partial class VortexFileWriter
         staging.Assembled = -1;
         staging.Rows = 0;
         staging.Bytes = 0;
-        staging.Context.Canonical.ResetKeepingBlocks();
+
+        // A block cut gives its blocks back, as the transit that adopts one gives them back at its emission: kept by each of
+        // the four to six stagings a writer makes, they held a block's rows each (2026-11-18).
+        if (flight.Cuts)
+        {
+            staging.Context.Canonical.Reset();
+        }
+        else
+        {
+            staging.Context.Canonical.ResetKeepingBlocks();
+        }
+
         SpareStaging(staging);
         bool ends = flight.EndsChunk;
         long index = flight.Index;
@@ -907,11 +1213,14 @@ public sealed partial class VortexFileWriter
         // By state, whether the epilogue being counted moved it past its flight (PoseUntouched); cleared after.
         private bool[] _raised = [];
 
-        // The flights admitted, prologued, whose epilogue ran, and landed, each a count of the writer's flights.
+        // The flights admitted, prologued, whose epilogue ran, and landed, each a count of the writer's flights; and the
+        // flights the owner is through with, which it goes through in their order, ahead of the landings for flights cut column
+        // by column, whose landing waits for their epilogue too.
         private long _admitted;
         private long _prologued;
         private long _epilogued;
         private long _landed;
+        private long _owning;
 
         // Whether a prologue or an epilogue is queued or running: each runs one at a time, in order.
         private bool _prologuing;
@@ -947,13 +1256,15 @@ public sealed partial class VortexFileWriter
                     _posed = new int[writer.StateCount()];
                     _raised = new bool[_posed.Length];
                     Array.Fill(_posed, (int)Math.Min(index, int.MaxValue));
-                    _prologued = _epilogued = _landed = index;
+                    _prologued = _epilogued = _landed = _owning = index;
                 }
 
                 Flight flight = _spare.Count > 0 ? _spare.Pop() : new Flight();
                 flight.Staging = staging;
                 flight.Index = index;
                 flight.Phase = FlightPhase.Admitted;
+                flight.Cuts = false;
+                flight.LandsFailed = false;
                 staging.Flight = flight;
                 staging.Ready = false;
                 _ring[index % LandRing] = flight;
@@ -1006,9 +1317,9 @@ public sealed partial class VortexFileWriter
                 bool done = false;
                 lock (_gate)
                 {
-                    if (OwnerActs())
+                    if (OwnerFlight() is { } acting)
                     {
-                        owned = _ring[_landed % LandRing];
+                        owned = acting;
                     }
                     else if (_landed >= target)
                     {
@@ -1079,6 +1390,12 @@ public sealed partial class VortexFileWriter
         [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
         private async ValueTask OwnAsync(Flight flight, CancellationToken cancellationToken)
         {
+            if (flight.Cuts)
+            {
+                await OwnCutAsync(flight, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
             bool alone = flight.Phase == FlightPhase.Alone;
             try
             {
@@ -1117,8 +1434,9 @@ public sealed partial class VortexFileWriter
                     }
                 }
 
-                Land(flight);
-                ready = (QueuePrologue() ? 1 : 0) + (QueueEpilogue() ? 1 : 0);
+                ready = Land(flight);
+                ready += LandInOrder();
+                ready += (QueuePrologue() ? 1 : 0) + (QueueEpilogue() ? 1 : 0);
             }
 
             if (ready > 0)
@@ -1127,13 +1445,145 @@ public sealed partial class VortexFileWriter
             }
         }
 
-        /// <summary>Lands <paramref name="flight"/>, the oldest not landed, under the lock: its slot freed for a flight after it.</summary>
-        private void Land(Flight flight)
+        /// <summary>
+        /// Emits the columns of <paramref name="flight"/>, cut column by column, that its cuts reached, then, every column
+        /// emitted, closes its chunk and is through with it, landing it if its epilogue ran. Whatever fails, every column is
+        /// given back to the flights after, which would wait for it forever otherwise.
+        /// </summary>
+        [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+        private async ValueTask OwnCutAsync(Flight flight, CancellationToken cancellationToken)
         {
+            bool finished;
+            try
+            {
+                finished = Volatile.Read(ref _error) is null && await writer.EmitCutColumnsAsync(flight, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception error)
+            {
+                Interlocked.CompareExchange(ref _error, error, null);
+                finished = false;
+            }
+
+            bool failed = Volatile.Read(ref _error) is not null;
+            if (!finished && !failed)
+            {
+                // Its next column is not cut yet: the owner comes back once it is.
+                return;
+            }
+
+            if (failed)
+            {
+                writer.DropCut(flight);
+            }
+
+            int ready;
+            lock (_gate)
+            {
+                ready = failed ? PoseOwned(flight, flight.Owned) : 0;
+                flight.Finished = true;
+                _owning = flight.Index + 1;
+                ready += LandInOrder();
+                ready += (QueuePrologue() ? 1 : 0) + (QueueEpilogue() ? 1 : 0);
+            }
+
+            if (ready > 0)
+            {
+                core.Offer(this, Flow.Write, ready);
+            }
+        }
+
+        /// <summary>
+        /// Lands the flights not landed, oldest first, under the lock, as long as the oldest may: its epilogue run, and its rows
+        /// in transit, or, cut column by column, its owner through with it, or its line failed. After a flight cut column by
+        /// column, the next one may run its epilogue first: it lands once that one did. The items made ready: how many.
+        /// </summary>
+        private int LandInOrder()
+        {
+            int ready = 0;
+            while (_landed < _prologued && _ring[_landed % LandRing] is { Phase: FlightPhase.Held } head
+                && (head.Cuts ? head.Finished : !head.EndsChunk || head.LandsFailed || Volatile.Read(ref _error) is not null))
+            {
+                ready += Land(head);
+            }
+
+            return ready;
+        }
+
+        /// <summary>
+        /// Lands <paramref name="flight"/>, the oldest not landed, under the lock: its slot freed for a flight after it. A flight
+        /// not cut column by column is one the owner is through with as it lands, and its columns' owned states are posed past
+        /// it then, the items of the next flight that waited for them made ready: how many.
+        /// </summary>
+        private int Land(Flight flight)
+        {
+            int ready = 0;
+            if (!flight.Cuts)
+            {
+                ready = PoseOwned(flight, 0);
+                _owning = Math.Max(_owning, flight.Index + 1);
+            }
+
             flight.Phase = FlightPhase.Landed;
             _landed = flight.Index + 1;
             _ring[flight.Index % LandRing] = null;
             _spare.Push(flight);
+            return ready;
+        }
+
+        /// <summary>
+        /// Poses the owned states of <paramref name="flight"/>'s columns from <paramref name="from"/> on past it, under the lock
+        /// (<see cref="VortexFileWriter.StateOwned"/>), and makes ready the items of the next flight that waited for them: how many.
+        /// </summary>
+        private int PoseOwned(Flight flight, int from) => _posed.Length == 0 ? 0 : PoseOwned(flight, from, writer._fieldCount);
+
+        /// <summary>
+        /// Poses column <paramref name="field"/>'s owned state past <paramref name="flight"/>, cut column by column, once its
+        /// owner emitted the column (<see cref="VortexFileWriter.EmitCutColumnsAsync"/>): the next flight's items of the
+        /// column that waited for it are offered.
+        /// </summary>
+        internal void Owned(Flight flight, int field)
+        {
+            int ready;
+            lock (_gate)
+            {
+                ready = PoseOwned(flight, field, field + 1);
+            }
+
+            if (ready > 0)
+            {
+                core.Offer(this, Flow.Write, ready);
+            }
+        }
+
+        /// <summary>Poses the owned states of columns <paramref name="from"/> to <paramref name="to"/> past <paramref name="flight"/>, under the lock.</summary>
+        private int PoseOwned(Flight flight, int from, int to)
+        {
+            int ready = 0;
+            int past = (int)Math.Min(flight.Index + 1, int.MaxValue);
+            for (int field = from; field < to; field++)
+            {
+                int state = writer.StateOwned(field);
+                if (_posed[state] >= past)
+                {
+                    continue;
+                }
+
+                _posed[state] = past;
+                if (flight.Index + 1 < _prologued && _ring[(flight.Index + 1) % LandRing] is { Phase: FlightPhase.Running } next)
+                {
+                    for (int i = 0; i < next.Count; i++)
+                    {
+                        if (next.Waiting[i] > 0 && (Array.IndexOf(next.After[i], state) >= 0 || Array.IndexOf(next.Own[i], state) >= 0)
+                            && --next.Waiting[i] == 0)
+                        {
+                            _ready.Enqueue((next.Index << TicketBits) | (uint)i);
+                            ready++;
+                        }
+                    }
+                }
+            }
+
+            return ready;
         }
 
         internal override bool TryClaim(out bool more, out long ticket)
@@ -1168,6 +1618,7 @@ public sealed partial class VortexFileWriter
                     if (failed || !writer.Prologue(flight, first: flight.Index == Volatile.Read(ref _landed)))
                     {
                         flight.Phase = FlightPhase.Alone;
+                        flight.Cuts = false;
                     }
                 }
                 else if (code == Epilogues)
@@ -1187,6 +1638,7 @@ public sealed partial class VortexFileWriter
                 if (code == Prologues)
                 {
                     flight.Phase = FlightPhase.Alone;
+                    flight.Cuts = false;
                 }
 
                 return true;
@@ -1224,9 +1676,15 @@ public sealed partial class VortexFileWriter
                     _epilogued = index + 1;
                     flight.Phase = FlightPhase.Held;
                     ready += PoseUntouched(flight);
-                    if (!flight.EndsChunk || failed || Volatile.Read(ref _error) is not null)
+                    if (failed && flight.EndsChunk && !flight.Cuts)
                     {
-                        Land(flight);
+                        flight.LandsFailed = true;
+                    }
+
+                    long landed = _landed;
+                    ready += LandInOrder();
+                    if (_landed > landed)
+                    {
                         ready += QueuePrologue() ? 1 : 0;
                     }
 
@@ -1252,10 +1710,30 @@ public sealed partial class VortexFileWriter
             return signal;
         }
 
-        /// <summary>Whether the oldest flight not landed waits for its owner, under the lock: the chunk it ends, or its block alone.</summary>
-        private bool OwnerActs() =>
-            _landed < _admitted && _ring[_landed % LandRing] is { } head
-            && ((head.Phase == FlightPhase.Held && head.EndsChunk) || head.Phase == FlightPhase.Alone);
+        /// <summary>Whether a flight waits for its owner, under the lock (<see cref="OwnerFlight"/>).</summary>
+        private bool OwnerActs() => OwnerFlight() is not null;
+
+        /// <summary>
+        /// The flight that waits for its owner, under the lock; null for none. The first the owner is not through with: cut
+        /// column by column, once its next column's cut ran; otherwise once it is the oldest not landed, for the chunk it ends
+        /// or its block alone.
+        /// </summary>
+        private Flight? OwnerFlight()
+        {
+            if (_owning >= _prologued || _ring[_owning % LandRing] is not { } flight)
+            {
+                return null;
+            }
+
+            if (flight.Cuts && flight.Phase is FlightPhase.Running or FlightPhase.Ran or FlightPhase.Held)
+            {
+                return !flight.Finished && (flight.Owned == flight.CutDone.Length || flight.CutDone[flight.Owned]) ? flight : null;
+            }
+
+            return _owning == _landed && ((flight.Phase == FlightPhase.Held && flight.EndsChunk) || flight.Phase == FlightPhase.Alone)
+                ? flight
+                : null;
+        }
 
         /// <summary>
         /// Queues the prologue of the next flight, under the lock, when it may run: its block assembled, the prologue before it
@@ -1268,8 +1746,9 @@ public sealed partial class VortexFileWriter
                 return false;
             }
 
+            // A flight cut column by column lets the next start once its prologue ran: the next one's columns follow its cuts.
             if (_prologued > _landed && _ring[(_prologued - 1) % LandRing] is { } before
-                && (before.EndsChunk || before.Phase == FlightPhase.Alone))
+                && ((before.EndsChunk && !before.Cuts) || before.Phase == FlightPhase.Alone))
             {
                 return false;
             }
@@ -1299,7 +1778,7 @@ public sealed partial class VortexFileWriter
             int index = (int)Math.Min(flight.Index, int.MaxValue);
             for (int i = 0; i < flight.Count; i++)
             {
-                int waiting = flight.Before[i] >= 0 ? 1 : 0;
+                int waiting = (flight.Before[i] >= 0 ? 1 : 0) + flight.Befores[i].Length;
                 foreach (int state in flight.Own[i])
                 {
                     waiting += _posed[state] < index ? 1 : 0;
@@ -1336,6 +1815,13 @@ public sealed partial class VortexFileWriter
         {
             int ready = 0;
             int past = (int)Math.Min(flight.Index + 1, int.MaxValue);
+            int entry = flight.Entries[item];
+            if ((entry & CloseItem) != 0 && (entry & KeysItem) == 0)
+            {
+                // The column's cut ran: its owner may emit it.
+                flight.CutDone[entry & 0xF_FFFF] = true;
+            }
+
             int[] states = flight.Own[item];
             foreach (int state in states)
             {
@@ -1362,7 +1848,8 @@ public sealed partial class VortexFileWriter
 
             for (int i = 0; i < flight.Count; i++)
             {
-                if (flight.Before[i] == item && --flight.Waiting[i] == 0)
+                int freed = (flight.Before[i] == item ? 1 : 0) + (Array.IndexOf(flight.Befores[i], item) >= 0 ? 1 : 0);
+                if (freed > 0 && (flight.Waiting[i] -= freed) == 0)
                 {
                     _ready.Enqueue((flight.Index << TicketBits) | (uint)i);
                     ready++;
@@ -1396,7 +1883,8 @@ public sealed partial class VortexFileWriter
             bool any = false;
             for (int state = 0; state < _posed.Length; state++)
             {
-                if (_posed[state] < past)
+                // A column's owned state is the owner's to pose, as it is through with each flight (PoseOwned).
+                if (_posed[state] < past && !writer.IsOwnedState(state))
                 {
                     _posed[state] = past;
                     _raised[state] = true;

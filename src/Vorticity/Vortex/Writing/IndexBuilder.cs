@@ -38,6 +38,17 @@ internal abstract class IndexBuilder : IDisposable
     /// <summary>Everything it costs: written payloads, queued estimates, and what is still open.</summary>
     internal long Bytes => WrittenBytes + _pending + OpenBytes;
 
+    /// <summary>
+    /// What `Auto`'s verdict weighs (<see cref="Judge"/>): <see cref="Bytes"/> as the last chunk closed or the data ended
+    /// (<see cref="Freeze"/>), whatever rows of the next chunk it took since. What is still open grows as rows come in, and a
+    /// writer's line may ingest a block of the next chunk before the verdict on the one before is taken: weighed then, the
+    /// verdict would depend on how far the lanes had gone.
+    /// </summary>
+    internal long JudgedBytes { get; private set; }
+
+    /// <summary>Takes <see cref="Bytes"/> as the verdict weighs them, as a chunk closes or the data ends.</summary>
+    internal void Freeze() => JudgedBytes = Bytes;
+
     internal long WrittenBytes { get; private set; }
 
     /// <summary>
@@ -93,10 +104,10 @@ internal abstract class IndexBuilder : IDisposable
             return;
         }
 
-        if (Bytes * 1000 > facts.ColumnBytes * AutoShare)
+        if (JudgedBytes * 1000 > facts.ColumnBytes * AutoShare)
         {
             Abandon(
-                $"Auto gave it up: {Bytes} bytes against {facts.ColumnBytes} bytes of column, over " +
+                $"Auto gave it up: {JudgedBytes} bytes against {facts.ColumnBytes} bytes of column, over " +
                 $"its share of {AutoShare}‰. An explicit policy overrides the share");
         }
     }

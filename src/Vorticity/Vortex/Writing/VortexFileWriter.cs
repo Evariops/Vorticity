@@ -3938,12 +3938,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// for a column written against an object dictionary, rather than its values, which a merge's writer gathered as text
     /// up to sixteen times a chunk's target, 482 MiB of a job's 691 over metric records.
     /// </summary>
-    private void Gather(int field, Gathering gathering, CanonicalArena arena, int node, long rows, int blocks)
+    /// <remarks>
+    /// The blocks of the file before the rows are <paramref name="firstBlock"/>, or the writer's count now for -1: a flight cut
+    /// column by column passes its own, which the flights before it counted in their order, the owner counting them as it
+    /// emits them.
+    /// </remarks>
+    private void Gather(int field, Gathering gathering, CanonicalArena arena, int node, long rows, int blocks, int firstBlock = -1)
     {
         CanonicalArena into = (gathering.Context ??= TransitContexts.Rent(Account)).Canonical;
         if (gathering.Rows == 0)
         {
-            gathering.FirstBlock = _emittedBlocks;
+            gathering.FirstBlock = firstBlock >= 0 ? firstBlock : _emittedBlocks;
         }
 
         // A column gathered as codes is cut where its values would have been: its target counts the values' bytes, so that

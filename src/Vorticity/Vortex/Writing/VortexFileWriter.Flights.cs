@@ -57,6 +57,96 @@ public sealed partial class VortexFileWriter
         /// <summary>Whether its items copy its block's columns in with what each gathers, its block a whole chunk of the file, which its emission then finds gathered.</summary>
         internal bool Gathers;
 
+        /// <summary>
+        /// Whether its chunk is cut column by column on the line (<see cref="CutsOnLine"/>): each column's cut an item of its
+        /// own (<see cref="CloseItem"/>), the owner emitting each column once cut, the flights after it going through meanwhile.
+        /// </summary>
+        internal bool Cuts;
+
+        /// <summary>Whether the flight before it was cut column by column, whose cuts its own then follow (<see cref="OverItem"/>).</summary>
+        internal bool AfterCut;
+
+        /// <summary>The column that writes its chunk early in the chunk it cuts, -1 for none (<see cref="Over"/>), set by its <see cref="OverItem"/> or its prologue.</summary>
+        internal int OverField = -1;
+
+        /// <summary>Per column, the chunk its cut took from the column's gathering to emission; null for none.</summary>
+        internal ColumnEmission?[] Detached = [];
+
+        /// <summary>Per column, whether its cut ran, which the owner emits the column after.</summary>
+        internal bool[] CutDone = [];
+
+        /// <summary>The columns its owner emitted, in their order.</summary>
+        internal int Owned;
+
+        /// <summary>Whether its owner emitted every column and closed its chunk, which it then lands with, its epilogue run.</summary>
+        internal bool Finished;
+
+        /// <summary>Whether it ends a chunk and its epilogue failed, so that it lands without its emission.</summary>
+        internal bool LandsFailed;
+
+        /// <summary>Its counted rows, whose wide columns' distinct values its owner attaches as it emits each column; null once attached.</summary>
+        internal CountedRows? OwnCounted;
+
+        /// <summary>The blocks and the rows of the file before its chunk, in the order of the flights.</summary>
+        internal int ChunkFirstBlock;
+
+        /// <inheritdoc cref="ChunkFirstBlock"/>
+        internal long ChunkFirstRow;
+
+        // By column, the items its cut waits for, kept from one flight to the next: a flight lays the same items each time.
+        private int[][] _cutWaits = [];
+
+        /// <summary>
+        /// Column <paramref name="field"/>'s cut's items to wait for, <paramref name="items"/> each once, in an array kept for the
+        /// flights this one carries next: an item laid for two columns' cuts may be laid twice for one, and an item done
+        /// counts once toward what waits for it, so a cut that counted it twice would wait for ever.
+        /// </summary>
+        internal int[] CutWaits(int field, System.Collections.Generic.List<int> items)
+        {
+            if (_cutWaits.Length <= field)
+            {
+                System.Array.Resize(ref _cutWaits, field + 1);
+            }
+
+            items.Sort();
+            int distinct = 0;
+            for (int i = 0; i < items.Count; i++)
+            {
+                distinct += i == 0 || items[i] != items[i - 1] ? 1 : 0;
+            }
+
+            int[]? kept = _cutWaits[field];
+            if (kept is null || kept.Length != distinct)
+            {
+                kept = _cutWaits[field] = new int[distinct];
+            }
+
+            for (int i = 0, at = 0; i < items.Count; i++)
+            {
+                if (i == 0 || items[i] != items[i - 1])
+                {
+                    kept[at++] = items[i];
+                }
+            }
+
+            return kept;
+        }
+
+        /// <summary>Room for the cuts of <paramref name="fields"/> columns, emptied.</summary>
+        internal void SizeCuts(int fields)
+        {
+            if (Detached.Length != fields)
+            {
+                Detached = new ColumnEmission?[fields];
+                CutDone = new bool[fields];
+            }
+
+            System.Array.Clear(Detached);
+            System.Array.Clear(CutDone);
+            Owned = 0;
+            Finished = false;
+        }
+
         /// <summary>The counted rows of the flight before, whose wide columns' distinct values this flight's counts attach first; null for none.</summary>
         internal CountedRows? AttachFrom;
 
@@ -86,6 +176,12 @@ public sealed partial class VortexFileWriter
 
         /// <summary>Per item, the item of the same flight it waits for, -1 for none: a group of keys waits for its column's read.</summary>
         internal int[] Before = [];
+
+        /// <summary>
+        /// Per item, the items of the same flight it waits for besides <see cref="Before"/>, empty for none: a column's cut
+        /// waits for the column's ingest, gathering and take of the flight, which touch the states it touches.
+        /// </summary>
+        internal int[][] Befores = [];
 
         /// <summary>Per item, how many states and items it still waits for.</summary>
         internal int[] Waiting = [];
@@ -131,6 +227,7 @@ public sealed partial class VortexFileWriter
                 Own = new int[count][];
                 After = new int[count][];
                 Before = new int[count];
+                Befores = new int[count][];
                 Waiting = new int[count];
             }
 

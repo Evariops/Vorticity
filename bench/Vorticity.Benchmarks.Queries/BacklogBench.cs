@@ -124,7 +124,7 @@ internal static class BacklogBench
     // stopAfter: the jobs the maintainer runs at most, -1 for all of them (--jobs N). keep: where the store the jobs left is
     // kept as a backlog of its own (--keep DIR), null for nowhere: a store a few jobs in, whose next job a run compacts alone
     // (--store DIR --compact-only --jobs 1), in seconds rather than the minutes the whole backlog takes.
-    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false, bool logs = false, int stopAfter = -1, string? keep = null, int repeat = 1, bool quickExit = false, bool bytesOf = false, string? memoryTimeline = null)
+    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false, bool logs = false, int stopAfter = -1, string? keep = null, int repeat = 1, bool quickExit = false, bool bytesOf = false, string? memoryTimeline = null, string? segments = null)
     {
         if (memoryLimit > 0)
         {
@@ -256,7 +256,7 @@ internal static class BacklogBench
             refusals += Interlocked.Read(ref s_refused);
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"{(repeat > 1 ? $"round {round} " : "")}job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB (inputs {Mib(result.MemoryReservedBy.Inputs)}, writer {Mib(result.MemoryReservedBy.Writer)}), {result.RangesAtOnce} at once, {result.MergeSlices} slices ({result.MergeSlicesAhead} ahead), {result.InputWindowsAhead} windows ahead, held back {result.AdvancesHeldBack}, {result.BoundRestarts} restarts under a doubled bound, written {(double)result.BytesOut / Math.Max(1, result.BytesIn):F2} of read, {result.InputsToldByDirectories} inputs counted from their directories, {result.CensusParts.Inputs} in {result.CensusParts.Parts} parts,{Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of lanes, {session.Lanes.PeakHeld} of {session.Lanes.Lanes} lanes at most, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {result.WriterBlocksOnLine:N0} on the line, {result.WriterChunksEndedOnLine:N0} chunks ended there, {GC.CollectionCount(2) - fullCollections} full collections, {(GC.GetTotalPauseDuration() - paused).TotalSeconds:F2} s paused by the collector, {Slabs.Slab.Made - slabsMade} slabs made, {session.Core.UnitsRun - unitsRun:N0} units of the core on {session.Core.PumpsStarted - pumpsStarted:N0} pumps started; passes: {PassesOfJob()}; {sampler.Peaks()}"));
+                $"{(repeat > 1 ? $"round {round} " : "")}job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB (inputs {Mib(result.MemoryReservedBy.Inputs)}, writer {Mib(result.MemoryReservedBy.Writer)}), {result.RangesAtOnce} at once, {result.MergeSlices} slices ({result.MergeSlicesAhead} ahead), {result.InputWindowsAhead} windows ahead, held back {result.AdvancesHeldBack}, {result.BoundRestarts} restarts under a doubled bound, written {(double)result.BytesOut / Math.Max(1, result.BytesIn):F2} of read, {result.InputsToldByDirectories} inputs counted from their directories, {result.CensusParts.Inputs} in {result.CensusParts.Parts} parts,{Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of lanes, {session.Lanes.PeakHeld} of {session.Lanes.Lanes} lanes at most, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {result.WriterBlocksOnLine:N0} on the line, {result.WriterChunksEndedOnLine:N0} chunks ended there, {result.WriterChunksCutOnLine:N0} cut column by column,{GC.CollectionCount(2) - fullCollections} full collections, {(GC.GetTotalPauseDuration() - paused).TotalSeconds:F2} s paused by the collector, {Slabs.Slab.Made - slabsMade} slabs made, {session.Core.UnitsRun - unitsRun:N0} units of the core on {session.Core.PumpsStarted - pumpsStarted:N0} pumps started; passes: {PassesOfJob()}; {sampler.Peaks()}"));
         }
 
         Console.WriteLine(string.Create(
@@ -284,7 +284,7 @@ internal static class BacklogBench
 
         if (bytesOf && last)
         {
-            Console.WriteLine(await BytesDigestAsync(maintainer));
+            Console.WriteLine(await BytesDigestAsync(maintainer, segments));
         }
         }
 
@@ -437,7 +437,7 @@ internal static class BacklogBench
     /// run to the next and the walk's order with them. Two runs that wrote the same bytes print the same line, in a fraction
     /// of the time the rows' digest takes. The bytes counted are the objects', footers included.
     /// </summary>
-    private static async Task<string> BytesDigestAsync(VortexDataset dataset)
+    private static async Task<string> BytesDigestAsync(VortexDataset dataset, string? segments)
     {
         ulong sum = 0;
         ulong xor = 0;
@@ -457,11 +457,43 @@ internal static class BacklogBench
             ulong running = 0;
             await using (VortexFile file = await dataset.Session.OpenAsync(copy))
             {
+                // --segments FILE: each segment's place in the layout, its length and its hash, for two runs to be told apart
+                // segment by segment where their digests differ.
+                string? dump = segments;
+                Dictionary<int, string> where = [];
+                if (dump is not null)
+                {
+                    void Walk(VortexLayout node, string path)
+                    {
+                        foreach (int s in node.Segments)
+                        {
+                            where[s] = path + "/" + node.Encoding;
+                        }
+
+                        for (int c = 0; c < node.Children.Length; c++)
+                        {
+                            Walk(node.Children[c], path + "." + c);
+                        }
+                    }
+
+                    Walk(await file.GetLayoutAsync(), "r");
+                }
+
+                List<string> lines = [];
                 ISegmentReader reader = file;
+                int index = 0;
                 foreach (VortexSegment segment in file.SegmentMap)
                 {
                     using SegmentOwner owner = await reader.ReadRangeAsync((long)segment.Offset, (int)segment.Length, 1, CancellationToken.None);
-                    running = (running * 0x9E3779B97F4A7C15UL) ^ Vorticity.Aggregating.CardinalitySlot.Hash(owner.Buffer.Span);
+                    ulong hash = Vorticity.Aggregating.CardinalitySlot.Hash(owner.Buffer.Span);
+                    running = (running * 0x9E3779B97F4A7C15UL) ^ hash;
+                    lines.Add(string.Create(CultureInfo.InvariantCulture, $"{index}\t{segment.Length}\t{hash:x16}\t{where.GetValueOrDefault(index, "?")}"));
+                    index++;
+                }
+
+                if (dump is not null)
+                {
+                    await System.IO.File.WriteAllLinesAsync(dump, lines);
                 }
             }
 

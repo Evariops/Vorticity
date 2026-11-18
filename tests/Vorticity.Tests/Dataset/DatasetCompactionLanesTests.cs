@@ -129,6 +129,9 @@ public sealed partial class DatasetCompactionLanesTests
         {
             Assert.True(sliced.Max(static job => job.MergeSlices) >= 2, "no merge was cut in slices");
             Assert.True(sliced.Sum(static job => job.MergeSlicesAhead) > 0, "no slice was merged ahead");
+
+            // Each block a chunk of 4 KiB alone, cut column by column past one lane, the blocks after it going through.
+            Assert.True(sliced.Sum(static job => job.WriterChunksCutOnLine) > 0, "no chunk was cut column by column on a writer's line");
         }
     }
 
