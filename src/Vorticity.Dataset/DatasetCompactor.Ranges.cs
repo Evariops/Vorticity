@@ -888,7 +888,11 @@ internal static partial class DatasetCompactor
         long perWriter = Math.Max(1, writer / count);
         int batchRows = InputBatchRows(dataset, schema, job, ranges.MostInputs * count, JobBudget(dataset), writer);
         long perRange = perWriter + InputsBytes(dataset, schema, job, ranges.MostInputs, batchRows);
-        int atOnce = (int)Math.Clamp(memory.Room / perRange, 1, count);
+
+        // A quarter of a range's price left over: two ranges of a consolidation of metric records under 2 GiB, priced at the
+        // jobs' budget of 672 MiB together, held 684, their inputs a third past their price and their writers below it, and
+        // the job was refused; with that room kept, it runs its ranges one after another, and three at once under 16 GiB.
+        int atOnce = (int)Math.Clamp((memory.Room - (perRange / 4)) / perRange, 1, count);
 
         // After a refusal, no more inputs open at once than the refused job held.
         if (dataset.JobSizingCap.Open is > 0 and int open)
