@@ -211,7 +211,7 @@ internal static class BacklogBench
         sampler.Reset();
         clock.Restart();
 
-        IObjectStore store = new LatencyObjectStore(new FileObjectStore(work)) { Latency = TimeSpan.FromMilliseconds(latency) };
+        await using IObjectStore store = new LatencyObjectStore(new FileObjectStore(work)) { Latency = TimeSpan.FromMilliseconds(latency) };
         await using VortexDataset maintainer = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, Encrypted = true });
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
@@ -234,6 +234,9 @@ internal static class BacklogBench
             session.Lanes.ResetPeak();
             long slabsMade = Slabs.Slab.Made;
             int fullCollections = GC.CollectionCount(2);
+            long unitsRun = session.Core.UnitsRun;
+            long pumpsStarted = session.Core.PumpsStarted;
+            TimeSpan paused = GC.GetTotalPauseDuration();
             await maintainer.RefreshAsync();
             CompactionResult? result = jobs == stopAfter ? null : await maintainer.CompactAsync();
             if (result is null)
@@ -251,7 +254,7 @@ internal static class BacklogBench
             refusals += Interlocked.Read(ref s_refused);
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"{(repeat > 1 ? $"round {round} " : "")}job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB (inputs {Mib(result.MemoryReservedBy.Inputs)}, writer {Mib(result.MemoryReservedBy.Writer)}), {result.RangesAtOnce} at once, {result.MergeSlices} slices ({result.MergeSlicesAhead} ahead), {result.InputWindowsAhead} windows ahead, held back {result.AdvancesHeldBack}, {result.BoundRestarts} restarts under a doubled bound, written {(double)result.BytesOut / Math.Max(1, result.BytesIn):F2} of read, {result.InputsToldByDirectories} inputs counted from their directories, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of lanes, {session.Lanes.PeakHeld} of {session.Lanes.Lanes} lanes at most, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {GC.CollectionCount(2) - fullCollections} full collections, {Slabs.Slab.Made - slabsMade} slabs made; passes: {PassesOfJob()}; {sampler.Peaks()}"));
+                $"{(repeat > 1 ? $"round {round} " : "")}job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB (inputs {Mib(result.MemoryReservedBy.Inputs)}, writer {Mib(result.MemoryReservedBy.Writer)}), {result.RangesAtOnce} at once, {result.MergeSlices} slices ({result.MergeSlicesAhead} ahead), {result.InputWindowsAhead} windows ahead, held back {result.AdvancesHeldBack}, {result.BoundRestarts} restarts under a doubled bound, written {(double)result.BytesOut / Math.Max(1, result.BytesIn):F2} of read, {result.InputsToldByDirectories} inputs counted from their directories, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of lanes, {session.Lanes.PeakHeld} of {session.Lanes.Lanes} lanes at most, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {result.WriterBlocksOnLine:N0} on the line, {result.WriterChunksEndedOnLine:N0} chunks ended there, {GC.CollectionCount(2) - fullCollections} full collections, {(GC.GetTotalPauseDuration() - paused).TotalSeconds:F2} s paused by the collector, {Slabs.Slab.Made - slabsMade} slabs made, {session.Core.UnitsRun - unitsRun:N0} units of the core on {session.Core.PumpsStarted - pumpsStarted:N0} pumps started; passes: {PassesOfJob()}; {sampler.Peaks()}"));
         }
 
         Console.WriteLine(string.Create(
