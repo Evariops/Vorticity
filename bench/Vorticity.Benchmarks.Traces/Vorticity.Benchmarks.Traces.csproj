@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>Vorticity.Bench.Traces</RootNamespace>
+    <AssemblyName>vortex-traces</AssemblyName>
+
+    <!-- Reads the traces dotnet-trace records of a bench: the allocations the runtime samples, each with its stack, folded
+         by type and by the frames of ours that made them, and the collections on a timeline. Its own project because it
+         depends on TraceEvent, which nothing else in the repository needs, and references nothing of the library: a
+         trace names the methods it saw itself. -->
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Diagnostics.Tracing.TraceEvent" />
+  </ItemGroup>
+
+</Project>

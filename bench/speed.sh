@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # bench/speed.sh: the short benches of the throughput work, each run once per source tree and kept in a ledger.
 #
-#   bench/speed.sh [--only B,B…] [--degree N,N…] [--profile] [--again] [--base REF|TREE] [--digest] [--same-bytes] [--note TEXT]
+#   bench/speed.sh [--only B,B…] [--degree N,N…] [--profile|--allocations] [--memory SIZE] [--again] [--base REF|TREE] [--digest]
+#                  [--same-bytes] [--note TEXT]
 #
 # Benches (default: logs,metrics):
 #   logs     one tier merge of 5 job outputs of log records, 7.6 M rows, 2 GiB        (~15 s a round)
@@ -16,9 +17,24 @@
 # second compared), the passes, the processor and write-lane seconds, the occupancy (processor over wall over degree),
 # the rows, the inputs, the output and scratch sizes, a digest of the bytes written (decrypted, the same bytes at any
 # degree and on any run), the resident and block peaks, the full collections and the machine's load. --digest adds the
-# rows' digest, which takes four to five times the job and is for a change of what is written. --profile is a run of its
-# own (mode p10): `sample` at 10 ms on the last round only, with the JIT's perf map, summarised by bench/profile/samples.py
-# into roles, top functions, threads and spinners; never compared with plain runs, whose timing it distorts.
+# rows' digest, which takes four to five times the job and is for a change of what is written.
+#
+# --profile is a run of its own (mode x30): Instruments' CPU Profiler at its high frequency, a sample every 25 to 30 µs of
+# each running thread weighed in cycles, on the last round only, its JIT frames named by the runtime's perf map, folded by
+# bench/profile/jitcycles.py into the cores busy millisecond by millisecond, roles, functions, threads and spinners, a
+# timeline and folded stacks for speedscope (the run's .cycles directory beside its log). It slows the round by about a
+# quarter, and is never compared with plain runs. Without Xcode it falls back to `sample` at 10 ms (mode p10). EventPipe's
+# sampler is not used: it stops the runtime at every sample (a job at 10 kHz takes 3.4 times as long) and charges a thread
+# that waits to the frame it waits in.
+#
+# --allocations is a run of its own (mode alloc): dotnet-trace on the last round with the runtime's allocation sampling
+# (AllocationSampled, an allocation drawn every 100 KB on average, with its stack) and its collections, folded by
+# bench/Vorticity.Benchmarks.Traces into bytes by type and by the frames of ours that allocated them; and the bench's own
+# timeline of what the process and the library hold every 10 ms (resident, blocks, the pool, the slabs, the heap, the
+# governor's reservations), the run's .allocations directory beside its log.
+#
+# --memory SIZE runs the compactions under SIZE rather than 2 GiB, the mode then named after it (plain-16g): the work
+# measured with the memory left free, never compared with the 2 GiB runs.
 #
 # A run is keyed by the hash of the src/ tree it compiled, the working tree's changes included: a commit of the bench, the
 # docs or the tests alone keeps the key, and a tree measured is not measured again unless --again. The base it is compared
@@ -34,12 +50,14 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 home=${VORTICITY_SPEED:-$HOME/.cache/vorticity/speed}
 ledger=$home/ledger.tsv
 mkdir -p "$home/logs"
-only="logs,metrics"; degrees="14"; profile=0; again=0; base=""; digest=0; note=""; same=0; refused=0
+only="logs,metrics"; degrees="14"; profile=0; allocations=0; memory=2g; again=0; base=""; digest=0; note=""; same=0; refused=0
 while [ $# -gt 0 ]; do
   case $1 in
     --only) only=$2; shift ;;
     --degree) degrees=$2; shift ;;
     --profile) profile=1 ;;
+    --allocations) allocations=1 ;;
+    --memory) memory=$2; shift ;;
     --again) again=1 ;;
     --base) base=$2; shift ;;
     --digest) digest=1 ;;
@@ -65,7 +83,13 @@ else
   base=$(git -C "$repo" rev-parse "$base:src" 2>/dev/null || echo "$base")
 fi
 commit=$(git -C "$repo" rev-parse --short HEAD); [ "$tree" != "$head_src" ] && commit="$commit+"
-mode=$([ $profile = 1 ] && echo p10 || echo plain)
+xctrace=${XCTRACE:-$(xcrun --find xctrace 2>/dev/null || echo /Applications/Xcode.app/Contents/Developer/usr/bin/xctrace)}
+[ -x "$xctrace" ] || xctrace=""
+mode=plain
+[ $profile = 1 ] && mode=$([ -n "$xctrace" ] && echo x30 || echo p10)
+[ $allocations = 1 ] && mode=alloc
+[ $profile = 1 ] && [ $allocations = 1 ] && { echo "--profile and --allocations are runs of their own: one at a time" >&2; exit 2; }
+[ "$memory" != 2g ] && mode="$mode-$memory"
 echo "tree ${tree:0:10} ($commit), base ${base:0:10}, mode $mode"
 
 queries=$repo/bench/Vorticity.Benchmarks.Queries/bin/Release/net11.0
@@ -80,6 +104,8 @@ measured() { awk -F'\t' -v t="$tree" -v b="$1" -v d="$2" -v m="$mode" '$2==t && 
 
 # Everything the runs need is built before the first one, from the tree whose hash keys them: a build between two runs
 # would compile whatever the working tree became meanwhile.
+traces=$repo/bench/Vorticity.Benchmarks.Traces/bin/Release/net11.0/vortex-traces.dll
+[ $allocations = 1 ] && build bench/Vorticity.Benchmarks.Traces
 for bench in ${only//,/ }; do
   case $bench in
     logs|metrics|runs|append) [ $built_queries = 0 ] && { build bench/Vorticity.Benchmarks.Queries; built_queries=1; } ;;
@@ -99,10 +125,10 @@ for bench in ${only//,/ }; do
     log=$home/logs/$stamp.log
     kind=compact; cores="-"; roles="-"
     case $bench in
-      logs) args=(--micro backlog --store "$home/logtier" --logs --jobs 1 --compact-only --memory-limit 2g --degree "$degree" --repeat 2 --bytes-digest) ;;
-      metrics) args=(--micro backlog --store "$home/metrictier" --jobs 1 --compact-only --memory-limit 2g --degree "$degree" --repeat 2 --bytes-digest) ;;
-      runs) args=(--micro backlog --store "$home/appends60" --jobs 1 --compact-only --memory-limit 2g --degree "$degree" --repeat 3 --bytes-digest) ;;
-      append) kind=append; args=(--micro backlog --store "$home/append" --build-only --appends 24 --rows 65536 --memory-limit 2g --degree "$degree") ;;
+      logs) args=(--micro backlog --store "$home/logtier" --logs --jobs 1 --compact-only --memory-limit "$memory" --degree "$degree" --repeat 2 --bytes-digest) ;;
+      metrics) args=(--micro backlog --store "$home/metrictier" --jobs 1 --compact-only --memory-limit "$memory" --degree "$degree" --repeat 2 --bytes-digest) ;;
+      runs) args=(--micro backlog --store "$home/appends60" --jobs 1 --compact-only --memory-limit "$memory" --degree "$degree" --repeat 3 --bytes-digest) ;;
+      append) kind=append; args=(--micro backlog --store "$home/append" --build-only --appends 24 --rows 65536 --memory-limit "$memory" --degree "$degree") ;;
       scan) kind=runner; args=(--scenario scan "$fixture" 10485760 --repeat 12 --threads "$degree") ;;
       filter) kind=runner; args=(--scenario filter-wide "$fixture" 10485760 --repeat 12 --threads "$degree") ;;
       write) kind=runner; args=(--scenario write "$fixture" 10485760 --repeat 12 --threads "$degree") ;;
@@ -111,23 +137,60 @@ for bench in ${only//,/ }; do
     esac
     [ $digest = 1 ] && [ $kind = compact ] && args+=(--digest)
     exe=("$queries/vortex-queries.dll"); [ $kind = runner ] && exe=("$runner")
-    if [ $profile = 1 ]; then
+    # The last round alone: a compaction waits a second and a half after saying so, a runner is sampled from its start.
+    last_round() {
+      if [ $kind = compact ]; then
+        for _ in $(seq 1 600); do grep -q "^round $1 starts" "$log" 2>/dev/null && break; kill -0 $pid 2>/dev/null || break; sleep 0.1; done
+      else
+        sleep 0.5
+      fi
+    }
+    rounds_of=2; [ "$bench" = runs ] && rounds_of=3
+    if [ $profile = 1 ] && [ -n "$xctrace" ]; then
+      [ $kind = compact ] && args+=(--quick-exit)
+      out=$home/logs/$stamp.cycles; mkdir -p "$out"
+      "$xctrace" record --template 'CPU Profiler' --show-recording-options 2> /dev/null |
+        sed 's/"highFrequency" : false/"highFrequency" : true/' > "$out/options.json"
+      (cd "$repo" && DOTNET_PerfMapEnabled=1 exec dotnet "${exe[@]}" "${args[@]}" > "$log" 2>&1) &
+      pid=$!
+      last_round $rounds_of
+      "$xctrace" record --template 'CPU Profiler' --recording-options "$out/options.json" --no-prompt --attach $pid \
+        --output "$out/cpu.trace" > "$out/xctrace.txt" 2>&1
+      cp "/tmp/perf-$pid.map" "$out/perf.map" 2>/dev/null
+      wait $pid
+      "$xctrace" export --input "$out/cpu.trace" --xpath '/trace-toc/run[@number="1"]/data/table[@schema="cpu-profile"]' \
+        --output "$out/cpu-profile.xml" > /dev/null 2>&1
+      line=$(python3 -I "$repo/bench/profile/jitcycles.py" "$out/cpu-profile.xml" "$out/perf.map" "$out" --ledger 2>/dev/null || printf -- '-\t-')
+      cores=${line%%	*}; roles=${line#*	}
+      rm -rf "$out/cpu.trace" "$out/cpu-profile.xml"
+      gzip -f "$out/folded.txt" "$out/perf.map"
+      echo "$bench at $degree: $out/summary.md"
+    elif [ $profile = 1 ]; then
       [ $kind = compact ] && args+=(--quick-exit)
       sample_file=$home/logs/$stamp.sample; map=$home/logs/$stamp.map; summary=$home/logs/$stamp.profile.txt
       (cd "$repo" && DOTNET_PerfMapEnabled=1 exec dotnet "${exe[@]}" "${args[@]}" > "$log" 2>&1) &
       pid=$!
-      # The last round alone: a compaction waits a second and a half after saying so, a runner is sampled from its start.
-      if [ $kind = compact ]; then
-        for _ in $(seq 1 600); do grep -q '^round 2 starts' "$log" 2>/dev/null && break; kill -0 $pid 2>/dev/null || break; sleep 0.2; done
-      else
-        sleep 0.5
-      fi
+      last_round $rounds_of
       sample $pid 600 10 -mayDie -file "$sample_file" > /dev/null 2>&1
       cp "/tmp/perf-$pid.map" "$map" 2>/dev/null
       wait $pid
       line=$(python3 -I "$repo/bench/profile/samples.py" "$sample_file" "$map" "$summary" 2>/dev/null || printf -- '-\t-')
       cores=${line%%	*}; roles=${line#*	}
       gzip -f "$sample_file"
+    elif [ $allocations = 1 ]; then
+      [ $kind = compact ] || { echo "$bench: --allocations is for the compaction benches" >&2; continue; }
+      out=$home/logs/$stamp.allocations; mkdir -p "$out"
+      args+=(--quick-exit --memory-timeline "$out/memory.tsv")
+      (cd "$repo" && exec dotnet "${exe[@]}" "${args[@]}" > "$log" 2>&1) &
+      pid=$!
+      last_round $rounds_of
+      # GC (0x1), loader and JIT (0x18) for the stacks' names, allocation sampling (0x80000000000), at the informational level.
+      dotnet-trace collect -p $pid --providers 'Microsoft-Windows-DotNETRuntime:0x80000000019:4' -o "$out/trace.nettrace" \
+        > "$out/dotnet-trace.txt" 2>&1
+      wait $pid
+      dotnet "$traces" allocations "$out/trace.nettrace" "$out" 40 > /dev/null 2>&1
+      gzip -f "$out/trace.nettrace"
+      echo "$bench at $degree: $out/allocations.md, $out/memory.tsv"
     else
       (cd "$repo" && dotnet "${exe[@]}" "${args[@]}" > "$log" 2>&1) || { echo "$bench at $degree failed, see $log" >&2; tail -5 "$log" >&2; continue; }
     fi

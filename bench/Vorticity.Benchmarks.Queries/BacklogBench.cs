@@ -124,7 +124,7 @@ internal static class BacklogBench
     // stopAfter: the jobs the maintainer runs at most, -1 for all of them (--jobs N). keep: where the store the jobs left is
     // kept as a backlog of its own (--keep DIR), null for nowhere: a store a few jobs in, whose next job a run compacts alone
     // (--store DIR --compact-only --jobs 1), in seconds rather than the minutes the whole backlog takes.
-    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false, bool logs = false, int stopAfter = -1, string? keep = null, int repeat = 1, bool quickExit = false, bool bytesOf = false)
+    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false, bool logs = false, int stopAfter = -1, string? keep = null, int repeat = 1, bool quickExit = false, bool bytesOf = false, string? memoryTimeline = null)
     {
         if (memoryLimit > 0)
         {
@@ -144,7 +144,8 @@ internal static class BacklogBench
                 options.MaxDegreeOfParallelism = degree;
             }
         });
-        using Sampler sampler = new Sampler();
+        // --memory-timeline FILE: what the process and the library hold every 10 ms, written to FILE when the bench ends.
+        using Sampler sampler = new Sampler(memoryTimeline);
         Stopwatch clock = Stopwatch.StartNew();
 
         if (!compactOnly)
@@ -187,6 +188,7 @@ internal static class BacklogBench
                 }
             }
 
+            sampler.Round = round;
             await RoundAsync(round, last);
         }
 
@@ -549,11 +551,16 @@ internal static class BacklogBench
 
     /// <summary>
     /// The process's resident bytes, the blocks alive, those the pool keeps, and the heap past the blocks, sampled every 50 ms,
-    /// and their peaks since the last reset.
+    /// and their peaks since the last reset; with a timeline file, the same and the governor's reservations every 10 ms, kept
+    /// in memory and written when the bench ends, so that no write to the disk lands inside a job.
     /// </summary>
     private sealed class Sampler : IDisposable
     {
         private readonly Timer _timer;
+        private readonly Timer? _fine;
+        private readonly string? _timeline;
+        private readonly List<string> _rows = [];
+        private readonly Stopwatch _since = Stopwatch.StartNew();
         private readonly LargeBlocks? _large;
         private long _resident;
         private long _blocks;
@@ -569,7 +576,7 @@ internal static class BacklogBench
         private readonly long[] _second = new long[20];
         private int _at;
 
-        internal Sampler()
+        internal Sampler(string? timeline = null)
         {
             if (BlockPool.Watch is null)
             {
@@ -578,6 +585,27 @@ internal static class BacklogBench
             }
 
             _timer = new Timer(_ => Sample(), null, 0, 50);
+            if (timeline is not null)
+            {
+                _timeline = timeline;
+                _rows.Add("ms\tround\tresident_MiB\tblocks_MiB\tpool_kept_MiB\tslabs_MiB\tslabs_free_MiB\theap_beside_MiB\treserved_MiB\theld_MiB");
+                _fine = new Timer(_ => Line(), null, 0, 10);
+            }
+        }
+
+        /// <summary>The bench's round, a column of the timeline.</summary>
+        internal int Round { get; set; }
+
+        /// <summary>One row of the timeline, added under the rows' lock: two callbacks of a late timer may overlap.</summary>
+        private void Line()
+        {
+            string row = string.Create(
+                CultureInfo.InvariantCulture,
+                $"{_since.ElapsedMilliseconds}\t{Round}\t{Mib(MemoryPeaks.Read().Working)}\t{Mib(BlockOwner.LiveBytes)}\t{Mib(MemoryAccount.Pool.ParkedBytes)}\t{Mib(Slabs.HeldBytes)}\t{Mib(Slabs.FreeBytes)}\t{Mib(GC.GetTotalMemory(false) - Pinned())}\t{Mib(QueryMemoryBudget.Process.ReservedBytes)}\t{Mib(HeldMemory.TotalBytes())}");
+            lock (_rows)
+            {
+                _rows.Add(row);
+            }
         }
 
         internal void Reset()
@@ -614,6 +642,15 @@ internal static class BacklogBench
         public void Dispose()
         {
             _timer.Dispose();
+            _fine?.Dispose();
+            if (_timeline is not null)
+            {
+                lock (_rows)
+                {
+                    System.IO.File.WriteAllLines(_timeline, _rows);
+                }
+            }
+
             if (_large is not null && ReferenceEquals(BlockPool.Watch, _large))
             {
                 BlockPool.Watch = null;
