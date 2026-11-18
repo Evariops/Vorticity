@@ -2102,6 +2102,30 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
     }
 
+    /// <summary>
+    /// Takes the rows of <paramref name="staging"/>'s assembled block, node <paramref name="node"/>, as the transit's, where
+    /// they wait for their chunk, the transit holding none: the staging's context becomes the transit's, and the staging
+    /// takes the transit's, empty, for its next block. Its rows were copied out of the inputs' batches as it was assembled,
+    /// and own their bytes, as rows that wait must.
+    /// </summary>
+    /// <remarks>
+    /// Copied into the transit as a block that completes a chunk is, the block that makes one alone, each block of a
+    /// consolidation of metric records, was copied twice, its epilogue a copy of 5 MB in the order of the blocks: 0.56 ms of
+    /// the 2 ms a block took through the writer at degree 14 (2026-11-18). A list's elements a block may share whole with a
+    /// batch it was cut from are compacted as they are copied into the transit, so a schema with lists still copies.
+    /// </remarks>
+    private void Adopt(Staging staging, int node)
+    {
+        _transit ??= new ScanContext?[2];
+        ScanContext? empty = _transit[_current];
+        _transit[_current] = staging.Context;
+        staging.Context = empty ?? TransitContexts.Rent(Account);
+        CanonicalArena transit = _transit[_current]!.Canonical;
+        _pending.Add(node);
+        _pendingRows += transit.GetNode(node).Length;
+        _pendingBytes += transit.ByteSize(node);
+    }
+
     /// <summary>Copies the rows of node <paramref name="root"/> into the transit arena, where they wait for their chunk.</summary>
     private void Hold(CanonicalArena arena, int root)
     {
@@ -2639,7 +2663,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private sealed class Staging(ScanContext context)
     {
-        internal readonly ScanContext Context = context;
+        // Exchanged with the transit's, empty, when the transit adopts the block it assembled (Adopt).
+        internal ScanContext Context = context;
         internal readonly List<StagedPart> Parts = [];
         internal int Rows;
         internal long Bytes;

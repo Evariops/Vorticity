@@ -687,7 +687,16 @@ public sealed partial class VortexFileWriter
 
         if (!failed)
         {
-            Hold(flight.Arena, flight.Node);
+            // A block that makes its chunk alone is adopted where it was assembled; one that joins rows in transit is copied.
+            if (flight.EndsChunk && _pendingRows == 0 && !_mayShareChildren)
+            {
+                Adopt(staging, flight.Node);
+            }
+            else
+            {
+                Hold(flight.Arena, flight.Node);
+            }
+
             BatchesIngestedAcross++;
             BlocksOnLine++;
             if (flight.KeysApart)
