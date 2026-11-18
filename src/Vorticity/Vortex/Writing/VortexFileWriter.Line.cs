@@ -735,7 +735,7 @@ public sealed partial class VortexFileWriter
             {
                 if (indexes.Feeds(field))
                 {
-                    int[] after = attaches ? (afterCut ? WideAfterOwned(field) : WideAfter(field)) : afterCut ? OwnedOf(field) : [];
+                    int[] after = afterCut ? FeedAfterCut(field, attaches) : attaches ? WideAfter(field) : [];
                     int item = Add(flight, field << 3, after, -1);
                     before?[field].Add(item);
 
@@ -754,7 +754,7 @@ public sealed partial class VortexFileWriter
             // The builders past the columns close once the owner emitted the last column.
             if (indexes.FeedsKeys)
             {
-                int item = Add(flight, _fieldCount << 3, afterCut ? OwnedOf(last) : [], -1);
+                int item = Add(flight, _fieldCount << 3, afterCut ? BuildersAfterCut(last) : [], -1);
                 before?[last].Add(item);
             }
 
@@ -767,14 +767,14 @@ public sealed partial class VortexFileWriter
 
                 if (indexes.FeedsNested(field))
                 {
-                    int item = Add(flight, NestedItem | field, afterCut ? OwnedOf(last) : [], reads[field]);
+                    int item = Add(flight, NestedItem | field, afterCut ? BuildersAfterCut(field) : [], reads[field]);
                     before?[field].Add(item);
                     before?[last].Add(item);
                 }
 
                 for (int group = 0; group < indexes.KeyGroups(field); group++)
                 {
-                    int item = Add(flight, KeysItem | ((group + 1) << 20) | field, afterCut ? OwnedOf(last) : [], reads[field]);
+                    int item = Add(flight, KeysItem | ((group + 1) << 20) | field, afterCut ? BuildersAfterCut(field) : [], reads[field]);
                     before?[field].Add(item);
                     before?[last].Add(item);
                 }
@@ -863,6 +863,46 @@ public sealed partial class VortexFileWriter
         return _cutStates;
     }
 
+    // By column, what the builders past the columns that its cut closes wait for after a cut flight, and what its own
+    // builders' feed waits for, with and without the wide columns' attachment; made once.
+    private int[][]? _buildersAfterCut;
+    private int[][][]? _feedAfterCut;
+
+    /// <summary>
+    /// What an item feeding builders whose chunk column <paramref name="field"/>'s cut closes waits for after a flight cut
+    /// column by column: that cut, when it closes them itself (<see cref="ClosesAtCut"/>); otherwise the owner through with the
+    /// last column, who closes them past the columns in the slots' order.
+    /// </summary>
+    private int[] BuildersAfterCut(int field)
+    {
+        if (_buildersAfterCut is null)
+        {
+            _buildersAfterCut = new int[_fieldCount][];
+            for (int f = 0; f < _fieldCount; f++)
+            {
+                _buildersAfterCut[f] = ClosesAtCut(f) ? [StateCut(f)] : OwnedOf(_fieldCount - 1);
+            }
+        }
+
+        return _buildersAfterCut[field];
+    }
+
+    /// <summary>What column <paramref name="field"/>'s builders' feed waits for after a flight cut column by column: its cut or its owner (<see cref="BuildersAfterCut"/>), and the wide columns' builders when it attaches their counts.</summary>
+    private int[] FeedAfterCut(int field, bool attaches)
+    {
+        if (_feedAfterCut is null)
+        {
+            _feedAfterCut = new int[_fieldCount][][];
+            for (int f = 0; f < _fieldCount; f++)
+            {
+                int gate = ClosesAtCut(f) ? StateCut(f) : StateOwned(f);
+                _feedAfterCut[f] = [[gate], [.. WideAfter(f), gate]];
+            }
+        }
+
+        return _feedAfterCut[field][attaches ? 1 : 0];
+    }
+
     // By column, whether its counts are wide (IndexWriter.WideFields), made once.
     private bool[]? _wide;
 
@@ -881,23 +921,6 @@ public sealed partial class VortexFileWriter
         }
 
         return _wide[field];
-    }
-
-    // By column, the wide columns' builders its counts' attachment waits for and its owned state, made once.
-    private int[][]? _wideAfterOwned;
-
-    private int[] WideAfterOwned(int field)
-    {
-        if (_wideAfterOwned is null)
-        {
-            _wideAfterOwned = new int[_fieldCount][];
-            for (int f = 0; f < _fieldCount; f++)
-            {
-                _wideAfterOwned[f] = [.. WideAfter(f), StateOwned(f)];
-            }
-        }
-
-        return _wideAfterOwned[field];
     }
 
     private int[] OwnedOf(int field)
@@ -1818,8 +1841,14 @@ public sealed partial class VortexFileWriter
             int entry = flight.Entries[item];
             if ((entry & CloseItem) != 0 && (entry & KeysItem) == 0)
             {
-                // The column's cut ran: its owner may emit it.
-                flight.CutDone[entry & 0xF_FFFF] = true;
+                // The column's cut ran: its owner may emit it, and the next flight's ingest of it goes on now when the owner
+                // has nothing to hand it.
+                int field = entry & 0xF_FFFF;
+                flight.CutDone[field] = true;
+                if (flight.OwnedAtCut[field])
+                {
+                    ready += PoseOwned(flight, field, field + 1);
+                }
             }
 
             int[] states = flight.Own[item];

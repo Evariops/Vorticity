@@ -1375,6 +1375,39 @@ internal sealed class IndexWriter : IDisposable
     internal long[] ColumnBytes(int fields) => _columnBytes[..fields];
 
     /// <summary>
+    /// The column whose cut closes slot <paramref name="slot"/>'s chunk on a writer's line: a column's own, the variant column
+    /// a shredded key or a nested path reads, the last column for a composite key, which reads several.
+    /// </summary>
+    internal int FieldOfSlot(int slot) =>
+        slot < _fieldCount ? slot
+        : _variants?[slot] is { } path ? path.Field
+        : _nested?[slot] is { Length: > 0 } chain && chain[0] < _fieldCount ? chain[0]
+        : _fieldCount - 1;
+
+    /// <summary>Whether every builder of slot <paramref name="slot"/> closes its chunk at once, freezing what the verdict weighs alone (<see cref="IndexBuilder.ClosesChunkLater"/>).</summary>
+    internal bool ClosesAtOnce(int slot)
+    {
+        foreach (IndexBuilder builder in _builders[slot])
+        {
+            if (builder.ClosesChunkLater)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>Closes the chunk in slot <paramref name="slot"/>'s builders, which all close at once (<see cref="ClosesAtOnce"/>): what the verdict weighs frozen.</summary>
+    internal void CloseChunkAtOnce(int slot)
+    {
+        foreach (IndexBuilder builder in _builders[slot])
+        {
+            builder.Freeze();
+        }
+    }
+
+    /// <summary>
     /// Closes the chunk in the builders of slot <paramref name="slot"/> alone (<see cref="Slots"/>): a writer that cuts its
     /// chunks column by column closes each column's as the column is emitted, in the slots' order, as
     /// <see cref="CloseChunkAsync(int, int, long, long, CancellationToken)"/> closes them all.

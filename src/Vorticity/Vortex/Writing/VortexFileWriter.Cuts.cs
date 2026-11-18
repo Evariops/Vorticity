@@ -64,6 +64,8 @@ public sealed partial class VortexFileWriter
             return;
         }
 
+        MakeSlotsAtCut();
+
         CutRecord[][] records = new CutRecord[LandRing][];
         for (int slot = 0; slot < LandRing; slot++)
         {
@@ -164,6 +166,70 @@ public sealed partial class VortexFileWriter
 
         flight.Detached[field] = detached;
         CutRecordsOf(flight.Index)[field] = new CutRecord(column.Bytes, column.Held, column.Rows, column.Generation, counted);
+
+        // A column whose builders all close at once has its chunk closed here, the flight's wide counts attached first, as the
+        // owner does it for one that closes later: the next flight's builders of the column then wait for this cut rather
+        // than for the owner, who goes through the columns in their order.
+        if (_indexes is { } indexes && ClosesAtCut(field))
+        {
+            if (flight.OwnCounted is { } attached)
+            {
+                indexes.Attach(field, attached, flight.Rows);
+            }
+
+            foreach (int slot in SlotsAtCut(field))
+            {
+                indexes.CloseChunkAtOnce(slot);
+            }
+
+            flight.ClosedAtCut[field] = true;
+        }
+
+        flight.OwnedAtCut[field] = detached is null && (_indexes is null || flight.ClosedAtCut[field]);
+    }
+
+    // By column, the builders' slots its cut closes (IndexWriter.FieldOfSlot), and whether they all close at once; made once.
+    private int[][]? _slotsAtCut;
+    private bool[]? _closesAtCut;
+
+    /// <summary>The slots of builders column <paramref name="field"/>'s cut closes: its own, those of the keys and nested paths it holds, and the composite keys' for the last column.</summary>
+    private int[] SlotsAtCut(int field)
+    {
+        MakeSlotsAtCut();
+        return _slotsAtCut![field];
+    }
+
+    /// <summary>Whether column <paramref name="field"/>'s cut closes its builders' chunk itself, every one of them closing at once.</summary>
+    private bool ClosesAtCut(int field)
+    {
+        MakeSlotsAtCut();
+        return _closesAtCut![field];
+    }
+
+    private void MakeSlotsAtCut()
+    {
+        if (_slotsAtCut is not null || _indexes is not { } indexes)
+        {
+            return;
+        }
+
+        System.Collections.Generic.List<int>[] slots = new System.Collections.Generic.List<int>[_fieldCount];
+        bool[] atOnce = new bool[_fieldCount];
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            slots[field] = [];
+            atOnce[field] = true;
+        }
+
+        for (int slot = 0; slot < indexes.Slots; slot++)
+        {
+            int field = indexes.FieldOfSlot(slot);
+            slots[field].Add(slot);
+            atOnce[field] &= indexes.ClosesAtOnce(slot);
+        }
+
+        _closesAtCut = atOnce;
+        _slotsAtCut = Array.ConvertAll(slots, static list => list.ToArray());
     }
 
     /// <summary>
@@ -211,18 +277,26 @@ public sealed partial class VortexFileWriter
 
             if (_indexes is { } indexes)
             {
-                if (flight.OwnCounted is { } counted)
+                // A column whose cut closed its builders leaves them be; the others close here, in the slots' order.
+                if (!flight.ClosedAtCut[field])
                 {
-                    indexes.Attach(field, counted, flight.Rows);
+                    if (flight.OwnCounted is { } counted)
+                    {
+                        indexes.Attach(field, counted, flight.Rows);
+                    }
+
+                    await indexes.CloseChunkAsync(field, flight.ChunkFirstBlock, blocks, flight.ChunkFirstRow, flight.Rows, cancellationToken).ConfigureAwait(false);
                 }
 
-                await indexes.CloseChunkAsync(field, flight.ChunkFirstBlock, blocks, flight.ChunkFirstRow, flight.Rows, cancellationToken).ConfigureAwait(false);
                 if (field == _fieldCount - 1)
                 {
                     // Past the columns, the builders of the composite keys and of the variant columns' groups.
                     for (int slot = _fieldCount; slot < indexes.Slots; slot++)
                     {
-                        await indexes.CloseChunkAsync(slot, flight.ChunkFirstBlock, blocks, flight.ChunkFirstRow, flight.Rows, cancellationToken).ConfigureAwait(false);
+                        if (!flight.ClosedAtCut[indexes.FieldOfSlot(slot)])
+                        {
+                            await indexes.CloseChunkAsync(slot, flight.ChunkFirstBlock, blocks, flight.ChunkFirstRow, flight.Rows, cancellationToken).ConfigureAwait(false);
+                        }
                     }
                 }
             }

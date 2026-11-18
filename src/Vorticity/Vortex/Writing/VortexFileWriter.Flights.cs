@@ -75,6 +75,16 @@ public sealed partial class VortexFileWriter
         /// <summary>Per column, whether its cut ran, which the owner emits the column after.</summary>
         internal bool[] CutDone = [];
 
+        /// <summary>Per column, whether its cut closed its builders' chunk, which all close at once (<see cref="IndexWriter.ClosesAtOnce"/>).</summary>
+        internal bool[] ClosedAtCut = [];
+
+        /// <summary>
+        /// Per column, whether its cut left the owner nothing to do for it that the next flight waits for: its builders closed,
+        /// and no chunk of it taken, so none to land, which would hand its ingest what the emission decided. Its owned state
+        /// is posed as the cut ends.
+        /// </summary>
+        internal bool[] OwnedAtCut = [];
+
         /// <summary>The columns its owner emitted, in their order.</summary>
         internal int Owned;
 
@@ -139,10 +149,14 @@ public sealed partial class VortexFileWriter
             {
                 Detached = new ColumnEmission?[fields];
                 CutDone = new bool[fields];
+                ClosedAtCut = new bool[fields];
+                OwnedAtCut = new bool[fields];
             }
 
             System.Array.Clear(Detached);
             System.Array.Clear(CutDone);
+            System.Array.Clear(ClosedAtCut);
+            System.Array.Clear(OwnedAtCut);
             Owned = 0;
             Finished = false;
         }

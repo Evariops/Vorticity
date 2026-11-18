@@ -522,6 +522,9 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         _buckets?.CloseBlock();
     }
 
+    /// <summary>Its chunk's keys are cut, spilled and queued as the chunk closes.</summary>
+    internal override bool ClosesChunkLater => true;
+
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     internal override async ValueTask CloseChunkAsync(
         int firstBlock, int blocks, long firstRow, long rows, CancellationToken cancellationToken)

@@ -89,9 +89,16 @@ internal abstract class IndexBuilder : IDisposable
     {
     }
 
-    /// <summary>A chunk went out: its blocks and its rows.</summary>
+    /// <summary>A chunk went out: its blocks and its rows. A builder that does anything here says so (<see cref="ClosesChunkLater"/>).</summary>
     internal virtual ValueTask CloseChunkAsync(int firstBlock, int blocks, long firstRow, long rows, CancellationToken cancellationToken) =>
         ValueTask.CompletedTask;
+
+    /// <summary>
+    /// Whether closing a chunk does work, <see cref="CloseChunkAsync"/> overridden: such a builder is closed by its writer's
+    /// owner, in the order of the slots, the payloads it queues as it closes written in that order; any other is closed at
+    /// once by its column's cut on the writer's line, which only freezes what the verdict weighs.
+    /// </summary>
+    internal virtual bool ClosesChunkLater => false;
 
     /// <summary>
     /// The verdict after a chunk: gives up when the builder costs more of the column than its share,
