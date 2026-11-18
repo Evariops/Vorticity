@@ -106,6 +106,43 @@ public sealed partial class ShreddedVariantWriteTests
     }
 
     /// <summary>
+    /// Runs of thousands of rows of one document, its text a few bytes, a hundred or a thousand long: the rows that repeat it
+    /// lay its text again row after row, a block's room at a time and doubled, across the blocks the column's bytes are kept
+    /// in. Every row reads back its document, on one lane or four.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task LongRunsOfOneDocumentReadBackEveryRow(int degree)
+    {
+        string[] texts = [new string('a', 3), new string('b', 97), new string('c', 1_000)];
+        List<Doc> drawn = [];
+        for (int run = 0; run < 6; run++)
+        {
+            Variant document = Variant.Object(("route", Variant.From(texts[run % 3] + run)), ("n", Variant.From(run)));
+            for (int i = 0; i < 2_500 + (run * 37); i++)
+            {
+                drawn.Add(new Doc(drawn.Count, document, null));
+            }
+        }
+
+        Doc[] rows = [.. drawn];
+        Dictionary<string, VariantShredding> shredding = new()
+        {
+            [nameof(Doc.Attributes)] = VariantShredding.Object(
+                ("route", VariantShredding.Primitive(VariantClass.String)), ("n", VariantShredding.Primitive(VariantClass.Integer))),
+        };
+
+        List<Doc> read = await RoundTripAsync(rows, shredding, degree);
+        Assert.Equal(rows.Length, read.Count);
+        for (int i = 0; i < rows.Length; i++)
+        {
+            Assert.Equal(rows[i].Id, read[i].Id);
+            Assert.True(rows[i].Attributes.Equals(read[i].Attributes), $"row {i}: {rows[i].Attributes.ToJson()[..Math.Min(60, rows[i].Attributes.ToJson().Length)]} read as {read[i].Attributes.ToJson()[..Math.Min(60, read[i].Attributes.ToJson().Length)]}");
+        }
+    }
+
+    /// <summary>
     /// Two columns shredded alike, whose rows a scan puts back together by one plan kept from a batch to the next and
     /// from a column to the other, read back every document, over chunks of 512 rows on one lane or four.
     /// </summary>
