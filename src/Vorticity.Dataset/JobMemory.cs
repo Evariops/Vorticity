@@ -142,8 +142,11 @@ internal sealed class JobMemory : IAsyncDisposable
     /// </summary>
     internal long WriterPrice { get; set; }
 
-    /// <summary>What the writer was priced at past what it holds now, which the reads and the merge ahead leave it.</summary>
-    private long WriterKeep => Math.Max(0, WriterPrice - Writer.ReservedBytes);
+    /// <summary>
+    /// What the writer was priced at, or held at most so far when that is more, past what it holds now: which the reads and
+    /// the merge ahead leave it. A writer's chunks come and go, and what it held once it takes again with the next.
+    /// </summary>
+    private long WriterKeep => Math.Max(0, Math.Max(WriterPrice, Writer.PeakBytes) - Writer.ReservedBytes);
 
     /// <summary>
     /// Whether the job admits a window of <paramref name="bytes"/> decoded ahead by an input of its merge, past the two its

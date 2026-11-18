@@ -28,7 +28,7 @@ namespace Vorticity.Dataset;
 /// merged ahead or not, and its objects are the same bytes.
 /// </para>
 /// <para>
-/// Each slice counts what its blocks hold apart (<see cref="SliceAccount"/>). The slices ahead start once the slice taken
+/// Each slice counts what its blocks hold apart (<see cref="CountedAccount"/>). The slices ahead start once the slice taken
 /// gave its first run, its inputs open: what it holds then prices them, and a slice ahead keeps runs waiting while it holds
 /// no more than it was admitted at, then merges a run as the taking flow takes one.
 /// </para>
@@ -48,7 +48,7 @@ internal sealed class SlicedMerge : IMergedRuns
     private int _slice = -1;
     private int _started;
     private KeyOrderedMerge? _inline;
-    private SliceAccount? _inlineAccount;
+    private CountedAccount? _inlineAccount;
     private Ahead? _taking;
     private bool _aheadStarted;
     private long _measured;
@@ -103,7 +103,7 @@ internal sealed class SlicedMerge : IMergedRuns
     /// <summary>The most inputs a slice reads, which what an input open held at a slice's first run is counted by.</summary>
     internal int SliceInputs { get; init; } = 1;
 
-    /// <summary>The account of the job's inputs, in which each slice's own counts (<see cref="SliceAccount"/>); null for none.</summary>
+    /// <summary>The account of the job's inputs, in which each slice's own counts (<see cref="CountedAccount"/>); null for none.</summary>
     internal MemoryAccount? Inputs { get; init; }
 
     /// <summary>
@@ -194,7 +194,7 @@ internal sealed class SlicedMerge : IMergedRuns
             }
             else
             {
-                _inlineAccount = Inputs is null ? null : new SliceAccount(Inputs);
+                _inlineAccount = Inputs is null ? null : new CountedAccount(Inputs);
                 _inline = _merge(_slice, null, _inlineAccount);
             }
         }
@@ -251,7 +251,7 @@ internal sealed class SlicedMerge : IMergedRuns
             }
 
             int slice = _started++;
-            Ahead ahead = new Ahead(Inputs is null ? null : new SliceAccount(Inputs), price);
+            Ahead ahead = new Ahead(Inputs is null ? null : new CountedAccount(Inputs), price);
             _ahead[slice] = ahead;
             SlicesAhead++;
             PeakAtOnce = Math.Max(PeakAtOnce, _started - _slice);
@@ -439,7 +439,7 @@ internal sealed class SlicedMerge : IMergedRuns
     /// A slice merged ahead: the account its blocks count in, <paramref name="account"/>, what it was admitted at,
     /// <paramref name="admitted"/>, its merge, its runs waiting, and its end.
     /// </summary>
-    private sealed class Ahead(SliceAccount? account, long admitted)
+    private sealed class Ahead(CountedAccount? account, long admitted)
     {
         private TaskCompletionSource? _room;
 
@@ -448,7 +448,7 @@ internal sealed class SlicedMerge : IMergedRuns
         internal KeyOrderedMerge? Merge;
 
         /// <summary>What its blocks hold, counted apart; null when the merge counts none.</summary>
-        internal SliceAccount? Account => account;
+        internal CountedAccount? Account => account;
 
         /// <summary>The bytes it was admitted at, up to which it keeps runs waiting.</summary>
         internal long Admitted => admitted;

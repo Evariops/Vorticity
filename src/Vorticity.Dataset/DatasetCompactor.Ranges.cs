@@ -77,9 +77,12 @@ internal static partial class DatasetCompactor
     /// gathered columns, and the chunks its variant columns compress ahead, each holding its rows and its leaves as it
     /// compresses. The first job of a handle priced its writer at the ceiling alone, held 322 MiB in its writer over log
     /// records and 332 to 368 over metric records, four times the ceiling of 84 MiB under 2 GiB, and was refused, then
-    /// narrowed, twice (2026-11-17).
+    /// narrowed, twice (2026-11-17). Priced at four times, its writer held 344 to 360 MiB over log records and 350 to 384
+    /// over metric records once every column's chunk was emitted by a task of its own, its gathered chunks' contexts 204 to
+    /// 246 MiB of it and the shredded copies its line took 38 to 74, and a consolidation of 74 appends was given up after
+    /// 8 to 10 s of its 11 four times in ten (2026-11-18).
     /// </summary>
-    private const int FirstWriterPerCeiling = 4;
+    private const int FirstWriterPerCeiling = 5;
 
     /// <summary>
     /// What a decoded row of the job's inputs weighs, about: what the handle's last merge measured, or, before any, the
