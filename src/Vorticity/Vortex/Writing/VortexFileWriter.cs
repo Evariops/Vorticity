@@ -3963,7 +3963,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// column by column passes its own, which the flights before it counted in their order, the owner counting them as it
     /// emits them.
     /// </remarks>
-    private void Gather(int field, Gathering gathering, CanonicalArena arena, int node, long rows, int blocks, int firstBlock = -1)
+    private void Gather(int field, Gathering gathering, CanonicalArena arena, int node, long rows, int blocks, int firstBlock = -1, bool thin = false)
     {
         CanonicalArena into = (gathering.Context ??= TransitContexts.Rent(Account)).Canonical;
         if (gathering.Rows == 0)
@@ -3977,17 +3977,61 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // Gathered, the copy holds each row's bytes, which the encoders size the chunk by, and a repeat views the copy of the
         // row before: given views of their own, the repeats of a consolidation of metric records' gathered texts, 104 M rows,
         // were each compared byte by byte by the chunk's search for runs (2026-11-18).
+        // A shredded column gathers thin the rows its chain took on the line, their values left out, their emission reading
+        // the metadata and the validity alone: gathered whole, a consolidation of metric records' shredded columns held
+        // 27.3 GiB over the job, their values half of it and their rows' metadata, the same bytes row after row, the other
+        // half; thin, 1.8 GiB (2026-11-18).
         bool coded = _dictionaries?[field] is not null;
+        bool shredded = !coded && _shredding?[field] is not null;
         int owned = coded
             ? _dictionaries![field]!.CodeInto(arena, node, into, _codesTypes![field])
+            : thin && shredded ? Thin(into, arena, node)
             : into.CopyFrom(arena, node, viewRepeats: true);
-        long held = into.ByteSize(owned);
         gathering.Nodes.Add(owned);
+        if (thin && shredded)
+        {
+            gathering.ThinNodes = gathering.Nodes.Count;
+        }
+
+        // What it holds counts as a whole copy holds it, gathered thin or not, so that the writer's ceiling decides the same
+        // at any degree: a writer on one lane has no line, and gathers its shredded columns whole.
+        long named = coded || shredded ? arena.NamedBytes(node) : 0;
+        long held = shredded ? named : into.ByteSize(owned);
         gathering.Rows += rows;
         gathering.Blocks += blocks;
-        gathering.Bytes += coded ? arena.NamedBytes(node) : held;
+        gathering.Bytes += coded ? named : held;
         gathering.Held += held;
         Interlocked.Add(ref _gatheredHeld, held);
+    }
+
+    /// <summary>
+    /// Variant node <paramref name="node"/> of <paramref name="arena"/> copied thin into <paramref name="into"/>: its rows'
+    /// metadata, each run of rows' bytes kept once, and validity, its values a constant of no bytes, for rows a shredded
+    /// column's chain took on the line, of which the emission reads nothing else
+    /// (<see cref="VariantShredder.Shredding.Settle"/>, which writes the metadata from a copy of each row's bytes). The same
+    /// arena for both, the node is thinned where it lies, its metadata and validity shared.
+    /// </summary>
+    private static int Thin(CanonicalArena into, CanonicalArena arena, int node)
+    {
+        // Read before anything is added: the additions may move the records.
+        CanonicalNode variant = arena.GetNode(node);
+        DType dtype = variant.DType;
+        int length = variant.Length;
+        Validity validity = variant.Validity;
+        int metadata = variant.GetFieldIndex(0);
+        DType values = arena.GetNode(variant.GetFieldIndex(1)).DType;
+        if (!ReferenceEquals(into, arena))
+        {
+            if (validity.Kind == ValidityKind.Bitmap)
+            {
+                validity = Validity.Bitmap(into.CopyFrom(arena, validity.CanonicalNodeIndex));
+            }
+
+            metadata = into.CopyFrom(arena, metadata, shareRepeats: true);
+        }
+
+        int none = into.AddConstant(values, length, Validity.FromNullability(values.Nullability), []);
+        return into.AddStruct(dtype, length, validity, [metadata, none]);
     }
 
 
@@ -3995,6 +4039,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private async ValueTask EmitGatheredAsync(int field, Gathering gathering, CancellationToken cancellationToken)
     {
         await LandEmissionsAsync(field, cancellationToken).ConfigureAwait(false);
+
+        // Rows gathered thin are emitted with what the chain took of them, which only a chunk emitted apart takes: a writer
+        // with a line emits apart.
+        if (gathering.ThinNodes > 0)
+        {
+            StartEmission(Detach(field, gathering));
+            await LandEmissionsAsync(field, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         ScanContext context = gathering.Context!;
         int rows = checked((int)gathering.Rows);
 
@@ -4095,8 +4149,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         /// <summary>The chunks it began, counted as it lets one go: what the rows a line took block by block were taken for (<see cref="ShredChain"/>).</summary>
         internal long Generation;
 
-        /// <summary>The bytes it holds: its values' as <see cref="Bytes"/> counts them, or its codes' for a column gathered as codes.</summary>
+        /// <summary>
+        /// The bytes it holds: its values' as <see cref="Bytes"/> counts them, its codes' for a column gathered as codes, or
+        /// the rows' metadata and validity alone for a shredded column's rows gathered thin (<see cref="ThinNodes"/>).
+        /// </summary>
         internal long Held;
+
+        /// <summary>
+        /// Its nodes up to the last gathered thin, 0 for none: a shredded column's rows its chain took on the line, of which
+        /// it keeps the metadata and the validity alone (<see cref="Thin"/>), every one within the rows the chain hands over.
+        /// </summary>
+        internal int ThinNodes;
 
         /// <summary>Whether the target counts encoded bytes, at <see cref="Rate"/>, rather than canonical ones.</summary>
         internal bool IsEncoded { get; private init; }

@@ -488,7 +488,9 @@ public sealed partial class VortexFileWriter
         CanonicalNode root = arena.GetNode(staging.Assembled);
         for (int field = 0; field < _fieldCount; field++)
         {
-            if (chains[field] is { } chain && _gathering![field] is { } gathering)
+            // Not past rows gathered thin: a block alone may end the chunk inside its rows, whose chain then took more than the
+            // chunk holds and hands nothing over, where the thin rows need it to.
+            if (chains[field] is { } chain && _gathering![field] is { ThinNodes: 0 } gathering)
             {
                 long position = gathering.Rows + _pendingRows;
                 if (chain.Plan(gathering.Generation, position, staging.Rows))
@@ -984,8 +986,14 @@ public sealed partial class VortexFileWriter
 
         if ((entry & GatherItem) != 0)
         {
+            // A shredded column gathers thin the rows its chain takes: as its prologue planned, or after a cut flight, as that
+            // flight's cut of the column found the chain, which the take's item, beside this one, plans from.
             int field = entry & 0xF_FFFF;
-            Gather(field, _gathering![field]!, flight.Arena, flight.FieldNodes[field], rows, ChunkBlocks(rows, _blockRows), flight.Cuts || flight.AfterCut ? flight.ChunkFirstBlock : -1);
+            // The take's item turns PlacedByCut into the place it takes the rows at, never into -1.
+            bool thin = field < flight.ShredAt.Length && (flight.AfterCut
+                ? flight.ShredAt[field] != -1 && CutRecordsOf(flight.Index - 1)[field].Takes
+                : flight.ShredAt[field] >= 0);
+            Gather(field, _gathering![field]!, flight.Arena, flight.FieldNodes[field], rows, ChunkBlocks(rows, _blockRows), flight.Cuts || flight.AfterCut ? flight.ChunkFirstBlock : -1, thin);
             return;
         }
 

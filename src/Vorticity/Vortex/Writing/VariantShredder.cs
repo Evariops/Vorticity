@@ -266,13 +266,20 @@ internal static class VariantShredder
         /// Settles a chunk taken in parts on its rows whole, node <paramref name="node"/> of <paramref name="arena"/>, once every
         /// part is taken: what its blob's frames and its rows' metadata are written from.
         /// </summary>
+        /// <remarks>
+        /// Rows gathered thin keep a run of rows' metadata once (<c>VortexFileWriter.Thin</c>), where the encoders of its leaf
+        /// size it by its buffers: it is written from a copy that holds each row's bytes, as the metadata of a chunk gathered
+        /// whole does, the same leaf. Held so as the rows gathered, a consolidation of metric records' shredded columns held
+        /// 14.6 GiB of their rows' metadata over the job, 1.8 GiB once shared (2026-11-18).
+        /// </remarks>
         internal void Settle(CanonicalArena arena, int node)
         {
             CanonicalNode variant = arena.GetNode(node);
             _arena = arena;
             _node = node;
-            _metadata = ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(0));
             _rows = variant.Length;
+            int metadata = ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(0));
+            _metadata = arena.ByteSize(metadata) < arena.NamedBytes(metadata) ? arena.CopyFrom(arena, metadata, viewRepeats: true) : metadata;
         }
 
         /// <summary>The chunk taken, shredded, every typed column laid out in its arena; the tree's dtypes made in <paramref name="types"/>.</summary>

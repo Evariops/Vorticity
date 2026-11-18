@@ -198,6 +198,42 @@ public sealed partial class VortexFileWriter
     private int _chunksTakenOnLine;
 
     /// <summary>
+    /// Of <see cref="ChunksTakenOnLine"/>, those some of whose rows were gathered thin (<see cref="Thin"/>), counted by their
+    /// columns' chains, once the writer is done.
+    /// </summary>
+    internal int ChunksGatheredThin
+    {
+        get
+        {
+            int count = 0;
+            foreach (ShredChain? chain in _chains ?? [])
+            {
+                count += chain?.ChunksThin ?? 0;
+            }
+
+            return count;
+        }
+    }
+
+    /// <summary>
+    /// Of <see cref="ChunksTakenOnLine"/>, those whose chain broke, their rows past the break taken as they were compressed,
+    /// counted by their columns' chains, once the writer is done.
+    /// </summary>
+    internal int ChunksTakenInPart
+    {
+        get
+        {
+            int count = 0;
+            foreach (ShredChain? chain in _chains ?? [])
+            {
+                count += chain?.ChunksInPart ?? 0;
+            }
+
+            return count;
+        }
+    }
+
+    /// <summary>
     /// Whether the chunk of a column that gathers, due, is emitted by a task of its own: once the file holds an encoding id.
     /// An emission meets the file's ids as they stand and is renumbered onto them when it lands, and an id new to it at
     /// index 0 is left out of its tree as the default, where no renumbering reaches it; the file's first ids are met by a
@@ -285,7 +321,10 @@ public sealed partial class VortexFileWriter
         /// <inheritdoc cref="Frames"/>
         internal bool FramesFailed;
 
-        /// <summary>Its rows taken block by block on the writer's line (<see cref="ShredChain"/>), every row of it; null when they are taken here.</summary>
+        /// <summary>
+        /// Its first rows taken block by block on the writer's line (<see cref="ShredChain"/>), up to where its chain broke,
+        /// the rest after them (<see cref="TakenChunk.Rest"/>); null when they are taken here.
+        /// </summary>
         internal TakenChunk? Taken;
 
         /// <summary>
@@ -392,7 +431,20 @@ public sealed partial class VortexFileWriter
     {
         ScanContext context = gathering.Context!;
         int rows = checked((int)gathering.Rows);
-        int node = gathering.Nodes.Count == 1
+
+        // A shredded chunk's first rows taken block by block on the line, up to where its chain broke, if it did.
+        ShredChain? chain = _chains is { Length: > 0 } chains ? chains[field] : null;
+        TakenChunk? taken = chain?.Hand(gathering.Generation, gathering.Rows);
+        if (chain is not null)
+        {
+            chain.ChunksThin += gathering.ThinNodes > 0 ? 1 : 0;
+            chain.ChunksInPart += taken is not null && taken.Rows < rows ? 1 : 0;
+        }
+
+        int rest = -1;
+        int node = taken is not null || gathering.ThinNodes > 0
+            ? TakenNode(field, gathering, context, rows, taken, out rest)
+            : gathering.Nodes.Count == 1
             ? gathering.Nodes[0]
             : CanonicalConcat.Concat(
                 context.Decode, ChunkType(field), rows, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(gathering.Nodes));
@@ -422,16 +474,71 @@ public sealed partial class VortexFileWriter
         // block half a chunk after this one, once (2026-11-17).
         chunk.Held = gathering.Held;
 
-        // A shredded chunk's rows taken block by block on the line, when they are exactly the chunk's.
-        chunk.Taken = _chains is { Length: > 0 } chains ? chains[field]?.Hand(gathering.Generation, gathering.Rows) : null;
+        if (taken is not null)
+        {
+            taken.Rest = rest;
+        }
+
+        chunk.Taken = taken;
         gathering.Generation++;
         gathering.Context = null;
         gathering.Nodes.Clear();
+        gathering.ThinNodes = 0;
         gathering.Rows = 0;
         gathering.Held = 0;
         gathering.Bytes = 0;
         gathering.Blocks = 0;
         return chunk;
+    }
+
+    /// <summary>
+    /// The node of a shredded chunk whose first rows its chain took on the line, <paramref name="taken"/>: every row's
+    /// metadata and validity, each of its gathered nodes thinned (<see cref="Thin"/>); and in <paramref name="rest"/> the
+    /// rows past those taken, whole, which its compression takes (<see cref="Compress"/>), -1 for none.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">A node gathered thin lies past the rows taken.</exception>
+    private int TakenNode(int field, Gathering gathering, ScanContext context, int rows, TakenChunk? taken, out int rest)
+    {
+        CanonicalArena arena = context.Canonical;
+        Span<int> nodes = System.Runtime.InteropServices.CollectionsMarshal.AsSpan(gathering.Nodes);
+        int took = taken?.Rows ?? 0;
+
+        // The node row `took` falls in, and where that node begins.
+        int at = 0;
+        int start = 0;
+        while (at < nodes.Length && start + arena.GetNode(nodes[at]).Length <= took)
+        {
+            start += arena.GetNode(nodes[at]).Length;
+            at++;
+        }
+
+        if (gathering.ThinNodes > at)
+        {
+            throw new InvalidOperationException(
+                $"Column {field} gathered {gathering.ThinNodes} nodes thin, past the {took} rows of {rows} its chain took.");
+        }
+
+        // The rest whole, the node it begins in cut where it begins, then given back its rows to be thinned with the others.
+        rest = -1;
+        if (took < rows)
+        {
+            int first = nodes[at];
+            int length = arena.GetNode(first).Length;
+            if (took > start)
+            {
+                nodes[at] = Layouts.CanonicalSlice.Slice(context.Decode, first, took - start, length - (took - start));
+            }
+
+            rest = nodes.Length - at == 1 ? nodes[at] : CanonicalConcat.Concat(context.Decode, ChunkType(field), rows - took, nodes[at..]);
+            nodes[at] = first;
+        }
+
+        for (int i = 0; i < nodes.Length; i++)
+        {
+            nodes[i] = Thin(arena, arena, nodes[i]);
+        }
+
+        return nodes.Length == 1 ? nodes[0] : CanonicalConcat.Concat(context.Decode, ChunkType(field), rows, nodes);
     }
 
     /// <summary>
@@ -562,26 +669,38 @@ public sealed partial class VortexFileWriter
             }
 
             lane.Blobs.ColumnLevel = ZstdLevelOf(chunk.Field);
-            if (chunk.Inline)
-            {
-                chunk.Blob = VariantShredder.Write(
-                    lane.Blobs, lane.Arena, local, _shredding![chunk.Field]!, chunk.Bounds, lane.Encodings, _compress);
-                NoteFresh(chunk, lane);
-                return;
-            }
 
-            // Its rows taken on the line block by block, or here at once.
+            // Its rows taken on the line block by block, the rest after them here, or every row here at once.
             VariantShredder.Shredding shredding;
             if (chunk.Taken is { } taken)
             {
                 shredding = taken.Shredding;
                 shredding.Settle(lane.Arena, local);
+                if (taken.Rest >= 0)
+                {
+                    int rest = lane.Arena.ReferenceFrom(chunk.Arena!, taken.Rest);
+                    if (_mayShareChildren)
+                    {
+                        rest = ChunkCompactor.Compact(lane.Arena, rest);
+                    }
+
+                    VariantShredder.Shredding.Rows more = VariantShredder.Shredding.Prepare(lane.Arena, rest);
+                    shredding.TakeMore(in more, taken.Rows);
+                }
+
                 Interlocked.Increment(ref _chunksTakenOnLine);
             }
             else
             {
                 shredding = lane.Blobs.Shredding(_shredding![chunk.Field]!);
                 shredding.Take(lane.Arena, local, chunk.Bounds);
+            }
+
+            if (chunk.Inline)
+            {
+                chunk.Blob = shredding.Write(lane.Blobs, lane.Encodings, _compress);
+                NoteFresh(chunk, lane);
+                return;
             }
 
             int leaves = shredding.PrepareLeaves(lane.Blobs.EncodesValidity, _compress);

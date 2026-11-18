@@ -46,9 +46,11 @@ public sealed partial class VortexFileWriter
 
     /// <summary>
     /// What a column held once its cut ran: its gathering's canonical bytes, the bytes it holds, its rows and the chunks it
-    /// began, and what it and its chunks in emission count toward the writer's ceiling (<see cref="Over"/>).
+    /// began, what it and its chunks in emission count toward the writer's ceiling (<see cref="Over"/>), and for a shredded
+    /// column, whether its chain takes the next flight's rows (<see cref="ShredChain.Accepts"/>), which that flight then
+    /// gathers thin.
     /// </summary>
-    private readonly record struct CutRecord(long Bytes, long Held, long Rows, long Generation, long Counted);
+    private readonly record struct CutRecord(long Bytes, long Held, long Rows, long Generation, long Counted, bool Takes);
 
     /// <summary>The columns' records of flight <paramref name="flight"/>'s cuts, made by the prologue of the first flight cut (<see cref="MakeCutRecords"/>).</summary>
     private CutRecord[] CutRecordsOf(long flight) => _cutRecords![flight % LandRing];
@@ -165,7 +167,10 @@ public sealed partial class VortexFileWriter
         }
 
         flight.Detached[field] = detached;
-        CutRecordsOf(flight.Index)[field] = new CutRecord(column.Bytes, column.Held, column.Rows, column.Generation, counted);
+        // Whether the chain takes the next flight's rows, decided here, where its state stands as the next take finds it: the
+        // next flight's take and gathering both wait for this cut, and the take alone changes the chain.
+        bool takes = _chains is { Length: > 0 } chains && chains[field] is { } chain && chain.Accepts(column.Generation, column.Rows);
+        CutRecordsOf(flight.Index)[field] = new CutRecord(column.Bytes, column.Held, column.Rows, column.Generation, counted, takes);
 
         // A column whose builders all close at once has its chunk closed here, the flight's wide counts attached first, as the
         // owner does it for one that closes later: the next flight's builders of the column then wait for this cut rather
