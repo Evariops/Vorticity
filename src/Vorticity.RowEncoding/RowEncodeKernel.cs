@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Types;
@@ -305,11 +306,23 @@ internal static class RowEncodeKernel
     {
         RowValidity validity = RowValidity.Resolve(arena, node);
         ReadOnlySpan<byte> views = node.Views.Span;
+        if (validity.AllValid && views.Length >= (long)node.Length * ViewBytes)
+        {
+            EncodeValidVarBin(node, field, views, offsets, cursors, destination);
+            return;
+        }
+
         byte nullByte = RowSentinels.VarNull(field);
         byte emptyByte = RowSentinels.VarEmpty(field);
         byte nonEmptyByte = RowSentinels.VarNonEmpty(field);
         bool descending = field.Descending;
 
+        // The view of the last value written and where its key lies: a row of the same view holds the same bytes, in its
+        // view or where it points, and takes that key's bytes as they lie (EncodeValidVarBin).
+        ulong lastLow = 0;
+        ulong lastHigh = 0;
+        int lastPos = -1;
+        int lastSize = 0;
         for (int i = 0; i < node.Length; i++)
         {
             int pos = offsets[i] + cursors[i];
@@ -331,10 +344,112 @@ internal static class RowEncodeKernel
                 continue;
             }
 
+            ulong low = MemoryMarshal.Read<ulong>(view);
+            ulong high = MemoryMarshal.Read<ulong>(view.Slice(sizeof(ulong)));
+            if (lastPos >= 0 && low == lastLow && high == lastHigh)
+            {
+                destination.Slice(lastPos, lastSize).CopyTo(destination.Slice(pos));
+                cursors[i] += lastSize;
+                continue;
+            }
+
             ReadOnlySpan<byte> bytes = ResolveView(node, view, length, i);
             destination[pos] = nonEmptyByte;
             int written = RowBytes.WriteVarBody(bytes, destination.Slice(pos + 1), descending);
             cursors[i] += 1 + written;
+            lastLow = low;
+            lastHigh = high;
+            lastPos = pos;
+            lastSize = 1 + written;
+        }
+    }
+
+    /// <summary>The bytes of a text's view.</summary>
+    private const int ViewBytes = 16;
+
+    /// <summary>
+    /// A text column whose every row holds a value, <paramref name="views"/> holding a view a row at least: a stretch of
+    /// rows of one view holds one value, in the view or where it points, which is encoded once, at the stretch's first row,
+    /// and its key copied to the rows after it.
+    /// </summary>
+    /// <remarks>
+    /// The rows of a batch sorted by a text repeat it row after row, each viewing the run's, the dictionary's or the
+    /// constant's value. Encoding each again, its bytes found then laid out in blocks, was a twentieth of the processor of
+    /// a consolidation of metric records, whose key leads with a service's and a metric's names (2026-11-18).
+    /// </remarks>
+    private static void EncodeValidVarBin(
+        CanonicalNode node, RowSortField field, ReadOnlySpan<byte> views,
+        ReadOnlySpan<int> offsets, Span<int> cursors, Span<byte> destination)
+    {
+        ReadOnlySpan<Int128> rows = MemoryMarshal.Cast<byte, Int128>(views).Slice(0, node.Length);
+        byte emptyByte = RowSentinels.VarEmpty(field);
+        byte nonEmptyByte = RowSentinels.VarNonEmpty(field);
+        bool descending = field.Descending;
+        for (int i = 0; i < rows.Length;)
+        {
+            Int128 held = rows[i];
+            int end = i + 1;
+            while (end < rows.Length && rows[end] == held)
+            {
+                end++;
+            }
+
+            ReadOnlySpan<byte> view = views.Slice(i * ViewBytes, ViewBytes);
+            int length = RowBytes.ViewLength(view);
+            if (length == 0)
+            {
+                // Three sentinels, not two (EncodeVarBin).
+                for (int row = i; row < end; row++)
+                {
+                    destination[offsets[row] + cursors[row]] = emptyByte;
+                    cursors[row] += RowWidths.VarEmptySize;
+                }
+
+                i = end;
+                continue;
+            }
+
+            int pos = offsets[i] + cursors[i];
+            ReadOnlySpan<byte> bytes = ResolveView(node, view, length, i);
+            destination[pos] = nonEmptyByte;
+            int size = 1 + RowBytes.WriteVarBody(bytes, destination.Slice(pos + 1), descending);
+            cursors[i] += size;
+            ReadOnlySpan<byte> key = destination.Slice(pos, size);
+            for (int row = i + 1; row < end; row++)
+            {
+                CopyKey(key, destination.Slice(offsets[row] + cursors[row], size));
+                cursors[row] += size;
+            }
+
+            i = end;
+        }
+    }
+
+    /// <summary>
+    /// Copies <paramref name="key"/>, a text's, into <paramref name="destination"/>, of its length: 16 bytes at a time then
+    /// its last 16, which a key of a sentinel and a block of 33 bytes at least holds, no call for its three vectors.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void CopyKey(ReadOnlySpan<byte> key, Span<byte> destination)
+    {
+        nuint size = (nuint)key.Length;
+        if (size < (nuint)Vector128<byte>.Count || destination.Length != key.Length)
+        {
+            key.CopyTo(destination);
+            return;
+        }
+
+        ref byte from = ref MemoryMarshal.GetReference(key);
+        ref byte to = ref MemoryMarshal.GetReference(destination);
+        nuint at = 0;
+        for (; at + (nuint)Vector128<byte>.Count <= size; at += (nuint)Vector128<byte>.Count)
+        {
+            Vector128.LoadUnsafe(ref from, at).StoreUnsafe(ref to, at);
+        }
+
+        if (at < size)
+        {
+            Vector128.LoadUnsafe(ref from, size - (nuint)Vector128<byte>.Count).StoreUnsafe(ref to, size - (nuint)Vector128<byte>.Count);
         }
     }
 

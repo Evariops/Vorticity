@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.InteropServices;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
 using Vorticity.Types;
@@ -12,6 +13,9 @@ namespace Vorticity.RowEncoding;
 /// </summary>
 internal static class RowSizeKernel
 {
+    /// <summary>The bytes of a text's view, its length first.</summary>
+    private const int ViewBytes = 16;
+
     /// <summary>
     /// Adds one column's per-row encoded size into <paramref name="sizes"/>, one accumulator per
     /// row. Every child inherits <paramref name="field"/> unchanged.
@@ -84,6 +88,33 @@ internal static class RowSizeKernel
     {
         RowValidity validity = RowValidity.Resolve(arena, node);
         ReadOnlySpan<byte> views = node.Views.Span;
+        if (validity.AllValid && views.Length >= (long)sizes.Length * ViewBytes)
+        {
+            // Every row a value: its length read where it lies, and the size of a length the row before had taken again,
+            // the rows of a batch sorted by a text repeating it row after row.
+            ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(views);
+            uint last = 0;
+            int size = RowWidths.VarEmptySize;
+            for (int i = 0; i < sizes.Length; i++)
+            {
+                uint length = words[i * (ViewBytes / sizeof(uint))];
+                if (length != last)
+                {
+                    if (length > int.MaxValue)
+                    {
+                        throw new VortexFormatException($"A view declares a length of {length} bytes.");
+                    }
+
+                    last = length;
+                    size = length == 0 ? RowWidths.VarEmptySize : RowWidths.NonEmptyVarSize((int)length);
+                }
+
+                sizes[i] = Checked(sizes[i], size);
+            }
+
+            return;
+        }
+
         for (int i = 0; i < sizes.Length; i++)
         {
             int contribution;

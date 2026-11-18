@@ -166,6 +166,7 @@ because the encoder would otherwise be silently choosing an ordering the format 
 - It reads a column's values at their width wherever they lie. The arena allocates every buffer on
   a multiple of its values' width, and a copy of a batch keeps that boundary, but a segment read in
   place sits where its file laid it out, and a key must not depend on the address of its bytes.
+- A text column's rows that hold the view of the row before them take its key. Two rows of one view hold the same bytes, in the view or where it points, so a stretch of them is encoded once, at its first row, and that key is copied to the rows after it, three vectors for a key of one block. A column sorted by a text repeats it row after row, each row viewing the run's, the dictionary's or the constant's value. Encoded row by row, the two leading texts of the key of metric records took 3.8 billion of the 59 billion cycles of a consolidation of 74 appends, and they take 1.2 billion (2026-11-19). A column with nulls takes the key of the last value written the same way, a row at a time, and the sizing pass takes again the size of the length before it.
 - It is synchronous. It is CPU work over arrays already in memory, and the async-only rule is for
   I/O.
 
