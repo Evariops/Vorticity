@@ -5,6 +5,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -110,6 +111,46 @@ public sealed class NullableRunsTests
         }
     }
 
+    [Theory]
+    [InlineData(0.0, 0)]
+    [InlineData(0.5, 3)]
+    [InlineData(0.97, 5)]
+    [InlineData(1.0, 0)]
+    public void TheValidLengthsAreTheRowWalksSum(double valid, int bitOffset)
+    {
+        Random random = new Random((int)(valid * 100) + bitOffset);
+        foreach (int length in (int[])[1, 63, 64, 65, 1_000, 10_007])
+        {
+            bool[] present = new bool[length];
+            Int128[] views = new Int128[length];
+            long expected = 0;
+            for (int row = 0; row < length; row++)
+            {
+                // Long stretches of each, so that whole words of valid rows come up, and a length under every null row too.
+                present[row] = row > 0 && random.Next(16) != 0 ? present[row - 1] : random.NextDouble() < valid;
+                uint size = (uint)random.Next(0, 1 << 20);
+                views[row] = new Int128((ulong)random.NextInt64(), ((ulong)random.Next() << 32) | size);
+                expected += present[row] ? size : 0;
+            }
+
+            CanonicalArena arena = new CanonicalArena();
+            DTypeArena types = new DTypeArena();
+            Validity validity = valid == 1.0 ? Validity.NonNullable : Bitmap(arena, types, present, bitOffset);
+            Assert.Equal(valid == 1.0 ? ViewLengths(views) : expected, ColumnCompressor.ValidLengths(ValidityMask.From(arena, validity), views));
+        }
+
+        static long ViewLengths(Int128[] views)
+        {
+            long total = 0;
+            foreach (Int128 view in views)
+            {
+                total += (uint)(ulong)view;
+            }
+
+            return total;
+        }
+    }
+
     private static int SpreadTexts(CanonicalArena arena, DTypeArena types, string[] texts, bool padded, Random random)
     {
         const int Buffers = 3;
@@ -134,6 +175,14 @@ public sealed class NullableRunsTests
         {
             byte[] value = Encoding.UTF8.GetBytes(texts[row]);
             Span<byte> view = viewBytes.Slice(row * 16, 16);
+
+            // Half the repeats view the bytes the row before views, as a shredded leaf's do, so that runs of equal views come up.
+            if (row > 0 && texts[row] == texts[row - 1] && random.Next(2) == 0)
+            {
+                viewBytes.Slice((row - 1) * 16, 16).CopyTo(view);
+                continue;
+            }
+
             random.NextBytes(view);
             if (padded)
             {

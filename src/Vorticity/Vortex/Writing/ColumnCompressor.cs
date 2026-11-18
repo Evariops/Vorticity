@@ -4,6 +4,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -618,8 +619,20 @@ internal static class ColumnCompressor
         int readRow = -1;
         int runCount = 1;
         starts[0] = 0;
+        ref Int128 first = ref MemoryMarshal.GetReference(views);
         for (int i = 1; i < views.Length; i++)
         {
+            // A run's views, equal when its rows view one copy, passed four at a time.
+            while (i + 4 <= views.Length && FourEqual(ref Unsafe.Add(ref first, i - 1)))
+            {
+                i += 4;
+            }
+
+            if (i >= views.Length)
+            {
+                break;
+            }
+
             Int128 before = views[i - 1];
             Int128 view = views[i];
             if (before == view)
@@ -664,6 +677,19 @@ internal static class ColumnCompressor
 
     /// <summary>The bytes a view holds inline, past its length: a longer value lies in a data buffer.</summary>
     private const int ViewInlineBytes = 12;
+
+    /// <summary>Whether the four views after <paramref name="before"/> each equal the one before them: five loads and a test.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool FourEqual(ref Int128 before)
+    {
+        ref byte at = ref Unsafe.As<Int128, byte>(ref before);
+        Vector128<byte> a = Vector128.LoadUnsafe(ref at);
+        Vector128<byte> b = Vector128.LoadUnsafe(ref at, 16);
+        Vector128<byte> c = Vector128.LoadUnsafe(ref at, 32);
+        Vector128<byte> d = Vector128.LoadUnsafe(ref at, 48);
+        Vector128<byte> e = Vector128.LoadUnsafe(ref at, 64);
+        return ((a ^ b) | (b ^ c) | (c ^ d) | (d ^ e)) == Vector128<byte>.Zero;
+    }
 
     /// <summary>
     /// The bytes of row <paramref name="row"/>, whose <paramref name="view"/> names them in a data buffer: in
@@ -2015,21 +2041,65 @@ internal static class ColumnCompressor
 
         if (heap < 0)
         {
-            heap = 0;
-            ValidityMask mask = ValidityMask.From(arena, node.Validity);
-            ReadOnlySpan<byte> views = node.Views.Span;
-            for (int i = 0; i < node.Length; i++)
-            {
-                if (mask.IsValid(i))
-                {
-                    heap += System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(
-                        views.Slice(i * 16, 4));
-                }
-            }
+            heap = ValidLengths(ValidityMask.From(arena, node.Validity), MemoryMarshal.Cast<byte, Int128>(node.Views.Span)[..node.Length]);
         }
 
         long varbinForm = (((long)node.Length + 1) * FsstPlan.IndexPType(heap).ByteWidth()) + heap;
         return Math.Min(viewForm, varbinForm);
+    }
+
+    /// <summary>
+    /// The lengths <paramref name="views"/> hold at the rows <paramref name="mask"/> says are valid, added up: every view's when
+    /// all are valid, none when none is, and through a bitmap a word of rows at a time, a word all valid added whole.
+    /// </summary>
+    /// <remarks>
+    /// The leaves of a shredded variant are weighed here, their bytes not counted by the pass that measures a column, and
+    /// read a row at a time, each row's validity and a slice of its view, the walk took 2.6 % of a consolidation of metric
+    /// records' processor (2026-11-18).
+    /// </remarks>
+    internal static long ValidLengths(ValidityMask mask, ReadOnlySpan<Int128> views)
+    {
+        if (mask.AllInvalid)
+        {
+            return 0;
+        }
+
+        long total = 0;
+        if (mask.AllValid)
+        {
+            foreach (Int128 view in views)
+            {
+                total += (uint)(ulong)view;
+            }
+
+            return total;
+        }
+
+        ReadOnlySpan<byte> bits = mask.Bits;
+        int shift = mask.BitOffset & 7;
+        int firstByte = mask.BitOffset >> 3;
+        for (int row = 0; row < views.Length; row += 64)
+        {
+            int take = Math.Min(64, views.Length - row);
+            ulong word = BitWords.Load(bits, firstByte + (row >> 3), shift) & BitWords.Mask(take);
+            if (word == ulong.MaxValue)
+            {
+                foreach (Int128 view in views.Slice(row, 64))
+                {
+                    total += (uint)(ulong)view;
+                }
+
+                continue;
+            }
+
+            while (word != 0)
+            {
+                total += (uint)(ulong)views[row + BitOperations.TrailingZeroCount(word)];
+                word &= word - 1;
+            }
+        }
+
+        return total;
     }
 
     /// <summary>

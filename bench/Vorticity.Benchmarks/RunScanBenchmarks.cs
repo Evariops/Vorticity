@@ -35,6 +35,10 @@ public class RunScanBenchmarks
     [Params(false, true)]
     public bool AllValid { get; set; }
 
+    /// <summary>Whether a row that repeats the value before views the same bytes, as a shredded leaf's rows do, or a copy of its own.</summary>
+    [Params(false, true)]
+    public bool Shared { get; set; }
+
     private const int Rows = 8_192;
 
     private CanonicalArena _arena = null!;
@@ -70,7 +74,7 @@ public class RunScanBenchmarks
 
         _arena = new CanonicalArena();
         DTypeArena types = new DTypeArena();
-        _column = Texts(_arena, types, texts, AllValid ? Validity.NonNullable : Bitmap(_arena, types, present));
+        _column = Texts(_arena, types, texts, AllValid ? Validity.NonNullable : Bitmap(_arena, types, present), Shared);
         _starts = new int[Rows + 1];
         _ends = new int[Rows + 1];
     }
@@ -79,9 +83,10 @@ public class RunScanBenchmarks
     [Benchmark]
     public int Runs() => ColumnCompressor.RunsOf(_arena, _column, compared: false, _starts, _ends);
 
-    private static int Texts(CanonicalArena arena, DTypeArena types, string[] texts, Validity validity)
+    private static int Texts(CanonicalArena arena, DTypeArena types, string[] texts, Validity validity, bool shared)
     {
-        // Each row's bytes its own, as a gathered chunk holds them: two equal long values lie apart in the heap.
+        // Each row's bytes its own, the heap holding every repeat's copy, and two equal long values lying apart in it unless
+        // the repeat views the bytes of the row before.
         int heapBytes = 0;
         foreach (string text in texts)
         {
@@ -96,6 +101,14 @@ public class RunScanBenchmarks
         {
             byte[] value = Encoding.UTF8.GetBytes(texts[row]);
             Span<byte> view = viewBytes.Slice(row * 16, 16);
+            if (shared && row > 0 && texts[row] == texts[row - 1])
+            {
+                viewBytes.Slice((row - 1) * 16, 16).CopyTo(view);
+                value.CopyTo(heapSpan[at..]);
+                at += value.Length;
+                continue;
+            }
+
             MemoryMarshal.Write(view, value.Length);
             if (value.Length <= 12)
             {
