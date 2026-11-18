@@ -2886,6 +2886,18 @@ internal static class ArrayBlobWriter
             }
 
             default:
+            {
+                // A bitmap of ones is written as none, as an array that holds every row is: whether rows
+                // that all hold a value carry a bitmap is how they were cut, never what they hold. A merge's
+                // block took its kind from the input batches its rows came from, and a consolidation of
+                // log records wrote a chunk of trace ids with a bitmap of ones or without one, run to run.
+                CanonicalNode bits = arena.GetNode(node.Validity.CanonicalNodeIndex);
+                if (bits.Kind == CanonicalKind.Bool
+                    && Arrays.Decoders.Canonical.BitmapKernels.CountSet(bits.Bits.Span, bits.BitOffset, node.Length) == node.Length)
+                {
+                    return 0;
+                }
+
                 // Never compressed: a validity bitmap is index machinery, and it is small. A shredded
                 // tree's is not: a path its rows hold in stretches would pay a bit a row, so its
                 // validity is a column the compressor writes as runs where they pay.
@@ -2893,6 +2905,7 @@ internal static class ArrayBlobWriter
                     ? WriteCompressed(blob, arena, node.Validity.CanonicalNodeIndex, encodings)
                     : WriteNode(blob, arena, node.Validity.CanonicalNodeIndex, encodings, compress: false);
                 return 1;
+            }
         }
     }
 

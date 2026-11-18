@@ -100,6 +100,46 @@ public sealed class BatchingSizeTests
         Assert.Equal(owned, windows);
     }
 
+    [Fact]
+    public async Task RowsThatAllHoldAValueWriteTheSameFileWithABitmapOfOnesOrWithout()
+    {
+        // Whether rows that all hold a value carry a bitmap is how they were cut, from batches with nulls or without: a
+        // merge's blocks took the kind of their inputs' batches, and a nullable column wrote a bitmap of ones or none, run to
+        // run. The same rows write the same file either way, and read back with every row present.
+        Decoders.EnsureRegistered();
+        const int Rows = 20_000;
+        DTypeArena types = new DTypeArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.Nullable);
+        DType schema = types.Struct(["n"], [i64], Nullability.NonNullable);
+
+        CanonicalArena plain = new CanonicalArena();
+        CanonicalArena ones = new CanonicalArena();
+        byte[] withoutBitmap = await WriteAsync(schema, plain, Numbers(plain, bitmap: false), Rows, own: true);
+        byte[] withBitmap = await WriteAsync(schema, ones, Numbers(ones, bitmap: true), Rows, own: true);
+        Assert.Equal(withoutBitmap, withBitmap);
+
+        int Numbers(CanonicalArena arena, bool bitmap)
+        {
+            VortexBuffer values = arena.Allocate(Rows * sizeof(long), sizeof(long), out Span<byte> bytes);
+            Span<long> numbers = MemoryMarshal.Cast<byte, long>(bytes);
+            for (int row = 0; row < Rows; row++)
+            {
+                numbers[row] = row * 7_919L % 100_003;
+            }
+
+            Validity validity = Validity.AllValid;
+            if (bitmap)
+            {
+                VortexBuffer bits = arena.Allocate((Rows + 7) / 8, 8, out Span<byte> set);
+                set.Fill(0xFF);
+                validity = Validity.Bitmap(arena.AddBool(types.Bool(Nullability.NonNullable), Rows, Validity.NonNullable, bits, 0));
+            }
+
+            int column = arena.AddPrimitive(i64, Rows, validity, PType.I64, values);
+            return arena.AddStruct(schema, Rows, Validity.NonNullable, [column]);
+        }
+    }
+
     private static async Task<byte[]> WriteAsync(DType schema, CanonicalArena whole, int root, int rows, bool own)
     {
         using MemoryStream stream = new MemoryStream();
