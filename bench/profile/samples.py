@@ -15,7 +15,10 @@ from collections import Counter
 
 path, mpath, out = sys.argv[1:4]
 ROLES = [
-    ("compress", r"VortexFileWriter::Compress\b|VortexFileWriter::Compress$|ZstdCompressor|DoubleFastMatchFinder"),
+    ("pump", r"FlowCore\+Pump::|FlowCore::"),
+    ("line", r"FlightLine::|VortexFileWriter::RunLineItem|VortexFileWriter::(Prologue|Epilogue)\b"),
+    ("emission", r"VortexFileWriter::(CompressColumn|WriteFramed|WriteColumn|Graft|LandEmission)|VortexFileWriter\+(LeafWork|FrameWork|ColumnEmission)"),
+    ("compress", r"VortexFileWriter::Compress\b|VortexFileWriter::Compress$|VortexFileWriter::CompressColumn|ZstdCompressor|DoubleFastMatchFinder"),
     ("shred_take", r"Shredding::Take"),
     ("keys", r"IndexWriter::(FeedKeys|ReadKeys|FeedVariant)|VariantFieldExpr::(ReadKeys|WriteKey|ApplyKeys)"),
     ("stats", r"IngestPart|ColumnWriter::Accumulate|BlockStats"),
@@ -32,6 +35,10 @@ ROLES = [
     ("lock_spin", r"Lock::(Enter|Spin)|EnterAndGetCurrentThreadId|AwareLock"),
 ]
 compiled = [(name, re.compile(rx)) for name, rx in ROLES]
+LIBRARY = re.compile(r"Vorticity\.")
+# What runs on a lane the session counts, or beside the degree by design: a pump, a worker of the core's entries, a scan's
+# lane loop, a job's flow (which holds a lane), and what waits on the store or the disk.
+ENTRY = re.compile(r"FlowCore|LaneWorkers|Waits::|HeldLane|LaneLoopAsync|DatasetCompactor|DatasetMaintainer|BacklogBench|Program::|vortex-queries")
 WAIT = re.compile(r"__psynch_cvwait|__ulock_wait|mach_msg|kevent|__semwait_signal|__workq_kernreturn|__psynch_mutexwait|__select|poll|__wait4|read \[libsystem_kernel|__open|pread|__accept|__read_nocancel")
 SPIN = re.compile(r"ThreadNative_SpinWait|EnterAndGetCurrentThreadId")
 
@@ -75,6 +82,7 @@ selfc = Counter()
 roles = Counter()
 threads = Counter()
 spinners = Counter()
+outside = Counter()
 busy = 0
 thread = "?"
 wall = 0
@@ -91,6 +99,9 @@ def record(frames, s):
     for name, rx in compiled:
         if rx.search(text):
             roles[name] += s
+    # Busy in the library's code, on a thread that runs no pump nor any of the core's entries: outside the degree's count.
+    if LIBRARY.search(text) and not ENTRY.search(text) and not SPIN.search(frames[-1]):
+        outside[frames[-1] if len(frames) < 2 else " <- ".join(reversed([f for f in frames if LIBRARY.search(f)][:3]))] += s
     if SPIN.search(frames[-1]):
         managed = [f for f in frames[:-1] if "[" not in f and f not in ("THREAD", "??? jit")]
         spinners[" <- ".join(reversed(managed[-3:])) or "(no managed caller: an idle pool worker)"] += s
@@ -144,5 +155,9 @@ with open(out, "w") as f:
         f.write(f"  {v:7d} {100 * v / max(wall, 1):5.1f} %  {k}\n")
     f.write("\nwho spins (self samples of a spin, by their managed callers):\n")
     for k, v in spinners.most_common(10):
+        f.write(f"  {v:7d} {100 * v / max(busy, 1):5.1f} %  {k}\n")
+    total = sum(outside.values())
+    f.write(f"\nbusy in the library outside a pump and the core's entries: {total} samples, {100 * total / max(busy, 1):.1f} %\n")
+    for k, v in outside.most_common(12):
         f.write(f"  {v:7d} {100 * v / max(busy, 1):5.1f} %  {k}\n")
 print(f"{cores:.2f}\t" + " ".join(f"{name}={100 * roles[name] / max(busy, 1):.1f}" for name, _ in ROLES))
