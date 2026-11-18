@@ -2482,9 +2482,19 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private int Assemble(Staging staging)
     {
-        // Runs still in a merge's inputs, a window of each batch: gathered where they lie, then copied once. Each window copied
-        // first, then the windows concatenated and their rows gathered, paid the copy of every node of the schema for each of
-        // a block's eighty windows of metric records, half of its assembly's 630 µs (2026-11-18).
+        // Runs still in a merge's inputs: each column gathered run after run from the inputs' batches, in one pass.
+        if (!_mayShareChildren && GatheredByRuns(staging) is >= 0 and int assembled)
+        {
+            staging.Gathers = false;
+            staging.Parts.Clear();
+            Ledger?.Release(staging, ref staging.FirstRun);
+            return assembled;
+        }
+
+        // A schema the gather by runs does not take, a decimal's: a window of each batch, gathered where they lie, then
+        // copied once. Each window copied first, then the windows concatenated and their rows gathered, paid the copy of
+        // every node of the schema for each of a block's eighty windows of metric records, half of its assembly's 630 µs
+        // (2026-11-18).
         if (!_mayShareChildren && Windowed(staging))
         {
             CanonicalArena into = staging.Context.Canonical;
@@ -2526,6 +2536,77 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         parts.Clear();
         return node;
+    }
+
+    /// <summary>
+    /// The rows of <paramref name="staging"/>, some still held where they lie in a merge's inputs, gathered run after run into
+    /// one node of its arena that owns its bytes (<see cref="CanonicalRuns"/>): each column in one pass over the runs, a text
+    /// that repeats the one copied last viewing its bytes. -1 when no run lies in an input, or when the schema holds a form
+    /// the gather does not take, the staging then left as it was.
+    /// </summary>
+    /// <remarks>
+    /// A window of each batch sliced, the windows concatenated, the runs' rows gathered by their indices and the result
+    /// copied gave the same node, every fixed value and every view copied three times over: 16.6 % of the processor of a
+    /// consolidation of 74 appends of metric records, whose blocks take 240 runs of 80 batches each (2026-11-18).
+    /// </remarks>
+    private int GatheredByRuns(Staging staging)
+    {
+        List<StagedPart> parts = staging.Parts;
+        bool held = false;
+        for (int i = 0; i < parts.Count && !held; i++)
+        {
+            held = parts[i].Source is not null;
+        }
+
+        if (!held || !CanonicalRuns.Takes(_schema))
+        {
+            return -1;
+        }
+
+        // The batches the runs lie in, in the order their first run comes, a part the staging owns a batch of its own; the
+        // runs kept as integers in the room the gather by indices keeps its rows in.
+        CanonicalArena into = staging.Context.Canonical;
+        Dictionary<(CanonicalArena, int), int> windowOf = staging.WindowOf ??= [];
+        List<RunWindow> windows = staging.Windows ??= [];
+        windows.Clear();
+        const int RunInts = 3;
+        if (staging.Picks.Length < RunInts * parts.Count)
+        {
+            staging.Picks = new int[Math.Max(RunInts * parts.Count, staging.Picks.Length * 2)];
+        }
+
+        Span<CanonicalRuns.Run> runs = MemoryMarshal.Cast<int, CanonicalRuns.Run>(staging.Picks.AsSpan(0, RunInts * parts.Count));
+        int rows = 0;
+        for (int i = 0; i < parts.Count; i++)
+        {
+            StagedPart part = parts[i];
+            (CanonicalArena arena, int node) = part.Source is { } from ? (from, part.Root) : (into, part.Node);
+            ref int window = ref CollectionsMarshal.GetValueRefOrAddDefault(windowOf, (arena, node), out bool exists);
+            if (!exists)
+            {
+                window = windows.Count;
+                windows.Add(new RunWindow(arena, node, part.Row, part.Row + part.Rows));
+            }
+            else
+            {
+                ref RunWindow known = ref CollectionsMarshal.AsSpan(windows)[window];
+                known.Row = Math.Min(known.Row, part.Row);
+                known.End = Math.Max(known.End, part.Row + part.Rows);
+            }
+
+            runs[i] = new CanonicalRuns.Run(window, part.Row, part.Rows);
+            rows += part.Rows;
+        }
+
+        windowOf.Clear();
+        try
+        {
+            return CanonicalRuns.Gather<RunWindow>(staging.Context.Decode, _schema, CollectionsMarshal.AsSpan(windows), runs, rows);
+        }
+        finally
+        {
+            windows.Clear();
+        }
     }
 
     /// <summary>
@@ -2579,13 +2660,21 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// Rows <see cref="Row"/> to <see cref="End"/> of node <see cref="Root"/> of a merge's input batch <see cref="Source"/>,
     /// which hold every run a block takes of it, and the node of the block's arena they were copied in.
     /// </summary>
-    private struct RunWindow(CanonicalArena source, int root, int row, int end)
+    private struct RunWindow(CanonicalArena source, int root, int row, int end) : CanonicalRuns.ISource
     {
         internal readonly CanonicalArena Source = source;
         internal readonly int Root = root;
         internal int Row = row;
         internal int End = end;
         internal int Node = -1;
+
+        readonly CanonicalArena CanonicalRuns.ISource.Arena => Source;
+
+        readonly int CanonicalRuns.ISource.Node => Root;
+
+        readonly int CanonicalRuns.ISource.First => Row;
+
+        readonly int CanonicalRuns.ISource.End => End;
     }
 
     /// <summary>
