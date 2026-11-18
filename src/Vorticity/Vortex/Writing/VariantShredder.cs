@@ -1608,26 +1608,36 @@ internal static class VariantShredder
         Reading<int> row = at is null ? default : new Reading<int>(at);
         Reading<int> length = new Reading<int>(lengths);
         int start = 0;
-        int viewed = 0;
+
+        // A repeat's view is the one written for the string it repeats, kept as its two words: stored again, not composed.
+        Int128 view = default;
+        ref Int128 views0 = ref Unsafe.As<byte, Int128>(ref MemoryMarshal.GetReference(into));
         for (int i = 0; i < lengths.Count; i++)
         {
             int to = at is null ? i : row.Next();
             int count = length.Next();
             if (count >= 0)
             {
-                viewed = start;
+                view = default;
+                if (count > 0)
+                {
+                    Span<byte> composed = MemoryMarshal.AsBytes(new Span<Int128>(ref view));
+                    CanonicalSupport.WriteView(composed, written.Slice(start, count), count, 0, start);
+                }
+
+                start += count;
             }
             else
             {
-                count = ~count;
+                start += ~count;
             }
 
-            if (count > 0)
+            if ((uint)to >= (uint)rows)
             {
-                CanonicalSupport.WriteView(into.Slice(to * ViewSize, ViewSize), written.Slice(viewed, count), count, 0, viewed);
+                throw new ArgumentOutOfRangeException(nameof(at), "A string's row lies past the column's.");
             }
 
-            start += count;
+            Unsafe.Add(ref views0, to) = view;
         }
 
         return arena.AddVarBinView(dtype, rows, validity, views, [data], padded: true);
