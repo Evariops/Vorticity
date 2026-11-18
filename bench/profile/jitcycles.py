@@ -156,12 +156,17 @@ def load(export, perfmap):
     def parse_thread(element):
         return element.get("fmt", "?")
 
+    def parse_core(element):
+        text = element.get("fmt", "")
+        return "E" if "(E Core)" in text else "P"
+
     for _, element in ET.iterparse(export, events=("end",)):
         if element.tag != "row":
             continue
         time = 0
         weight = 0
         thread = "?"
+        core = "P"
         frames = ()
         for child in element:
             tag = child.tag
@@ -169,11 +174,13 @@ def load(export, perfmap):
                 time = int(value(child, parse_text))
             elif tag == "thread":
                 thread = value(child, parse_thread)
+            elif tag == "core":
+                core = value(child, parse_core)
             elif tag == "cycle-weight":
                 weight = int(value(child, parse_text))
             elif tag in ("tagged-backtrace", "backtrace"):
                 frames = value(child, parse_backtrace)
-        samples.append((time, thread, weight, frames))
+        samples.append((time, thread, weight, frames, core))
         element.clear()
     return samples
 
@@ -225,9 +232,11 @@ def main(argv):
     spinners = collections.Counter()
     folded = collections.Counter()
     buckets = collections.defaultdict(lambda: (set(), collections.Counter()))
-    for time, thread, weight, frames in samples:
+    by_core = collections.Counter()
+    for time, thread, weight, frames, core in samples:
         weight = weight or 1
         total += weight
+        by_core[core] += weight
         role = role_of(frames)
         by_role[role] += weight
         threads[thread] += weight
@@ -264,8 +273,11 @@ def main(argv):
     pct = lambda part, whole: 100.0 * part / whole if whole else 0.0
     out.append("# CPU cycles: %s" % os.path.basename(os.path.dirname(os.path.abspath(export))))
     out.append("")
-    out.append("%d samples over %.3f s of wall, %.1f Gcycles; %.2f cores busy on average (threads seen running in each %s ms)." % (
-        len(samples), wall_ns / 1e9, total / 1e9, mean, options["--bucket"]))
+    # The cores the cycles fill, at the cores' top clocks (an M4 Pro's: 4.5 GHz a performance core, 2.9 an efficiency core):
+    # what the cores ran, where the threads seen running in a millisecond count one that ran a few microseconds of it whole.
+    by_cycles = (by_core["P"] / 4.5e9 + by_core["E"] / 2.9e9) / max(wall_ns / 1e9, 1e-9)
+    out.append("%d samples over %.3f s of wall, %.1f Gcycles; %.2f cores by their cycles (at their top clocks), %.2f threads seen running in each %s ms." % (
+        len(samples), wall_ns / 1e9, total / 1e9, by_cycles, mean, options["--bucket"]))
     out.append("")
     out.append("## How many cores ran, bucket by bucket")
     out.append("")
@@ -309,7 +321,7 @@ def main(argv):
         for stack, cycles in folded.most_common():
             handle.write("%s %d\n" % (stack.replace(" ", "_"), cycles))
     if options["--ledger"]:
-        print("%.2f\t%s" % (mean, " ".join("%s=%.1f" % (name, pct(cycles, total)) for name, cycles in by_role.most_common())))
+        print("%.2f\t%s" % (by_cycles, " ".join("%s=%.1f" % (name, pct(cycles, total)) for name, cycles in by_role.most_common())))
     else:
         print("\n".join(out[:3]))
         print("written: summary.md, timeline.tsv, folded.txt in " + directory)
