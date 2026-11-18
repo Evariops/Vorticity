@@ -322,6 +322,62 @@ public sealed class CanonicalCopyTests
     }
 
     /// <summary>
+    /// A copy that shares repeats keeps once a text equal to the one copied before it, though the two name different bytes, as
+    /// a merge's rows of a series name each its own input's; a text as long and beginning alike but differing past that is
+    /// copied, and every row reads back once its source is refilled.
+    /// </summary>
+    [Fact]
+    public void ACopyThatSharesRepeatsKeepsOnceATextEqualToTheOneBefore()
+    {
+        DTypeArena types = new DTypeArena();
+        byte[] a = System.Text.Encoding.UTF8.GetBytes("a value of twenty b.");
+        byte[] near = System.Text.Encoding.UTF8.GetBytes("a value of twenty c.");
+        CanonicalArena source = new CanonicalArena();
+        CanonicalArena shared = new CanonicalArena();
+
+        // Rows 0 to 2 name three copies of a, row 3 near, row 4 a fourth copy of a.
+        byte[][] copies = [a, a, a, near, a];
+        int original = Copies(types, source, copies);
+        int kept = shared.CopyFrom(source, original, shareRepeats: true);
+        source.Reset();
+        _ = Copies(types, source, [near, near, near, a, near]);
+
+        CanonicalNode node = shared.GetNode(kept);
+        Assert.Equal(a.Length + near.Length + a.Length, node.GetDataBuffer(0).Length);
+        ReadOnlySpan<Int128> views = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, Int128>(node.Views.Span);
+        Assert.Equal(views[0], views[2]);
+        Assert.NotEqual(views[0], views[4]);
+        for (int row = 0; row < copies.Length; row++)
+        {
+            Assert.Equal(copies[row], Vorticity.Compute.LiteralReader.ViewAt(node, row).ToArray());
+        }
+
+        static int Copies(DTypeArena types, CanonicalArena arena, byte[][] values)
+        {
+            int total = 0;
+            foreach (byte[] value in values)
+            {
+                total += value.Length;
+            }
+
+            VortexBuffer data = arena.Allocate(total, 1, out Span<byte> dataBytes);
+            VortexBuffer views = arena.Allocate(values.Length * 16, 16, out Span<byte> viewBytes);
+            int at = 0;
+            for (int row = 0; row < values.Length; row++)
+            {
+                values[row].CopyTo(dataBytes[at..]);
+                Span<byte> view = viewBytes.Slice(row * 16, 16);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(view, (uint)values[row].Length);
+                values[row].AsSpan(0, 4).CopyTo(view[4..]);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(view[12..], (uint)at);
+                at += values[row].Length;
+            }
+
+            return arena.AddVarBinView(types.Utf8(Nullability.NonNullable), values.Length, Validity.NonNullable, views, [data]);
+        }
+    }
+
+    /// <summary>
     /// A copy that views repeats copies each row's bytes, as one that does not share them, but a text whose view names the
     /// bytes the buffered view before it names views the copy made for that one: the repeats' views are equal, and every row
     /// reads back once its source is refilled.

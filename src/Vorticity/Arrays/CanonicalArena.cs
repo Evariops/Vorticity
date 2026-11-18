@@ -2088,12 +2088,17 @@ internal partial class CanonicalArena
         // buffered view before it names views the copy made for that one: a series' rows repeat their
         // attributes, which a reassembled input views once, and each copy of the merge's runs copied
         // them again row by row, its comparisons downstream reading them whole where the same address
-        // ends one. Viewing repeats, such a view names that copy too, its own bytes copied all the same.
+        // ends one. A value that names other bytes but is the one copied last, as long, beginning alike and equal byte for
+        // byte, views that copy as well: a consolidation's series holds a row of each input in turn, each viewing its own
+        // input's bytes, and the take of the block's variant compared every row's value whole with the row before's.
+        // Viewing repeats, a view that names the bytes the one before names views that copy too, its own bytes copied all
+        // the same.
         Span<uint> words = MemoryMarshal.Cast<byte, uint>(writable);
         int at = 0;
         uint lastSize = 0;
         uint lastIndex = uint.MaxValue;
         uint lastOffset = 0;
+        uint lastPrefix = 0;
         int lastAt = 0;
         bool repeats = shareRepeats || viewRepeats;
         for (int j = 0; j <= lastBuffered && (shareRepeats || at < referenced); j++)
@@ -2113,14 +2118,6 @@ internal partial class CanonicalArena
                 continue;
             }
 
-            if (!repeat)
-            {
-                lastSize = size;
-                lastIndex = words[w + 2];
-                lastOffset = words[w + 3];
-                lastAt = at;
-            }
-
             uint index = words[w + 2];
             if (index >= (uint)src.DataBufferCount)
             {
@@ -2134,6 +2131,25 @@ internal partial class CanonicalArena
             {
                 ArraysThrow.Format(
                     $"Row {j} names bytes {offset}..{offset + size} of a {from.Length}-byte buffer.");
+            }
+
+            if (shareRepeats && size == lastSize && words[w + 1] == lastPrefix
+                && from.Slice((int)offset, (int)size).SequenceEqual(into.Slice(lastAt, (int)size)))
+            {
+                lastIndex = index;
+                lastOffset = offset;
+                words[w + 2] = 0;
+                words[w + 3] = (uint)lastAt;
+                continue;
+            }
+
+            if (!repeat)
+            {
+                lastSize = size;
+                lastIndex = index;
+                lastOffset = offset;
+                lastPrefix = words[w + 1];
+                lastAt = at;
             }
 
             // A value a block of its buffer's bytes can be read past is copied in whole blocks, no
@@ -2165,6 +2181,12 @@ internal partial class CanonicalArena
             words[w + 2] = 0;
             words[w + 3] = (uint)(repeat ? lastAt : at);
             at += (int)size;
+        }
+
+        // The repeats found equal by their bytes left room the sizing counted.
+        if (at < referenced)
+        {
+            data = data.Slice(0, at);
         }
 
         System.Threading.Interlocked.Add(ref BytesMaterialized, viewBytes + at);
