@@ -1598,45 +1598,139 @@ internal static class VariantShredder
         VortexBuffer data = arena.AllocateUninitialized(used, 64, out Span<byte> written).Slice(0, used);
         written = written[..used];
         bytes.CopyTo(written);
-        Reading<int> row = at is null ? default : new Reading<int>(at);
-        Reading<int> length = new Reading<int>(lengths);
+        Span<Int128> laid = MemoryMarshal.Cast<byte, Int128>(into)[..rows];
         int start = 0;
 
         // A repeat's view is the one written for the string it repeats, kept as its two words: stored again, not composed.
         Int128 view = default;
-        bool shares = false;
-        long standsFor = used;
-        ref Int128 views0 = ref Unsafe.As<byte, Int128>(ref MemoryMarshal.GetReference(into));
-        for (int i = 0; i < lengths.Count; i++)
+        long repeated = 0;
+
+        // The rows and the lengths, appended a value at a time to lists that grow alike, are read a block of both at a time,
+        // and a run of repeats on rows that follow each other is laid at once. Read a value at a time, a row's view at a
+        // time, the leaves of a consolidation of metric records took 7.3 % of its processor (2026-11-18).
+        if (at is null || Aligned(at, lengths))
         {
-            int to = at is null ? i : row.Next();
-            int count = length.Next();
-            if (count >= 0)
+            int first = 0;
+            for (int block = 0; block < lengths.Blocks; block++)
             {
-                view = default;
-                if (count > 0)
+                ReadOnlySpan<int> counts = lengths.Block(block);
+                ReadOnlySpan<int> tos = at is null ? default : at.Block(block);
+                int k = 0;
+                while (k < counts.Length)
                 {
-                    Span<byte> composed = MemoryMarshal.AsBytes(new Span<Int128>(ref view));
-                    CanonicalSupport.WriteView(composed, written.Slice(start, count), count, 0, start);
+                    int count = counts[k];
+                    int end = k + 1;
+                    if (count >= 0)
+                    {
+                        view = Composed(written, start, count);
+                        start += count;
+                    }
+                    else
+                    {
+                        repeated += ~count;
+                    }
+
+                    // The repeats after it, which view what it views.
+                    while (end < counts.Length && counts[end] < 0)
+                    {
+                        repeated += ~counts[end];
+                        end++;
+                    }
+
+                    int from = at is null ? first + k : tos[k];
+                    int last = at is null ? first + end - 1 : tos[end - 1];
+                    if ((uint)from >= (uint)rows || (uint)last >= (uint)rows)
+                    {
+                        throw new ArgumentOutOfRangeException(nameof(at), "A string's row lies past the column's.");
+                    }
+
+                    // Rows that follow each other take the view at once: the rows a node takes values at only rise, so that
+                    // the run's are consecutive when its last is as far from its first as the run is long.
+                    if (last - from == end - 1 - k)
+                    {
+                        laid.Slice(from, end - k).Fill(view);
+                    }
+                    else
+                    {
+                        for (int j = k; j < end; j++)
+                        {
+                            int to = tos[j];
+                            if ((uint)to >= (uint)rows)
+                            {
+                                throw new ArgumentOutOfRangeException(nameof(at), "A string's row lies past the column's.");
+                            }
+
+                            laid[to] = view;
+                        }
+                    }
+
+                    k = end;
                 }
 
-                start += count;
+                first += counts.Length;
             }
-            else
+        }
+        else
+        {
+            Reading<int> row = new Reading<int>(at);
+            Reading<int> length = new Reading<int>(lengths);
+            for (int i = 0; i < lengths.Count; i++)
             {
-                shares = true;
-                standsFor += ~count;
-            }
+                int to = row.Next();
+                int count = length.Next();
+                if (count >= 0)
+                {
+                    view = Composed(written, start, count);
+                    start += count;
+                }
+                else
+                {
+                    repeated += ~count;
+                }
 
-            if ((uint)to >= (uint)rows)
-            {
-                throw new ArgumentOutOfRangeException(nameof(at), "A string's row lies past the column's.");
-            }
+                if ((uint)to >= (uint)rows)
+                {
+                    throw new ArgumentOutOfRangeException(nameof(at), "A string's row lies past the column's.");
+                }
 
-            Unsafe.Add(ref views0, to) = view;
+                laid[to] = view;
+            }
         }
 
-        return arena.AddVarBinView(dtype, rows, validity, views, [data], padded: true, shares ? standsFor : -1);
+        return arena.AddVarBinView(dtype, rows, validity, views, [data], padded: true, repeated > 0 ? used + repeated : -1);
+    }
+
+    /// <summary>The view of the <paramref name="count"/> bytes of <paramref name="written"/> from <paramref name="start"/> on, zero past an inline value's bytes.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Int128 Composed(Span<byte> written, int start, int count)
+    {
+        Int128 view = default;
+        if (count > 0)
+        {
+            Span<byte> composed = MemoryMarshal.AsBytes(new Span<Int128>(ref view));
+            CanonicalSupport.WriteView(composed, written.Slice(start, count), count, 0, start);
+        }
+
+        return view;
+    }
+
+    /// <summary>Whether <paramref name="rows"/> and <paramref name="values"/> hold as many values a block, appended to alike.</summary>
+    private static bool Aligned(Appended<int> rows, Appended<int> values)
+    {
+        if (rows.Blocks != values.Blocks || rows.Count != values.Count)
+        {
+            return false;
+        }
+
+        for (int block = 0; block < rows.Blocks; block++)
+        {
+            if (rows.Block(block).Length != values.Block(block).Length)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// <summary>
