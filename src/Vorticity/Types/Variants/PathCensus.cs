@@ -343,10 +343,15 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
     }
 
     /// <summary>
-    /// Whether the directory <paramref name="body"/> tells every count a shredding is chosen from: whole, and with no list and
-    /// no number, whose counts it keeps by the class a question reads them as. A list's elements' class and a double apart from
-    /// a 32-bit float, which a shredding takes apart, it does not keep.
+    /// Whether the directory <paramref name="body"/> tells every count a shredding is chosen from: whole, with no list, and with
+    /// no number but 64-bit doubles. It keeps its counts by the class a question reads them as, which takes a 32-bit float for
+    /// a double where a shredding takes it apart, and a list's elements' class it does not keep; a path whose numbers are all
+    /// doubles it marks so (<see cref="Indexes.DirectoryEntry.WholeDoubles"/>).
     /// </summary>
+    /// <remarks>
+    /// Unmarked, every path of log records' attributes that held a duration refused its directory, and a tier merge of two
+    /// objects parsed every row of their attributes again in its first pass, 6.6 s of its 11.3 at degree 14 (2026-11-18).
+    /// </remarks>
     internal static bool Tells(Indexes.VariantDirectory.DirectoryBody body)
     {
         if (body.Partial)
@@ -378,7 +383,8 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
 
         public void Head(long rows, long groupRows, bool partial) => _refused |= partial;
 
-        public void Entry(in Indexes.DirectoryEntry entry) => _refused |= entry.Class is PathClass.List or PathClass.Double;
+        public void Entry(in Indexes.DirectoryEntry entry) =>
+            _refused |= entry.Class == PathClass.List || (entry.Class == PathClass.Double && !entry.WholeDoubles);
     }
 
     /// <summary>Each entry of a directory counted at its path (<see cref="AddPaths"/>).</summary>

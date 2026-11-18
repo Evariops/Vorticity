@@ -80,19 +80,47 @@ public sealed class PathCensusDirectoryTests
         Assert.Equal(Describe(ShreddingChoice.Choose(counted)), Describe(ShreddingChoice.Choose(cleared)));
     }
 
+    /// <summary>
+    /// A list, whose elements' class the directory does not keep, and a 32-bit float, which it reads as a double where a
+    /// shredding takes it apart, beside doubles at the same path: the directory tells nothing.
+    /// </summary>
     [Theory]
     [InlineData("list")]
-    [InlineData("double")]
-    public void ADirectoryThatHoldsAListOrANumberTellsNothing(string held)
+    [InlineData("float")]
+    public void ADirectoryThatHoldsAListOrAFloatTellsNothing(string held)
     {
         Random random = new Random(11);
         Variant[] rows = [.. Enumerable.Range(0, 500).Select(_ => Row(random))];
+        rows[249] = Variant.Object(("ratio", Variant.From(0.5)));
         rows[250] = held == "list"
             ? Variant.Object(("tags", Variant.Array("a", "b")))
-            : Variant.Object(("ratio", Variant.From(0.25)));
+            : Variant.Object(("ratio", Variant.From(0.25f)));
 
         using VariantDirectory.DirectoryBody body = Body(Census(rows));
         Assert.False(PathCensus.Tells(body));
+    }
+
+    /// <summary>
+    /// Doubles at a path of every row, a duration's, and at a path of a few, which the directory marks whole: it tells their
+    /// counts as the rows do, and the same shredding is chosen from both. Unmarked, every log record's attributes that held a
+    /// duration were parsed again in a job's first pass.
+    /// </summary>
+    [Fact]
+    public void ADirectoryOfWholeDoublesTellsTheirCountsAsTheRowsDo()
+    {
+        Random random = new Random(13);
+        Variant[] rows = [.. Enumerable.Range(0, 3_000).Select(i => Variant.Object(
+            ("route", Variant.From($"/api/r{random.Next(20)}")),
+            ("duration", Variant.From(random.NextDouble() * 100)),
+            (i % 7 == 0 ? "ratio" : "user", i % 7 == 0 ? Variant.From(random.NextDouble()) : Variant.From($"user-{random.Next(50)}"))))];
+        PathCensus counted = Census(rows);
+
+        using VariantDirectory.DirectoryBody body = Body(counted);
+        Assert.True(PathCensus.Tells(body));
+        PathCensus read = new PathCensus(stringBoundBytes: 8);
+        read.AddPaths(body);
+        Same(counted.Root, read.Root, "$");
+        Assert.Equal(Describe(ShreddingChoice.Choose(counted)), Describe(ShreddingChoice.Choose(read)));
     }
 
     [Fact]

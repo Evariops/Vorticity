@@ -422,11 +422,12 @@ public sealed partial class DatasetCompactionLanesTests
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, options, Ct);
         for (int a = 0; a < 3; a++)
         {
-            // No number past an integer and no list, which a directory keeps by the class a question reads them as and a
-            // shredding takes apart: such a directory tells every count.
+            // No list, whose elements' class a directory does not keep, and no 32-bit float: a duration's doubles, which the
+            // directory marks whole, tell their counts as an integer's do.
             Doc[] rows = [.. Enumerable.Range(a * 20_000, 20_000).Select(i => new Doc(0, $"svc-{random.Next(0, 60):D2}", i, Variant.Object(
                 ("route", Variant.From($"/api/r{random.Next(20)}")),
                 ("status", Variant.From(200 + (random.Next(4) * 100))),
+                ("duration", Variant.From(random.NextDouble() * 100)),
                 ("user", Variant.From($"user-{random.Next(500)}")))))];
             await using ObjectDraft draft = dataset.StartObject();
             await draft.Writer.WriteAsync<Doc>(rows, Ct);

@@ -44,9 +44,10 @@ internal enum PathPlace : byte
 /// The groups of rows of the object the path may hold a value in, a bit each, group 0 the low bit of byte 0;
 /// null when it may hold one in every group, or the object counts none.
 /// </param>
+/// <param name="WholeDoubles">Whether every number of a double entry is a 64-bit double (<see cref="DirectoryEntry.WholeDoubles"/>).</param>
 internal sealed record PathEntry(
     string[] Path, PathClass Class, long Values, PathPlace Place, long Low, long High, bool NaNs, byte[]? MinText, byte[]? MaxText,
-    byte[]? Groups = null)
+    byte[]? Groups = null, bool WholeDoubles = false)
 {
     /// <summary>Whether the path may hold a value in group <paramref name="group"/>; any group for -1.</summary>
     internal bool In(int group) => group < 0 || Groups is null || (group >> 3 < Groups.Length && (Groups[group >> 3] & (1 << (group & 7))) != 0);
@@ -114,6 +115,12 @@ internal readonly ref struct DirectoryEntry
 
     /// <summary>Whether the entry names the groups it may hold a value in; it may hold one in every group otherwise.</summary>
     internal bool HasGroups => (_flags & 8) != 0;
+
+    /// <summary>
+    /// Whether every number of a <see cref="PathClass.Double"/> entry is a 64-bit double, none a 32-bit float: what a count of
+    /// the rows keeps apart, which a shredding chooses from. Written since 2026-11-18; a directory before says nothing of it.
+    /// </summary>
+    internal bool WholeDoubles => (_flags & 16) != 0;
 
     internal ReadOnlySpan<byte> MinText { get; }
 
@@ -238,7 +245,8 @@ internal sealed class VariantDirectory
 
             (long low, long high, bool nans, byte[]? min, byte[]? max) = Bounds(count, @class);
             byte[]? held = groups > 1 ? GroupsOf(count.SpansOf(@class), groupRows, groups) : null;
-            entries.Add(new PathEntry(keys, @class, values, PlaceOf(shredding, @class), low, high, nans, min, max, held));
+            bool wholeDoubles = @class == PathClass.Double && count.Of(VariantClass.Double) == values;
+            entries.Add(new PathEntry(keys, @class, values, PlaceOf(shredding, @class), low, high, nans, min, max, held, wholeDoubles));
         }
 
         // Keys in their ordinal order, so that the same rows give the same bytes.
@@ -691,7 +699,8 @@ internal sealed class VariantDirectory
             writer.WriteVarint(Zigzag(entry.Low));
             writer.WriteVarint(Zigzag(entry.High));
             writer.WriteVarint(
-                (entry.NaNs ? 1UL : 0) | (entry.MinText is null ? 0 : 2UL) | (entry.MaxText is null ? 0 : 4UL) | (entry.Groups is null ? 0 : 8UL));
+                (entry.NaNs ? 1UL : 0) | (entry.MinText is null ? 0 : 2UL) | (entry.MaxText is null ? 0 : 4UL) | (entry.Groups is null ? 0 : 8UL)
+                | (entry.WholeDoubles ? 16UL : 0));
             Text(ref writer, entry.MinText);
             Text(ref writer, entry.MaxText);
             Text(ref writer, entry.Groups);
@@ -973,7 +982,7 @@ internal sealed class VariantDirectory
             Entries.Add(new PathEntry(
                 path, entry.Class, entry.Values, entry.Place, entry.Low, entry.High, entry.NaNs,
                 entry.HasMinText ? entry.MinText.ToArray() : null, entry.HasMaxText ? entry.MaxText.ToArray() : null,
-                entry.HasGroups ? entry.Groups.ToArray() : null));
+                entry.HasGroups ? entry.Groups.ToArray() : null, entry.WholeDoubles));
         }
     }
 
