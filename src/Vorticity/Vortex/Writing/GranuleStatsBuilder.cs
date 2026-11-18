@@ -226,13 +226,29 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     }
 
     /// <summary>Counts the rows' values in the open granule, each by its number, a null's -1 aside.</summary>
+    /// <remarks>
+    /// A run of rows of one value is counted at once, its end found a vector at a time: a block's rows come in the order of
+    /// their keys, and a series' rows hold its attributes row after row. Counted a row at a time, the keys of a consolidation
+    /// of metric records' attributes took 2.7 % of its processor (2026-11-18).
+    /// </remarks>
     private void Count(ReadOnlySpan<int> ids)
     {
         int mark = _granules + 1;
         Span<int> rowsOf = _rowsOf;
         Span<int> seenIn = _seenIn;
-        foreach (int id in ids)
+        int at = 0;
+        while (at < ids.Length)
         {
+            // A value the next row does not repeat is counted without looking for its run's end.
+            int id = ids[at];
+            int run = 1;
+            if (at + 1 < ids.Length && ids[at + 1] == id)
+            {
+                int past = ids[(at + 2)..].IndexOfAnyExcept(id);
+                run = past < 0 ? ids.Length - at : past + 2;
+            }
+
+            at += run;
             if (id < 0)
             {
                 continue;
@@ -256,7 +272,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
                 _met[_metCount++] = id;
             }
 
-            rowsOf[id]++;
+            rowsOf[id] += run;
         }
     }
 

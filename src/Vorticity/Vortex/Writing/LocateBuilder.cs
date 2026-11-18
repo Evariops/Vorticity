@@ -86,9 +86,24 @@ internal sealed class LocateBuilder : IndexBuilder
         }
         else
         {
+            // A run of rows of one value is noted once, its end found a vector at a time: a block's rows come in the order of
+            // their keys, and a series' rows hold its attributes row after row.
             Span<int> seenIn = _seenIn;
-            foreach (int id in ids[..count])
+            ReadOnlySpan<int> rows = ids[..count];
+            int at = 0;
+            while (at < rows.Length)
             {
+                int id = rows[at];
+                if (at + 1 < rows.Length && rows[at + 1] == id)
+                {
+                    int past = rows[(at + 2)..].IndexOfAnyExcept(id);
+                    at = past < 0 ? rows.Length : at + 2 + past;
+                }
+                else
+                {
+                    at++;
+                }
+
                 if (id < 0)
                 {
                     continue;
