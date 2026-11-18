@@ -3974,11 +3974,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // A column gathered as codes is cut where its values would have been: its target counts the values' bytes, so that
         // its chunks hold the rows they held, and what it holds, its codes, is what counts toward the writer's ceiling. The
         // values' bytes are those the rows name: a merge's staged rows view a text that repeats the row before's once.
-        // Gathered, the copy holds each row's bytes, which the encoders size the chunk by.
+        // Gathered, the copy holds each row's bytes, which the encoders size the chunk by, and a repeat views the copy of the
+        // row before: given views of their own, the repeats of a consolidation of metric records' gathered texts, 104 M rows,
+        // were each compared byte by byte by the chunk's search for runs (2026-11-18).
         bool coded = _dictionaries?[field] is not null;
         int owned = coded
             ? _dictionaries![field]!.CodeInto(arena, node, into, _codesTypes![field])
-            : into.CopyFrom(arena, node);
+            : into.CopyFrom(arena, node, viewRepeats: true);
         long held = into.ByteSize(owned);
         gathering.Nodes.Add(owned);
         gathering.Rows += rows;

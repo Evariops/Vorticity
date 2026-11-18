@@ -1954,7 +1954,12 @@ internal partial class CanonicalArena
     /// it by what its rows name, never by its buffers, takes it: a merge's runs waiting in its writer
     /// (<c>VortexFileWriter.Stage</c>), whose rows the writer copies again, each row's bytes, before an encoder sizes them.
     /// </param>
-    internal int CopyFrom(CanonicalArena source, int sourceIndex, bool shareRepeats = false)
+    /// <param name="viewRepeats">
+    /// Whether such a text, its bytes copied again all the same, views the copy made for the one before, when
+    /// <paramref name="shareRepeats"/> is not: the copy holds the bytes its rows name, as encoders size it, and the rows of a
+    /// value repeated have equal views, which a search for runs passes over whole. The columns a writer gathers.
+    /// </param>
+    internal int CopyFrom(CanonicalArena source, int sourceIndex, bool shareRepeats = false, bool viewRepeats = false)
     {
         ArgumentNullException.ThrowIfNull(source);
         if ((uint)sourceIndex >= (uint)source._recordCount)
@@ -1971,7 +1976,7 @@ internal partial class CanonicalArena
         Validity validity = src.Validity;
         if (validity.Kind == ValidityKind.Bitmap)
         {
-            validity = Validity.Bitmap(CopyFrom(source, validity.CanonicalNodeIndex, shareRepeats));
+            validity = Validity.Bitmap(CopyFrom(source, validity.CanonicalNodeIndex, shareRepeats, viewRepeats));
         }
 
         // A VarBinView is copied compact, and that is not an optimization but the difference
@@ -1982,7 +1987,7 @@ internal partial class CanonicalArena
         // block, would drag the whole heap of every block already emitted along with it.
         if (src.Kind == CanonicalKind.VarBinView)
         {
-            return CompactVarBinView(source, in src, validity, shareRepeats);
+            return CompactVarBinView(source, in src, validity, shareRepeats, viewRepeats);
         }
 
         // Children next, gathered before anything is committed so the block stays contiguous: a
@@ -1992,7 +1997,7 @@ internal partial class CanonicalArena
         int childStart = ReserveChildren(childCount);
         for (int i = 0; i < childCount; i++)
         {
-            int child = CopyFrom(source, source._children[src.ChildStart + i], shareRepeats);
+            int child = CopyFrom(source, source._children[src.ChildStart + i], shareRepeats, viewRepeats);
             _children[childStart + i] = child;
         }
 
@@ -2048,7 +2053,7 @@ internal partial class CanonicalArena
     /// trusting them.
     /// </para>
     /// </remarks>
-    private int CompactVarBinView(CanonicalArena source, in CanonicalRecord src, Validity validity, bool shareRepeats)
+    private int CompactVarBinView(CanonicalArena source, in CanonicalRecord src, Validity validity, bool shareRepeats, bool viewRepeats)
     {
         const int ViewSize = Decoders.Canonical.CanonicalSupport.ViewSize;
         const uint MaxInline = Decoders.Canonical.CanonicalSupport.MaxInlineViewLength;
@@ -2083,13 +2088,14 @@ internal partial class CanonicalArena
         // buffered view before it names views the copy made for that one: a series' rows repeat their
         // attributes, which a reassembled input views once, and each copy of the merge's runs copied
         // them again row by row, its comparisons downstream reading them whole where the same address
-        // ends one.
+        // ends one. Viewing repeats, such a view names that copy too, its own bytes copied all the same.
         Span<uint> words = MemoryMarshal.Cast<byte, uint>(writable);
         int at = 0;
         uint lastSize = 0;
         uint lastIndex = uint.MaxValue;
         uint lastOffset = 0;
         int lastAt = 0;
+        bool repeats = shareRepeats || viewRepeats;
         for (int j = 0; j <= lastBuffered && (shareRepeats || at < referenced); j++)
         {
             int w = j * 4;
@@ -2099,17 +2105,22 @@ internal partial class CanonicalArena
                 continue;
             }
 
-            if (shareRepeats && size == lastSize && words[w + 2] == lastIndex && words[w + 3] == lastOffset)
+            bool repeat = repeats && size == lastSize && words[w + 2] == lastIndex && words[w + 3] == lastOffset;
+            if (repeat && shareRepeats)
             {
                 words[w + 2] = 0;
                 words[w + 3] = (uint)lastAt;
                 continue;
             }
 
-            lastSize = size;
-            lastIndex = words[w + 2];
-            lastOffset = words[w + 3];
-            lastAt = at;
+            if (!repeat)
+            {
+                lastSize = size;
+                lastIndex = words[w + 2];
+                lastOffset = words[w + 3];
+                lastAt = at;
+            }
+
             uint index = words[w + 2];
             if (index >= (uint)src.DataBufferCount)
             {
@@ -2152,7 +2163,7 @@ internal partial class CanonicalArena
             }
 
             words[w + 2] = 0;
-            words[w + 3] = (uint)at;
+            words[w + 3] = (uint)(repeat ? lastAt : at);
             at += (int)size;
         }
 

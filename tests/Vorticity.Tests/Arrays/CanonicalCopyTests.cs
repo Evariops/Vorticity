@@ -322,6 +322,42 @@ public sealed class CanonicalCopyTests
     }
 
     /// <summary>
+    /// A copy that views repeats copies each row's bytes, as one that does not share them, but a text whose view names the
+    /// bytes the buffered view before it names views the copy made for that one: the repeats' views are equal, and every row
+    /// reads back once its source is refilled.
+    /// </summary>
+    [Fact]
+    public void ACopyThatViewsRepeatsCopiesEachRowAndViewsTheFirst()
+    {
+        DTypeArena types = new DTypeArena();
+        byte[] a = System.Text.Encoding.UTF8.GetBytes("a value of twenty b.");
+        byte[] b = System.Text.Encoding.UTF8.GetBytes("another value of twenty-seven");
+        string[] rows = ["A", "A", "A", "B", "B", "c", "A"];
+        CanonicalArena source = new CanonicalArena();
+        CanonicalArena viewed = new CanonicalArena();
+        int original = Repeats(types, source, a, b, rows);
+        int kept = viewed.CopyFrom(source, original, viewRepeats: true);
+        source.Reset();
+        _ = Repeats(types, source, b, a, rows);
+
+        CanonicalNode node = viewed.GetNode(kept);
+        Assert.Equal((4 * a.Length) + (2 * b.Length), node.GetDataBuffer(0).Length);
+        ReadOnlySpan<Int128> views = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, Int128>(node.Views.Span);
+        Assert.Equal(views[0], views[1]);
+        Assert.Equal(views[0], views[2]);
+        Assert.Equal(views[3], views[4]);
+        Assert.NotEqual(views[0], views[6]);
+        for (int row = 0; row < rows.Length; row++)
+        {
+            byte[] expected = rows[row] switch { "A" => a, "B" => b, _ => "c"u8.ToArray() };
+            Assert.Equal(expected, Vorticity.Compute.LiteralReader.ViewAt(node, row).ToArray());
+        }
+
+        // The bytes a repeat's own copy holds are its value's, as a copy that does not view repeats leaves them.
+        Assert.Equal(a, node.GetDataBuffer(0).Span.Slice(a.Length, a.Length).ToArray());
+    }
+
+    /// <summary>
     /// Rows of two texts too long for their views, <paramref name="a"/> and <paramref name="b"/>, each held once in the data
     /// buffer and viewed by every row that holds it, as a reassembled input views a series' repeated attributes; a "c" inline.
     /// </summary>
