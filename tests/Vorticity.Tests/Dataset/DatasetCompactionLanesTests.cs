@@ -133,6 +133,141 @@ public sealed partial class DatasetCompactionLanesTests
     }
 
     /// <summary>
+    /// Log records, a nullable message beside a variant of some forty keys, most of them sparse, in twelve appends a day over
+    /// two days, merged by size class: the tier merges write the same segments at one lane, four and fourteen, their
+    /// variant shredded, their blocks through their writers' lines past one lane.
+    /// </summary>
+    [Fact]
+    public async Task ATierMergeOfLogRecordsWritesTheSameSegmentsAtAnyDegree()
+    {
+        await using MemoryObjectStore built = new MemoryObjectStore();
+        {
+            Random random = new Random(41);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(built, LogDoc.Schema, LogOptionsOf(VortexSession.Default, LayoutOrganization.Tiered), Ct);
+            for (int a = 0; a < 24; a++)
+            {
+                await AppendLogsAsync(dataset, random, a * 1_500, 1_500, latePercent: 0, dayRows: 18_000);
+            }
+        }
+
+        List<CompactionResult> jobs = await SameObjectsAtDegreesAsync(
+            built, [1, 4, 14], static session => LogOptionsOf(session, LayoutOrganization.Tiered), static dataset => DrainAsync(dataset));
+        string ran = string.Join(", ", jobs.Select(static job => $"{job.Trigger} {job.ObjectsIn}->{job.ObjectsOut} line {job.WriterBlocksOnLine}"));
+        Assert.True(jobs.Exists(static job => job.Trigger == CompactionTrigger.Tier), ran);
+        Assert.True(jobs.Sum(static job => job.WriterBlocksOnLine) > 0, ran);
+    }
+
+    /// <summary>
+    /// The same records over a leveled tree of one day, a few of every append a little late, behind the rows level 1 already
+    /// holds, and nine appends left in level 0, past its ceiling: the exits of level 0, which keep the late rows apart,
+    /// write the same segments at one lane, four and fourteen.
+    /// </summary>
+    [Fact]
+    public async Task ExitsOfLevelZeroWithLateRowsWriteTheSameSegmentsAtAnyDegree()
+    {
+        await using MemoryObjectStore built = new MemoryObjectStore();
+        {
+            Random random = new Random(43);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(built, LogDoc.Schema, LogOptionsOf(VortexSession.Default, LayoutOrganization.Leveled), Ct);
+            for (int a = 0; a < 19; a++)
+            {
+                await AppendLogsAsync(dataset, random, a * 1_500, 1_500, latePercent: 3, dayRows: 1_000_000);
+                if (a < 10)
+                {
+                    await DrainAsync(dataset);
+                }
+            }
+        }
+
+        List<CompactionResult> jobs = await SameObjectsAtDegreesAsync(
+            built, [1, 4, 14], static session => LogOptionsOf(session, LayoutOrganization.Leveled), static dataset => DrainAsync(dataset));
+        string ran = string.Join(", ", jobs.Select(static job => $"{job.Trigger} L{job.FromLevel}->L{job.ToLevel} {job.ObjectsIn}->{job.ObjectsOut}"));
+        Assert.True(jobs.Exists(static job => job.Trigger == CompactionTrigger.LevelZeroCeiling), ran);
+    }
+
+    /// <summary>Every job the plan gives, run until none is left.</summary>
+    private static async Task<List<CompactionResult>> DrainAsync(VortexDataset dataset)
+    {
+        List<CompactionResult> jobs = [];
+        for (int step = 0; await dataset.CompactAsync(cancellationToken: Ct) is { } job; step++)
+        {
+            Assert.True(step < 1_000, "compaction never runs out of jobs");
+            jobs.Add(job);
+        }
+
+        return jobs;
+    }
+
+    /// <summary>
+    /// Appends <paramref name="rows"/> log records from instant <paramref name="from"/> on, a millisecond apart, a day each
+    /// <paramref name="dayRows"/>, <paramref name="latePercent"/> of them a little behind the last.
+    /// </summary>
+    private static async Task AppendLogsAsync(VortexDataset dataset, Random random, long from, int rows, int latePercent, long dayRows)
+    {
+        LogDoc[] logs = new LogDoc[rows];
+        for (int i = 0; i < rows; i++)
+        {
+            long at = from + i;
+            if (from > 0 && random.Next(100) < latePercent)
+            {
+                at = Math.Max(0, from - random.Next(1, 2_000));
+            }
+
+            logs[i] = new LogDoc(
+                (int)(at / dayRows),
+                $"svc-{random.Next(0, 12):D2}",
+                random.Next(4) == 0 ? null : $"request {random.Next(1_000)} served in {random.Next(500)} ms",
+                at,
+                LogAttributes(random));
+        }
+
+        await using ObjectDraft draft = dataset.StartObject();
+        await draft.Writer.WriteAsync<LogDoc>(logs, Ct);
+        await dataset.AppendAsync(draft, Ct);
+    }
+
+    /// <summary>A log record's attributes: six keys every record has, and of thirty-four more, each now and then, the later the rarer.</summary>
+    private static Variant LogAttributes(Random random)
+    {
+        List<(string, Variant)> fields =
+        [
+            ("route", Variant.From($"/api/r{random.Next(30)}")),
+            ("status", Variant.From(200 + (random.Next(4) * 100))),
+            ("duration", Variant.From(random.NextDouble() * 100)),
+            ("user", Variant.From($"user-{random.Next(800)}")),
+            ("host", Variant.From($"host-{random.Next(16)}")),
+            ("region", Variant.From(random.Next(3) == 0 ? "eu" : "us")),
+        ];
+        for (int key = 0; key < 34; key++)
+        {
+            if (random.Next(key + 2) == 0)
+            {
+                fields.Add(($"k{key:D2}", key % 3 == 0 ? Variant.From(random.Next(1_000)) : Variant.From($"v{random.Next(50)}")));
+            }
+        }
+
+        return Variant.Object([.. fields]);
+    }
+
+    private static DatasetOptions LogOptionsOf(VortexSession session, LayoutOrganization organization) => new DatasetOptions
+    {
+        Session = session,
+        Seed = 0x1067_0001,
+
+        // Blocks of 64 rows, so that an object is aimed at dozens of them and its writer sends several through its line.
+        Write = new VortexWriteOptions { BlockRows = 64 },
+        Layout = new DatasetLayout
+        {
+            Partition = LayoutValue.Column(nameof(LogDoc.Day)),
+            SortKey = [LayoutValue.Column(nameof(LogDoc.Service)), LayoutValue.Column(nameof(LogDoc.At))],
+            Organization = organization,
+            ObjectBytes = 1 << 19,
+            MergeFanout = 4,
+            CalmAfter = null,
+        },
+    };
+
+    /// <summary>
     /// Two appends of 150 000 rows, each read in several batches: the lanes work ahead of the merge, the input it reads
     /// decoding windows past its own two, or the slices of a piece after the one taken merging, and the rows are those of a
     /// consolidation on one lane.
@@ -383,8 +518,6 @@ public sealed partial class DatasetCompactionLanesTests
     private static async Task<List<CompactionResult>> SameSegmentsAtDegreesAsync(
         int[] degrees, Func<Random, string> service, Func<VortexSession, DatasetOptions> optionsOf)
     {
-        List<List<(string Path, byte[] Bytes)>> runs = [];
-        List<CompactionResult> jobs = [];
         await using MemoryObjectStore built = new MemoryObjectStore();
         {
             Random random = new Random(29);
@@ -397,6 +530,20 @@ public sealed partial class DatasetCompactionLanesTests
                 await dataset.AppendAsync(draft, Ct);
             }
         }
+
+        return await SameObjectsAtDegreesAsync(built, degrees, optionsOf, static async dataset => [.. await dataset.ConsolidateAsync(Ct)]);
+    }
+
+    /// <summary>
+    /// The store <paramref name="built"/>, copied once a degree of <paramref name="degrees"/>, its jobs run there by
+    /// <paramref name="drive"/> under <paramref name="optionsOf"/>: every segment of every object is the same bytes on every
+    /// copy. The jobs' results, of every degree.
+    /// </summary>
+    private static async Task<List<CompactionResult>> SameObjectsAtDegreesAsync(
+        MemoryObjectStore built, int[] degrees, Func<VortexSession, DatasetOptions> optionsOf, Func<VortexDataset, Task<List<CompactionResult>>> drive)
+    {
+        List<List<(string Path, byte[] Bytes)>> runs = [];
+        List<CompactionResult> jobs = [];
 
         // A copy keeps the objects' identities, which order the objects of equal keys in the tree, as a maintainer's store does.
         for (int run = 0; run < degrees.Length; run++)
@@ -413,7 +560,7 @@ public sealed partial class DatasetCompactionLanesTests
             int degree = degrees[run];
             await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
             await using VortexDataset dataset = await VortexDataset.OpenAsync(copy, optionsOf(session), Ct);
-            jobs.AddRange(await dataset.ConsolidateAsync(Ct));
+            jobs.AddRange(await drive(dataset));
             List<(string Path, byte[] Bytes)> segments = [];
             int index = 0;
             await foreach (PositionedObject positioned in dataset.ScanBuilder().ObjectsAsync(Ct))
@@ -531,4 +678,7 @@ public sealed partial class DatasetCompactionLanesTests
 
     [VortexRecord]
     public partial record struct Doc(int Day, string Service, long Sequence, Variant Attributes);
+
+    [VortexRecord]
+    public partial record struct LogDoc(int Day, string Service, string? Message, long At, Variant Attributes);
 }
