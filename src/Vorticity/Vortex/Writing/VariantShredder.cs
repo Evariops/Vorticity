@@ -1473,15 +1473,16 @@ internal static class VariantShredder
             _lastLength = text.Length;
         }
 
+        // A repeat's length is complemented, which tells Binary that it views the bytes of the value it repeats.
         protected override void Repeat()
         {
-            _lengths.Add(_lastLength);
+            _lengths.Add(~_lastLength);
             _bytes.AddRange(_last.AsSpan(0, _lastLength));
         }
 
         protected override void Repeat(int count)
         {
-            _lengths.AddRepeated(_lastLength, count);
+            _lengths.AddRepeated(~_lastLength, count);
             _bytes.AddTiled(_last.AsSpan(0, _lastLength), count);
         }
 
@@ -1580,8 +1581,16 @@ internal static class VariantShredder
     /// <summary>
     /// A column of byte strings over <paramref name="rows"/> rows, as views and one data buffer: each of
     /// <paramref name="lengths"/>' strings, end to end in <paramref name="bytes"/>, at its row of <paramref name="at"/>,
-    /// or at the next row when <paramref name="at"/> is null.
+    /// or at the next row when <paramref name="at"/> is null. A length complemented is a repeat of the string before,
+    /// whose bytes follow again, and its view names the bytes of the string it repeats.
     /// </summary>
+    /// <remarks>
+    /// A series' attribute repeats row after row, and each row viewing its own copy of the bytes, every search for the
+    /// column's runs compared the bytes of each row with the row before's: 362 M rows of the 828 M a consolidation of metric
+    /// records searched, 1.9 s of its processor (2026-11-18). Its rows view one copy now, and their views are equal. The
+    /// copies stay in the buffer, which the encoders size the column by. The views are zero past an inline value's bytes, as
+    /// <see cref="CanonicalSupport.WriteView(Span{byte}, ReadOnlySpan{byte}, int, int, int)"/> writes them into zeroed room.
+    /// </remarks>
     private static int Binary(
         CanonicalArena arena, DType dtype, int rows, Validity validity, Appended<int>? at, Appended<int> lengths, Appended<byte> bytes)
     {
@@ -1590,7 +1599,7 @@ internal static class VariantShredder
         int used = bytes.Count;
         if (used == 0)
         {
-            return arena.AddVarBinView(dtype, rows, validity, views, []);
+            return arena.AddVarBinView(dtype, rows, validity, views, [], padded: true);
         }
 
         VortexBuffer data = arena.AllocateUninitialized(used, 64, out Span<byte> written).Slice(0, used);
@@ -1599,19 +1608,29 @@ internal static class VariantShredder
         Reading<int> row = at is null ? default : new Reading<int>(at);
         Reading<int> length = new Reading<int>(lengths);
         int start = 0;
+        int viewed = 0;
         for (int i = 0; i < lengths.Count; i++)
         {
             int to = at is null ? i : row.Next();
             int count = length.Next();
+            if (count >= 0)
+            {
+                viewed = start;
+            }
+            else
+            {
+                count = ~count;
+            }
+
             if (count > 0)
             {
-                CanonicalSupport.WriteView(into.Slice(to * ViewSize, ViewSize), written.Slice(start, count), count, 0, start);
+                CanonicalSupport.WriteView(into.Slice(to * ViewSize, ViewSize), written.Slice(viewed, count), count, 0, viewed);
             }
 
             start += count;
         }
 
-        return arena.AddVarBinView(dtype, rows, validity, views, [data]);
+        return arena.AddVarBinView(dtype, rows, validity, views, [data], padded: true);
     }
 
     /// <summary>
