@@ -223,11 +223,16 @@ public sealed partial class VortexFileWriter
     /// <summary>
     /// Whether the line takes the block of <paramref name="rows"/> rows assembled at node <paramref name="node"/> of
     /// <paramref name="arena"/> beside others, <paramref name="pending"/> rows in transit before it: a whole block from a
-    /// block's start, the file's first block posed, whose rows go into transit without crossing a chunk of the file nor
-    /// making one alone; and whether they end a chunk (<paramref name="endsChunk"/>). A block that starts a chunk past the
-    /// rows in transit, makes a whole chunk or crosses one goes through alone, as the write of a batch cuts it
-    /// (<see cref="WriteInChunksAsync"/>).
+    /// block's start, the file's first block posed, whose rows go into transit without crossing a chunk of the file; and
+    /// whether they end a chunk (<paramref name="endsChunk"/>). A block that starts a chunk past the rows in transit or
+    /// crosses one goes through alone, as the write of a batch cuts it (<see cref="WriteInChunksAsync"/>).
     /// </summary>
+    /// <remarks>
+    /// A block that makes a whole chunk, its rows the chunk's to the last, ends it on the line as a block that completes one
+    /// does: it went through alone, and a consolidation of metric records, each of whose blocks makes a chunk, ingested its
+    /// 6 328 blocks one at a time on its flow, 7.45 s of its 9.6 s of writing at degree 14, behind 9.2 s at four lanes and
+    /// 11.6 at fourteen; on the line, 9.2 s at fourteen, the same bytes (2026-11-18).
+    /// </remarks>
     private bool LineTakes(CanonicalArena arena, int node, int rows, long pending, out bool endsChunk)
     {
         endsChunk = false;
@@ -244,7 +249,7 @@ public sealed partial class VortexFileWriter
             chunk = Math.Min(chunk, GatheredChunkRows(arena, node, rows));
         }
 
-        if (pending >= chunk || (pending == 0 && rows >= chunk) || rows > chunk - pending)
+        if (pending >= chunk || rows > chunk - pending)
         {
             return false;
         }
@@ -834,6 +839,9 @@ public sealed partial class VortexFileWriter
         private readonly Stack<Flight> _spare = new Stack<Flight>();
         private int[] _posed = [];
 
+        // By state, whether the epilogue being counted moved it past its flight (PoseUntouched); cleared after.
+        private bool[] _raised = [];
+
         // The flights admitted, prologued, whose epilogue ran, and landed, each a count of the writer's flights.
         private long _admitted;
         private long _prologued;
@@ -872,6 +880,7 @@ public sealed partial class VortexFileWriter
                     // The line made at a later block than the writer's first: the blocks before it went through one at a
                     // time, and count as landed, every state past them.
                     _posed = new int[writer.StateCount()];
+                    _raised = new bool[_posed.Length];
                     Array.Fill(_posed, (int)Math.Min(index, int.MaxValue));
                     _prologued = _epilogued = _landed = index;
                 }
@@ -1149,6 +1158,7 @@ public sealed partial class VortexFileWriter
                     _epiloguing = false;
                     _epilogued = index + 1;
                     flight.Phase = FlightPhase.Held;
+                    ready += PoseUntouched(flight);
                     if (!flight.EndsChunk || failed || Volatile.Read(ref _error) is not null)
                     {
                         Land(flight);
@@ -1301,6 +1311,72 @@ public sealed partial class VortexFileWriter
             }
 
             return ready;
+        }
+
+        /// <summary>
+        /// Moves every state past <paramref name="flight"/> whose epilogue ran, under the lock, and makes ready the items of the
+        /// next flight that waited for those it moved: how many. Its epilogue runs once every item of it ran, after the
+        /// epilogues of the flights before it, so no flight up to it has work left on any state, those it did not touch
+        /// included.
+        /// </summary>
+        /// <remarks>
+        /// A state moved only as an item that touched it ended. A flight that touched a state no flight since it did waited for
+        /// them forever: a shredded column's chain broken for three blocks, then taken again at a chunk's start, left the next
+        /// flight's item waiting for the state the three never moved, and a writer of 30 000 rows hung (2026-11-18). Hidden
+        /// while a block that made a whole chunk went through alone, which moves every state.
+        /// </remarks>
+        private int PoseUntouched(Flight flight)
+        {
+            int past = (int)Math.Min(flight.Index + 1, int.MaxValue);
+            bool any = false;
+            for (int state = 0; state < _posed.Length; state++)
+            {
+                if (_posed[state] < past)
+                {
+                    _posed[state] = past;
+                    _raised[state] = true;
+                    any = true;
+                }
+            }
+
+            if (!any)
+            {
+                return 0;
+            }
+
+            int ready = 0;
+            if (flight.Index + 1 < _prologued && _ring[(flight.Index + 1) % LandRing] is { Phase: FlightPhase.Running } next)
+            {
+                for (int i = 0; i < next.Count; i++)
+                {
+                    if (next.Waiting[i] == 0)
+                    {
+                        continue;
+                    }
+
+                    int freed = Raised(next.Own[i]) + Raised(next.After[i]);
+                    if (freed > 0 && (next.Waiting[i] -= freed) == 0)
+                    {
+                        _ready.Enqueue((next.Index << TicketBits) | (uint)i);
+                        ready++;
+                    }
+                }
+            }
+
+            Array.Clear(_raised);
+            return ready;
+        }
+
+        /// <summary>How many of <paramref name="states"/> the epilogue being counted moved (<see cref="PoseUntouched"/>).</summary>
+        private int Raised(int[] states)
+        {
+            int count = 0;
+            foreach (int state in states)
+            {
+                count += _raised[state] ? 1 : 0;
+            }
+
+            return count;
         }
 
         /// <summary>How many of <paramref name="states"/> are among <paramref name="past"/>.</summary>
