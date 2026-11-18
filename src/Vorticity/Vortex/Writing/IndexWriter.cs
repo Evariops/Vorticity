@@ -1174,9 +1174,10 @@ internal sealed class IndexWriter : IDisposable
         CanonicalArena into = feed.GroupRows(group);
         try
         {
+            VortexBuffer absent = default;
             for (int i = group; i < keyed; i += feed.Groups)
             {
-                pass.Nodes[i] = pass.Reads!.Write(into, i);
+                pass.Nodes[i] = pass.Reads!.Write(into, i, ref absent);
             }
 
             FeedSlots(feed, pass.Nodes, into, group, keyed, feed.Groups, rows, filled, blockRows);

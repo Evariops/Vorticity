@@ -420,9 +420,10 @@ internal sealed class VariantFieldExpr : FieldExpr
 
         try
         {
+            VortexBuffer absent = default;
             for (int i = 0; i < paths.Length; i++)
             {
-                into[i] = reads.Write(arena, i);
+                into[i] = reads.Write(arena, i, ref absent);
             }
         }
         finally
@@ -584,13 +585,21 @@ internal sealed class VariantFieldExpr : FieldExpr
     /// The second pass of <see cref="ApplyKeys"/> for path <paramref name="path"/> of <paramref name="reads"/>: its column over
     /// the rows the first read, written into <paramref name="into"/> from its key's notes alone.
     /// </summary>
-    private static int WriteKey(KeyReads reads, CanonicalArena into, int path)
+    private static int WriteKey(KeyReads reads, CanonicalArena into, int path, ref VortexBuffer absent)
     {
         CanonicalNode values = reads.Arena!.GetNode(reads.ValueIndex);
         ReadOnlySpan<byte> valueViews = values.Views.Span;
         int rows = reads.Rows;
         Block<Note> notes = reads.Notes;
-        Output output = new(into, reads.Paths[path].Read, rows);
+        VariantRead read = reads.Paths[path].Read;
+
+        // A key no row holds, and so none that repeats one: its column takes no slots of its own.
+        if (reads.Heads[reads.KeyOf[path]] < 0 && read is not (VariantRead.Has or VariantRead.AsBool))
+        {
+            return Output.Absent(into, read, rows, in values, ref absent);
+        }
+
+        Output output = new(into, read, rows);
         for (int n = reads.Heads[reads.KeyOf[path]]; n >= 0; n = notes[n].Next)
         {
             Note note = notes[n];
@@ -682,7 +691,13 @@ internal sealed class VariantFieldExpr : FieldExpr
         /// what <see cref="Apply"/> gives it. The pass's arena is read and not written, so that paths apart are written at
         /// once, each into an arena of its own.
         /// </summary>
-        internal int Write(CanonicalArena into, int path) => WriteKey(this, into, path);
+        /// <param name="into">The arena the column is written into.</param>
+        /// <param name="path">The path.</param>
+        /// <param name="absent">
+        /// The cleared slots the columns of the keys no row holds share, of <paramref name="into"/>: empty before the first
+        /// path written into it, then kept by the caller from one path to the next while the arena keeps its buffers.
+        /// </param>
+        internal int Write(CanonicalArena into, int path, ref VortexBuffer absent) => WriteKey(this, into, path, ref absent);
 
         /// <summary>Ends the pass <see cref="Read"/> began, its notes given back.</summary>
         internal void Release()
@@ -950,6 +965,11 @@ internal sealed class VariantFieldExpr : FieldExpr
                 return;
             }
 
+            if (Plain(row, found, valueViews, rowValue))
+            {
+                return;
+            }
+
             VariantScalar scalar = VariantScalar.Read(found);
             switch (_read)
             {
@@ -983,6 +1003,105 @@ internal sealed class VariantFieldExpr : FieldExpr
             }
 
             Present(row);
+        }
+
+        /// <summary>
+        /// Takes <paramref name="found"/> at <paramref name="row"/> from its header as it lies, when it is a short text, an
+        /// integer, a double, a float, a boolean or the null whose bytes are all there and the read takes a value in its
+        /// class without converting it: written when it is of that class, passed over when it is not. False for any other
+        /// value and any other read, which <see cref="VariantScalar"/> reads whole.
+        /// </summary>
+        /// <remarks>
+        /// The attributes of log records are short texts and numbers, some four hundred keys a column: read whole, each into
+        /// a scalar of every type's fields, they took a quarter of what writing the keys' columns cost (2026-11-19).
+        /// </remarks>
+        private bool Plain(int row, scoped ReadOnlySpan<byte> found, scoped ReadOnlySpan<byte> valueViews, scoped ReadOnlySpan<byte> rowValue)
+        {
+            if (_read is not (VariantRead.AsString or VariantRead.AsInt64 or VariantRead.AsDouble or VariantRead.AsBool or VariantRead.AsTimestamp)
+                || found.IsEmpty)
+            {
+                return false;
+            }
+
+            byte header = found[0];
+            int type = header >> 2;
+            switch (header & 0x03)
+            {
+                case ParquetVariant.BasicShortString:
+                    if (found.Length <= type)
+                    {
+                        return false;
+                    }
+
+                    if (_read == VariantRead.AsString)
+                    {
+                        View(row, found.Slice(1, type), valueViews, rowValue);
+                        Present(row);
+                    }
+
+                    return true;
+
+                case ParquetVariant.BasicObject:
+                case ParquetVariant.BasicArray:
+                    return false;
+            }
+
+            switch (type)
+            {
+                case 0:
+                    return true;
+                case 1:
+                case 2:
+                    if (_read == VariantRead.AsBool)
+                    {
+                        if (type == 1)
+                        {
+                            Set(_into, row);
+                        }
+
+                        Present(row);
+                    }
+
+                    return true;
+                case 3 when found.Length >= 2:
+                    return Integer(row, (sbyte)found[1]);
+                case 4 when found.Length >= 3:
+                    return Integer(row, BinaryPrimitives.ReadInt16LittleEndian(found[1..]));
+                case 5 when found.Length >= 5:
+                    return Integer(row, BinaryPrimitives.ReadInt32LittleEndian(found[1..]));
+                case 6 when found.Length >= 9:
+                    return Integer(row, BinaryPrimitives.ReadInt64LittleEndian(found[1..]));
+                case 7 when found.Length >= 9:
+                    return Number(row, BinaryPrimitives.ReadDoubleLittleEndian(found[1..]));
+                case 14 when found.Length >= 5:
+                    return Number(row, BinaryPrimitives.ReadSingleLittleEndian(found[1..]));
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>An integer at <paramref name="row"/>, written when integers are read; true either way, the value taken.</summary>
+        private bool Integer(int row, long value)
+        {
+            if (_read == VariantRead.AsInt64)
+            {
+                BinaryPrimitives.WriteInt64LittleEndian(_into[(row * 8)..], value);
+                Present(row);
+            }
+
+            return true;
+        }
+
+        /// <summary>A double or a float at <paramref name="row"/>, written when doubles are read; true either way, the value taken.</summary>
+        private bool Number(int row, double value)
+        {
+            if (_read == VariantRead.AsDouble)
+            {
+                BinaryPrimitives.WriteDoubleLittleEndian(_into[(row * 8)..], value);
+                Present(row);
+            }
+
+            return true;
         }
 
         /// <summary>The view of a string: inline when it fits, otherwise into the data buffer the variant's value lies in.</summary>
@@ -1162,10 +1281,16 @@ internal sealed class VariantFieldExpr : FieldExpr
             Validity validity = _present == _rows ? Validity.AllValid
                 : _present == 0 ? Validity.AllInvalid
                 : Validity.Bitmap(arena.AddBool(BitmapType, _rows, Validity.NonNullable, _validity, 0));
-            switch (_read)
+            return Node(arena, _read, _rows, validity, _values, in values);
+        }
+
+        /// <summary>The node of a column of <paramref name="rows"/> rows read as <paramref name="read"/>, its slots or bits in <paramref name="slots"/>.</summary>
+        private static int Node(CanonicalArena arena, VariantRead read, int rows, Validity validity, VortexBuffer slots, in CanonicalNode values)
+        {
+            switch (read)
             {
                 case VariantRead.AsBool:
-                    return arena.AddBool(BoolType, _rows, validity, _values, 0);
+                    return arena.AddBool(BoolType, rows, validity, slots, 0);
                 case VariantRead.AsString:
                 {
                     // The views name the value column's data buffers by index, so they are its own.
@@ -1177,17 +1302,39 @@ internal sealed class VariantFieldExpr : FieldExpr
                         buffers.Span[i] = values.GetDataBuffer(i);
                     }
 
-                    return arena.AddVarBinView(StringType, _rows, validity, _values, buffers.Span);
+                    return arena.AddVarBinView(StringType, rows, validity, slots, buffers.Span);
                 }
 
                 case VariantRead.AsDouble:
                 case VariantRead.ToDouble:
-                    return arena.AddPrimitive(DoubleType, _rows, validity, PType.F64, _values);
+                    return arena.AddPrimitive(DoubleType, rows, validity, PType.F64, slots);
                 case VariantRead.AsTimestamp:
-                    return arena.AddExtension(TimestampType, _rows, arena.AddPrimitive(TimestampType.StorageType, _rows, validity, PType.I64, _values));
+                    return arena.AddExtension(TimestampType, rows, arena.AddPrimitive(TimestampType.StorageType, rows, validity, PType.I64, slots));
                 default:
-                    return arena.AddPrimitive(Int64Type, _rows, validity, PType.I64, _values);
+                    return arena.AddPrimitive(Int64Type, rows, validity, PType.I64, slots);
             }
+        }
+
+        /// <summary>
+        /// The column of a key no row holds, read as numbers or texts: every row null, its slots the first bytes of
+        /// <paramref name="zeros"/>, the cleared slots every such key written into <paramref name="arena"/> shares, made at
+        /// the first.
+        /// </summary>
+        /// <remarks>
+        /// A block of log records holds the keys of the service it comes from, a few dozen of the four hundred its column
+        /// shreds. Each of the others took a column of its own, cleared whole, 128 KB a key of texts and a block
+        /// (2026-11-19).
+        /// </remarks>
+        internal static int Absent(CanonicalArena arena, VariantRead read, int rows, in CanonicalNode values, ref VortexBuffer zeros)
+        {
+            int width = read == VariantRead.AsString ? CanonicalSupport.ViewSize : sizeof(long);
+            int most = Math.Max(rows, 1) * CanonicalSupport.ViewSize;
+            if (zeros.Length < most)
+            {
+                zeros = arena.Allocate(most, 64, out _);
+            }
+
+            return Node(arena, read, rows, Validity.AllInvalid, zeros.Slice(0, Math.Max(rows * width, width)), in values);
         }
     }
 }
