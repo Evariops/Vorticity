@@ -185,6 +185,55 @@ public sealed partial class DatasetCompactionLanesTests
         Assert.True(jobs.Exists(static job => job.Trigger == CompactionTrigger.LevelZeroCeiling), ran);
     }
 
+    /// <summary>
+    /// Six appends of log records whose keys interleave closely, every append holding each service's instants a sixth apart,
+    /// and some of every append deleted before the consolidation: the merge hands its writer runs of one row, each of another
+    /// input than the run before, which the writer copies a window of each input's batch at a time and gathers into its
+    /// blocks. The consolidation holds every record kept, each with its own message, null where it was, and attributes.
+    /// </summary>
+    [Fact]
+    public async Task AMergeOfInputsWhoseKeysInterleaveKeepsEveryRowWithItsValues()
+    {
+        Random random = new Random(47);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, LogDoc.Schema, LogOptionsOf(VortexSession.Default, LayoutOrganization.Tiered), Ct);
+        List<LogDoc> kept = [];
+        for (int a = 0; a < 6; a++)
+        {
+            LogDoc[] logs = new LogDoc[3_000];
+            for (int i = 0; i < logs.Length; i++)
+            {
+                long at = (i * 6L) + a;
+                logs[i] = new LogDoc(
+                    0,
+                    $"svc-{i % 3:D2}",
+                    random.Next(4) == 0 ? null : $"request {random.Next(1_000)} served in {random.Next(500)} ms",
+                    at,
+                    LogAttributes(random));
+            }
+
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<LogDoc>(logs, Ct);
+            await dataset.AppendAsync(draft, Ct);
+            kept.AddRange(logs.Where(static log => log.At is not (>= 4_000 and < 6_000) and not (>= 11_000 and < 11_030)));
+        }
+
+        await dataset.DeleteAsync<LogDoc>(r => (r.At >= 4_000 & r.At < 6_000) | (r.At >= 11_000 & r.At < 11_030), Ct);
+        IReadOnlyList<CompactionResult> results = await dataset.ConsolidateAsync(Ct);
+        Assert.NotEmpty(results);
+
+        List<LogDoc> read = [.. (await dataset.Scan<LogDoc>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(static log => log.At)];
+        kept.Sort(static (x, y) => x.At.CompareTo(y.At));
+        Assert.Equal(kept.Count, read.Count);
+        for (int i = 0; i < kept.Count; i++)
+        {
+            Assert.Equal(kept[i].At, read[i].At);
+            Assert.Equal(kept[i].Service, read[i].Service);
+            Assert.Equal(kept[i].Message, read[i].Message);
+            Assert.True(kept[i].Attributes.Equals(read[i].Attributes), $"record {kept[i].At}");
+        }
+    }
+
     /// <summary>Every job the plan gives, run until none is left.</summary>
     private static async Task<List<CompactionResult>> DrainAsync(VortexDataset dataset)
     {

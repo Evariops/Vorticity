@@ -2317,17 +2317,24 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private void Own(Staging staging)
     {
-        CanonicalArena into = staging.Context.Canonical;
-        List<StagedPart> parts = staging.Parts;
-        for (int i = 0; i < parts.Count; i++)
+        if (!_mayShareChildren && Windowed(staging))
         {
-            StagedPart part = parts[i];
-            if (part.Source is { } from)
+            OwnWindows(staging);
+        }
+        else
+        {
+            CanonicalArena into = staging.Context.Canonical;
+            List<StagedPart> parts = staging.Parts;
+            for (int i = 0; i < parts.Count; i++)
             {
-                // A text that repeats the row before's is copied once: the rows staged are sized by the bytes they name, and
-                // the writer copies each row's bytes again as it gathers them, before any encoder sizes them.
-                int window = into.DecodedTree(CanonicalSlice.SliceAcross(from, into, part.Root, part.Row, part.Rows));
-                parts[i] = new StagedPart(null, 0, 0, part.Rows, Owned(into, into, window, shareRepeats: true));
+                StagedPart part = parts[i];
+                if (part.Source is { } from)
+                {
+                    // A text that repeats the row before's is copied once: the rows staged are sized by the bytes they name, and
+                    // the writer copies each row's bytes again as it gathers them, before any encoder sizes them.
+                    int window = into.DecodedTree(CanonicalSlice.SliceAcross(from, into, part.Root, part.Row, part.Rows));
+                    parts[i] = new StagedPart(null, 0, 0, part.Rows, Owned(into, into, window, shareRepeats: true));
+                }
             }
         }
 
@@ -2335,8 +2342,126 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
+    /// Whether the runs of <paramref name="staging"/> still held in a merge's inputs are copied a window of each input batch at
+    /// a time rather than one by one, which then has its block gathered from the windows (<see cref="Gathered"/>): the windows
+    /// are told in <see cref="Staging.Windows"/>, each run's in <see cref="Staging.RunWindows"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A run copied alone pays the slice, the decoding and the copy of every column of the schema, and its block's concatenation
+    /// a piece of every column again, whatever its rows. A merge of inputs whose keys interleave closely hands its writer runs
+    /// of one or two rows: 1.2 million runs for 1.8 million rows of a consolidation of 60 appended objects, which assembled its
+    /// blocks in 2.9 s of 8.3 s of processor at degree 14, and 0.26 s with the windows (2026-11-18). An input's runs in a block
+    /// follow one another in its batch, the rows a merge passes over between them aside, so a window over each batch holds
+    /// them all at once.
+    /// </para>
+    /// <para>
+    /// The windows cost one more pass over the block's rows, the gather, and the copy of the rows they span that no run takes;
+    /// the runs copied alone, a fixed price each. The windows are taken when the runs they spare are worth more
+    /// (<see cref="RunCost"/>, <see cref="PassedOverCost"/>).
+    /// </para>
+    /// </remarks>
+    private static bool Windowed(Staging staging)
+    {
+        List<StagedPart> parts = staging.Parts;
+        Dictionary<(CanonicalArena, int), int> windowOf = staging.WindowOf;
+        List<RunWindow> windows = staging.Windows;
+        if (staging.RunWindows.Length < parts.Count)
+        {
+            staging.RunWindows = new int[Math.Max(parts.Count, staging.RunWindows.Length * 2)];
+        }
+
+        int runs = 0;
+        long rows = 0;
+        for (int i = 0; i < parts.Count; i++)
+        {
+            StagedPart part = parts[i];
+            if (part.Source is not { } from)
+            {
+                continue;
+            }
+
+            ref int window = ref CollectionsMarshal.GetValueRefOrAddDefault(windowOf, (from, part.Root), out bool exists);
+            if (!exists)
+            {
+                window = windows.Count;
+                windows.Add(new RunWindow(from, part.Root, part.Row, part.Row + part.Rows));
+            }
+            else
+            {
+                ref RunWindow known = ref CollectionsMarshal.AsSpan(windows)[window];
+                known.Row = Math.Min(known.Row, part.Row);
+                known.End = Math.Max(known.End, part.Row + part.Rows);
+            }
+
+            staging.RunWindows[i] = window;
+            runs++;
+            rows += part.Rows;
+        }
+
+        windowOf.Clear();
+        long spanned = 0;
+        foreach (RunWindow window in windows)
+        {
+            spanned += window.End - window.Row;
+        }
+
+        if ((long)(runs - windows.Count) * RunCost > rows + ((spanned - rows) * PassedOverCost))
+        {
+            return true;
+        }
+
+        windows.Clear();
+        return false;
+    }
+
+    /// <summary>
+    /// The rows a block's gather goes through for the price of one run copied alone, measured on the metrics schema at degree
+    /// 14 (2026-11-18): past its rows' bytes, a run cost 1.7 µs to copy and 0.75 µs to concatenate, and a row 14 ns to gather.
+    /// A consolidation of 51.8 million rows assembled its 1.52 million runs in 6.3 s of processor, and its 0.50 million windows
+    /// in 4.5 s. Both prices grow with the columns, which the ratio leaves out.
+    /// </summary>
+    private const int RunCost = 170;
+
+    /// <summary>
+    /// The rows a block's gather goes through for the price of one row a window copies that no run takes, which a merge passed
+    /// over: a row cost 64 ns to copy on the metrics schema (2026-11-18), against 14 ns to gather.
+    /// </summary>
+    private const int PassedOverCost = 5;
+
+    /// <summary>
+    /// Copies each window <see cref="Windowed"/> told of <paramref name="staging"/> into its arena, decoded, then has each run
+    /// name its rows there: its part becomes rows of the window's node, which <see cref="Assemble"/> gathers.
+    /// </summary>
+    private void OwnWindows(Staging staging)
+    {
+        CanonicalArena into = staging.Context.Canonical;
+        Span<RunWindow> windows = CollectionsMarshal.AsSpan(staging.Windows);
+        for (int w = 0; w < windows.Length; w++)
+        {
+            ref RunWindow window = ref windows[w];
+            int slice = into.DecodedTree(CanonicalSlice.SliceAcross(window.Source, into, window.Root, window.Row, window.End - window.Row));
+            window.Node = Owned(into, into, slice, shareRepeats: true);
+        }
+
+        List<StagedPart> parts = staging.Parts;
+        for (int i = 0; i < parts.Count; i++)
+        {
+            StagedPart part = parts[i];
+            if (part.Source is not null)
+            {
+                RunWindow window = windows[staging.RunWindows[i]];
+                parts[i] = new StagedPart(null, 0, part.Row - window.Row, part.Rows, window.Node);
+            }
+        }
+
+        staging.Windows.Clear();
+        staging.Gathers = true;
+    }
+
+    /// <summary>
     /// The rows of <paramref name="staging"/> as one node of its arena: those still held in a merge's inputs copied, and every
-    /// part concatenated. Its parts are let go.
+    /// part concatenated, or gathered from the windows they were copied in. Its parts are let go.
     /// </summary>
     private int Assemble(Staging staging)
     {
@@ -2344,7 +2469,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         ScanContext context = staging.Context;
         List<StagedPart> parts = staging.Parts;
         int node;
-        if (parts.Count == 1)
+        if (staging.Gathers)
+        {
+            node = Gathered(staging);
+            staging.Gathers = false;
+        }
+        else if (parts.Count == 1)
         {
             node = parts[0].Node;
         }
@@ -2365,6 +2495,66 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         parts.Clear();
         return node;
+    }
+
+    /// <summary>
+    /// The rows of <paramref name="staging"/>, whose parts name rows of the nodes they were copied in, as one node: the nodes
+    /// concatenated once each, and the rows gathered from them in the parts' order.
+    /// </summary>
+    private int Gathered(Staging staging)
+    {
+        ScanContext context = staging.Context;
+        CanonicalArena into = context.Canonical;
+        List<StagedPart> parts = staging.Parts;
+        Dictionary<int, int> starts = staging.NodeStarts;
+        if (staging.Order.Length < parts.Count)
+        {
+            staging.Order = new int[Math.Max(parts.Count, staging.Order.Length * 2)];
+        }
+
+        if (staging.Picks.Length < staging.Rows)
+        {
+            staging.Picks = new int[Math.Max(staging.Rows, staging.Picks.Length * 2)];
+        }
+
+        Span<int> picks = staging.Picks;
+        int nodes = 0;
+        int total = 0;
+        int picked = 0;
+        for (int i = 0; i < parts.Count; i++)
+        {
+            StagedPart part = parts[i];
+            ref int start = ref CollectionsMarshal.GetValueRefOrAddDefault(starts, part.Node, out bool exists);
+            if (!exists)
+            {
+                start = total;
+                staging.Order[nodes++] = part.Node;
+                total += into.GetNode(part.Node).Length;
+            }
+
+            int from = start + part.Row;
+            for (int row = 0; row < part.Rows; row++)
+            {
+                picks[picked++] = from + row;
+            }
+        }
+
+        starts.Clear();
+        int all = CanonicalConcat.Concat(context.Decode, _schema, total, staging.Order.AsSpan(0, nodes));
+        return Compute.CanonicalFilter.Apply(into, all, picks[..picked]);
+    }
+
+    /// <summary>
+    /// Rows <see cref="Row"/> to <see cref="End"/> of node <see cref="Root"/> of a merge's input batch <see cref="Source"/>,
+    /// which hold every run a block takes of it, and the node of the block's arena they were copied in.
+    /// </summary>
+    private struct RunWindow(CanonicalArena source, int root, int row, int end)
+    {
+        internal readonly CanonicalArena Source = source;
+        internal readonly int Root = root;
+        internal int Row = row;
+        internal int End = end;
+        internal int Node = -1;
     }
 
     /// <summary>
@@ -2684,6 +2874,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         // The parts' nodes in order, for their concatenation, kept from one block to the next.
         internal int[] Order = new int[256];
+
+        // The windows of a merge's input batches its runs are copied in (Windowed), each run's window by its part, the window
+        // of each batch, and where each node of the arena its parts name starts once concatenated: kept from one block to the
+        // next.
+        internal readonly List<RunWindow> Windows = [];
+        internal int[] RunWindows = [];
+        internal readonly Dictionary<(CanonicalArena, int), int> WindowOf = [];
+        internal readonly Dictionary<int, int> NodeStarts = [];
+
+        /// <summary>Whether its parts name rows of the windows they were copied in, which its block gathers (<see cref="Gathered"/>).</summary>
+        internal bool Gathers;
+
+        // The row of its nodes' concatenation each of its rows comes from, kept from one block to the next.
+        internal int[] Picks = [];
     }
 
     /// <summary>Seals the whole blocks waiting in transit into a chunk, whatever their bytes.</summary>
