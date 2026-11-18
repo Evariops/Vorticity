@@ -2444,7 +2444,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// Copies each window <see cref="Windowed"/> told of <paramref name="staging"/> into its arena, decoded, then has each run
     /// name its rows there: its part becomes rows of the window's node, which <see cref="Assemble"/> gathers.
     /// </summary>
-    private void OwnWindows(Staging staging)
+    private void OwnWindows(Staging staging) => Windows(staging, owned: true);
+
+    /// <summary>
+    /// Has each window <see cref="Windowed"/> told of <paramref name="staging"/> sliced in its arena, decoded, and copied when
+    /// <paramref name="owned"/>, or left over its input batch's bytes otherwise; then has each run name its rows there.
+    /// </summary>
+    private void Windows(Staging staging, bool owned)
     {
         CanonicalArena into = staging.Context.Canonical;
         Span<RunWindow> windows = CollectionsMarshal.AsSpan(staging.Windows!);
@@ -2452,7 +2458,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             ref RunWindow window = ref windows[w];
             int slice = into.DecodedTree(CanonicalSlice.SliceAcross(window.Source, into, window.Root, window.Row, window.End - window.Row));
-            window.Node = Owned(into, into, slice, shareRepeats: true);
+            window.Node = owned ? Owned(into, into, slice, shareRepeats: true) : slice;
         }
 
         List<StagedPart> parts = staging.Parts;
@@ -2476,6 +2482,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private int Assemble(Staging staging)
     {
+        // Runs still in a merge's inputs, a window of each batch: gathered where they lie, then copied once. Each window copied
+        // first, then the windows concatenated and their rows gathered, paid the copy of every node of the schema for each of
+        // a block's eighty windows of metric records, half of its assembly's 630 µs (2026-11-18).
+        if (!_mayShareChildren && Windowed(staging))
+        {
+            CanonicalArena into = staging.Context.Canonical;
+            Windows(staging, owned: false);
+            int gathered = into.CopyFrom(into, Gathered(staging), shareRepeats: true);
+            staging.Gathers = false;
+            staging.Parts.Clear();
+            Ledger?.Release(staging, ref staging.FirstRun);
+            return gathered;
+        }
+
         Own(staging);
         ScanContext context = staging.Context;
         List<StagedPart> parts = staging.Parts;
