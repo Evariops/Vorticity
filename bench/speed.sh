@@ -198,7 +198,9 @@ for bench in ${only//,/ }; do
     load=$(uptime | sed -E 's/.*averages?: ([0-9.,]+).*/\1/' | tr -d ',')
     if [ $same = 1 ]; then
       written=$(echo "$fields" | cut -f12)
-      before=$(awk -F'\t' -v b="$base" -v n="$bench" -v d="$degree" '$2==b && $4==n && $5==d && $18!="-" {x=$18} END {print x}' "$ledger")
+      # The bytes depend on the memory limit (a writer gathers its chunks within its share of it): its base's at the same.
+      before=$(awk -F'\t' -v b="$base" -v n="$bench" -v d="$degree" -v m="$memory" \
+        '$2==b && $4==n && $5==d && $18!="-" && (m=="2g" ? $6 !~ /-/ : $6 ~ ("-" m "$")) {x=$18} END {print x}' "$ledger")
       if [ -n "$before" ] && [ "$written" != "$before" ]; then
         echo "$bench at $degree: bytes ${written:0:8} where the base wrote ${before:0:8}, not written to the ledger (--same-bytes)" >&2
         refused=1; continue

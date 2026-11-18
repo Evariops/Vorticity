@@ -59,6 +59,9 @@ internal sealed class JobMemory : IAsyncDisposable
     /// <summary>Notes an input its first pass counted from its directories alone, from the lane that counted it.</summary>
     internal void ToldByDirectories() => Interlocked.Increment(ref _toldByDirectories);
 
+    /// <summary>The inputs its first pass counted in parts of their rows, side by side, and the parts.</summary>
+    internal (int Inputs, int Parts) CensusParts { get; set; }
+
     /// <summary>The lane the job's own flow holds, which its objects' sinks give back while they wait for the store; null before it holds one.</summary>
     internal Execution.HeldLane? Lane { get; set; }
 

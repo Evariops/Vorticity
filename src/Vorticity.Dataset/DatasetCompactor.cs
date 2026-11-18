@@ -145,6 +145,9 @@ public sealed record CompactionResult
 
     /// <summary>The inputs its first pass counted from their path directories alone, reading none of their rows (<see cref="Indexes.VariantDirectory.ValueBytes"/>).</summary>
     internal int InputsToldByDirectories { get; init; }
+
+    /// <summary>The inputs its first pass counted in parts of their rows side by side, and the parts (<see cref="DatasetOptions.CensusPartRows"/>).</summary>
+    internal (int Inputs, int Parts) CensusParts { get; init; }
 }
 
 /// <summary>Runs one compaction: a k-way merge of the inputs on the sort key when there is
@@ -759,6 +762,7 @@ internal static partial class DatasetCompactor
             StoreWaitsWithoutLane = memory.Lane?.GivenBack ?? 0,
             AdvancesHeldBack = memory.HeldBack,
             InputsToldByDirectories = memory.InputsToldByDirectories,
+            CensusParts = memory.CensusParts,
         };
     }
 
@@ -1632,7 +1636,9 @@ internal static partial class DatasetCompactor
     /// inputs counted every row on one thread, and took a fifth of a tier merge of log records. An input's counts are added
     /// to its values' once it and the inputs before it are counted, in the inputs' order whatever the lanes' pace, and its
     /// censuses go back to <see cref="Censuses"/> for the next input to count in: what the job holds is its values' keys,
-    /// where every input's census, kept to the end, made the job's keys as many times over as it has inputs.
+    /// where every input's census, kept to the end, made the job's keys as many times over as it has inputs. A large input
+    /// that no directory tells is counted in parts of its rows (<see cref="CensusPartsAsync"/>), side by side as the inputs
+    /// are and added in their order, which makes the census the input's rows counted one after the other make.
     /// </remarks>
     private static async ValueTask<IReadOnlyList<ValueShredding>> PlanValuesAsync(
         VortexDataset dataset, DatasetSchema schema, CompactionJob job, JobMemory memory, KeyRanges? piece, CancellationToken cancellationToken)
@@ -1640,10 +1646,15 @@ internal static partial class DatasetCompactor
         int[] variants = VariantColumns(schema.DType);
         ValueCut? values = schema.Cut;
         int textBound = dataset.Options.Write.StringBoundBytes;
-        List<ValueCount>?[] counts = new List<ValueCount>?[job.Inputs.Count];
+
+        // What the lanes count, in the inputs' order: each input whole, or a large one in parts of its rows (CensusPartsAsync).
+        using CensusParts plan = await CensusPartsAsync(dataset, schema, job, variants, memory, piece, cancellationToken).ConfigureAwait(false);
+        List<CensusPart> parts = plan.Parts;
+        List<ValueCount>?[] counts = new List<ValueCount>?[parts.Count];
         List<(byte[] First, PathCensus[] Paths)> added = [];
         List<int> refused = [];
         int next = 0;
+        ValueCount? pending = null;
         Lock gate = new Lock();
 
         // As many lanes as the room the jobs' budget leaves holds what a lane holds as it counts an input: the input open,
@@ -1655,22 +1666,22 @@ internal static partial class DatasetCompactor
             perLane = Math.Max(perLane, InputCost(dataset, schema, input.Entry, censusRows) + File.VortexReadOptions.DefaultVariantSliceBytes);
         }
 
-        int most = Math.Min(Math.Max(1, dataset.Session.Options.MaxDegreeOfParallelism), job.Inputs.Count);
+        int most = Math.Min(Math.Max(1, dataset.Session.Options.MaxDegreeOfParallelism), parts.Count);
         int admitted = (int)Math.Clamp(memory.Room / perLane, 1, most);
 
         // The job's own lane, and beside it the lanes of the session's that are free now (LaneBudget), as many as the room
         // admits: the job holds the session's degree with its writers' helpers and every other job's, where the census took
-        // its own threads past it. Each lane given back as it finds no input left.
+        // its own threads past it. Each lane given back as it finds no part left.
         await Execution.LaneWorkers.ForAsync(
             dataset.Session.Lanes,
-            job.Inputs.Count,
+            parts.Count,
             admitted,
-            async (input, token) =>
+            async (part, token) =>
             {
                 List<ValueCount> counted;
                 try
                 {
-                    counted = await CountAsync(dataset, schema, job, input, variants, memory, piece, token).ConfigureAwait(false);
+                    counted = await CountAsync(dataset, schema, job, parts[part].Input, variants, memory, piece, token, parts[part].Rows, parts[part].Told).ConfigureAwait(false);
                 }
                 catch (VortexMemoryException) when (memory.Refused && !token.IsCancellationRequested)
                 {
@@ -1679,7 +1690,7 @@ internal static partial class DatasetCompactor
                     // count held went back as it unwound.
                     lock (gate)
                     {
-                        refused.Add(input);
+                        refused.Add(part);
                     }
 
                     return;
@@ -1687,17 +1698,17 @@ internal static partial class DatasetCompactor
 
                 lock (gate)
                 {
-                    counts[input] = counted;
+                    counts[part] = counted;
                     Drain();
                 }
             },
             cancellationToken).ConfigureAwait(false);
 
-        // The inputs refused beside the others, each counted alone on the job's thread, in their order.
+        // The parts refused beside the others, each counted alone on the job's thread, in their order.
         refused.Sort();
-        foreach (int input in refused)
+        foreach (int part in refused)
         {
-            counts[input] = await CountAsync(dataset, schema, job, input, variants, memory, piece, cancellationToken).ConfigureAwait(false);
+            counts[part] = await CountAsync(dataset, schema, job, parts[part].Input, variants, memory, piece, cancellationToken, parts[part].Rows, parts[part].Told).ConfigureAwait(false);
             Drain();
         }
 
@@ -1725,14 +1736,56 @@ internal static partial class DatasetCompactor
 
         return shreddings;
 
-        // The inputs counted, added to their values in the inputs' order up to the first not counted yet.
+        // The parts counted, added to their values in the parts' order up to the first not counted yet. The parts of an input
+        // counted in parts make its census first, each added after the one before, then the paths its directories tell, as a
+        // count of the whole input adds them after its rows; the input's census then goes to its value.
         void Drain()
         {
             for (; next < counts.Length && counts[next] is { } ready; counts[next++] = null)
             {
+                CensusPart part = parts[next];
+                if (part.Rows is null)
+                {
+                    foreach (ValueCount count in ready)
+                    {
+                        Add(count);
+                    }
+
+                    continue;
+                }
+
                 foreach (ValueCount count in ready)
                 {
-                    Add(count);
+                    if (pending is null)
+                    {
+                        pending = count;
+                        continue;
+                    }
+
+                    for (int v = 0; v < variants.Length; v++)
+                    {
+                        pending.Paths[v].Merge(count.Paths[v]);
+                    }
+
+                    Censuses.Return(count.Paths);
+                }
+
+                if (part.Last && pending is not null)
+                {
+                    if (plan.Take(next) is { } directories)
+                    {
+                        for (int v = 0; v < variants.Length; v++)
+                        {
+                            if (directories[v] is { } directory)
+                            {
+                                pending.Paths[v].AddPaths(directory);
+                                directory.Dispose();
+                            }
+                        }
+                    }
+
+                    Add(pending);
+                    pending = null;
                 }
             }
         }
@@ -1758,6 +1811,129 @@ internal static partial class DatasetCompactor
             }
 
             Censuses.Return(count.Paths);
+        }
+    }
+
+    /// <summary>
+    /// A unit of the first pass: an input whole, or <see cref="Rows"/> of it, with the variant columns its directories tell,
+    /// whose rows are then counted alone (<see cref="PathCensus.AddRows"/>); <see cref="Last"/> for an input's last part.
+    /// </summary>
+    private readonly record struct CensusPart(int Input, RowRange? Rows, bool[]? Told, bool Last);
+
+    /// <summary>
+    /// The units of the first pass (<see cref="CensusPart"/>), and the directories of each input counted in parts, held by its
+    /// last part until its census adds the paths they tell; those not taken go back as it is disposed.
+    /// </summary>
+    private sealed class CensusParts : IDisposable
+    {
+        private readonly Dictionary<int, VariantDirectory.DirectoryBody?[]> _directories = [];
+
+        internal List<CensusPart> Parts { get; } = [];
+
+        /// <summary>Holds <paramref name="directories"/> for part <paramref name="part"/>.</summary>
+        internal void Hold(int part, VariantDirectory.DirectoryBody?[] directories) => _directories[part] = directories;
+
+        /// <summary>The directories part <paramref name="part"/> holds, now the caller's to dispose; null for none.</summary>
+        internal VariantDirectory.DirectoryBody?[]? Take(int part) => _directories.Remove(part, out VariantDirectory.DirectoryBody?[]? taken) ? taken : null;
+
+        public void Dispose()
+        {
+            foreach (VariantDirectory.DirectoryBody?[] directories in _directories.Values)
+            {
+                foreach (VariantDirectory.DirectoryBody? directory in directories)
+                {
+                    directory?.Dispose();
+                }
+            }
+
+            _directories.Clear();
+        }
+    }
+
+    /// <summary>
+    /// What the first pass counts on its lanes, in the inputs' order: each input whole, or in parts of its rows when it holds
+    /// <see cref="DatasetOptions.CensusPartRows"/> twice or more, a single value, no deleted row, and a variant column its
+    /// directories do not tell; an input they tell whole is counted from them alone. Each part is whole chunks of its first
+    /// variant column and at least <see cref="DatasetOptions.CensusPartRows"/> rows, so that no chunk is decoded twice, and the
+    /// cuts are the file's and the options' alone, the same at any degree. The parts' censuses added in their order, then the paths the directories tell, are the input's while its
+    /// paths hold fewer than <see cref="PathCensus.MaxKeys"/> keys, and past them the same at any degree
+    /// (<see cref="PathCensus.Merge"/>).
+    /// </summary>
+    private static async ValueTask<CensusParts> CensusPartsAsync(
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, int[] variants, JobMemory memory, KeyRanges? piece, CancellationToken cancellationToken)
+    {
+        CensusParts plan = new CensusParts();
+        List<CensusPart> parts = plan.Parts;
+        long least = Math.Max(1, dataset.Options.CensusPartRows);
+        try
+        {
+            for (int input = 0; input < job.Inputs.Count; input++)
+            {
+                CompactionInput held = job.Inputs[input];
+                long rows = held.Entry.PhysicalRows;
+                if (piece is not null || variants.Length == 0 || rows < 2 * least || held.Entry.HasDeletions
+                    || (schema.Cut is { } values && !values.HoldsOne(held)))
+                {
+                    parts.Add(new CensusPart(input, null, null, true));
+                    continue;
+                }
+
+                long[] starts;
+                VariantDirectory.DirectoryBody?[] directories = new VariantDirectory.DirectoryBody?[variants.Length];
+                ObjectLease lease = await memory.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+                await using (lease.ConfigureAwait(false))
+                {
+                    if (schema.Holds(held.Entry))
+                    {
+                        directories = await DirectoriesAsync(lease, held.Entry, variants, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    // Told whole when every column's directory keeps its values' bytes too, as the count decides.
+                    starts = Array.TrueForAll(directories, static directory => directory is { ValueBytes: >= 0 })
+                        ? []
+                        : lease.File.ChunkStartsOf(schema.DType.GetFieldName(variants[0]));
+                }
+
+                int first = parts.Count;
+                long begin = 0;
+                for (int chunk = 1; chunk < starts.Length - 1; chunk++)
+                {
+                    if (starts[chunk] - begin >= least && rows - starts[chunk] >= least)
+                    {
+                        parts.Add(new CensusPart(input, new RowRange(begin, starts[chunk]), null, false));
+                        begin = starts[chunk];
+                    }
+                }
+
+                if (parts.Count == first)
+                {
+                    // Told whole, or of one part: counted whole, its directories read again by its count.
+                    foreach (VariantDirectory.DirectoryBody? directory in directories)
+                    {
+                        directory?.Dispose();
+                    }
+
+                    parts.Add(new CensusPart(input, null, null, true));
+                    continue;
+                }
+
+                parts.Add(new CensusPart(input, new RowRange(begin, rows), null, true));
+                memory.CensusParts = (memory.CensusParts.Inputs + 1, memory.CensusParts.Parts + parts.Count - first);
+                bool[] told = [.. directories.Select(static directory => directory is not null)];
+                for (int part = first; part < parts.Count; part++)
+                {
+                    parts[part] = parts[part] with { Told = told };
+                }
+
+                plan.Hold(parts.Count - 1, directories);
+            }
+
+            return plan;
+        }
+        catch
+        {
+            plan.Dispose();
+            throw;
         }
     }
 
@@ -1819,11 +1995,13 @@ internal static partial class DatasetCompactor
     /// <summary>
     /// The paths of input <paramref name="input"/>'s rows counted for <see cref="PlanValuesAsync"/>, a value at a time in the
     /// key's order: of an input that holds one value, or of a dataset with none, its variant columns alone, read through; of
-    /// one that holds several, the key's columns too, the input merged alone so that its keys tell its values apart.
+    /// one that holds several, the key's columns too, the input merged alone so that its keys tell its values apart. With
+    /// <paramref name="rows"/>, a part of an input of one value (<see cref="CensusPartsAsync"/>), those rows alone, the columns
+    /// <paramref name="toldColumns"/> marks counted by their rows and bytes only, their paths left to its directories.
     /// </summary>
     private static async ValueTask<List<ValueCount>> CountAsync(
         VortexDataset dataset, DatasetSchema schema, CompactionJob job, int input, int[] variants, JobMemory memory, KeyRanges? piece,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, RowRange? rows = null, bool[]? toldColumns = null)
     {
         int textBound = dataset.Options.Write.StringBoundBytes;
         CompactionInput held = job.Inputs[input];
@@ -1837,7 +2015,7 @@ internal static partial class DatasetCompactor
             {
                 // A column whose directory tells its paths is not parsed: its rows give their count and their values' bytes
                 // alone, and the directory the rest. A piece reads a part of its inputs, which their directories do not tell.
-                VariantDirectory.DirectoryBody?[] directories = piece is null && schema.Holds(held.Entry)
+                VariantDirectory.DirectoryBody?[] directories = piece is null && rows is null && schema.Holds(held.Entry)
                     ? await DirectoriesAsync(lease, held.Entry, variants, cancellationToken).ConfigureAwait(false)
                     : new VariantDirectory.DirectoryBody?[variants.Length];
                 try
@@ -1864,12 +2042,12 @@ internal static partial class DatasetCompactor
                         // In batches of the rows its lane was priced at (CensusRows): read at the scan's own size, a lane of
                         // log records held a window of their attributes rebuilt, and the census of a tier merge of 23 inputs was
                         // refused at 671 MiB of 672, twice, before a job of 5 ran (2026-11-16).
-                        await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants, piece?.RowsOf(input, 0), CensusRows(dataset, job), memory.InputsAccount)
+                        await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants, rows ?? piece?.RowsOf(input, 0), CensusRows(dataset, job), memory.InputsAccount)
                             .WithCancellation(cancellationToken).ConfigureAwait(false))
                         {
                             for (int v = 0; v < variants.Length; v++)
                             {
-                                if (directories[v] is null)
+                                if (directories[v] is null && toldColumns?[v] != true)
                                 {
                                     paths[v].Add(batch, v);
                                 }

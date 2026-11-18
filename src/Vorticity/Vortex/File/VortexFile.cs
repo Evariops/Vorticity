@@ -1168,6 +1168,44 @@ public sealed partial class VortexFile : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// The row each chunk of the table's column <paramref name="name"/> starts at, then the column's rows: where a reader that
+    /// splits the column's rows cuts so that no chunk is decoded twice. Its zone maps and a dictionary's codes are looked
+    /// through to the chunks below; empty for a column of one chunk, one the file does not hold, or a file that is no table.
+    /// </summary>
+    internal long[] ChunkStartsOf(string name)
+    {
+        int field = IsTabular ? _schema.IndexOfField(name) : -1;
+        Layouts.LayoutNode node = LayoutTree.Root;
+        if (field < 0 || node.Encoding != LayoutEncodingId.Struct || field >= node.ChildCount)
+        {
+            return [];
+        }
+
+        node = node.GetChild(field);
+        while (node.Encoding != LayoutEncodingId.Chunked)
+        {
+            // A zoned or a stats node keeps its data in its first child, a dictionary its codes in the child of its rows.
+            int next = -1;
+            for (int child = 0; child < node.ChildCount && next < 0; child++)
+            {
+                if (node.Encoding is LayoutEncodingId.Zoned or LayoutEncodingId.Stats ? child == 0 : node.Encoding == LayoutEncodingId.Dict && node.GetChild(child).RowCount == node.RowCount)
+                {
+                    next = child;
+                }
+            }
+
+            if (next < 0)
+            {
+                return [];
+            }
+
+            node = node.GetChild(next);
+        }
+
+        return node.ChunkOffsets.ToArray();
+    }
+
     /// <summary>True when <see cref="DType"/> is a struct and the file therefore reads as a table.</summary>
     internal bool IsTabular => _schema.Kind == DTypeKind.Struct;
 

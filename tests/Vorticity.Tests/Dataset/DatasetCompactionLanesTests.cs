@@ -489,6 +489,49 @@ public sealed partial class DatasetCompactionLanesTests
     }
 
     /// <summary>
+    /// A consolidation of a large append and three small ones, whose variant holds a list, which no path directory tells: on
+    /// four lanes and fourteen its first pass counts the large append in parts of its rows, whole chunks of its variant column
+    /// each, side by side, and its objects are those the first pass that counts it whole, on one lane, writes.
+    /// </summary>
+    [Fact]
+    public async Task AFirstPassCountsALargeInputInPartsAndWritesWhatItsWholeCountWrites()
+    {
+        // Objects aimed past a mebibyte, which a job counts the paths of first, and chunks of 4 KiB, so that the large append's
+        // variant column holds dozens of them.
+        static DatasetOptions Counted(VortexSession session)
+        {
+            DatasetOptions options = OptionsOf(session);
+            return options with { ChunkBytes = 4 << 10, Layout = options.Layout! with { ObjectBytes = 4 << 20 } };
+        }
+
+        await using MemoryObjectStore built = new MemoryObjectStore();
+        {
+            Random random = new Random(53);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(built, Doc.Schema, Counted(VortexSession.Default), Ct);
+            foreach (int rows in new[] { 24_000, 2_000, 2_000, 2_000 })
+            {
+                Doc[] docs = [.. Enumerable.Range(0, rows).Select(i => new Doc(0, $"svc-{random.Next(0, 60):D2}", i, Variant.Object(
+                    ("route", Variant.From($"/api/r{random.Next(20)}")),
+                    ("status", Variant.From(200 + (random.Next(4) * 100))),
+                    ("tags", Variant.Array([.. Enumerable.Range(0, random.Next(3)).Select(t => Variant.From($"tag-{random.Next(9)}"))])))))];
+                await using ObjectDraft draft = dataset.StartObject();
+                await draft.Writer.WriteAsync<Doc>(docs, Ct);
+                await dataset.AppendAsync(draft, Ct);
+            }
+        }
+
+        // Whole on one lane, in parts of a thousand rows or more on four lanes and fourteen.
+        List<CompactionResult> jobs = await SameObjectsAtDegreesAsync(
+            built,
+            [1, 4, 14],
+            static session => Counted(session) with { CensusPartRows = session.Options.MaxDegreeOfParallelism == 1 ? long.MaxValue / 4 : 1_024 },
+            static async dataset => [.. await dataset.ConsolidateAsync(Ct)]);
+        string ran = string.Join(", ", jobs.Select(static job => $"{job.ObjectsIn}->{job.ObjectsOut} parts {job.CensusParts}"));
+        Assert.Equal(1, jobs.Count(static job => job.CensusParts.Inputs == 0));
+        Assert.True(jobs.Count(static job => job.CensusParts is { Inputs: 1, Parts: >= 4 }) == 2, ran);
+    }
+
+    /// <summary>
     /// A consolidation of appends whose keys do not interleave, so that its merge takes long runs of one input: its writer
     /// takes them a block's map at a time and sends the blocks through its line on four lanes, and the objects are those of
     /// one lane.

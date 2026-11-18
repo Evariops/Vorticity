@@ -232,6 +232,16 @@ public sealed record DatasetOptions
     internal long SliceRows { get; init; } = 1L << 18;
 
     /// <summary>
+    /// The rows of a part of a large input a compaction's first pass counts on a lane of its own, about: 2^20 by default. The
+    /// first pass of a consolidation of 74 appends of metric records, written before their directories counted doubles, took
+    /// 1.3 s of its job's 6.3 s on one core: 72 of its inputs counted in 2 to 8 ms each, side by side, and the largest,
+    /// 21.4 M rows, in 1 336 ms alone, its variant rows rebuilt from their shredding (2026-11-18). A part of a million rows is
+    /// some 60 ms of counting, against a scan opened and a census merged a part, which are microseconds. A test cuts its
+    /// small inputs with less.
+    /// </summary>
+    internal long CensusPartRows { get; init; } = 1L << 20;
+
+    /// <summary>
     /// The objects' size a piece of a consolidation reads at most, and the ranges below its cut it merges: 8 by default,
     /// whatever the session's degree, so that a consolidation commits the same pieces at any degree. A piece of eight
     /// objects is what a degree of eight or more cut before; a test consolidates in pieces of one.
