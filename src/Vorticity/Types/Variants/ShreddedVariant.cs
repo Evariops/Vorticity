@@ -507,26 +507,25 @@ internal sealed class ShreddedVariant
     /// </summary>
     private static bool Same(Shred shred, int slot)
     {
-        int prior = slot - 1;
-        if (shred.Group[slot] != shred.Group[prior])
+        if (!shred.Group.AsBefore(slot, out bool grouped))
         {
             return false;
         }
 
-        if (!shred.Group[slot])
+        if (!grouped)
         {
             return true;
         }
 
-        bool value = shred.Value >= 0 && shred.ValuePresent[slot];
-        if (value != (shred.Value >= 0 && shred.ValuePresent[prior])
-            || (value && !SameSlot(shred.ValueViews.Span, ViewSize, slot)))
+        bool value = false;
+        if (shred.Value >= 0
+            && (!shred.ValuePresent.AsBefore(slot, out value) || (value && !SameSlot(shred.ValueViews.Span, ViewSize, slot))))
         {
             return false;
         }
 
-        bool typed = shred.Typed >= 0 && shred.TypedPresent[slot];
-        if (typed != (shred.Typed >= 0 && shred.TypedPresent[prior]))
+        bool typed = false;
+        if (shred.Typed >= 0 && !shred.TypedPresent.AsBefore(slot, out typed))
         {
             return false;
         }
@@ -572,8 +571,24 @@ internal sealed class ShreddedVariant
     }
 
     /// <summary>Whether the <paramref name="width"/> bytes of slot <paramref name="slot"/> of <paramref name="data"/> are the slot before's.</summary>
-    private static bool SameSlot(ReadOnlySpan<byte> data, int width, int slot) =>
-        data.Slice(slot * width, width).SequenceEqual(data.Slice((slot - 1) * width, width));
+    /// <remarks>
+    /// A row of a metric's series is asked this of each of its attributes, a view or a number each: a call to compare sixteen
+    /// bytes or eight, run for every node of every row, came to 5 % of a consolidation of metric records' processor with the
+    /// walk around it (2026-11-18). The widths a slot has are read as one word.
+    /// </remarks>
+    private static bool SameSlot(ReadOnlySpan<byte> data, int width, int slot)
+    {
+        int at = slot * width;
+        return width switch
+        {
+            16 => MemoryMarshal.Read<Int128>(data[at..]) == MemoryMarshal.Read<Int128>(data[(at - 16)..]),
+            8 => MemoryMarshal.Read<ulong>(data[at..]) == MemoryMarshal.Read<ulong>(data[(at - 8)..]),
+            4 => MemoryMarshal.Read<uint>(data[at..]) == MemoryMarshal.Read<uint>(data[(at - 4)..]),
+            2 => MemoryMarshal.Read<ushort>(data[at..]) == MemoryMarshal.Read<ushort>(data[(at - 2)..]),
+            1 => data[at] == data[at - 1],
+            _ => data.Slice(at, width).SequenceEqual(data.Slice(at - width, width)),
+        };
+    }
 
     /// <summary>The dictionary of <paramref name="metadata"/>; a new generation of field ids when it is not the last row's.</summary>
     private VariantDictionary Dictionary(ReadOnlySpan<byte> metadata)
@@ -1531,6 +1546,23 @@ internal sealed class ShreddedVariant
             }
 
             return present;
+        }
+
+        /// <summary>Whether slot <paramref name="slot"/> is present as the slot before is, and whether it is (<paramref name="present"/>).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal readonly bool AsBefore(int slot, out bool present)
+        {
+            if (_mode != Bits)
+            {
+                present = _mode == All;
+                return true;
+            }
+
+            ReadOnlySpan<byte> bits = _bits.Span;
+            int at = _offset + slot;
+            int before = at - 1;
+            present = ((bits[at >> 3] >> (at & 7)) & 1) != 0;
+            return present == (((bits[before >> 3] >> (before & 7)) & 1) != 0);
         }
 
         internal readonly bool this[int slot]
