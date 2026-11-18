@@ -1,5 +1,6 @@
 // The run search over a column with nulls, sixty-four rows a word: the runs the row-by-row walk finds, in the same order,
-// whatever the nulls, the values, the kind of the column, the bit its validity starts at, and the ceiling it gives up at.
+// whatever the nulls, the values, the kind of the column, the bit its validity starts at, and the ceiling it gives up at. Over
+// all-valid views, a view at a time: the same runs, whether the views are padded or hold anything past a short value's bytes.
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -67,6 +68,101 @@ public sealed class NullableRunsTests
                 }
             }
         }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TheViewWalkFindsTheRowWalksRuns(bool padded)
+    {
+        // All valid, as a merge's gathered chunk is: each row's bytes a copy of their own across three buffers, so that equal
+        // long values differ by their views, and, unpadded, bytes past every short value's that the views of equal ones differ by.
+        Random random = new Random(padded ? 11 : 13);
+        string[] shapes = ["", "ab", "abc", "abcd", "abcde", "twelve bytes", "thirteen byte", "a value longer than twelve bytes", "a value longer than twelve bytez"];
+        foreach (int length in (int[])[1, 2, 63, 1_000, 10_007])
+        {
+            string[] texts = new string[length];
+            for (int row = 0; row < length;)
+            {
+                int stretch = random.Next(1, random.Next(2) == 0 ? 4 : 100);
+                string text = shapes[random.Next(shapes.Length)];
+                for (int i = 0; i < stretch && row < length; i++, row++)
+                {
+                    texts[row] = text;
+                }
+            }
+
+            CanonicalArena arena = new CanonicalArena();
+            DTypeArena types = new DTypeArena();
+            int column = SpreadTexts(arena, types, texts, padded, random);
+            foreach (int ceiling in (int[])[length, length / 4, 3])
+            {
+                int[] viewStarts = new int[ceiling + 1];
+                int[] viewEnds = new int[ceiling + 1];
+                int[] rowStarts = new int[ceiling + 1];
+                int[] rowEnds = new int[ceiling + 1];
+                int views = ColumnCompressor.RunsOf(arena, column, compared: false, viewStarts, viewEnds);
+                int rows = ColumnCompressor.RunsOf(arena, column, compared: true, rowStarts, rowEnds);
+                Assert.Equal(rows, views);
+                Assert.Equal(rowStarts, viewStarts);
+                Assert.Equal(rowEnds[..Math.Max(0, Math.Min(rows, ceiling + 1) - 1)], viewEnds[..Math.Max(0, Math.Min(views, ceiling + 1) - 1)]);
+            }
+        }
+    }
+
+    private static int SpreadTexts(CanonicalArena arena, DTypeArena types, string[] texts, bool padded, Random random)
+    {
+        const int Buffers = 3;
+        int[] heapBytes = new int[Buffers];
+        int[] bufferOf = new int[texts.Length];
+        for (int row = 0; row < texts.Length; row++)
+        {
+            bufferOf[row] = random.Next(Buffers);
+            heapBytes[bufferOf[row]] += Encoding.UTF8.GetByteCount(texts[row]);
+        }
+
+        VortexBuffer views = arena.Allocate(texts.Length * 16, 16, out Span<byte> viewBytes);
+        VortexBuffer[] heaps = new VortexBuffer[Buffers];
+        byte[][] heapSpans = new byte[Buffers][];
+        for (int b = 0; b < Buffers; b++)
+        {
+            heapSpans[b] = new byte[Math.Max(heapBytes[b], 1)];
+        }
+
+        int[] at = new int[Buffers];
+        for (int row = 0; row < texts.Length; row++)
+        {
+            byte[] value = Encoding.UTF8.GetBytes(texts[row]);
+            Span<byte> view = viewBytes.Slice(row * 16, 16);
+            random.NextBytes(view);
+            if (padded)
+            {
+                view.Clear();
+            }
+
+            MemoryMarshal.Write(view, value.Length);
+            if (value.Length <= 12)
+            {
+                value.CopyTo(view[4..]);
+            }
+            else
+            {
+                int b = bufferOf[row];
+                value.AsSpan(0, 4).CopyTo(view[4..]);
+                MemoryMarshal.Write(view[8..], b);
+                MemoryMarshal.Write(view[12..], at[b]);
+                value.CopyTo(heapSpans[b].AsSpan(at[b]));
+                at[b] += value.Length;
+            }
+        }
+
+        for (int b = 0; b < Buffers; b++)
+        {
+            heaps[b] = arena.Allocate(heapSpans[b].Length, 8, out Span<byte> heap);
+            heapSpans[b].CopyTo(heap);
+        }
+
+        return arena.AddVarBinView(types.Utf8(Nullability.NonNullable), texts.Length, Validity.NonNullable, views, heaps, padded);
     }
 
     private static int Numbers(CanonicalArena arena, DTypeArena types, long[] numbers, Validity validity)

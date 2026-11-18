@@ -529,18 +529,30 @@ internal static class ColumnCompressor
     }
 
     /// <summary>
-    /// The runs of column <paramref name="nodeIndex"/>, its validity a bitmap, as <see cref="NullableRuns"/> finds them, or
-    /// as <see cref="ComparedRuns"/> does when <paramref name="compared"/>, up to <paramref name="starts"/>' length less one:
-    /// for the tests, which hold the two to the same runs.
+    /// The runs of column <paramref name="nodeIndex"/> as <see cref="NullableRuns"/> finds them when its validity is a
+    /// bitmap, as <see cref="ViewRuns"/> does for all-valid views, or as <see cref="ComparedRuns"/> does when
+    /// <paramref name="compared"/> or for any other column, up to <paramref name="starts"/>' length less one: for the tests,
+    /// which hold the walks to the same runs.
     /// </summary>
     internal static int RunsOf(CanonicalArena arena, int nodeIndex, bool compared, Span<int> starts, Span<int> ends)
     {
         RowComparer comparer = new RowComparer(arena, nodeIndex);
-        int length = arena.GetNode(nodeIndex).Length;
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        int ceiling = starts.Length - 1;
         ValidityMask mask = comparer.Mask;
-        return compared || mask.Bits.IsEmpty
-            ? ComparedRuns(in comparer, length, starts.Length - 1, starts, ends)
-            : NullableRuns(in comparer, mask.Bits, mask.BitOffset, length, starts.Length - 1, starts, ends);
+        if (compared)
+        {
+            return ComparedRuns(in comparer, node.Length, ceiling, starts, ends);
+        }
+
+        if (!mask.Bits.IsEmpty)
+        {
+            return NullableRuns(in comparer, mask.Bits, mask.BitOffset, node.Length, ceiling, starts, ends);
+        }
+
+        return ViewRuns(in node, node.Length, ceiling, starts, ends, out int runs)
+            ? runs
+            : ComparedRuns(in comparer, node.Length, ceiling, starts, ends);
     }
 
     /// <summary>Runs by comparing adjacent rows, abandoning once run-end has already lost.</summary>
@@ -585,24 +597,54 @@ internal static class ColumnCompressor
         in CanonicalNode node, int length, int ceiling, Span<int> starts, Span<int> ends, out int runs)
     {
         runs = 0;
-        if (node.Kind != CanonicalKind.VarBinView || !node.Validity.IsAllValid
-            || !node.Arena.RecordRef(node.Index).PaddedViews)
+        if (node.Kind != CanonicalKind.VarBinView || !node.Validity.IsAllValid)
         {
             return false;
         }
 
+        // Views another writer wrote may hold anything past an inline value's bytes: two such views that differ are told apart
+        // by their bytes, where padded ones differ only if their values do. A chunk's columns gathered by a merge's writer copy
+        // the views they read, so they are seldom padded, and their search went row by row through the comparer, two validity
+        // reads a row: 828 M rows and 4.46 s of a consolidation of metric records' processor (2026-11-18), 1.9 s since. A long
+        // value repeated row after row, each row's bytes a copy of their own, is read once a row: the row before's bytes are
+        // those the last comparison read, and its buffer is looked up again only when a view names another.
+        bool padded = node.Arena.RecordRef(node.Index).PaddedViews;
         ReadOnlySpan<Int128> views = MemoryMarshal.Cast<byte, Int128>(node.Views.Span)[..length];
+        ReadOnlySpan<VortexBuffer> buffers = node.DataBuffers;
         ViewValues values = new ViewValues(node);
+        ReadOnlySpan<byte> heap = default;
+        int heapIndex = -1;
+        ReadOnlySpan<byte> read = default;
+        int readRow = -1;
         int runCount = 1;
         starts[0] = 0;
         for (int i = 1; i < views.Length; i++)
         {
             Int128 before = views[i - 1];
             Int128 view = views[i];
-            if (before == view
-                || ((ulong)before == (ulong)view && (uint)(ulong)view > 12 && values.At(i - 1).SequenceEqual(values.At(i))))
+            if (before == view)
             {
                 continue;
+            }
+
+            ulong head = (ulong)before;
+            uint bytes = (uint)head;
+            if (bytes == (uint)(ulong)view && (bytes < 4 || head == (ulong)view))
+            {
+                if (bytes > ViewInlineBytes)
+                {
+                    ReadOnlySpan<byte> left = readRow == i - 1 ? read : Buffered(before, i - 1, buffers, ref heap, ref heapIndex);
+                    read = Buffered(view, i, buffers, ref heap, ref heapIndex);
+                    readRow = i;
+                    if (left.SequenceEqual(read))
+                    {
+                        continue;
+                    }
+                }
+                else if (!padded && values.At(i - 1).SequenceEqual(values.At(i)))
+                {
+                    continue;
+                }
             }
 
             if (runCount > ceiling)
@@ -618,6 +660,37 @@ internal static class ColumnCompressor
 
         runs = runCount;
         return true;
+    }
+
+    /// <summary>The bytes a view holds inline, past its length: a longer value lies in a data buffer.</summary>
+    private const int ViewInlineBytes = 12;
+
+    /// <summary>
+    /// The bytes of row <paramref name="row"/>, whose <paramref name="view"/> names them in a data buffer: in
+    /// <paramref name="heap"/> when it is buffer <paramref name="heapIndex"/>, which otherwise becomes the one it names.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ReadOnlySpan<byte> Buffered(
+        Int128 view, int row, ReadOnlySpan<VortexBuffer> buffers, scoped ref ReadOnlySpan<byte> heap, scoped ref int heapIndex)
+    {
+        ulong tail = (ulong)(view >> 64);
+        uint index = (uint)tail;
+        uint offset = (uint)(tail >> 32);
+        uint size = (uint)(ulong)view;
+        if (index != (uint)heapIndex)
+        {
+            if (index >= (uint)buffers.Length)
+            {
+                return ArraysThrow.BufferIndex((int)index, buffers.Length).Span;
+            }
+
+            heap = buffers[(int)index].Span;
+            heapIndex = (int)index;
+        }
+
+        return (ulong)offset + size <= (ulong)(uint)heap.Length
+            ? heap.Slice((int)offset, (int)size)
+            : ArraysThrow.ViewPast(row, offset, size, heap.Length);
     }
 
     /// <summary>
@@ -2929,6 +3002,15 @@ internal static class ColumnCompressor
 
         private readonly ViewValues _strings;
 
+        /// <summary>
+        /// The views of a VarBinView column, and whether this library's kernels wrote them, zero past every inline value's
+        /// bytes: two equal views hold one value whoever wrote them, and two padded views of a value of twelve bytes or less
+        /// that differ hold two.
+        /// </summary>
+        private readonly ReadOnlySpan<Int128> _views;
+
+        private readonly bool _padded;
+
         internal RowComparer(CanonicalArena arena, int nodeIndex)
         {
             _node = arena.GetNode(nodeIndex);
@@ -2944,6 +3026,8 @@ internal static class ColumnCompressor
             {
                 case CanonicalKind.VarBinView:
                     _strings = new ViewValues(_node);
+                    _views = MemoryMarshal.Cast<byte, Int128>(_node.Views.Span);
+                    _padded = _node.Arena.RecordRef(_node.Index).PaddedViews;
                     break;
                 case CanonicalKind.Bool:
                     _bits = _node.Bits.Span;
@@ -2976,7 +3060,7 @@ internal static class ColumnCompressor
             {
                 return _node.Kind == CanonicalKind.Bool
                     ? CanonicalSupport.BitAt(_bits, _bitOffset + a) == CanonicalSupport.BitAt(_bits, _bitOffset + b)
-                    : _strings.At(a).SequenceEqual(_strings.At(b));
+                    : EqualViews(a, b);
             }
 
             // The widths that are one load are read as one load. `SequenceEqual` over four bytes is
@@ -2991,6 +3075,38 @@ internal static class ColumnCompressor
                 8 => Read<ulong>(values, a) == Read<ulong>(values, b),
                 _ => Fixed(a).SequenceEqual(Fixed(b)),
             };
+        }
+
+        /// <summary>
+        /// Whether rows <paramref name="a"/> and <paramref name="b"/> of a VarBinView column hold the same bytes, read from
+        /// their views first, as <see cref="ViewRuns"/> reads them: equal views hold one value; views of two lengths hold two;
+        /// past four bytes a view carries the value's first four, and padded views of twelve bytes or less carry it whole.
+        /// Only two values that agree as far as their views tell compare their bytes.
+        /// </summary>
+        /// <remarks>
+        /// The run search over a text column with nulls, a variant's shredded leaf, asks this of every pair of values that
+        /// follow each other, and each comparison sliced both rows out of their buffers: a kernel of 8192 rows of them, in
+        /// runs, took 28.2 µs, 27.3 µs reading the views first (<c>RunScanBenchmarks</c>, 2026-11-18).
+        /// </remarks>
+        private bool EqualViews(int a, int b)
+        {
+            Int128 left = _views[a];
+            Int128 right = _views[b];
+            if (left == right)
+            {
+                return true;
+            }
+
+            ulong head = (ulong)left;
+            uint length = (uint)head;
+            if (length != (uint)(ulong)right
+                || (length >= 4 && head != (ulong)right)
+                || (_padded && length <= 12))
+            {
+                return false;
+            }
+
+            return _strings.At(a).SequenceEqual(_strings.At(b));
         }
 
         internal int Hash(int row)
