@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # bench/speed.sh: the short benches of the throughput work, each run once per source tree and kept in a ledger.
 #
-#   bench/speed.sh [--only B,B…] [--degree N,N…] [--profile] [--again] [--base REF|TREE] [--digest] [--note TEXT]
+#   bench/speed.sh [--only B,B…] [--degree N,N…] [--profile] [--again] [--base REF|TREE] [--digest] [--same-bytes] [--note TEXT]
 #
 # Benches (default: logs,metrics):
 #   logs     one tier merge of 5 job outputs of log records, 7.6 M rows, 2 GiB        (~15 s a round)
@@ -25,12 +25,16 @@
 # with is HEAD's src/ tree when the working tree changes it, else the first commit before HEAD whose src/ differs; the
 # base's figures come from the ledger and are never run again. The ledger and the kept stores live in
 # ~/.cache/vorticity/speed (VORTICITY_SPEED to move them).
+#
+# --same-bytes is for a change that must not change what is written, a change of how the work runs alone: a run whose
+# bytes differ from those its base wrote at the same bench and degree is not written to the ledger, and the script exits
+# with 1 once every run is done.
 set -u
 repo=$(cd "$(dirname "$0")/.." && pwd)
 home=${VORTICITY_SPEED:-$HOME/.cache/vorticity/speed}
 ledger=$home/ledger.tsv
 mkdir -p "$home/logs"
-only="logs,metrics"; degrees="14"; profile=0; again=0; base=""; digest=0; note=""
+only="logs,metrics"; degrees="14"; profile=0; again=0; base=""; digest=0; note=""; same=0; refused=0
 while [ $# -gt 0 ]; do
   case $1 in
     --only) only=$2; shift ;;
@@ -40,6 +44,7 @@ while [ $# -gt 0 ]; do
     --base) base=$2; shift ;;
     --digest) digest=1 ;;
     --note) note=$2; shift ;;
+    --same-bytes) same=1 ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
   shift
@@ -128,6 +133,14 @@ for bench in ${only//,/ }; do
     fi
     fields=$(python3 -I "$repo/bench/profile/speed_line.py" $kind "$log")
     load=$(uptime | sed -E 's/.*averages?: ([0-9.,]+).*/\1/' | tr -d ',')
+    if [ $same = 1 ]; then
+      written=$(echo "$fields" | cut -f12)
+      before=$(awk -F'\t' -v b="$base" -v n="$bench" -v d="$degree" '$2==b && $4==n && $5==d && $18!="-" {x=$18} END {print x}' "$ledger")
+      if [ -n "$before" ] && [ "$written" != "$before" ]; then
+        echo "$bench at $degree: bytes ${written:0:8} where the base wrote ${before:0:8}, not written to the ledger (--same-bytes)" >&2
+        refused=1; continue
+      fi
+    fi
     occupancy=$(echo "$fields" | awk -F'\t' -v d="$degree" '{ if ($2 != "-" && $6 != "-" && $2 > 0) printf "%.3f", $6 / $2 / d; else print "-" }')
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date '+%m-%d %H:%M')" "$tree" "$commit" "$bench" "$degree" "$mode" \
       "$fields" "$occupancy" "$load" "$cores" "$roles" "$(basename "$log")" "$note" >> "$ledger"
@@ -136,3 +149,4 @@ for bench in ${only//,/ }; do
 done
 
 python3 -I "$repo/bench/profile/speed_compare.py" "$ledger" "$tree" "$base" "$mode" "$only" "$degrees"
+exit $refused
