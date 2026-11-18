@@ -232,6 +232,15 @@ public sealed record DatasetOptions
     internal long SliceRows { get; init; } = 1L << 18;
 
     /// <summary>
+    /// The rows of a range a compaction's merge is cut in, each range merged into objects of its own, side by side as the
+    /// job's room holds them: 2^24 by default, the job's rows over it rounded, whatever the session's degree, so that a job
+    /// writes the same objects at any degree. A merge of one range ran its writer's line alone, and a consolidation of 74
+    /// appends of metric records, 51.8 M rows, wrote at 474 µs a block from 12 lanes as from 14 (2026-11-18). A test cuts its
+    /// small merges with less.
+    /// </summary>
+    internal long RangeRows { get; init; } = 1L << 24;
+
+    /// <summary>
     /// The rows of a part of a large input a compaction's first pass counts on a lane of its own, about: 2^20 by default. The
     /// first pass of a consolidation of 74 appends of metric records, written before their directories counted doubles, took
     /// 1.3 s of its job's 6.3 s on one core: 72 of its inputs counted in 2 to 8 ms each, side by side, and the largest,

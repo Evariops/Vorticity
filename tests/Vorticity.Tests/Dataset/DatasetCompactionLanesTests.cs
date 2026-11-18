@@ -101,11 +101,13 @@ public sealed partial class DatasetCompactionLanesTests
     /// inputs whatever the batches its inputs are read in, which the memory the job measures decides; an input that ran
     /// through the keys equal to another's wrote them first or not depending on where its batch ended. Cut in slices of
     /// 2 048 rows, the merge is the same at any degree too, its slices merged ahead on the lanes free or by the job's flow.
+    /// Cut in ranges of 12 000 rows, each range writing objects of its own, side by side past one lane, it is too.
     /// </summary>
     [Theory]
-    [InlineData(0)]
-    [InlineData(2_048)]
-    public async Task AConsolidationWritesTheSameSegmentsAtAnyDegreeAndOnAnyRun(int sliceRows)
+    [InlineData(0, 0)]
+    [InlineData(2_048, 0)]
+    [InlineData(0, 12_000)]
+    public async Task AConsolidationWritesTheSameSegmentsAtAnyDegreeAndOnAnyRun(int sliceRows, int rangeRows)
     {
         // Blocks of 256 rows, so that an object is aimed at dozens of them and its writer sends several through at once.
         List<CompactionResult> sliced = await SameSegmentsAtDegreesAsync(
@@ -116,12 +118,19 @@ public sealed partial class DatasetCompactionLanesTests
                 // Slices of a few thousand rows over inputs of chunks of 4 KiB, which they cut a column's chunks of: a merge
                 // takes no more slices than half the chunks an input holds of a column.
                 DatasetOptions options = OptionsOf(session) with { Write = new VortexWriteOptions { BlockRows = 256 } };
+                options = rangeRows > 0 ? options with { RangeRows = rangeRows } : options;
                 return sliceRows > 0 ? options with { SliceRows = sliceRows, ChunkBytes = 4 << 10 } : options;
             });
 
         // At four lanes and fourteen, the writers sent blocks through their line, several at once, and the bytes are those of
         // one; with chunks of 4 KiB, a block is a chunk of its own, which goes through alone.
-        if (sliceRows == 0)
+        if (rangeRows > 0)
+        {
+            // A day of some 24 000 rows in two ranges, their objects apart, merged side by side past one lane.
+            Assert.True(sliced.Max(static job => job.ObjectsOut) >= 2, "no job wrote its ranges' objects apart");
+            Assert.True(sliced.Max(static job => job.RangesAtOnce) >= 2, "no ranges merged side by side");
+        }
+        else if (sliceRows == 0)
         {
             Assert.True(sliced.Sum(static job => job.WriterBlocksOnLine) > 0, "no block went through a writer's line");
         }

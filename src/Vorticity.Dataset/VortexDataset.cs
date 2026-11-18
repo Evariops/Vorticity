@@ -1188,7 +1188,8 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool contents = false, bool synopses = false,
         IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
         IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1, PartitionPostings? postings = null,
-        bool countsPaths = false, QueryMemoryBudget? budget = null, Execution.HeldLane? lane = null, Func<long, bool>? admitsAhead = null)
+        bool countsPaths = false, QueryMemoryBudget? budget = null, Execution.HeldLane? lane = null, Func<long, bool>? admitsAhead = null,
+        int gatherShare = 1)
     {
         RequireConditionalCreation(_store);
         DateTimeOffset started = _options.TimeProvider.GetUtcNow();
@@ -1232,8 +1233,9 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             // Such an object, which a job writes in its key's order, in blocks, keeps each column's statistics over them.
             Granulated = contents && synopses,
 
-            // A job's writer gathers its columns within its share of the jobs' budget, writing a chunk early past it.
-            GatheredBytesCeiling = budget is null ? 0 : DatasetCompactor.GatherCeiling(this),
+            // A job's writer gathers its columns within its share of the jobs' budget, writing a chunk early past it: a range's
+            // writer within the job's share over its ranges (gatherShare), the job's writers together within the job's.
+            GatheredBytesCeiling = budget is null ? 0 : DatasetCompactor.GatherCeiling(this) / Math.Max(1, gatherShare),
 
             // And takes its merge's runs a block at a time, which its ingest then spreads over its lanes, as many blocks in
             // flight as the job's memory admits.
