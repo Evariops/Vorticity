@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
@@ -1966,9 +1967,26 @@ internal static class VariantShredder
                     Grow();
                 }
 
+                // Eight rows a step, two vectors of four: the runs a consolidation's take replays are a series' rows, two
+                // thousand on average, each of a node's rows written one at a time before (2026-11-18).
                 int take = Math.Min(_left, count);
                 int* into = (int*)_next;
-                for (int i = 0; i < take; i++)
+                int i = 0;
+                if (take >= 8)
+                {
+                    Vector128<int> low = Vector128.Create(first, first + 1, first + 2, first + 3);
+                    Vector128<int> high = low + Vector128.Create(4);
+                    Vector128<int> step = Vector128.Create(8);
+                    for (; i <= take - 8; i += 8)
+                    {
+                        low.Store(into + i);
+                        high.Store(into + i + 4);
+                        low += step;
+                        high += step;
+                    }
+                }
+
+                for (; i < take; i++)
                 {
                     into[i] = first + i;
                 }
