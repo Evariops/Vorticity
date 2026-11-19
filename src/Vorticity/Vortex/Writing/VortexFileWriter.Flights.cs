@@ -220,7 +220,7 @@ public sealed partial class VortexFileWriter
             VariantShredder.Shredding block = Blocks[field] ??= new VariantShredder.Shredding(plan);
             CanonicalArena store = BlockStores[field] ??= new CanonicalArena(64, account);
             store.ResetKeepingBlocks();
-            block.Begin(store, null);
+            block.Begin(store, null, counted: true);
             block.TakeMore(in Shred[field], 0);
         }
 

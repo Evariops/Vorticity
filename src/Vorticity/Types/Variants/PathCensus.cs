@@ -337,6 +337,79 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
     }
 
     /// <summary>
+    /// Begins counting <paramref name="rows"/> rows, nulls included, whose values hold <paramref name="valueBytes"/> bytes,
+    /// from what a shredding took of them rather than from the rows themselves
+    /// (<c>VariantShredder.Shredding.Count</c>): the rows counted, their paths left to what each node took, at the rows
+    /// from the one returned on. The rows that repeated the last value counted are counted in first.
+    /// </summary>
+    /// <returns>The first of the rows, among the rows the census counts.</returns>
+    internal long BeginTaken(int rows, long valueBytes)
+    {
+        Settle();
+        _lastLength = -1;
+        long first = Rows;
+        Rows += rows;
+        ValueBytes += valueBytes;
+        return first;
+    }
+
+    /// <summary>
+    /// Whether the census may count <paramref name="keys"/> keys it has not met and stay under <see cref="MaxKeys"/>: past
+    /// them, which keys it counts depends on the order it meets them in, a row at a time and a key at a time, which a
+    /// count of what a shredding took does not follow.
+    /// </summary>
+    internal bool HasRoomFor(long keys) => _keyCount + keys < MaxKeys;
+
+    /// <summary>
+    /// The dictionary of <paramref name="metadata"/>, a row's, made the census's run's: the run's metadata, the row's when it
+    /// differs, as a row counted makes it (<see cref="Add(ReadOnlySpan{byte}, ReadOnlySpan{byte})"/>), so that the keys a
+    /// value kept whole names are found by its ids.
+    /// </summary>
+    internal VariantDictionary Enter(ReadOnlySpan<byte> metadata)
+    {
+        if (metadata.Length != _metadataLength || !metadata.SequenceEqual(_metadata.AsSpan(0, _metadataLength)))
+        {
+            if (_metadata.Length < metadata.Length)
+            {
+                _metadata = new byte[Math.Max(metadata.Length, 2 * _metadata.Length)];
+            }
+
+            metadata.CopyTo(_metadata);
+            _metadataLength = metadata.Length;
+            _epoch++;
+            _runRows = 0;
+        }
+
+        _runRows++;
+        return VariantDictionary.Read(metadata);
+    }
+
+    /// <summary>
+    /// The bytes of the values of the rows a variant column made ready holds (<see cref="Prepare(RecordBatch, int)"/>), as
+    /// <see cref="Add(in Counting)"/> counts them: a row's value, the variant null's for a row that holds none, nothing for
+    /// a null row.
+    /// </summary>
+    internal static long ValueBytesOf(in Counting counting)
+    {
+        Arrays.CanonicalArena arena = counting.Arena;
+        ReadOnlySpan<Int128> views = MemoryMarshal.Cast<byte, Int128>(arena.GetNode(counting.Value).Views.Span);
+        bool everyRow = arena.GetNode(counting.Column).Validity.IsAllValid;
+        bool everyValue = arena.GetNode(counting.Value).Validity.IsAllValid;
+        long bytes = 0;
+        for (int row = 0; row < counting.Rows; row++)
+        {
+            if (!everyRow && !Arrays.ArenaWords.IsValid(arena, counting.Column, row))
+            {
+                continue;
+            }
+
+            bytes += everyValue || Arrays.ArenaWords.IsValid(arena, counting.Value, row) ? (uint)views[row] : VariantEncoding.NullValue.Length;
+        }
+
+        return bytes;
+    }
+
+    /// <summary>
     /// Counts the rows of the variant column <paramref name="field"/> of <paramref name="batch"/>'s root struct and the bytes of
     /// their values, as <see cref="Add(RecordBatch, int)"/> counts them, and none of their paths: those the directory of the
     /// object they come from tells (<see cref="AddPaths"/>), which a job's first pass reads in place of parsing every row.
@@ -855,18 +928,28 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         /// value of the census's last row, or of its last rows when they repeat it, each count taking them all at once and each
         /// bound the value once, which repeating it moves no further (<see cref="PathCensus.Settle"/>).
         /// </summary>
-        internal void Add(PathCensus census, in VariantDictionary dictionary, ReadOnlySpan<byte> value, int depth, long times = 1)
+        /// <param name="census">The census.</param>
+        /// <param name="dictionary">The dictionary the value's keys are named by.</param>
+        /// <param name="value">The value.</param>
+        /// <param name="depth">The depth of the value among the objects it lies in, 1 for a row's.</param>
+        /// <param name="times">The rows that hold the value, which follow each other.</param>
+        /// <param name="at">The first of the rows that hold the value, when they are not the census's last; -1 for the last.</param>
+        internal void Add(PathCensus census, in VariantDictionary dictionary, ReadOnlySpan<byte> value, int depth, long times = 1, long at = -1)
         {
             Values += times;
 
             // At the rows being counted, the census's last ones: one row, or the rows that repeated a value, which follow each
-            // other.
+            // other. Or at the row given, of a value counted from what a shredding took of it.
             if (census._gap > 0)
             {
                 PathClass spanned = ApartCensus.ClassOf(value);
                 if (times == 1)
                 {
-                    Occur(spanned, census.Rows - 1, census._gap);
+                    Occur(spanned, at >= 0 ? at : census.Rows - 1, census._gap);
+                }
+                else if (at >= 0)
+                {
+                    SpanListOf(spanned).Append(at, at + times - 1, census._gap);
                 }
                 else
                 {
@@ -924,7 +1007,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                             continue;
                         }
 
-                        key.Add(census, in dictionary, fields.ValueAt(i), depth + 1, times);
+                        key.Add(census, in dictionary, fields.ValueAt(i), depth + 1, times, at);
                     }
 
                     return;
@@ -960,6 +1043,163 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                 default:
                     Scalar(census.StringBoundBytes, value, times);
                     return;
+            }
+        }
+
+        // ---------------------------------------------------------------- what a shredding took of the rows, counted
+        //
+        // A value a shredding typed is counted as its bytes read would be: once at its path, at its row, in its class and in
+        // the class a question reads it as, its bounds widened. The rows of one path and one class are given in their order,
+        // as rows counted one after the other give them, which the spans keep.
+
+        /// <summary>
+        /// The count of the key named <paramref name="utf8"/> under this one, made when the key is new and the census lets it
+        /// count one more, as a row's field makes it (<see cref="Child"/>); null when it does not.
+        /// </summary>
+        internal PathCount? Key(PathCensus census, ReadOnlySpan<byte> utf8)
+        {
+            _keys ??= new Dictionary<string, PathCount>(StringComparer.Ordinal);
+            ReadOnlySpan<char> name = census.Chars(utf8);
+            if (!_keys.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out PathCount? key))
+            {
+                if (census._keyCount >= MaxKeys)
+                {
+                    return null;
+                }
+
+                _keys[new string(name)] = key = new PathCount();
+                census._keyCount++;
+                census._held++;
+            }
+            else if (key.Values == 0)
+            {
+                if (census._keyCount >= MaxKeys)
+                {
+                    return null;
+                }
+
+                census._keyCount++;
+            }
+
+            // The keys found by a name's number are another table, which a row counted after these fills again.
+            return key;
+        }
+
+        /// <summary>
+        /// One value of <paramref name="class"/> at each of the <paramref name="times"/> rows from <paramref name="row"/> on,
+        /// which follow each other: the path's values, and the spans of its class.
+        /// </summary>
+        private void Taken(PathCensus census, PathClass @class, long row, long times)
+        {
+            Values += times;
+            if (census._gap <= 0)
+            {
+                return;
+            }
+
+            if (times == 1)
+            {
+                Occur(@class, row, census._gap);
+            }
+            else
+            {
+                SpanListOf(@class).Append(row, row + times - 1, census._gap);
+            }
+        }
+
+        /// <summary>Counts an integer a shredding typed at each of the <paramref name="times"/> rows from <paramref name="row"/> on.</summary>
+        internal void TakenInteger(PathCensus census, long row, long value, long times)
+        {
+            Taken(census, PathClass.Integer, row, times);
+            Integer(value, times);
+        }
+
+        /// <summary>Counts a double a shredding typed at each of the <paramref name="times"/> rows from <paramref name="row"/> on.</summary>
+        internal void TakenDouble(PathCensus census, long row, double value, long times)
+        {
+            Taken(census, PathClass.Double, row, times);
+            _classes[(int)VariantClass.Double] += times;
+            _read[(int)PathClass.Double] += times;
+            if (double.IsNaN(value))
+            {
+                _nans = true;
+                return;
+            }
+
+            _minDouble = Math.Min(_minDouble, value);
+            _maxDouble = Math.Max(_maxDouble, value);
+        }
+
+        /// <summary>Counts a boolean a shredding typed at each of the <paramref name="times"/> rows from <paramref name="row"/> on.</summary>
+        internal void TakenBoolean(PathCensus census, long row, bool value, long times)
+        {
+            Taken(census, PathClass.Boolean, row, times);
+            _classes[(int)VariantClass.Boolean] += times;
+            _read[(int)PathClass.Boolean] += times;
+            _true |= value;
+            _false |= !value;
+        }
+
+        /// <summary>Counts a text a shredding typed at each of the <paramref name="times"/> rows from <paramref name="row"/> on.</summary>
+        internal void TakenString(PathCensus census, long row, ReadOnlySpan<byte> text, long times)
+        {
+            Taken(census, PathClass.String, row, times);
+            String(census.StringBoundBytes, text, times);
+        }
+
+        /// <summary>
+        /// Counts an object at each of the <paramref name="times"/> rows from <paramref name="row"/> on, its keys counted
+        /// apart: a shredding's, each by its own node, and the others' (<see cref="TakenFields"/>).
+        /// </summary>
+        internal void TakenObject(PathCensus census, long row, long times)
+        {
+            Taken(census, PathClass.Object, row, times);
+            _classes[ObjectSlot] += times;
+            _read[(int)PathClass.Object] += times;
+        }
+
+        /// <summary>
+        /// Counts a list of <paramref name="elements"/> elements all of <paramref name="class"/>, which a shredding typed at
+        /// each of the <paramref name="times"/> rows from <paramref name="row"/> on.
+        /// </summary>
+        internal void TakenList(PathCensus census, long row, int elements, VariantClass @class, long times)
+        {
+            Taken(census, PathClass.List, row, times);
+            _read[(int)PathClass.List] += times;
+            _classes[elements == 0 ? EmptyListSlot : ListSlot + (int)@class] += times;
+        }
+
+        /// <summary>
+        /// Counts <paramref name="value"/>, a value a shredding kept whole at each of the <paramref name="times"/> rows from
+        /// <paramref name="row"/> on, as a row's value is counted: its class, and an object's keys below it, named by
+        /// <paramref name="dictionary"/>.
+        /// </summary>
+        internal void TakenValue(PathCensus census, long row, in VariantDictionary dictionary, ReadOnlySpan<byte> value, int depth, long times) =>
+            Add(census, in dictionary, value, depth, times, row);
+
+        /// <summary>
+        /// Counts the keys of <paramref name="kept"/>, the object of the keys a shredding left of the object at
+        /// <paramref name="row"/>, which <see cref="TakenObject"/> counted: each as a field of a row's object is counted.
+        /// </summary>
+        internal void TakenFields(PathCensus census, long row, in VariantDictionary dictionary, ReadOnlySpan<byte> kept, int depth)
+        {
+            if (depth >= VortexLimits.MaxDTypeDepth / 2)
+            {
+                return;
+            }
+
+            VariantNested fields = VariantNested.Read(kept);
+            for (int i = 0; i < fields.Count; i++)
+            {
+                PathCount key = Child(census, in dictionary, fields.IdAt(i));
+                if (ReferenceEquals(key, Uncounted))
+                {
+                    OtherKeys++;
+                    census.Partial = true;
+                    continue;
+                }
+
+                key.Add(census, in dictionary, fields.ValueAt(i), depth + 1, 1, row);
             }
         }
 

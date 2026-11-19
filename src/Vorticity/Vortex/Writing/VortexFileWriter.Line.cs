@@ -683,12 +683,14 @@ public sealed partial class VortexFileWriter
 
         // Each shredded column's rows read alone, beside anything, then taken along its chain after the flight before's: the
         // chain adds what the block's read took, a copy.
+        Span<int> blocks = stackalloc int[_fieldCount];
+        blocks.Fill(-1);
         for (int field = 0; field < flight.ShredAt.Length; field++)
         {
             if (flight.ShredAt[field] != -1)
             {
                 // Laid first, then noted for the cut: a null-conditional call would skip laying it too.
-                int block = Add(flight, BlockItem | field, [], -1);
+                int block = blocks[field] = Add(flight, BlockItem | field, [], -1);
                 int item = before is null ? Add(flight, ShredItem | field, [], block) : AddBeforeCut(flight, ShredItem | field, false);
                 flight.Before[item] = block;
                 before?[field].Add(item);
@@ -718,11 +720,12 @@ public sealed partial class VortexFileWriter
 
         // Each variant column's census an item of its own: counted in one, the two variant columns of a metric record took
         // 0.44 ms of a block, the longest of its items once the shredded columns' takes were quicker (2026-11-18).
+        // A shredded column's census counts what the block's read took, after it, and reads no row again.
         for (int field = 0; flight.Census is not null && field < _fieldCount; field++)
         {
             if (_census![field] is not null)
             {
-                Add(flight, CensusItem | field, [], -1);
+                Add(flight, CensusItem | field, [], blocks[field]);
             }
         }
 
@@ -976,8 +979,15 @@ public sealed partial class VortexFileWriter
 
         if ((entry & CensusItem) != 0)
         {
+            // From what the block's read took of a shredded column, where the two count alike; from the rows otherwise.
             int field = entry & 0xF_FFFF;
-            _census![field]!.Add(in flight.Census![field], 0, rows);
+            PathCensus census = _census![field]!;
+            if (field >= flight.ShredAt.Length || flight.ShredAt[field] == -1 || flight.Blocks[field] is not { } block
+                || !block.Count(census, in flight.Shred[field], PathCensus.ValueBytesOf(in flight.Census![field])))
+            {
+                census.Add(in flight.Census![field], 0, rows);
+            }
+
             return;
         }
 

@@ -108,6 +108,7 @@ internal static class VariantShredder
         internal Shredding(VariantShredding plan)
         {
             Plan = plan;
+            _planKeys = KeysOf(plan);
             _root = Group.For(plan);
             _root.Attach(_replay);
         }
@@ -155,9 +156,14 @@ internal static class VariantShredder
         /// <summary>
         /// Begins a chunk taken in parts (<see cref="TakeMore"/>), what each node takes carved from <paramref name="store"/>,
         /// which lasts as long as the chunk: nothing taken, the keys <paramref name="bounds"/> asks for counted block by block.
+        /// With <paramref name="counted"/>, a block read alone whose paths a census counts from what it took
+        /// (<see cref="Count"/>): the runs of its rows that repeat the row before them are kept for it.
         /// </summary>
-        internal void Begin(CanonicalArena store, Indexes.ChunkBlockBounds? bounds)
+        internal void Begin(CanonicalArena store, Indexes.ChunkBlockBounds? bounds, bool counted = false)
         {
+            _keepsRuns = counted;
+            _runCount = 0;
+            _replay.Clear();
             _root.Clear(store);
             if (_root is ObjectGroup keys)
             {
@@ -231,7 +237,7 @@ internal static class VariantShredder
                 {
                     if (runCount > 0 && runStart + runCount != row)
                     {
-                        _replay.Again(lastValue, runStart, runCount);
+                        Again(lastValue, runStart, runCount);
                         runCount = 0;
                     }
 
@@ -255,7 +261,7 @@ internal static class VariantShredder
                 {
                     if (runCount > 0 && runStart + runCount != row)
                     {
-                        _replay.Again(lastValue, runStart, runCount);
+                        Again(lastValue, runStart, runCount);
                         runCount = 0;
                     }
 
@@ -266,7 +272,7 @@ internal static class VariantShredder
 
                 if (runCount > 0)
                 {
-                    _replay.Again(lastValue, runStart, runCount);
+                    Again(lastValue, runStart, runCount);
                     runCount = 0;
                 }
 
@@ -279,11 +285,36 @@ internal static class VariantShredder
 
             if (runCount > 0)
             {
-                _replay.Again(lastValue, runStart, runCount);
+                Again(lastValue, runStart, runCount);
             }
 
             _epoch = epoch;
             Taken = offset + rows.Count;
+        }
+
+        // For a chunk that keeps them (Begin), the runs of rows that took again what the row read before them took, a first
+        // row and a count each, in the rows' order: what a census counts a run at once from (Count).
+        private int[] _runs = [];
+        private int _runCount;
+        private bool _keepsRuns;
+
+        /// <summary>The <paramref name="count"/> rows from <paramref name="row"/> on take again what the row read last took, of value <paramref name="value"/>.</summary>
+        private void Again(ReadOnlySpan<byte> value, int row, int count)
+        {
+            _replay.Again(value, row, count);
+            if (!_keepsRuns)
+            {
+                return;
+            }
+
+            if (2 * (_runCount + 1) > _runs.Length)
+            {
+                Array.Resize(ref _runs, Math.Max(64, 2 * _runs.Length));
+            }
+
+            _runs[2 * _runCount] = row;
+            _runs[(2 * _runCount) + 1] = count;
+            _runCount++;
         }
 
         /// <summary>
@@ -308,6 +339,47 @@ internal static class VariantShredder
 
             _root.Append(block._root, offset);
             Taken = offset + block.Taken;
+        }
+
+        /// <summary>
+        /// Counts in <paramref name="census"/> the paths of <paramref name="rows"/>, a block's rows read alone, numbered from
+        /// its first (<see cref="Begin"/>, then <see cref="TakeMore"/> at 0), from what each node took of them: what the
+        /// census counts of the rows read one after the other (<see cref="PathCensus.Add(in PathCensus.Counting)"/>), their
+        /// values holding <paramref name="valueBytes"/> bytes. False, and nothing counted, where the two would differ: an
+        /// object held a key the shredding takes twice, whose second value it dropped, or the census is so near its most keys
+        /// that which ones it counts depends on the order it meets them in.
+        /// </summary>
+        /// <remarks>
+        /// A value the shredding typed is counted from its node, with no row read: the census read every row's object again,
+        /// field by field, 8 % of the processor of a consolidation of log records, in a row from a block to the next
+        /// (2026-11-19). What the nodes kept whole is read as it was, a key's value of another class and an object's other
+        /// keys.
+        /// </remarks>
+        internal bool Count(PathCensus census, in Rows rows, long valueBytes)
+        {
+            if (!_keepsRuns || _replay.Dropped || !census.HasRoomFor(_planKeys + (_root.KeptBytes / 3)))
+            {
+                return false;
+            }
+
+            long first = census.BeginTaken(rows.Count, valueBytes);
+            Counting counting = new Counting(census, new ViewValues(rows.Arena.GetNode(rows.Metadata)), first, _runs.AsSpan(0, 2 * _runCount));
+            _root.Count(in counting, census.Root, depth: 1);
+            return true;
+        }
+
+        // The keys the plan names, every depth together: the most a count of what the nodes typed may add to a census.
+        private readonly int _planKeys;
+
+        private static int KeysOf(VariantShredding plan)
+        {
+            int keys = plan.Keys.Count;
+            foreach (ShreddedKey key in plan.Keys)
+            {
+                keys += KeysOf(key.Field);
+            }
+
+            return keys;
         }
 
         /// <summary>
@@ -824,6 +896,15 @@ internal static class VariantShredder
         /// <summary>The row read takes what a replay cannot take again.</summary>
         internal void Break() => Whole = false;
 
+        /// <summary>Whether a row of the chunk held a key the shredding takes twice, whose second value was dropped: what the nodes took is then not all the rows hold.</summary>
+        internal bool Dropped { get; private set; }
+
+        /// <summary>A key's second value in a row's object is dropped.</summary>
+        internal void Drop() => Dropped = true;
+
+        /// <summary>A chunk begins: nothing dropped.</summary>
+        internal void Clear() => Dropped = false;
+
         /// <summary>Row <paramref name="row"/>, whose value <paramref name="value"/> is the last row read's, takes what it took.</summary>
         internal void Again(ReadOnlySpan<byte> value, int row)
         {
@@ -939,6 +1020,17 @@ internal static class VariantShredder
 
         /// <summary>The validity of the rows that hold the node, over <paramref name="rows"/> rows.</summary>
         internal abstract Validity HeldValidity(CanonicalArena arena, DTypeArena types, int rows);
+
+        /// <summary>
+        /// Counts at <paramref name="count"/>, the node's path in a census, what the node took of a block's rows, as the
+        /// census counts the rows' values read one after the other: each value at its row, in its class, the rows of one
+        /// class in their order; and below it what each of its nodes took. <paramref name="depth"/> is the node's, 1 for
+        /// the rows' own value.
+        /// </summary>
+        internal abstract void Count(in Counting counting, PathCensus.PathCount count, int depth);
+
+        /// <summary>The bytes of the values the node and every node below it kept whole: three at least for each key they may name.</summary>
+        internal virtual long KeptBytes => Values.ByteCount;
     }
 
     /// <summary>A node whose typed node is a column, laid out whole when the blob comes to it.</summary>
@@ -981,6 +1073,49 @@ internal static class VariantShredder
 
         // Whether the value taken last went to the typed column, which a row that repeats it takes again there.
         private bool _typedLast;
+
+        /// <summary>
+        /// The values typed and the values kept whole, each at its row, in the rows' order: a float kept whole is read as a
+        /// double is, and its rows lie among the doubles'.
+        /// </summary>
+        internal override void Count(in Counting counting, PathCensus.PathCount count, int depth)
+        {
+            Appended<int> typedRows = _typed.Rows!;
+            int typed = _typed.Count;
+            int kept = Values.Count;
+            Cursor typedAt = default;
+            Cursor keptAt = default;
+            Cursor keptLengths = default;
+            Cursor keptBytes = default;
+            byte[]? crossing = null;
+            TypedCursor values = default;
+            RunsAt typedRuns = new RunsAt(counting.Runs);
+            RunsAt keptRuns = new RunsAt(counting.Runs);
+            int t = typed > 0 ? typedRows.Next(ref typedAt) : int.MaxValue;
+            int k = kept > 0 ? Values.Rows.Next(ref keptAt) : int.MaxValue;
+            while (typed > 0 || kept > 0)
+            {
+                // A run of rows that took the value before them again is counted at once, and what they hold passed over.
+                if (t < k)
+                {
+                    int times = typedRuns.Times(t);
+                    _typed.CountNext(in counting, count, counting.First + t, times, ref values);
+                    typedRows.Skip(ref typedAt, times - 1);
+                    typed -= times;
+                    t = typed > 0 ? typedRows.Next(ref typedAt) : int.MaxValue;
+                }
+                else
+                {
+                    int times = keptRuns.Times(k);
+                    ReadOnlySpan<byte> value = Values.Next(ref keptLengths, ref keptBytes, ref crossing);
+                    counting.Kept(count, k, value, depth, times);
+                    Values.Skip(ref keptLengths, ref keptBytes, times - 1, value.Length);
+                    Values.Rows.Skip(ref keptAt, times - 1);
+                    kept -= times;
+                    k = kept > 0 ? Values.Rows.Next(ref keptAt) : int.MaxValue;
+                }
+            }
+        }
 
         /// <summary>The other's typed values after these, counted in the chunk's blocks as a take counts them, and the values it kept whole.</summary>
         internal override void Append(Group other, int offset)
@@ -1127,6 +1262,80 @@ internal static class VariantShredder
             }
         }
 
+        /// <summary>
+        /// The objects, each at its row, the keys the shredding left of one counted as its fields, and the values that are
+        /// no object, kept whole; then each key the rows hold, by its own node.
+        /// </summary>
+        internal override void Count(in Counting counting, PathCensus.PathCount count, int depth)
+        {
+            int objects = _objects.Count;
+            int kept = Values.Count;
+            Cursor objectsAt = default;
+            Cursor keptAt = default;
+            Cursor keptLengths = default;
+            Cursor keptBytes = default;
+            byte[]? crossing = null;
+            RunsAt objectRuns = new RunsAt(counting.Runs);
+            RunsAt keptRuns = new RunsAt(counting.Runs);
+            int o = objects > 0 ? _objects.Next(ref objectsAt) : int.MaxValue;
+            int k = kept > 0 ? Values.Rows.Next(ref keptAt) : int.MaxValue;
+            while (objects > 0 || kept > 0)
+            {
+                if (o < k)
+                {
+                    int times = objectRuns.Times(o);
+                    count.TakenObject(counting.Census, counting.First + o, times);
+                    _objects.Skip(ref objectsAt, times - 1);
+                    objects -= times;
+                    o = objects > 0 ? _objects.Next(ref objectsAt) : int.MaxValue;
+                    continue;
+                }
+
+                ReadOnlySpan<byte> value = Values.Next(ref keptLengths, ref keptBytes, ref crossing);
+                if (k < o)
+                {
+                    int times = keptRuns.Times(k);
+                    counting.Kept(count, k, value, depth, times);
+                    Values.Skip(ref keptLengths, ref keptBytes, times - 1, value.Length);
+                    Values.Rows.Skip(ref keptAt, times - 1);
+                    kept -= times;
+                }
+                else
+                {
+                    // The row's object, and the keys kept of it in an object of their own: a row read, which no row takes again.
+                    count.TakenObject(counting.Census, counting.First + o, 1);
+                    VariantDictionary dictionary = counting.Census.Enter(counting.Metadata.At(k));
+                    count.TakenFields(counting.Census, counting.First + k, in dictionary, value, depth);
+                    o = --objects > 0 ? _objects.Next(ref objectsAt) : int.MaxValue;
+                    kept--;
+                }
+
+                k = kept > 0 ? Values.Rows.Next(ref keptAt) : int.MaxValue;
+            }
+
+            for (int i = 0; i < _fields.Length; i++)
+            {
+                if (_fields[i].HeldAny && count.Key(counting.Census, _plan.Keys[i].Utf8) is { } key)
+                {
+                    _fields[i].Count(in counting, key, depth + 1);
+                }
+            }
+        }
+
+        internal override long KeptBytes
+        {
+            get
+            {
+                long bytes = Values.ByteCount;
+                foreach (Group node in _fields)
+                {
+                    bytes += node.KeptBytes;
+                }
+
+                return bytes;
+            }
+        }
+
         /// <summary>The other's objects' rows after these, and each key what the other's took.</summary>
         internal override void Append(Group other, int offset)
         {
@@ -1221,6 +1430,10 @@ internal static class VariantShredder
                         int at = offset + (int)Unsafe.ByteOffset(ref MemoryMarshal.GetReference(value), ref MemoryMarshal.GetReference(held));
                         field.Present(in dictionary, epoch, held, row, at);
                     }
+                    else
+                    {
+                        Record?.Drop();
+                    }
                 }
                 else
                 {
@@ -1313,6 +1526,45 @@ internal static class VariantShredder
             _elements.Clear(arena);
             _lists.Clear(arena);
             _sizes.Clear(arena);
+        }
+
+        /// <summary>The lists typed, each at its row by its elements' class, and the values kept whole, a list whose elements do not all fit among them, in the rows' order.</summary>
+        internal override void Count(in Counting counting, PathCensus.PathCount count, int depth)
+        {
+            int lists = _lists.Count;
+            int kept = Values.Count;
+            Cursor listsAt = default;
+            Cursor sizesAt = default;
+            Cursor keptAt = default;
+            Cursor keptLengths = default;
+            Cursor keptBytes = default;
+            byte[]? crossing = null;
+            RunsAt listRuns = new RunsAt(counting.Runs);
+            RunsAt keptRuns = new RunsAt(counting.Runs);
+            int l = lists > 0 ? _lists.Next(ref listsAt) : int.MaxValue;
+            int k = kept > 0 ? Values.Rows.Next(ref keptAt) : int.MaxValue;
+            while (lists > 0 || kept > 0)
+            {
+                if (l < k)
+                {
+                    int times = listRuns.Times(l);
+                    count.TakenList(counting.Census, counting.First + l, _sizes.Next(ref sizesAt), @class, times);
+                    _sizes.Skip(ref sizesAt, times - 1);
+                    _lists.Skip(ref listsAt, times - 1);
+                    lists -= times;
+                    l = lists > 0 ? _lists.Next(ref listsAt) : int.MaxValue;
+                }
+                else
+                {
+                    int times = keptRuns.Times(k);
+                    ReadOnlySpan<byte> value = Values.Next(ref keptLengths, ref keptBytes, ref crossing);
+                    counting.Kept(count, k, value, depth, times);
+                    Values.Skip(ref keptLengths, ref keptBytes, times - 1, value.Length);
+                    Values.Rows.Skip(ref keptAt, times - 1);
+                    kept -= times;
+                    k = kept > 0 ? Values.Rows.Next(ref keptAt) : int.MaxValue;
+                }
+            }
         }
 
         /// <summary>The other's lists after these: their rows, their sizes and their elements, which are rows of their own.</summary>
@@ -1460,6 +1712,13 @@ internal static class VariantShredder
         /// </summary>
         internal abstract void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset);
 
+        /// <summary>
+        /// Counts at <paramref name="count"/> the value after the one counted last, the first from a cursor at its default,
+        /// at each of the <paramref name="times"/> rows from <paramref name="row"/> of the census's on: the value once, and the
+        /// same once more for each row after the first, which the cursor passes over.
+        /// </summary>
+        internal abstract void CountNext(in Counting counting, PathCensus.PathCount count, long row, int times, ref TypedCursor cursor);
+
         /// <summary>Takes the value taken last again.</summary>
         protected abstract void Repeat();
 
@@ -1497,6 +1756,12 @@ internal static class VariantShredder
 
         protected override void All(TypedValues other) => _values.AddAll(((IntegerValues)other)._values);
 
+        internal override void CountNext(in Counting counting, PathCensus.PathCount count, long row, int times, ref TypedCursor cursor)
+        {
+            count.TakenInteger(counting.Census, row, _values.Next(ref cursor.Values), times);
+            _values.Skip(ref cursor.Values, times - 1);
+        }
+
         internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset)
         {
             Reading<int> row = new Reading<int>(Rows!);
@@ -1532,6 +1797,12 @@ internal static class VariantShredder
 
         protected override void All(TypedValues other) => _values.AddAll(((DoubleValues)other)._values);
 
+        internal override void CountNext(in Counting counting, PathCensus.PathCount count, long row, int times, ref TypedCursor cursor)
+        {
+            count.TakenDouble(counting.Census, row, _values.Next(ref cursor.Values), times);
+            _values.Skip(ref cursor.Values, times - 1);
+        }
+
         /// <summary>A chunk counts no doubles block by block (<see cref="Indexes.ChunkBlockBounds.Counted"/>).</summary>
         internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset)
         {
@@ -1561,6 +1832,12 @@ internal static class VariantShredder
         protected override void Value(in VariantScalar scalar) => _values.Add(scalar.Integer != 0 ? (byte)1 : (byte)0);
 
         protected override void All(TypedValues other) => _values.AddAll(((BooleanValues)other)._values);
+
+        internal override void CountNext(in Counting counting, PathCensus.PathCount count, long row, int times, ref TypedCursor cursor)
+        {
+            count.TakenBoolean(counting.Census, row, _values.Next(ref cursor.Values) != 0, times);
+            _values.Skip(ref cursor.Values, times - 1);
+        }
 
         internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset)
         {
@@ -1629,6 +1906,20 @@ internal static class VariantShredder
             _lastLength = from._lastLength;
         }
 
+        /// <summary>The next text, a repeat the text it repeats, whose bytes are there once and which the cursor keeps.</summary>
+        internal override void CountNext(in Counting counting, PathCensus.PathCount count, long row, int times, ref TypedCursor cursor)
+        {
+            int length = _lengths.Next(ref cursor.Lengths);
+            if (length >= 0)
+            {
+                cursor.Last = _bytes.Next(ref cursor.Values, length, ref cursor.Crossing);
+            }
+
+            // The rows after the first repeat the text, each a length of its own and no bytes.
+            count.TakenString(counting.Census, row, cursor.Last, times);
+            _lengths.Skip(ref cursor.Lengths, times - 1);
+        }
+
         /// <summary>Each text counted at its row, a repeat as the text it repeats, whose bytes are there once.</summary>
         internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset)
         {
@@ -1695,6 +1986,26 @@ internal static class VariantShredder
             _rows.AddShifted(other._rows, offset);
             _lengths.AddAll(other._lengths);
             _bytes.AddAll(other._bytes);
+        }
+
+        /// <summary>The values taken.</summary>
+        internal int Count => _rows.Count;
+
+        /// <summary>The bytes of the values taken.</summary>
+        internal long ByteCount => _bytes.Count;
+
+        /// <summary>
+        /// The value after the one read last, the first from cursors at their default: where it lies when a block holds it
+        /// whole, and otherwise a copy in <paramref name="crossing"/>, which lasts until the next value read so.
+        /// </summary>
+        internal ReadOnlySpan<byte> Next(scoped ref Cursor lengths, scoped ref Cursor bytes, scoped ref byte[]? crossing) =>
+            _bytes.Next(ref bytes, _lengths.Next(ref lengths), ref crossing);
+
+        /// <summary>Moves the cursors past the <paramref name="count"/> values after the one read last, each of <paramref name="length"/> bytes: the rows that repeat it.</summary>
+        internal void Skip(ref Cursor lengths, ref Cursor bytes, long count, int length)
+        {
+            _lengths.Skip(ref lengths, count);
+            _bytes.Skip(ref bytes, count * length);
         }
 
         /// <summary>
@@ -2215,6 +2526,88 @@ internal static class VariantShredder
             }
         }
 
+        /// <summary>Moves <paramref name="cursor"/> past the <paramref name="count"/> values after the one read last.</summary>
+        internal void Skip(ref Cursor cursor, long count)
+        {
+            while (count > 0)
+            {
+                int left = Block(cursor.Block).Length - cursor.At;
+                if (left == 0)
+                {
+                    cursor.Block++;
+                    cursor.At = 0;
+                    continue;
+                }
+
+                int take = (int)Math.Min(left, count);
+                cursor.At += take;
+                count -= take;
+            }
+        }
+
+        /// <summary>The value at <paramref name="cursor"/>, which moves past it: the values read back in order from a cursor at its default.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal T Next(ref Cursor cursor)
+        {
+            ReadOnlySpan<T> block = Block(cursor.Block);
+            if (cursor.At == block.Length)
+            {
+                block = Block(++cursor.Block);
+                cursor.At = 0;
+            }
+
+            return block[cursor.At++];
+        }
+
+        /// <summary>
+        /// The <paramref name="count"/> values from <paramref name="cursor"/> on, which moves past them: where they lie when a
+        /// block holds them all, and otherwise a copy in <paramref name="crossing"/>, which lasts until the next values a block
+        /// does not hold whole.
+        /// </summary>
+        internal ReadOnlySpan<T> Next(scoped ref Cursor cursor, int count, scoped ref T[]? crossing)
+        {
+            if (count == 0)
+            {
+                return default;
+            }
+
+            ReadOnlySpan<T> block = Block(cursor.Block);
+            if (cursor.At == block.Length)
+            {
+                block = Block(++cursor.Block);
+                cursor.At = 0;
+            }
+
+            if (block.Length - cursor.At >= count)
+            {
+                ReadOnlySpan<T> held = block.Slice(cursor.At, count);
+                cursor.At += count;
+                return held;
+            }
+
+            if (crossing is null || crossing.Length < count)
+            {
+                crossing = new T[Math.Max(count, 256)];
+            }
+
+            int copied = 0;
+            while (copied < count)
+            {
+                if (cursor.At == block.Length)
+                {
+                    block = Block(++cursor.Block);
+                    cursor.At = 0;
+                }
+
+                int take = Math.Min(count - copied, block.Length - cursor.At);
+                block.Slice(cursor.At, take).CopyTo(crossing.AsSpan(copied));
+                copied += take;
+                cursor.At += take;
+            }
+
+            return crossing.AsSpan(0, count);
+        }
+
         /// <summary>The value appended last; meaningless before one.</summary>
         internal T Last => *(_next - 1);
 
@@ -2250,6 +2643,79 @@ internal static class VariantShredder
             _blocks[_blockCount++] = block;
             _next = (T*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(into));
             _left = bytes / sizeof(T);
+        }
+    }
+
+    /// <summary>Where a list of values is read back from, a value or a few at a time (<see cref="Appended{T}.Next(ref Cursor)"/>): its first value at its default.</summary>
+    private struct Cursor
+    {
+        internal int Block;
+        internal int At;
+    }
+
+    /// <summary>
+    /// Where a typed column's values are read back from, one at a time (<see cref="TypedValues.CountNext"/>): its values, a
+    /// text's bytes, its lengths, and the text read last, which the texts after it may repeat.
+    /// </summary>
+    private ref struct TypedCursor
+    {
+        internal Cursor Values;
+        internal Cursor Lengths;
+        internal byte[]? Crossing;
+        internal ReadOnlySpan<byte> Last;
+    }
+
+    /// <summary>
+    /// A census counting what a shredding took of a block (<see cref="Shredding.Count"/>): the census, the block's rows'
+    /// metadata, which the keys of a value kept whole are named by, and the block's first row among the census's.
+    /// </summary>
+    private readonly ref struct Counting(PathCensus census, ViewValues metadata, long first, ReadOnlySpan<int> runs)
+    {
+        internal readonly PathCensus Census = census;
+        internal readonly ViewValues Metadata = metadata;
+        internal readonly long First = first;
+
+        /// <summary>
+        /// The runs of rows that took again what the row read before them took (<see cref="Replay"/>), a first row and a
+        /// count each, in the rows' order: a node that took the row read holds, right after what it took of it, the same
+        /// once more for each row of each run that follows it.
+        /// </summary>
+        internal readonly ReadOnlySpan<int> Runs = runs;
+
+        /// <summary>
+        /// Counts at <paramref name="count"/> the value <paramref name="value"/> kept whole at each of the
+        /// <paramref name="times"/> rows from <paramref name="row"/> of the block on, its row's dictionary read when it is an
+        /// object, whose keys it names.
+        /// </summary>
+        internal void Kept(PathCensus.PathCount count, int row, ReadOnlySpan<byte> value, int depth, int times)
+        {
+            VariantDictionary dictionary = (value[0] & 0x03) == ParquetVariant.BasicObject ? Census.Enter(Metadata.At(row)) : default;
+            count.TakenValue(Census, First + row, in dictionary, value, depth, times);
+        }
+    }
+
+    /// <summary>
+    /// The runs of a block (<see cref="Counting.Runs"/>) walked beside what one node took, whose rows rise: how many rows
+    /// take what the node holds at a row.
+    /// </summary>
+    private ref struct RunsAt(ReadOnlySpan<int> runs)
+    {
+        private readonly ReadOnlySpan<int> _runs = runs;
+        private int _at;
+
+        /// <summary>
+        /// The rows that hold what the node holds at <paramref name="row"/>, from it on: those of the run that starts there,
+        /// which the node holds the same for once each right after, or the row alone.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal int Times(int row)
+        {
+            while (_at < _runs.Length && _runs[_at] < row)
+            {
+                _at += 2;
+            }
+
+            return _at < _runs.Length && _runs[_at] == row ? _runs[_at + 1] : 1;
         }
     }
 
