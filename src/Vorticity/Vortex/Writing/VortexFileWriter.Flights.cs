@@ -1,4 +1,5 @@
 using Vorticity.Arrays;
+using Vorticity.Buffers;
 using Vorticity.Types.Variants;
 using Vorticity.Writing;
 
@@ -179,6 +180,50 @@ public sealed partial class VortexFileWriter
         /// <inheritdoc cref="Shred"/>
         internal int[] ShredAt = [];
 
+        /// <summary>
+        /// Per shredded column whose rows the line takes, what the flight's rows hold of the column's shredding, read alone
+        /// beside the chain (<see cref="TakeBlock"/>), and the arena it is carved from: made on the column's first block of
+        /// the flight and kept, null for a column the flight never took.
+        /// </summary>
+        internal VariantShredder.Shredding?[] Blocks = [];
+
+        /// <inheritdoc cref="Blocks"/>
+        internal CanonicalArena?[] BlockStores = [];
+
+        /// <summary>Room for the takes of <paramref name="fields"/> columns, on the thread that runs the flight's prologue: what a flight before it took of a column kept.</summary>
+        internal void SizeShreds(int fields)
+        {
+            if (ShredAt.Length != fields)
+            {
+                ShredAt = new int[fields];
+                Shred = new VariantShredder.Shredding.Rows[fields];
+            }
+
+            if (Blocks.Length != fields)
+            {
+                System.Array.Resize(ref Blocks, fields);
+                System.Array.Resize(ref BlockStores, fields);
+            }
+        }
+
+        /// <summary>
+        /// Reads the flight's rows of shredded column <paramref name="field"/>, made ready in <see cref="Shred"/>, into a
+        /// shredding of <paramref name="plan"/> of the block's own, its rows numbered from the block's first: what the chain
+        /// then adds to the column's chunk (<see cref="VariantShredder.Shredding.Append"/>), and touches nothing else.
+        /// </summary>
+        /// <remarks>
+        /// Each column's item touches its own slot alone, of arrays the flight's prologue sized (<see cref="SizeShreds"/>): the
+        /// items of two variant columns of a flight run beside each other.
+        /// </remarks>
+        internal void TakeBlock(int field, VariantShredding plan, MemoryAccount account)
+        {
+            VariantShredder.Shredding block = Blocks[field] ??= new VariantShredder.Shredding(plan);
+            CanonicalArena store = BlockStores[field] ??= new CanonicalArena(64, account);
+            store.ResetKeepingBlocks();
+            block.Begin(store, null);
+            block.TakeMore(in Shred[field], 0);
+        }
+
         /// <summary>The flight's items, as the ingest across the lanes numbers them.</summary>
         internal int[] Entries = [];
 
@@ -268,6 +313,13 @@ public sealed partial class VortexFileWriter
             }
 
             Keys = [];
+            foreach (CanonicalArena? store in BlockStores)
+            {
+                store?.Reset();
+            }
+
+            Blocks = [];
+            BlockStores = [];
         }
     }
 

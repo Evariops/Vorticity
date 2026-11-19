@@ -758,6 +758,52 @@ public sealed partial class ShreddedVariantWriteTests
                             Assert.True(
                                 actual.Memory.Span.SequenceEqual(partedBlob.Memory.Span),
                                 $"{name}, compressed {compress}, frames of {frameRows} rows: {partedBlob.Length} bytes taken in parts against {actual.Length} taken whole");
+
+                            // Each part read alone into a shredding of its own, its rows numbered from its first, then added to the
+                            // chunk's where the part falls, as the line takes a column's blocks: the same blob, and the same
+                            // counts of the chunk's keys block by block as the parts taken in place count, blocks of 256 rows
+                            // that the parts of 700 cross.
+                            using ArrayBlobWriter.Workspace addedTo = new ArrayBlobWriter.Workspace { FrameRows = frameRows, Account = TestAccount.Shared };
+                            VariantShredder.Shredding added = addedTo.Shredding(plan);
+                            VariantShredder.Shredding alone = new VariantShredder.Shredding(plan);
+                            VariantShredder.Shredding inPlace = new VariantShredder.Shredding(plan);
+                            CanonicalArena addedStore = new CanonicalArena();
+                            CanonicalArena aloneStore = new CanonicalArena();
+                            CanonicalArena inPlaceStore = new CanonicalArena();
+                            Vorticity.Indexes.ChunkBlockBounds addedBounds = new(Vorticity.Indexes.ChunkBlockBounds.Counted(plan), 256, 16);
+                            Vorticity.Indexes.ChunkBlockBounds inPlaceBounds = new(Vorticity.Indexes.ChunkBlockBounds.Counted(plan), 256, 16);
+                            added.Begin(addedStore, addedBounds);
+                            inPlace.Begin(inPlaceStore, inPlaceBounds);
+                            for (int start = 0; start < batch.RowCount; start += 700)
+                            {
+                                int count = Math.Min(700, batch.RowCount - start);
+                                int slice = Vorticity.Layouts.CanonicalSlice.SliceAcross(batch.Arena, part, batch.RootIndex, start, count);
+                                VariantShredder.Shredding.Rows taken = VariantShredder.Shredding.Prepare(part, part.GetNode(slice).GetFieldIndex(field));
+                                aloneStore.Reset();
+                                alone.Begin(aloneStore, null);
+                                alone.TakeMore(in taken, 0);
+                                added.Append(alone, start);
+                                inPlace.TakeMore(in taken, start);
+                                part.Reset();
+                            }
+
+                            Assert.Equal(batch.RowCount, added.Taken);
+                            added.Settle(batch.Arena, column);
+                            using ArrayBlobWriter.BlobLease addedBlob = added.Write(
+                                addedTo, new EncodingDictionary(ComponentKind.Array, Vorticity.Editions.EditionRegistry.Newest), compress);
+                            Assert.True(
+                                actual.Memory.Span.SequenceEqual(addedBlob.Memory.Span),
+                                $"{name}, compressed {compress}, frames of {frameRows} rows: {addedBlob.Length} bytes of parts read alone and added against {actual.Length} taken whole");
+                            Assert.Equal(inPlaceBounds.Keys.Count, addedBounds.Keys.Count);
+                            for (int key = 0; key < addedBounds.Keys.Count; key++)
+                            {
+                                Assert.Equal(inPlaceBounds.Keys[key].Count, addedBounds.Keys[key].Count);
+                                Assert.Equal(inPlaceBounds.Keys[key].First, addedBounds.Keys[key].First);
+                                Assert.Equal(inPlaceBounds.Keys[key].Last, addedBounds.Keys[key].Last);
+                                Assert.True(
+                                    inPlaceBounds.Keys[key].Body.SequenceEqual(addedBounds.Keys[key].Body),
+                                    $"{name}, key {key}: the blocks counted from parts added differ from those counted as the parts are taken");
+                            }
                         }
                     }
                 }

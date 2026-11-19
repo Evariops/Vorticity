@@ -221,6 +221,14 @@ public sealed partial class VortexFileWriter
     private const int ShredItem = 1 << 25;
 
     /// <summary>
+    /// An item that reads the flight's rows of a shredded column into a shredding of the block's own
+    /// (<see cref="Flight.TakeBlock"/>), its field in the low twenty bits: it touches no state, and the column's take along
+    /// its chain waits for it. Among the bits of a group of keys past the fifteenth, which a keys item sets: told apart
+    /// after it.
+    /// </summary>
+    private const int BlockItem = 1 << 24;
+
+    /// <summary>
     /// An item that cuts a column's chunk, its field in the low twenty bits, in a flight cut column by column
     /// (<see cref="Flight.Cuts"/>). Below the bits of a group of keys, which a keys item sets: told apart after it.
     /// </summary>
@@ -418,12 +426,7 @@ public sealed partial class VortexFileWriter
             return;
         }
 
-        if (flight.ShredAt.Length != _fieldCount)
-        {
-            flight.ShredAt = new int[_fieldCount];
-            flight.Shred = new VariantShredder.Shredding.Rows[_fieldCount];
-        }
-
+        flight.SizeShreds(_fieldCount);
         for (int field = 0; field < _fieldCount; field++)
         {
             flight.ShredAt[field] = -1;
@@ -451,12 +454,7 @@ public sealed partial class VortexFileWriter
             return;
         }
 
-        if (flight.ShredAt.Length != _fieldCount)
-        {
-            flight.ShredAt = new int[_fieldCount];
-            flight.Shred = new VariantShredder.Shredding.Rows[_fieldCount];
-        }
-
+        flight.SizeShreds(_fieldCount);
         for (int field = 0; field < _fieldCount; field++)
         {
             flight.ShredAt[field] = -1;
@@ -588,6 +586,10 @@ public sealed partial class VortexFileWriter
         {
             own = [StateShred(entry & 0xF_FFFF)];
         }
+        else if ((entry & BlockItem) != 0)
+        {
+            own = [];
+        }
         else if ((entry & CloseItem) != 0)
         {
             // What a column's cut reads and leaves: its ingest's summaries (Freeze), its gathering, its chain, and its cut.
@@ -669,7 +671,7 @@ public sealed partial class VortexFileWriter
         StateCount();
         IndexWriter? indexes = _indexes is { AsksNothing: false, Streams: true } streaming ? streaming : null;
         int groups = indexes is null ? 0 : KeysApart(indexes);
-        flight.Size((_fieldCount * 11) + groups + 4);
+        flight.Size((_fieldCount * 12) + groups + 4);
         flight.KeysApart = groups > 0;
         bool attaches = flight.AttachFrom is not null;
 
@@ -679,13 +681,16 @@ public sealed partial class VortexFileWriter
         int over = afterCut && flight.Gathers ? Add(flight, OverItem, CutStates(), -1) : -1;
         List<int>[]? before = flight.Cuts ? CutBefores() : null;
 
-        // Each shredded column's rows taken along its chain, after the flight before's.
+        // Each shredded column's rows read alone, beside anything, then taken along its chain after the flight before's: the
+        // chain adds what the block's read took, a copy.
         for (int field = 0; field < flight.ShredAt.Length; field++)
         {
             if (flight.ShredAt[field] != -1)
             {
                 // Laid first, then noted for the cut: a null-conditional call would skip laying it too.
-                int item = before is null ? Add(flight, ShredItem | field, [], -1) : AddBeforeCut(flight, ShredItem | field, false);
+                int block = Add(flight, BlockItem | field, [], -1);
+                int item = before is null ? Add(flight, ShredItem | field, [], block) : AddBeforeCut(flight, ShredItem | field, false);
+                flight.Before[item] = block;
                 before?[field].Add(item);
             }
         }
@@ -1000,6 +1005,13 @@ public sealed partial class VortexFileWriter
         if ((entry & ShredItem) != 0)
         {
             TakeOnLine(flight, entry & 0xF_FFFF);
+            return;
+        }
+
+        if ((entry & BlockItem) != 0)
+        {
+            int field = entry & 0xF_FFFF;
+            flight.TakeBlock(field, _shredding![field]!, Account);
             return;
         }
 

@@ -194,6 +194,66 @@ internal sealed class ChunkBlockBounds
         /// <summary>Counts the value <paramref name="scalar"/> of row <paramref name="row"/> of the chunk, a value of the key's class.</summary>
         internal void Note(int row, VariantScalar scalar)
         {
+            switch (@class)
+            {
+                case PathClass.Integer:
+                    Integer(row, (long)scalar.Integer);
+                    break;
+                case PathClass.Boolean:
+                    Boolean(row, scalar.Integer != 0);
+                    break;
+                case PathClass.String:
+                    String(row, scalar.Bytes);
+                    break;
+                default:
+                    Enter(row);
+                    break;
+            }
+        }
+
+        /// <summary>Counts the integer <paramref name="value"/> of row <paramref name="row"/> of the chunk, for a key of integers: what <see cref="Note"/> counts of it read.</summary>
+        internal void Integer(int row, long value)
+        {
+            Enter(row);
+            _low = Math.Min(_low, value);
+            _high = Math.Max(_high, value);
+        }
+
+        /// <summary>Counts the boolean <paramref name="value"/> of row <paramref name="row"/> of the chunk, for a key of booleans: what <see cref="Note"/> counts of it read.</summary>
+        internal void Boolean(int row, bool value)
+        {
+            Enter(row);
+            _booleans |= value ? 2 : 1;
+        }
+
+        /// <summary>Counts the text <paramref name="text"/> of row <paramref name="row"/> of the chunk, for a key of texts: what <see cref="Note"/> counts of it read.</summary>
+        internal void String(int row, ReadOnlySpan<byte> text)
+        {
+            Enter(row);
+            if (stringBoundBytes > 0)
+            {
+                Text(text);
+            }
+        }
+
+        /// <summary>
+        /// Counts the text <paramref name="text"/> of row <paramref name="row"/> of the chunk, the text counted last, which the
+        /// row repeats: in the same block, one value more and no bound moved; in the next, as <see cref="String"/> counts it.
+        /// </summary>
+        internal void StringAgain(int row, ReadOnlySpan<byte> text)
+        {
+            if (row / blockRows == _block)
+            {
+                _values++;
+                return;
+            }
+
+            String(row, text);
+        }
+
+        /// <summary>One value more at row <paramref name="row"/> of the chunk, in its block, the block before it closed when it starts one.</summary>
+        private void Enter(int row)
+        {
             int block = row / blockRows;
             if (block != _block)
             {
@@ -202,22 +262,6 @@ internal sealed class ChunkBlockBounds
             }
 
             _values++;
-            switch (@class)
-            {
-                case PathClass.Integer:
-                    long integer = (long)scalar.Integer;
-                    _low = Math.Min(_low, integer);
-                    _high = Math.Max(_high, integer);
-                    break;
-                case PathClass.Boolean:
-                    _booleans |= scalar.Integer != 0 ? 2 : 1;
-                    break;
-                case PathClass.String when stringBoundBytes > 0:
-                    Text(scalar.Bytes);
-                    break;
-                default:
-                    break;
-            }
         }
 
         /// <summary>Widens the block's text bounds by <paramref name="text"/>, cut to the bound, as a path's count does.</summary>

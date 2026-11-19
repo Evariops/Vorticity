@@ -287,6 +287,30 @@ internal static class VariantShredder
         }
 
         /// <summary>
+        /// Takes what <paramref name="block"/>, a shredding of the same plan begun for a block's rows alone, took of them, as
+        /// the chunk's rows from <paramref name="offset"/> on, after the rows taken before, which they follow: what
+        /// <see cref="TakeMore"/> takes of the same rows there, node by node, and no row read. The keys the chunk counts block
+        /// by block are counted from what the block typed.
+        /// </summary>
+        /// <remarks>
+        /// A column's blocks are taken one after the other, each after the one before, since each adds to the chunk's nodes:
+        /// reading the rows there, the take of a consolidation of log records' attributes was 4.4 s of work in a row a range
+        /// of its job, under a write pass of 6.4 s (2026-11-19). A block read alone, beside anything, leaves the chain the
+        /// copy of what it took.
+        /// </remarks>
+        /// <exception cref="ArgumentException"><paramref name="block"/> is of another plan.</exception>
+        internal void Append(Shredding block, int offset)
+        {
+            if (!ReferenceEquals(block.Plan, Plan))
+            {
+                throw new ArgumentException("A block's shredding is added to a chunk's of the same plan.", nameof(block));
+            }
+
+            _root.Append(block._root, offset);
+            Taken = offset + block.Taken;
+        }
+
+        /// <summary>
         /// Settles a chunk taken in parts on its rows whole, node <paramref name="node"/> of <paramref name="arena"/>, once every
         /// part is taken: what its blob's frames and its rows' metadata are written from.
         /// </summary>
@@ -861,6 +885,20 @@ internal static class VariantShredder
         /// <summary>Notes <paramref name="row"/> as the last the node took, as <see cref="Present"/> does.</summary>
         private protected void Mark(int row) => Last = row;
 
+        /// <summary>
+        /// Takes what <paramref name="other"/>, this node of another shredding of the plan, took of its rows, each
+        /// <paramref name="offset"/> rows on, after what this one took: the values it kept whole here, a node's own in its
+        /// override.
+        /// </summary>
+        internal virtual void Append(Group other, int offset)
+        {
+            Values.Append(other.Values, offset);
+            if (other.Last >= 0)
+            {
+                Last = offset + other.Last;
+            }
+        }
+
         internal static Group For(VariantShredding plan) => plan.Kind switch
         {
             VariantShreddingKind.Object => new ObjectGroup(plan),
@@ -943,6 +981,20 @@ internal static class VariantShredder
 
         // Whether the value taken last went to the typed column, which a row that repeats it takes again there.
         private bool _typedLast;
+
+        /// <summary>The other's typed values after these, counted in the chunk's blocks as a take counts them, and the values it kept whole.</summary>
+        internal override void Append(Group other, int offset)
+        {
+            PrimitiveGroup from = (PrimitiveGroup)other;
+            base.Append(other, offset);
+            if (Bounds is { } bounds)
+            {
+                from._typed.CountInto(bounds, offset);
+            }
+
+            _typed.Append(from._typed, offset);
+            _typedLast = from._typedLast;
+        }
 
         /// <summary>The value taken last again, not read: the typed column's last value, or the value kept whole.</summary>
         internal override void Again(ReadOnlySpan<byte> value, int row)
@@ -1072,6 +1124,18 @@ internal static class VariantShredder
             foreach (Group field in _fields)
             {
                 field.Attach(record);
+            }
+        }
+
+        /// <summary>The other's objects' rows after these, and each key what the other's took.</summary>
+        internal override void Append(Group other, int offset)
+        {
+            ObjectGroup from = (ObjectGroup)other;
+            base.Append(other, offset);
+            _objects.AddShifted(from._objects, offset);
+            for (int i = 0; i < _fields.Length; i++)
+            {
+                _fields[i].Append(from._fields[i], offset);
             }
         }
 
@@ -1251,6 +1315,16 @@ internal static class VariantShredder
             _sizes.Clear(arena);
         }
 
+        /// <summary>The other's lists after these: their rows, their sizes and their elements, which are rows of their own.</summary>
+        internal override void Append(Group other, int offset)
+        {
+            ListGroup from = (ListGroup)other;
+            base.Append(other, offset);
+            _elements.Append(from._elements, 0);
+            _lists.AddShifted(from._lists, offset);
+            _sizes.AddAll(from._sizes);
+        }
+
         protected override void Take(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row, int offset)
         {
             if ((value[0] & 0x03) == ParquetVariant.BasicArray)
@@ -1366,6 +1440,26 @@ internal static class VariantShredder
             Repeat(count);
         }
 
+        /// <summary>
+        /// Takes the values <paramref name="other"/>, a column of the same class, took, after these, each at its row
+        /// <paramref name="offset"/> rows on.
+        /// </summary>
+        internal void Append(TypedValues other, int offset)
+        {
+            Rows?.AddShifted(other.Rows!, offset);
+            Count += other.Count;
+            All(other);
+        }
+
+        /// <summary>Takes every value of <paramref name="other"/>, of the same class, after these.</summary>
+        protected abstract void All(TypedValues other);
+
+        /// <summary>
+        /// Counts the values taken in <paramref name="bounds"/>, each at its row <paramref name="offset"/> rows on, as a take
+        /// that counts a chunk's blocks counts them as it types them.
+        /// </summary>
+        internal abstract void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset);
+
         /// <summary>Takes the value taken last again.</summary>
         protected abstract void Repeat();
 
@@ -1401,6 +1495,18 @@ internal static class VariantShredder
 
         protected override void Value(in VariantScalar scalar) => _values.Add((long)scalar.Integer);
 
+        protected override void All(TypedValues other) => _values.AddAll(((IntegerValues)other)._values);
+
+        internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset)
+        {
+            Reading<int> row = new Reading<int>(Rows!);
+            Reading<long> value = new Reading<long>(_values);
+            for (int i = 0; i < Count; i++)
+            {
+                bounds.Integer(offset + row.Next(), value.Next());
+            }
+        }
+
         protected override void Repeat() => _values.Add(_values.Last);
 
         protected override void Repeat(int count) => _values.AddRepeated(_values.Last, count);
@@ -1424,6 +1530,13 @@ internal static class VariantShredder
 
         protected override void Value(in VariantScalar scalar) => _values.Add(scalar.Number);
 
+        protected override void All(TypedValues other) => _values.AddAll(((DoubleValues)other)._values);
+
+        /// <summary>A chunk counts no doubles block by block (<see cref="Indexes.ChunkBlockBounds.Counted"/>).</summary>
+        internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset)
+        {
+        }
+
         protected override void Repeat() => _values.Add(_values.Last);
 
         protected override void Repeat(int count) => _values.AddRepeated(_values.Last, count);
@@ -1446,6 +1559,18 @@ internal static class VariantShredder
         internal override DType Type(DTypeArena types) => types.Bool(Nullability.Nullable);
 
         protected override void Value(in VariantScalar scalar) => _values.Add(scalar.Integer != 0 ? (byte)1 : (byte)0);
+
+        protected override void All(TypedValues other) => _values.AddAll(((BooleanValues)other)._values);
+
+        internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset)
+        {
+            Reading<int> row = new Reading<int>(Rows!);
+            Reading<byte> value = new Reading<byte>(_values);
+            for (int i = 0; i < Count; i++)
+            {
+                bounds.Boolean(offset + row.Next(), value.Next() != 0);
+            }
+        }
 
         protected override void Repeat() => _values.Add(_values.Last);
 
@@ -1496,6 +1621,37 @@ internal static class VariantShredder
             _lastLength = text.Length;
         }
 
+        protected override void All(TypedValues other)
+        {
+            StringValues from = (StringValues)other;
+            _lengths.AddAll(from._lengths);
+            _bytes.AddAll(from._bytes);
+            _lastLength = from._lastLength;
+        }
+
+        /// <summary>Each text counted at its row, a repeat as the text it repeats, whose bytes are there once.</summary>
+        internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset)
+        {
+            Reading<int> row = new Reading<int>(Rows!);
+            Reading<int> length = new Reading<int>(_lengths);
+            Texts texts = new Texts(_bytes);
+            ReadOnlySpan<byte> last = default;
+            for (int i = 0; i < Count; i++)
+            {
+                int at = offset + row.Next();
+                int count = length.Next();
+                if (count >= 0)
+                {
+                    last = texts.Next(count);
+                    bounds.String(at, last);
+                }
+                else
+                {
+                    bounds.StringAgain(at, last);
+                }
+            }
+        }
+
         // A repeat's length is complemented, which tells Binary that it views the bytes of the value it repeats, kept once.
         protected override void Repeat() => _lengths.Add(~_lastLength);
 
@@ -1531,6 +1687,14 @@ internal static class VariantShredder
             _rows.Add(row);
             _lengths.Add(value.Length);
             _bytes.AddRange(value);
+        }
+
+        /// <summary>Takes the values <paramref name="other"/> took, after these, each at its row <paramref name="offset"/> rows on.</summary>
+        internal void Append(BinaryValues other, int offset)
+        {
+            _rows.AddShifted(other._rows, offset);
+            _lengths.AddAll(other._lengths);
+            _bytes.AddAll(other._bytes);
         }
 
         /// <summary>
@@ -1999,6 +2163,58 @@ internal static class VariantShredder
             }
         }
 
+        /// <summary>Appends every value of <paramref name="other"/>, another list, in order.</summary>
+        internal void AddAll(Appended<T> other)
+        {
+            for (int block = 0; block < other.Blocks; block++)
+            {
+                AddRange(other.Block(block));
+            }
+        }
+
+        /// <summary>Appends every row of <paramref name="other"/>, another list of rows, in order, each <paramref name="shift"/> rows on.</summary>
+        internal void AddShifted(Appended<T> other, int shift)
+        {
+            System.Diagnostics.Debug.Assert(typeof(T) == typeof(int), "Rows are shifted.");
+            if (shift == 0)
+            {
+                AddAll(other);
+                return;
+            }
+
+            Vector128<int> by = Vector128.Create(shift);
+            for (int block = 0; block < other.Blocks; block++)
+            {
+                ReadOnlySpan<int> rows = MemoryMarshal.Cast<T, int>(other.Block(block));
+                while (!rows.IsEmpty)
+                {
+                    if (_left == 0)
+                    {
+                        Grow();
+                    }
+
+                    int take = Math.Min(_left, rows.Length);
+                    int* into = (int*)_next;
+                    ref int from = ref MemoryMarshal.GetReference(rows);
+                    int i = 0;
+                    for (; i <= take - Vector128<int>.Count; i += Vector128<int>.Count)
+                    {
+                        (Vector128.LoadUnsafe(ref from, (nuint)i) + by).Store(into + i);
+                    }
+
+                    for (; i < take; i++)
+                    {
+                        into[i] = rows[i] + shift;
+                    }
+
+                    _next += take;
+                    _left -= take;
+                    Count += take;
+                    rows = rows[take..];
+                }
+            }
+        }
+
         /// <summary>The value appended last; meaningless before one.</summary>
         internal T Last => *(_next - 1);
 
@@ -2034,6 +2250,61 @@ internal static class VariantShredder
             _blocks[_blockCount++] = block;
             _next = (T*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(into));
             _left = bytes / sizeof(T);
+        }
+    }
+
+    /// <summary>
+    /// Reads the texts appended end to end to a list of bytes back in order, each of a length its caller knows: where it
+    /// lies when a block holds it whole, and otherwise a copy, which lasts until the next text a block does not hold whole.
+    /// </summary>
+    private ref struct Texts(Appended<byte> from)
+    {
+        private ReadOnlySpan<byte> _block;
+        private int _at;
+        private int _next;
+        private byte[]? _crossing;
+
+        internal ReadOnlySpan<byte> Next(int count)
+        {
+            if (count == 0)
+            {
+                return default;
+            }
+
+            if (_at == _block.Length)
+            {
+                _block = from.Block(_next++);
+                _at = 0;
+            }
+
+            if (_block.Length - _at >= count)
+            {
+                ReadOnlySpan<byte> text = _block.Slice(_at, count);
+                _at += count;
+                return text;
+            }
+
+            if (_crossing is null || _crossing.Length < count)
+            {
+                _crossing = new byte[Math.Max(count, 256)];
+            }
+
+            int copied = 0;
+            while (copied < count)
+            {
+                if (_at == _block.Length)
+                {
+                    _block = from.Block(_next++);
+                    _at = 0;
+                }
+
+                int take = Math.Min(count - copied, _block.Length - _at);
+                _block.Slice(_at, take).CopyTo(_crossing.AsSpan(copied));
+                copied += take;
+                _at += take;
+            }
+
+            return _crossing.AsSpan(0, count);
         }
     }
 

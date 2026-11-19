@@ -256,7 +256,9 @@ public sealed partial class VortexFileWriter
             flight.ShredAt[field] = checked((int)before.Rows);
         }
 
-        chain.Shredding.TakeMore(in flight.Shred[field], flight.ShredAt[field]);
+        // What the flight's read of the block took, added where the block falls in the chunk: the rows were read beside the
+        // chain, by an item this one waited for.
+        chain.Shredding.Append(flight.Blocks[field]!, flight.ShredAt[field]);
     }
 
     /// <summary>
