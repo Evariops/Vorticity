@@ -410,6 +410,30 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
     /// <summary>The share of what one of the pool's size classes keeps parked that the lanes of the splits in flight may hold together.</summary>
     private const double InFlightShare = 0.75;
 
+    /// <summary>
+    /// How many splits a scan may have in flight, a split's lane holding <paramref name="splitBytes"/> bytes once decoded,
+    /// <paramref name="splitShare"/> of what the pool keeps parked of a size class: as many lanes as hold
+    /// <see cref="InFlightBytes"/> together and <see cref="InFlightShare"/> of any size class of the pool, one at least and
+    /// <paramref name="window"/> at most. With <paramref name="sharesAhead"/>, the window whatever a split holds.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The two bounds are those of a consumer that reads each batch as it comes: what it decodes further ahead leaves its
+    /// last-level cache before it reads it, and what its lanes hold past the pool's share is freed and allocated again.
+    /// </para>
+    /// <para>
+    /// A scan whose consumer shares windows ahead (<see cref="DecodeAhead"/>), a merge's input, is bound otherwise: its own
+    /// two windows are what its job prices it at, and each window past them is admitted by the job's memory as it is taken.
+    /// Its batches are read later, by the lanes that assemble a writer's blocks. Held to the bytes, an input of log records
+    /// whose split of 15 000 rows holds 40 MiB had one split in flight where it is priced at two, and took no shared
+    /// window: the merge waited for 31 % of its inputs' batches, 5.3 s over the two rounds of a consolidation of 23 inputs,
+    /// with half of the session's lanes idle. Held to its window it waits 1.9 s, and the job runs in 6.1 to 6.2 s where it
+    /// ran in 7.2 to 7.3, on the same processor time, its inputs holding the same 3.7 GiB (2026-11-19).
+    /// </para>
+    /// </remarks>
+    internal static int InFlightSplits(double splitBytes, double splitShare, int window, bool sharesAhead) =>
+        sharesAhead ? window : (int)Math.Clamp(Math.Min(InFlightBytes / splitBytes, InFlightShare / splitShare), 1, window);
+
     /// <summary>What the pool keeps parked of one size class, which the guess puts all of a split's bytes in.</summary>
     private const double GuessedClassBytes = 64 << 20;
 
@@ -1280,12 +1304,10 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         }
 
         /// <summary>
-        /// How many splits may be in flight: as many lanes as hold <see cref="InFlightBytes"/>
-        /// together and <see cref="InFlightShare"/> of any size class of the pool, one at least and
-        /// <paramref name="window"/> at most.
+        /// How many splits may be in flight (<see cref="InFlightSplits"/>), of the bytes and the share of a size class a
+        /// split's lane was measured to hold; a scan whose consumer shares windows ahead holds as many as its window.
         /// </summary>
-        internal int Budget(int window) =>
-            (int)Math.Clamp(Math.Min(InFlightBytes / _splitBytes, InFlightShare / _splitShare), 1, window);
+        internal int Budget(int window) => InFlightSplits(_splitBytes, _splitShare, window, Handover is { Ahead: not null });
 
         /// <summary>The bytes a split's lane holds once decoded, the most measured so far, or the guess before.</summary>
         internal double SplitBytes => _splitBytes;

@@ -60,6 +60,32 @@ public sealed class DecodeAheadTests
         Assert.Equal(3, refused.Free);
     }
 
+    /// <summary>
+    /// A scan holds in flight the splits its consumer's cache and the pool's share allow, one at least. One whose consumer
+    /// shares windows ahead, a merge's input, holds its window whatever a split weighs: its own two windows, which its job
+    /// prices, and the shared ones, each admitted by its job's memory. Held to the bytes, an input whose split holds 40 MiB
+    /// had one split in flight and took no shared window.
+    /// </summary>
+    [Fact]
+    public void AScanThatSharesWindowsAheadHoldsItsWindowWhateverASplitHolds()
+    {
+        const int Window = 15;
+        const double SmallShare = 0.01;
+
+        // Splits of a megabyte: the window either way.
+        Assert.Equal(Window, BatchAsyncEnumerator.InFlightSplits(1 << 20, SmallShare, Window, sharesAhead: false));
+        Assert.Equal(Window, BatchAsyncEnumerator.InFlightSplits(1 << 20, SmallShare, Window, sharesAhead: true));
+
+        // Splits of 16 MiB, three of which hold what a consumer keeps in flight; of 40 MiB, one.
+        Assert.Equal(3, BatchAsyncEnumerator.InFlightSplits(16 << 20, SmallShare, Window, sharesAhead: false));
+        Assert.Equal(1, BatchAsyncEnumerator.InFlightSplits(40 << 20, SmallShare, Window, sharesAhead: false));
+        Assert.Equal(Window, BatchAsyncEnumerator.InFlightSplits(40 << 20, SmallShare, Window, sharesAhead: true));
+
+        // A split that holds most of what the pool keeps of a size class: one, and the window for a merge's input.
+        Assert.Equal(1, BatchAsyncEnumerator.InFlightSplits(1 << 20, 0.9, Window, sharesAhead: false));
+        Assert.Equal(Window, BatchAsyncEnumerator.InFlightSplits(1 << 20, 0.9, Window, sharesAhead: true));
+    }
+
     /// <summary>The rows and the first key of each batch a merge's input scan of <paramref name="file"/> delivers, sharing <paramref name="ahead"/>.</summary>
     private static async Task<List<(int Rows, long First)>> BatchesAsync(VortexFile file, DecodeAhead? ahead)
     {
