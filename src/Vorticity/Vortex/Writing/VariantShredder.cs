@@ -341,6 +341,124 @@ internal static class VariantShredder
             Taken = offset + block.Taken;
         }
 
+        /// <summary>
+        /// Takes what each node holds of the rows of <paramref name="group"/>, the group another shredding holds them in, a
+        /// struct of the rows' <c>metadata</c>, the <c>value</c> that shredding left of each and its <c>typed_value</c>
+        /// (<c>ShreddedTree.Group</c>), as the chunk's rows from <paramref name="offset"/> on, after the rows taken before:
+        /// what <see cref="TakeMore"/> takes of the same rows put back together, and no row put back together. A key both
+        /// shreddings type in one class is taken as its column lies, and what the other left of a row is read as a row's
+        /// value is, alone. False, and nothing taken, for a group that is not taken so (<see cref="ObjectGroup.Projects"/>).
+        /// </summary>
+        /// <remarks>
+        /// The texts are taken whole, each its bytes: a column tells nothing of a row that repeats the one before, which a
+        /// read of the rows finds and takes again at once.
+        /// </remarks>
+        /// <exception cref="VortexFormatException">What the other shredding left of a row does not decode.</exception>
+        internal bool TakeGroup(CanonicalArena arena, int group, int offset)
+        {
+            CanonicalNode node = arena.GetNode(group);
+            int metadata = -1;
+            int value = -1;
+            int typed = -1;
+            for (int f = 0; node.Kind == CanonicalKind.Struct && f < node.FieldCount; f++)
+            {
+                ReadOnlySpan<byte> name = node.DType.GetFieldNameUtf8(f);
+                if (name.SequenceEqual("metadata"u8))
+                {
+                    metadata = node.GetFieldIndex(f);
+                }
+                else if (name.SequenceEqual("value"u8))
+                {
+                    value = node.GetFieldIndex(f);
+                }
+                else if (name.SequenceEqual("typed_value"u8))
+                {
+                    typed = node.GetFieldIndex(f);
+                }
+            }
+
+            if (_root is not ObjectGroup root || metadata < 0 || typed < 0)
+            {
+                return false;
+            }
+
+            typed = ArrayBlobWriter.Materialize(arena, typed);
+            if (!root.Projects(arena, typed))
+            {
+                return false;
+            }
+
+            // The rows the column holds, those of them whose value is an object, and those the other shredding left a value of.
+            int rows = node.Length;
+            int words = (rows + 63) >> 6;
+            Block<ulong> masks = Blocks.Rent<ulong>(Math.Max(2 * words, 1));
+            try
+            {
+                Span<ulong> held = masks.AsSpan(0, words);
+                Span<ulong> left = masks.AsSpan(words, words);
+                ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, group);
+                ReadOnlySpan<ulong> objects = ArenaWords.Validity(arena, typed);
+                int residual = value < 0 ? -1 : ArrayBlobWriter.Materialize(arena, value);
+                ReadOnlySpan<ulong> kept = residual < 0 ? default : ArenaWords.Validity(arena, residual);
+                for (int w = 0; w < words; w++)
+                {
+                    ulong column = valid.IsEmpty ? ulong.MaxValue : valid[w];
+                    if (w == words - 1 && (rows & 63) != 0)
+                    {
+                        column &= (1UL << (rows & 63)) - 1;
+                    }
+
+                    held[w] = column & (objects.IsEmpty ? ulong.MaxValue : objects[w]);
+
+                    // Read alone: the value left of a row, and a row neither holds, the variant null.
+                    left[w] = column & (residual < 0 ? ~held[w] : (kept.IsEmpty ? ulong.MaxValue : kept[w]) | ~held[w]);
+                }
+
+                root.TakeProjected(arena, typed, held, rows, offset);
+
+                ViewValues metadataValues = new ViewValues(arena.GetNode(ArrayBlobWriter.Materialize(arena, metadata)));
+                ViewValues values = residual < 0 ? default : new ViewValues(arena.GetNode(residual));
+                ReadOnlySpan<byte> previous = default;
+                int epoch = _epoch;
+                bool started = false;
+                for (int w = 0; w < words; w++)
+                {
+                    for (ulong bits = left[w]; bits != 0; bits &= bits - 1)
+                    {
+                        int at = (w << 6) + System.Numerics.BitOperations.TrailingZeroCount(bits);
+                        bool holds = residual >= 0 && (kept.IsEmpty || ((kept[at >> 6] >> (at & 63)) & 1) != 0);
+                        ReadOnlySpan<byte> bytes = holds ? values.At(at) : VariantEncoding.NullValue;
+                        if (((held[at >> 6] >> (at & 63)) & 1) == 0)
+                        {
+                            // No object: the value whole, as the row's value read is kept.
+                            root.Values.Add(offset + at, bytes);
+                            continue;
+                        }
+
+                        ReadOnlySpan<byte> metadataBytes = metadataValues.At(at);
+                        if (!started || !metadataBytes.SequenceEqual(previous))
+                        {
+                            started = true;
+                            epoch++;
+                            previous = metadataBytes;
+                        }
+
+                        VariantDictionary dictionary = VariantDictionary.Read(metadataBytes);
+                        _replay.Begin();
+                        root.TakeKept(in dictionary, epoch, bytes, offset + at);
+                    }
+                }
+
+                _epoch = epoch;
+                Taken = offset + rows;
+                return true;
+            }
+            finally
+            {
+                Blocks.Return(masks);
+            }
+        }
+
         /// <summary>The runs kept (<see cref="Begin"/>), a first row and a count each; none for a chunk that keeps none.</summary>
         private ReadOnlySpan<int> Runs => _keepsRuns ? _runs.AsSpan(0, 2 * _runCount) : default;
 
@@ -360,7 +478,7 @@ internal static class VariantShredder
         /// </remarks>
         internal bool Count(PathCensus census, in Rows rows, long valueBytes)
         {
-            if (!_keepsRuns || _replay.Dropped || !census.HasRoomFor(_planKeys + (_root.KeptBytes / 3)))
+            if (!_keepsRuns || _replay.Dropped || !census.HasRoomFor(_planKeys + _root.KeptKeys))
             {
                 return false;
             }
@@ -1068,8 +1186,8 @@ internal static class VariantShredder
         /// </summary>
         internal abstract void Count(in Counting counting, PathCensus.PathCount count, int depth);
 
-        /// <summary>The bytes of the values the node and every node below it kept whole: three at least for each key they may name.</summary>
-        internal virtual long KeptBytes => Values.ByteCount;
+        /// <summary>The most keys the values the node and every node below it kept whole name (<see cref="BinaryValues.Keys"/>).</summary>
+        internal virtual long KeptKeys => Values.Keys;
     }
 
     /// <summary>A node whose typed node is a column, laid out whole when the blob comes to it.</summary>
@@ -1121,6 +1239,20 @@ internal static class VariantShredder
 
         // Whether the value taken last went to the typed column, which a row that repeats it takes again there.
         private bool _typedLast;
+
+        /// <summary>Whether <paramref name="column"/>, a typed column of another shredding, holds values of this node's class in the form its typed column takes them.</summary>
+        internal bool Holds(CanonicalNode column) => _typed.Holds(column);
+
+        /// <summary>
+        /// Takes the values of <paramref name="column"/>, a typed column of this node's class in another shredding of the same
+        /// rows, at the rows <paramref name="held"/> selects that hold one, as the chunk's rows from <paramref name="offset"/>
+        /// on: what the node would type of those rows' values read one by one.
+        /// </summary>
+        internal void TakeColumn(CanonicalArena arena, int column, ReadOnlySpan<ulong> held, int rows, int offset)
+        {
+            _typed.TakeColumn(arena, column, held, rows, offset);
+            _typedLast = true;
+        }
 
         /// <summary>
         /// The values typed and the values kept whole, each at its row, in the rows' order: a float kept whole is read as a
@@ -1401,17 +1533,17 @@ internal static class VariantShredder
             }
         }
 
-        internal override long KeptBytes
+        internal override long KeptKeys
         {
             get
             {
-                long bytes = Values.ByteCount;
+                long keys = Values.Keys;
                 foreach (Group node in _fields)
                 {
-                    bytes += node.KeptBytes;
+                    keys += node.KeptKeys;
                 }
 
-                return bytes;
+                return keys;
             }
         }
 
@@ -1461,6 +1593,75 @@ internal static class VariantShredder
                 return;
             }
 
+            _objects.Add(row);
+            Fields(in dictionary, epoch, value, row, offset);
+        }
+
+        /// <summary>
+        /// Takes the keys of <paramref name="kept"/>, the object of the keys another shredding left of the object at row
+        /// <paramref name="row"/>, which <see cref="TakeProjected"/> took as an object: each key the plan names by its node, the
+        /// others kept in an object of their own, as the keys of the row's whole object are taken.
+        /// </summary>
+        /// <exception cref="VortexFormatException"><paramref name="kept"/> is no object.</exception>
+        internal void TakeKept(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> kept, int row)
+        {
+            if ((kept[0] & 0x03) != ParquetVariant.BasicObject)
+            {
+                throw new VortexFormatException("A shredded object's residual is not an object.");
+            }
+
+            Fields(in dictionary, epoch, kept, row, 0);
+        }
+
+        /// <summary>
+        /// Whether what the struct <paramref name="typed"/> of <paramref name="arena"/> holds, another shredding's typed
+        /// object, a group a key, is taken as it lies (<see cref="TakeProjected"/>): every key of it one the plan types as a
+        /// column of the class of the key's column there, none that kept values of its own beside it, or an object or a list
+        /// of its own.
+        /// </summary>
+        internal bool Projects(CanonicalArena arena, int typed)
+        {
+            CanonicalNode node = arena.GetNode(typed);
+            if (node.Kind != CanonicalKind.Struct)
+            {
+                return false;
+            }
+
+            for (int f = 0; f < node.FieldCount; f++)
+            {
+                int key = _plan.IndexOf(node.DType.GetFieldNameUtf8(f));
+                CanonicalNode pair = arena.GetNode(node.GetFieldIndex(f));
+                if (key < 0 || _fields[key] is not PrimitiveGroup column || pair.Kind != CanonicalKind.Struct || pair.FieldCount != 1
+                    || !pair.DType.GetFieldNameUtf8(0).SequenceEqual("typed_value"u8)
+                    || !column.Holds(arena.GetNode(ArrayBlobWriter.Materialize(arena, pair.GetFieldIndex(0)))))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// Takes what the struct <paramref name="typed"/> holds of the rows <paramref name="held"/> selects, a bit a row, the
+        /// rows whose value is an object, as the chunk's rows from <paramref name="offset"/> on: each an object, and each key's
+        /// column the values of the rows that hold one, with no value read from a row (<see cref="Projects"/>).
+        /// </summary>
+        internal void TakeProjected(CanonicalArena arena, int typed, ReadOnlySpan<ulong> held, int rows, int offset)
+        {
+            AddRows(_objects, held, rows, offset);
+            CanonicalNode node = arena.GetNode(typed);
+            for (int f = 0; f < node.FieldCount; f++)
+            {
+                int key = _plan.IndexOf(node.DType.GetFieldNameUtf8(f));
+                int column = ArrayBlobWriter.Materialize(arena, arena.GetNode(node.GetFieldIndex(f)).GetFieldIndex(0));
+                ((PrimitiveGroup)_fields[key]).TakeColumn(arena, column, held, rows, offset);
+            }
+        }
+
+        /// <summary>The keys of <paramref name="value"/>, an object at row <paramref name="row"/>: each key the plan names taken by its node, the others kept in an object of their own.</summary>
+        private void Fields(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row, int offset)
+        {
             VariantNested fields = VariantNested.Read(value);
             if (_kept.Length < fields.Count)
             {
@@ -1479,7 +1680,6 @@ internal static class VariantShredder
                 _keyOf.AsSpan(0, dictionary.Count).Fill(-2);
             }
 
-            _objects.Add(row);
             int kept = 0;
             for (int i = 0; i < fields.Count; i++)
             {
@@ -1770,6 +1970,38 @@ internal static class VariantShredder
             Count++;
         }
 
+        /// <summary>Whether <paramref name="column"/> is a column of this class's values as a typed column of a shredding holds them.</summary>
+        internal abstract bool Holds(CanonicalNode column);
+
+        /// <summary>
+        /// Takes the values of <paramref name="column"/>, a column of this class (<see cref="Holds"/>) over
+        /// <paramref name="rows"/> rows, at the rows <paramref name="held"/> selects that hold one, a bit a row, each at its
+        /// row <paramref name="offset"/> rows on: the rows that follow each other at once.
+        /// </summary>
+        internal void TakeColumn(CanonicalArena arena, int column, ReadOnlySpan<ulong> held, int rows, int offset)
+        {
+            ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, column);
+            ColumnValues values = new ColumnValues(arena.GetNode(column));
+            int words = (rows + 63) >> 6;
+            for (int w = 0; w < words; w++)
+            {
+                ulong bits = held[w] & (valid.IsEmpty ? ulong.MaxValue : valid[w]);
+                int first = w << 6;
+                while (bits != 0)
+                {
+                    int start = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    int length = bits == ulong.MaxValue ? 64 : System.Numerics.BitOperations.TrailingZeroCount(~(bits >> start));
+                    Rows?.AddSequence(offset + first + start, length);
+                    Count += length;
+                    Range(in values, first + start, length);
+                    bits = length == 64 ? 0 : bits & ~(((1UL << length) - 1) << start);
+                }
+            }
+        }
+
+        /// <summary>Takes the <paramref name="count"/> values of <paramref name="column"/> from row <paramref name="first"/> on, one after the other.</summary>
+        protected abstract void Range(in ColumnValues column, int first, int count);
+
         /// <summary>Takes again at row <paramref name="row"/> the value taken last, which the row repeats.</summary>
         internal void Again(int row)
         {
@@ -1894,6 +2126,11 @@ internal static class VariantShredder
             return true;
         }
 
+        internal override bool Holds(CanonicalNode column) => column.Kind == CanonicalKind.Primitive && column.PType == PType.I64;
+
+        protected override void Range(in ColumnValues column, int first, int count) =>
+            _values.AddRange(MemoryMarshal.Cast<byte, long>(column.Fixed).Slice(first, count));
+
         protected override void All(TypedValues other) => _values.AddAll(((IntegerValues)other)._values);
 
         internal override void CountNext(in Counting counting, PathCensus.PathCount count, long row, int times, ref TypedCursor cursor)
@@ -1973,6 +2210,11 @@ internal static class VariantShredder
             return true;
         }
 
+        internal override bool Holds(CanonicalNode column) => column.Kind == CanonicalKind.Primitive && column.PType == PType.F64;
+
+        protected override void Range(in ColumnValues column, int first, int count) =>
+            _values.AddRange(MemoryMarshal.Cast<byte, double>(column.Fixed).Slice(first, count));
+
         protected override void All(TypedValues other) => _values.AddAll(((DoubleValues)other)._values);
 
         internal override void CountNext(in Counting counting, PathCensus.PathCount count, long row, int times, ref TypedCursor cursor)
@@ -2040,6 +2282,17 @@ internal static class VariantShredder
             _values.Add(held ? (byte)1 : (byte)0);
             bounds?.Boolean(row, held);
             return true;
+        }
+
+        internal override bool Holds(CanonicalNode column) => column.Kind == CanonicalKind.Bool;
+
+        protected override void Range(in ColumnValues column, int first, int count)
+        {
+            for (int row = first; row < first + count; row++)
+            {
+                int bit = column.BitOffset + row;
+                _values.Add((byte)((column.Bits[bit >> 3] >> (bit & 7)) & 1));
+            }
         }
 
         protected override void All(TypedValues other) => _values.AddAll(((BooleanValues)other)._values);
@@ -2150,6 +2403,20 @@ internal static class VariantShredder
             _lastLength = length;
             bounds?.String(row, text);
             return true;
+        }
+
+        internal override bool Holds(CanonicalNode column) => column.Kind == CanonicalKind.VarBinView && column.DType.Kind == DTypeKind.Utf8;
+
+        /// <summary>Each text whole, its bytes its own: a column says nothing of the row that repeats the one before.</summary>
+        protected override void Range(in ColumnValues column, int first, int count)
+        {
+            for (int row = first; row < first + count; row++)
+            {
+                ReadOnlySpan<byte> text = column.Views.At(row);
+                _lengths.Add(text.Length);
+                _bytes.AddRange(text);
+                _lastLength = text.Length;
+            }
         }
 
         protected override void All(TypedValues other)
@@ -2278,10 +2545,17 @@ internal static class VariantShredder
             _rows.Clear(arena);
             _lengths.Clear(arena);
             _bytes.Clear(arena);
+            Keys = 0;
         }
 
-        /// <summary>Takes <paramref name="value"/> at row <paramref name="row"/>.</summary>
+        /// <summary>Takes <paramref name="value"/>, a value whole, at row <paramref name="row"/>.</summary>
         internal void Add(int row, ReadOnlySpan<byte> value)
+        {
+            Put(row, value);
+            Keys += Nested(value);
+        }
+
+        private void Put(int row, ReadOnlySpan<byte> value)
         {
             _rows.Add(row);
             _lengths.Add(value.Length);
@@ -2294,13 +2568,22 @@ internal static class VariantShredder
             _rows.AddShifted(other._rows, offset);
             _lengths.AddAll(other._lengths);
             _bytes.AddAll(other._bytes);
+            Keys += other.Keys;
         }
 
         /// <summary>The values taken.</summary>
         internal int Count => _rows.Count;
 
-        /// <summary>The bytes of the values taken.</summary>
-        internal long ByteCount => _bytes.Count;
+        /// <summary>
+        /// The most keys the values taken name, every depth together: a key for each field of an object of keys kept, and
+        /// for an object or a list kept whole or held by such a field, a key for every three of its bytes, an id, an offset
+        /// and a byte of value at least. What a census that counts them may meet for the first time.
+        /// </summary>
+        internal long Keys { get; private set; }
+
+        /// <summary>The most keys <paramref name="value"/> names below it: none for a scalar, one for every three bytes of an object or a list.</summary>
+        private static long Nested(ReadOnlySpan<byte> value) =>
+            !value.IsEmpty && (value[0] & 0x03) is ParquetVariant.BasicObject or ParquetVariant.BasicArray ? value.Length / 3 : 0;
 
         /// <summary>
         /// The value after the one read last, the first from cursors at their default: where it lies when a block holds it
@@ -2324,10 +2607,13 @@ internal static class VariantShredder
         {
             int maxId = 0;
             int size = 0;
+            long keys = 0;
             foreach (int i in kept)
             {
+                ReadOnlySpan<byte> held = fields.ValueAt(i);
                 maxId = Math.Max(maxId, fields.IdAt(i));
-                size = checked(size + fields.ValueAt(i).Length);
+                size = checked(size + held.Length);
+                keys += 1 + Nested(held);
             }
 
             int count = kept.Length;
@@ -2363,7 +2649,8 @@ internal static class VariantShredder
                     at += value.Length;
                 }
 
-                Add(row, into);
+                Put(row, into);
+                Keys += keys;
             }
             finally
             {
@@ -2958,6 +3245,53 @@ internal static class VariantShredder
             _blocks[_blockCount++] = block;
             _next = (T*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(into));
             _left = bytes / sizeof(T);
+        }
+    }
+
+    /// <summary>
+    /// A typed column of another shredding, resolved once for the rows a node takes of it (<see cref="TypedValues.TakeColumn"/>):
+    /// its fixed-width values, a boolean's bits and where they start, or a text's views and their bytes.
+    /// </summary>
+    private readonly ref struct ColumnValues
+    {
+        internal readonly ReadOnlySpan<byte> Fixed;
+        internal readonly ReadOnlySpan<byte> Bits;
+        internal readonly int BitOffset;
+        internal readonly ViewValues Views;
+
+        internal ColumnValues(CanonicalNode column)
+        {
+            switch (column.Kind)
+            {
+                case CanonicalKind.Primitive:
+                    Fixed = column.Values.Span;
+                    break;
+                case CanonicalKind.Bool:
+                    Bits = column.Bits.Span;
+                    BitOffset = column.BitOffset;
+                    break;
+                default:
+                    Views = new ViewValues(column);
+                    break;
+            }
+        }
+    }
+
+    /// <summary>Appends to <paramref name="list"/> the rows <paramref name="held"/> selects, a bit a row, each <paramref name="offset"/> rows on: those that follow each other at once.</summary>
+    private static void AddRows(Appended<int> list, ReadOnlySpan<ulong> held, int rows, int offset)
+    {
+        int words = (rows + 63) >> 6;
+        for (int w = 0; w < words; w++)
+        {
+            ulong bits = held[w];
+            int first = w << 6;
+            while (bits != 0)
+            {
+                int start = System.Numerics.BitOperations.TrailingZeroCount(bits);
+                int length = bits == ulong.MaxValue ? 64 : System.Numerics.BitOperations.TrailingZeroCount(~(bits >> start));
+                list.AddSequence(offset + first + start, length);
+                bits = length == 64 ? 0 : bits & ~(((1UL << length) - 1) << start);
+            }
         }
     }
 
