@@ -1558,7 +1558,9 @@ internal static partial class DatasetCompactor
     /// merge holds the rows of range <paramref name="range"/> alone: each input its keys meet reads the rows the range
     /// names of it, and leaves out those outside the range. With <paramref name="only"/>, it holds that input's rows alone,
     /// their keys beside them. Each input reads batches of <paramref name="batchRows"/>, which <paramref name="meter"/>
-    /// counts when given, under <paramref name="account"/>, a slice's own, or the job's inputs' when none is given.
+    /// counts when given, under <paramref name="account"/>, a slice's own, or the job's inputs' when none is given, and
+    /// decodes <paramref name="prefetch"/> of them ahead of the merge: none for the measure of what an input holds
+    /// (<see cref="MeasureInputAsync"/>).
     /// </remarks>
     private static KeyOrderedMerge InputsMerged(
         VortexDataset dataset,
@@ -1576,7 +1578,8 @@ internal static partial class DatasetCompactor
         Writing.RunLedger? ledger = null,
         Action<KeyOrderedMerge.Window>? retiring = null,
         Scanning.DecodeAhead? ahead = null,
-        Buffers.MemoryAccount? account = null)
+        Buffers.MemoryAccount? account = null,
+        int prefetch = InputPrefetch)
     {
         account ??= memory?.InputsAccount;
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
@@ -1616,8 +1619,8 @@ internal static partial class DatasetCompactor
             // The rows of an input's batches read as it opens: the plan's, or fewer once the job repriced them (JobMemory.Reprice).
             // Under a ledger, its scan hands its batches over, their keys encoded by their decode.
             (lease, entry, handover) => meter is null
-                ? RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], RowsNow(), account, InputPrefetch, handover)
-                : MeteredAsync(RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], RowsNow(), account, InputPrefetch, handover), meter, cancellationToken),
+                ? RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], RowsNow(), account, prefetch, handover)
+                : MeteredAsync(RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], RowsNow(), account, prefetch, handover), meter, cancellationToken),
             opened: null,
             cancellationToken,
             ranges?.Low(range) ?? default,

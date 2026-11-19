@@ -167,17 +167,20 @@ internal static partial class DatasetCompactor
         {
             try
             {
-                KeyOrderedMerge merge = InputsMerged(dataset, schema, job, MeasuredBatchRows, cancellationToken, only: largest, meter: meter, memory: memory);
+                // An input of a merge holds two batches, the one the merge reads and the one its scan decodes ahead: the rows
+                // of both are read as one batch, with none decoded ahead, so that what the input holds is theirs alone. Read
+                // as two, the second decoded while the merge took the first, the peak was the two or more by what their
+                // decodes held at once: 15.7 MiB or 20.4 to 21.4 MiB for the largest input of a consolidation of 23 inputs
+                // of log records, from one run to the next, which then read its inputs in batches of 16 384 rows or of 8 192,
+                // its two ranges one after the other or side by side, and ran in 6.0 to 6.2 s or in 6.5 s (2026-11-19).
+                KeyOrderedMerge merge = InputsMerged(
+                    dataset, schema, job, 2 * MeasuredBatchRows, cancellationToken, only: largest, meter: meter, memory: memory, prefetch: 0);
                 await using (merge.ConfigureAwait(false))
                 {
                     if (!await merge.MoveNextAsync().ConfigureAwait(false))
                     {
                         return false;
                     }
-
-                    // On to its second batch, so that the batch it decodes ahead (InputPrefetch) is counted too: an input of a
-                    // merge holds both, and a measure of the first alone priced it at half.
-                    _ = await merge.MoveNextAsync().ConfigureAwait(false);
                 }
             }
             catch (VortexMemoryException) when (memory.Refused && !cancellationToken.IsCancellationRequested)
