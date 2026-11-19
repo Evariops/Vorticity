@@ -337,9 +337,12 @@ internal static class VariantShredder
                 throw new ArgumentException("A block's shredding is added to a chunk's of the same plan.", nameof(block));
             }
 
-            _root.Append(block._root, offset);
+            _root.Append(block._root, offset, block.Runs);
             Taken = offset + block.Taken;
         }
+
+        /// <summary>The runs kept (<see cref="Begin"/>), a first row and a count each; none for a chunk that keeps none.</summary>
+        private ReadOnlySpan<int> Runs => _keepsRuns ? _runs.AsSpan(0, 2 * _runCount) : default;
 
         /// <summary>
         /// Counts in <paramref name="census"/> the paths of <paramref name="rows"/>, a block's rows read alone, numbered from
@@ -363,10 +366,45 @@ internal static class VariantShredder
             }
 
             long first = census.BeginTaken(rows.Count, valueBytes);
-            Counting counting = new Counting(census, new ViewValues(rows.Arena.GetNode(rows.Metadata)), first, _runs.AsSpan(0, 2 * _runCount));
+            Counting counting = new Counting(census, new ViewValues(rows.Arena.GetNode(rows.Metadata)), first, Runs);
             _root.Count(in counting, census.Root, depth: 1);
             return true;
         }
+
+        /// <summary>
+        /// Whether the values of key <paramref name="key"/> of <paramref name="plan"/>'s object that <paramref name="read"/>
+        /// takes are those its typed column holds, a float kept whole beside doubles aside: a key shredded as values of one
+        /// class, read in that class, whose column over a block is written from what the block's read took of it
+        /// (<see cref="KeyColumn"/>).
+        /// </summary>
+        internal static bool Reads(VariantShredding plan, int key, VariantRead read) =>
+            plan.Kind == VariantShreddingKind.Object && (uint)key < (uint)plan.Keys.Count
+            && plan.Keys[key].Field is { Kind: VariantShreddingKind.Primitive } field
+            && read == field.Class switch
+            {
+                VariantClass.Integer => VariantRead.AsInt64,
+                VariantClass.Double => VariantRead.AsDouble,
+                VariantClass.String => VariantRead.AsString,
+                _ => VariantRead.AsBool,
+            };
+
+        /// <summary>Whether a row's object held a key the shredding takes twice, whose second value it dropped.</summary>
+        internal bool Dropped => _replay.Dropped;
+
+        /// <summary>
+        /// The column of key <paramref name="key"/> of the plan's object over the <paramref name="rows"/> rows taken, a block's
+        /// read alone, read as <paramref name="read"/> (<see cref="Reads"/>), written into <paramref name="into"/>: the values
+        /// a read of the rows' keys writes of it (<see cref="VariantFieldExpr.KeyReads.Write"/>), from what the key's node
+        /// took and no row read. A column of texts views the bytes the node took. The keys no row holds share
+        /// <paramref name="absent"/>, as there.
+        /// </summary>
+        /// <remarks>
+        /// The keys a variant column shreds are read for their indexes a block at a time, a pass over every row's object that
+        /// notes where each key lies, then each key's values read from its notes: 20.5 billion of the 210 billion cycles of a
+        /// consolidation of log records, beside the take that had typed the same values (2026-11-19).
+        /// </remarks>
+        internal int KeyColumn(CanonicalArena into, int key, VariantRead read, int rows, ref VortexBuffer absent) =>
+            ((PrimitiveGroup)((ObjectGroup)_root).Field(key)).Column(into, read, rows, ref absent, Runs);
 
         // The keys the plan names, every depth together: the most a count of what the nodes typed may add to a census.
         private readonly int _planKeys;
@@ -969,9 +1007,10 @@ internal static class VariantShredder
         /// <summary>
         /// Takes what <paramref name="other"/>, this node of another shredding of the plan, took of its rows, each
         /// <paramref name="offset"/> rows on, after what this one took: the values it kept whole here, a node's own in its
-        /// override.
+        /// override. <paramref name="runs"/> are the runs of the other's rows that took again what the row before them took,
+        /// when it kept them (<see cref="Counting.Runs"/>).
         /// </summary>
-        internal virtual void Append(Group other, int offset)
+        internal virtual void Append(Group other, int offset, ReadOnlySpan<int> runs)
         {
             Values.Append(other.Values, offset);
             if (other.Last >= 0)
@@ -1117,14 +1156,42 @@ internal static class VariantShredder
             }
         }
 
+        /// <summary>
+        /// The column of the key over <paramref name="rows"/> rows, read as <paramref name="read"/>, the read of the typed
+        /// column's class: each value typed at its row, and of the values kept whole those the read takes, a float beside
+        /// doubles.
+        /// </summary>
+        internal int Column(CanonicalArena into, VariantRead read, int rows, ref VortexBuffer absent, ReadOnlySpan<int> runs)
+        {
+            if (_typed.Count == 0 && Values.Count == 0)
+            {
+                return VariantFieldExpr.Output.Absent(into, read, rows, ReadOnlySpan<VortexBuffer>.Empty, ref absent);
+            }
+
+            VariantFieldExpr.Output output = new VariantFieldExpr.Output(into, read, rows);
+            VortexBuffer data = _typed.Scatter(ref output, into, runs);
+            int kept = Values.Count;
+            Cursor keptAt = default;
+            Cursor keptLengths = default;
+            Cursor keptBytes = default;
+            byte[]? crossing = null;
+            for (int i = 0; i < kept; i++)
+            {
+                int row = Values.Rows.Next(ref keptAt);
+                output.Write(row, Values.Next(ref keptLengths, ref keptBytes, ref crossing), default, default);
+            }
+
+            return data.Length > 0 ? output.Finish(into, [data]) : output.Finish(into, ReadOnlySpan<VortexBuffer>.Empty);
+        }
+
         /// <summary>The other's typed values after these, counted in the chunk's blocks as a take counts them, and the values it kept whole.</summary>
-        internal override void Append(Group other, int offset)
+        internal override void Append(Group other, int offset, ReadOnlySpan<int> runs)
         {
             PrimitiveGroup from = (PrimitiveGroup)other;
-            base.Append(other, offset);
+            base.Append(other, offset, runs);
             if (Bounds is { } bounds)
             {
-                from._typed.CountInto(bounds, offset);
+                from._typed.CountInto(bounds, offset, runs);
             }
 
             _typed.Append(from._typed, offset);
@@ -1218,6 +1285,9 @@ internal static class VariantShredder
             Settle();
             return _fields[_written[index]];
         }
+
+        /// <summary>The node of the plan's key <paramref name="index"/>.</summary>
+        internal Group Field(int index) => _fields[index];
 
         internal override void Clear(CanonicalArena arena)
         {
@@ -1337,14 +1407,14 @@ internal static class VariantShredder
         }
 
         /// <summary>The other's objects' rows after these, and each key what the other's took.</summary>
-        internal override void Append(Group other, int offset)
+        internal override void Append(Group other, int offset, ReadOnlySpan<int> runs)
         {
             ObjectGroup from = (ObjectGroup)other;
-            base.Append(other, offset);
+            base.Append(other, offset, runs);
             _objects.AddShifted(from._objects, offset);
             for (int i = 0; i < _fields.Length; i++)
             {
-                _fields[i].Append(from._fields[i], offset);
+                _fields[i].Append(from._fields[i], offset, runs);
             }
         }
 
@@ -1568,10 +1638,10 @@ internal static class VariantShredder
         }
 
         /// <summary>The other's lists after these: their rows, their sizes and their elements, which are rows of their own.</summary>
-        internal override void Append(Group other, int offset)
+        internal override void Append(Group other, int offset, ReadOnlySpan<int> runs)
         {
             ListGroup from = (ListGroup)other;
-            base.Append(other, offset);
+            base.Append(other, offset, runs);
             _elements.Append(from._elements, 0);
             _lists.AddShifted(from._lists, offset);
             _sizes.AddAll(from._sizes);
@@ -1710,7 +1780,20 @@ internal static class VariantShredder
         /// Counts the values taken in <paramref name="bounds"/>, each at its row <paramref name="offset"/> rows on, as a take
         /// that counts a chunk's blocks counts them as it types them.
         /// </summary>
-        internal abstract void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset);
+        /// <remarks>
+        /// A run of rows of <paramref name="runs"/> holds the value before it again, once each (<see cref="Counting.Runs"/>):
+        /// counted a block's rows at once. A value at a time, the rows of a consolidation of metric records' series, some
+        /// thirty to a run, took 5 billion cycles more than their take had (2026-11-19).
+        /// </remarks>
+        internal abstract void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset, ReadOnlySpan<int> runs);
+
+        /// <summary>
+        /// Writes each value taken at its row of <paramref name="output"/>, a column of the values' class. A column of texts
+        /// views their bytes in the buffer returned, which the column is finished over: the block that holds them when one
+        /// does, a copy in <paramref name="into"/> otherwise; none for any other class, or for texts all empty.
+        /// </summary>
+        /// <remarks>A run of rows of <paramref name="runs"/> takes the value before it at once (<see cref="Counting.Runs"/>).</remarks>
+        internal abstract VortexBuffer Scatter(ref VariantFieldExpr.Output output, CanonicalArena into, ReadOnlySpan<int> runs);
 
         /// <summary>
         /// Counts at <paramref name="count"/> the value after the one counted last, the first from a cursor at its default,
@@ -1762,13 +1845,37 @@ internal static class VariantShredder
             _values.Skip(ref cursor.Values, times - 1);
         }
 
-        internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset)
+        internal override VortexBuffer Scatter(ref VariantFieldExpr.Output output, CanonicalArena into, ReadOnlySpan<int> runs)
         {
-            Reading<int> row = new Reading<int>(Rows!);
-            Reading<long> value = new Reading<long>(_values);
-            for (int i = 0; i < Count; i++)
+            Cursor rowsAt = default;
+            Cursor valuesAt = default;
+            RunsAt at = new RunsAt(runs);
+            for (int left = Count; left > 0;)
             {
-                bounds.Integer(offset + row.Next(), value.Next());
+                int row = Rows!.Next(ref rowsAt);
+                int times = at.Times(row);
+                output.Put(row, _values.Next(ref valuesAt), times);
+                Rows.Skip(ref rowsAt, times - 1);
+                _values.Skip(ref valuesAt, times - 1);
+                left -= times;
+            }
+
+            return default;
+        }
+
+        internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset, ReadOnlySpan<int> runs)
+        {
+            Cursor rowsAt = default;
+            Cursor valuesAt = default;
+            RunsAt at = new RunsAt(runs);
+            for (int left = Count; left > 0;)
+            {
+                int row = Rows!.Next(ref rowsAt);
+                int times = at.Times(row);
+                bounds.Integer(offset + row, _values.Next(ref valuesAt), times);
+                Rows.Skip(ref rowsAt, times - 1);
+                _values.Skip(ref valuesAt, times - 1);
+                left -= times;
             }
         }
 
@@ -1803,8 +1910,26 @@ internal static class VariantShredder
             _values.Skip(ref cursor.Values, times - 1);
         }
 
+        internal override VortexBuffer Scatter(ref VariantFieldExpr.Output output, CanonicalArena into, ReadOnlySpan<int> runs)
+        {
+            Cursor rowsAt = default;
+            Cursor valuesAt = default;
+            RunsAt at = new RunsAt(runs);
+            for (int left = Count; left > 0;)
+            {
+                int row = Rows!.Next(ref rowsAt);
+                int times = at.Times(row);
+                output.Put(row, _values.Next(ref valuesAt), times);
+                Rows.Skip(ref rowsAt, times - 1);
+                _values.Skip(ref valuesAt, times - 1);
+                left -= times;
+            }
+
+            return default;
+        }
+
         /// <summary>A chunk counts no doubles block by block (<see cref="Indexes.ChunkBlockBounds.Counted"/>).</summary>
-        internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset)
+        internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset, ReadOnlySpan<int> runs)
         {
         }
 
@@ -1839,13 +1964,37 @@ internal static class VariantShredder
             _values.Skip(ref cursor.Values, times - 1);
         }
 
-        internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset)
+        internal override VortexBuffer Scatter(ref VariantFieldExpr.Output output, CanonicalArena into, ReadOnlySpan<int> runs)
         {
-            Reading<int> row = new Reading<int>(Rows!);
-            Reading<byte> value = new Reading<byte>(_values);
-            for (int i = 0; i < Count; i++)
+            Cursor rowsAt = default;
+            Cursor valuesAt = default;
+            RunsAt at = new RunsAt(runs);
+            for (int left = Count; left > 0;)
             {
-                bounds.Boolean(offset + row.Next(), value.Next() != 0);
+                int row = Rows!.Next(ref rowsAt);
+                int times = at.Times(row);
+                output.Put(row, _values.Next(ref valuesAt) != 0, times);
+                Rows.Skip(ref rowsAt, times - 1);
+                _values.Skip(ref valuesAt, times - 1);
+                left -= times;
+            }
+
+            return default;
+        }
+
+        internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset, ReadOnlySpan<int> runs)
+        {
+            Cursor rowsAt = default;
+            Cursor valuesAt = default;
+            RunsAt at = new RunsAt(runs);
+            for (int left = Count; left > 0;)
+            {
+                int row = Rows!.Next(ref rowsAt);
+                int times = at.Times(row);
+                bounds.Boolean(offset + row, _values.Next(ref valuesAt) != 0, times);
+                Rows.Skip(ref rowsAt, times - 1);
+                _values.Skip(ref valuesAt, times - 1);
+                left -= times;
             }
         }
 
@@ -1920,26 +2069,80 @@ internal static class VariantShredder
             _lengths.Skip(ref cursor.Lengths, times - 1);
         }
 
-        /// <summary>Each text counted at its row, a repeat as the text it repeats, whose bytes are there once.</summary>
-        internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset)
+        /// <summary>Each text's view at its row, a repeat the view of the text it repeats, over the bytes taken: where they lie when one block holds them, a copy otherwise.</summary>
+        internal override VortexBuffer Scatter(ref VariantFieldExpr.Output output, CanonicalArena into, ReadOnlySpan<int> runs)
         {
-            Reading<int> row = new Reading<int>(Rows!);
-            Reading<int> length = new Reading<int>(_lengths);
+            VortexBuffer data = default;
+            ReadOnlySpan<byte> written = default;
+            if (_bytes.Blocks == 1)
+            {
+                data = _bytes.Held(0);
+                written = data.Span;
+            }
+            else if (_bytes.Count > 0)
+            {
+                data = into.AllocateUninitialized(_bytes.Count, 1, out Span<byte> copy).Slice(0, _bytes.Count);
+                _bytes.CopyTo(copy);
+                written = copy[.._bytes.Count];
+            }
+
+            Cursor rowsAt = default;
+            Cursor lengthsAt = default;
+            RunsAt at = new RunsAt(runs);
+            Int128 view = default;
+            int start = 0;
+            for (int left = Count; left > 0;)
+            {
+                int row = Rows!.Next(ref rowsAt);
+                int count = _lengths.Next(ref lengthsAt);
+                if (count >= 0)
+                {
+                    view = Composed(written, start, count);
+                    start += count;
+                }
+
+                // The rows of a run repeat the text before them, each a length of its own and no bytes.
+                int times = at.Times(row);
+                output.Put(row, view, times);
+                Rows.Skip(ref rowsAt, times - 1);
+                _lengths.Skip(ref lengthsAt, times - 1);
+                left -= times;
+            }
+
+            return data;
+        }
+
+        /// <summary>Each text counted at its row, a repeat as the text it repeats, whose bytes are there once.</summary>
+        internal override void CountInto(Indexes.ChunkBlockBounds.KeyBlocks bounds, int offset, ReadOnlySpan<int> runs)
+        {
+            Cursor rowsAt = default;
+            Cursor lengthsAt = default;
+            RunsAt at = new RunsAt(runs);
             Texts texts = new Texts(_bytes);
             ReadOnlySpan<byte> last = default;
-            for (int i = 0; i < Count; i++)
+            for (int left = Count; left > 0;)
             {
-                int at = offset + row.Next();
-                int count = length.Next();
+                int row = Rows!.Next(ref rowsAt);
+                int count = _lengths.Next(ref lengthsAt);
+                int times = at.Times(row);
                 if (count >= 0)
                 {
                     last = texts.Next(count);
-                    bounds.String(at, last);
+                    bounds.String(offset + row, last, times);
+                }
+                else if (times > 1)
+                {
+                    // A run of rows that repeat the text before them: counted a block's rows at once.
+                    bounds.String(offset + row, last, times);
                 }
                 else
                 {
-                    bounds.StringAgain(at, last);
+                    bounds.StringAgain(offset + row, last);
                 }
+
+                Rows.Skip(ref rowsAt, times - 1);
+                _lengths.Skip(ref lengthsAt, times - 1);
+                left -= times;
             }
         }
 
@@ -2201,7 +2404,7 @@ internal static class VariantShredder
 
     /// <summary>The view of the <paramref name="count"/> bytes of <paramref name="written"/> from <paramref name="start"/> on, zero past an inline value's bytes.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static Int128 Composed(Span<byte> written, int start, int count)
+    private static Int128 Composed(ReadOnlySpan<byte> written, int start, int count)
     {
         Int128 view = default;
         if (count > 0)
@@ -2610,6 +2813,13 @@ internal static class VariantShredder
 
         /// <summary>The value appended last; meaningless before one.</summary>
         internal T Last => *(_next - 1);
+
+        /// <summary>The buffer of block <paramref name="index"/>, the last one's as far as it is filled: what a view of its values names.</summary>
+        internal VortexBuffer Held(int index)
+        {
+            VortexBuffer block = _blocks[index];
+            return index == _blockCount - 1 ? block.Slice(0, block.Length - (_left * sizeof(T))) : block;
+        }
 
         /// <summary>The values of block <paramref name="index"/>, the last one's as far as it is filled.</summary>
         internal ReadOnlySpan<T> Block(int index)

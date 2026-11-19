@@ -211,29 +211,72 @@ internal sealed class ChunkBlockBounds
             }
         }
 
-        /// <summary>Counts the integer <paramref name="value"/> of row <paramref name="row"/> of the chunk, for a key of integers: what <see cref="Note"/> counts of it read.</summary>
-        internal void Integer(int row, long value)
+        /// <summary>
+        /// Counts the integer <paramref name="value"/> of each of the <paramref name="times"/> rows from <paramref name="row"/>
+        /// of the chunk on, for a key of integers: what <see cref="Note"/> counts of it read at each, a block's rows at once.
+        /// </summary>
+        internal void Integer(int row, long value, int times = 1)
         {
-            Enter(row);
-            _low = Math.Min(_low, value);
-            _high = Math.Max(_high, value);
-        }
-
-        /// <summary>Counts the boolean <paramref name="value"/> of row <paramref name="row"/> of the chunk, for a key of booleans: what <see cref="Note"/> counts of it read.</summary>
-        internal void Boolean(int row, bool value)
-        {
-            Enter(row);
-            _booleans |= value ? 2 : 1;
-        }
-
-        /// <summary>Counts the text <paramref name="text"/> of row <paramref name="row"/> of the chunk, for a key of texts: what <see cref="Note"/> counts of it read.</summary>
-        internal void String(int row, ReadOnlySpan<byte> text)
-        {
-            Enter(row);
-            if (stringBoundBytes > 0)
+            while (times > 0)
             {
-                Text(text);
+                int inBlock = Enter(row, times);
+                _low = Math.Min(_low, value);
+                _high = Math.Max(_high, value);
+                row += inBlock;
+                times -= inBlock;
             }
+        }
+
+        /// <summary>
+        /// Counts the boolean <paramref name="value"/> of each of the <paramref name="times"/> rows from <paramref name="row"/>
+        /// of the chunk on, for a key of booleans: what <see cref="Note"/> counts of it read at each, a block's rows at once.
+        /// </summary>
+        internal void Boolean(int row, bool value, int times = 1)
+        {
+            while (times > 0)
+            {
+                int inBlock = Enter(row, times);
+                _booleans |= value ? 2 : 1;
+                row += inBlock;
+                times -= inBlock;
+            }
+        }
+
+        /// <summary>
+        /// Counts the text <paramref name="text"/> of each of the <paramref name="times"/> rows from <paramref name="row"/> of
+        /// the chunk on, for a key of texts: what <see cref="Note"/> counts of it read at each, a block's rows at once.
+        /// </summary>
+        internal void String(int row, ReadOnlySpan<byte> text, int times = 1)
+        {
+            while (times > 0)
+            {
+                int inBlock = Enter(row, times);
+                if (stringBoundBytes > 0)
+                {
+                    Text(text);
+                }
+
+                row += inBlock;
+                times -= inBlock;
+            }
+        }
+
+        /// <summary>
+        /// As many values more as rows of the <paramref name="times"/> from <paramref name="row"/> on lie in the row's block,
+        /// the block before it closed when the row starts one: how many.
+        /// </summary>
+        private int Enter(int row, int times)
+        {
+            int block = row / blockRows;
+            if (block != _block)
+            {
+                Close();
+                _block = block;
+            }
+
+            int inBlock = Math.Min(times, ((block + 1) * blockRows) - row);
+            _values += inBlock;
+            return inBlock;
         }
 
         /// <summary>

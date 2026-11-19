@@ -780,7 +780,7 @@ public sealed partial class ShreddedVariantWriteTests
                                 int slice = Vorticity.Layouts.CanonicalSlice.SliceAcross(batch.Arena, part, batch.RootIndex, start, count);
                                 VariantShredder.Shredding.Rows taken = VariantShredder.Shredding.Prepare(part, part.GetNode(slice).GetFieldIndex(field));
                                 aloneStore.Reset();
-                                alone.Begin(aloneStore, null);
+                                alone.Begin(aloneStore, null, counted: true);
                                 alone.TakeMore(in taken, 0);
                                 added.Append(alone, start);
                                 inPlace.TakeMore(in taken, start);

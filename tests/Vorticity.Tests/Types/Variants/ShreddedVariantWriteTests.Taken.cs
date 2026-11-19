@@ -56,6 +56,151 @@ public sealed partial class ShreddedVariantWriteTests
         await AssertSameCensusAsync([.. rows], [Shredding(random), Shredding(random), measured]);
     }
 
+    /// <summary>
+    /// The same documents, in runs of rows that repeat: each block read alone and added to the chunk writes the blob of the
+    /// chunk taken whole, and counts its keys block by block as the rows taken in place do, a run at once.
+    /// </summary>
+    [Theory]
+    [InlineData(11)]
+    [InlineData(12)]
+    [InlineData(13)]
+    public async Task BlocksOfRowsThatRepeatReadAloneAndAddedAreTheChunkTakenWhole(int seed)
+    {
+        Random random = new Random(seed);
+        await AssertSameBlobsAsync(Repeated(random), Shredding(random), Shredding(random));
+    }
+
+    /// <summary>
+    /// The column of each key a shredding types, read in its class, written from what a block's read took of it, is the column
+    /// a read of the rows' keys writes: the same rows hold a value, and the same value.
+    /// </summary>
+    [Theory]
+    [InlineData(21)]
+    [InlineData(22)]
+    [InlineData(23)]
+    [InlineData(24)]
+    public async Task AKeysColumnWrittenFromABlocksReadIsTheColumnReadFromItsRows(int seed)
+    {
+        Random random = new Random(seed);
+        Doc[] rows = Repeated(random);
+        VariantShredding plan = VariantShredding.Object(
+            ("status", VariantShredding.Primitive(VariantClass.Integer)),
+            ("duration", VariantShredding.Primitive(VariantClass.Double)),
+            ("route", VariantShredding.Primitive(VariantClass.String)),
+            ("ok", VariantShredding.Primitive(VariantClass.Boolean)),
+            ("big", VariantShredding.Primitive(VariantClass.String)),
+            ("missing", VariantShredding.Primitive(VariantClass.String)),
+            ("never", VariantShredding.Primitive(VariantClass.Integer)));
+        // Each key read in the class its typed column holds, in the plan's order of keys.
+        Vorticity.Compute.VariantRead[] reads = [.. plan.Keys.Select(static key => key.Field.Class switch
+        {
+            VariantClass.Integer => Vorticity.Compute.VariantRead.AsInt64,
+            VariantClass.Double => Vorticity.Compute.VariantRead.AsDouble,
+            VariantClass.String => Vorticity.Compute.VariantRead.AsString,
+            _ => Vorticity.Compute.VariantRead.AsBool,
+        })];
+        string path = await WriteAsync(rows, null, 1, blockRows: rows.Length);
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            int field = file.DType.IndexOfField(nameof(Doc.Attributes));
+            Vorticity.Compute.VariantFieldExpr[] paths = new Vorticity.Compute.VariantFieldExpr[plan.Keys.Count];
+            for (int key = 0; key < paths.Length; key++)
+            {
+                Assert.True(VariantShredder.Shredding.Reads(plan, key, reads[key]), plan.Keys[key].Name);
+                paths[key] = new Vorticity.Compute.VariantFieldExpr(
+                    new Vorticity.Expressions.ColumnFieldExpr(nameof(Doc.Attributes)), [Vorticity.Compute.VariantStep.Of(plan.Keys[key].Name)], reads[key]);
+            }
+
+            Vorticity.Compute.VariantFieldExpr.KeyReads together = new(paths);
+            int[] read = new int[paths.Length];
+            await foreach (RecordBatch batch in file.Scan<Doc>().ToBatchesAsync(Ct))
+            {
+                using (batch)
+                {
+                    VariantShredder.Shredding alone = new VariantShredder.Shredding(plan);
+                    CanonicalArena store = new CanonicalArena();
+                    CanonicalArena part = new CanonicalArena();
+                    for (int start = 0; start < batch.RowCount; start += 700)
+                    {
+                        int count = Math.Min(700, batch.RowCount - start);
+                        int slice = Vorticity.Layouts.CanonicalSlice.SliceAcross(batch.Arena, part, batch.RootIndex, start, count);
+                        int column = part.GetNode(slice).GetFieldIndex(field);
+                        Vorticity.Compute.VariantFieldExpr.ApplyKeys(part, column, together, read);
+                        VariantShredder.Shredding.Rows taken = VariantShredder.Shredding.Prepare(part, column);
+                        store.Reset();
+                        alone.Begin(store, null, counted: true);
+                        alone.TakeMore(in taken, 0);
+                        Vorticity.Buffers.VortexBuffer absent = default;
+                        for (int key = 0; key < paths.Length; key++)
+                        {
+                            int written = alone.KeyColumn(part, key, reads[key], count, ref absent);
+                            SameColumn(part, read[key], written, $"{plan.Keys[key].Name} from row {start}");
+                        }
+
+                        part.Reset();
+                    }
+                }
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>Whether two columns of an arena hold a value at the same rows, and the same: a number's bits, a boolean, a text's bytes.</summary>
+    private static void SameColumn(CanonicalArena arena, int expected, int actual, string what)
+    {
+        CanonicalNode a = arena.GetNode(expected);
+        CanonicalNode b = arena.GetNode(actual);
+        Assert.True(a.Kind == b.Kind, $"{what}: {b.Kind} against {a.Kind}");
+        Assert.Equal(a.Length, b.Length);
+        for (int row = 0; row < a.Length; row++)
+        {
+            bool held = ArenaWords.IsValid(arena, expected, row);
+            Assert.True(held == ArenaWords.IsValid(arena, actual, row), $"{what}: row {row} holds {(held ? "none" : "a value")} against {(held ? "a value" : "none")}");
+            if (!held)
+            {
+                continue;
+            }
+
+            switch (a.Kind)
+            {
+                case CanonicalKind.Bool:
+                    Assert.True(Bit(a, row) == Bit(b, row), $"{what}: row {row}");
+                    break;
+                case CanonicalKind.VarBinView:
+                    Assert.True(new ViewValues(a).At(row).SequenceEqual(new ViewValues(b).At(row)), $"{what}: row {row}");
+                    break;
+                default:
+                    Assert.True(
+                        System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(a.Values.Span)[row] == System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(b.Values.Span)[row],
+                        $"{what}: row {row}");
+                    break;
+            }
+        }
+
+        static bool Bit(CanonicalNode node, int row) => (node.Bits.Span[(node.BitOffset + row) >> 3] & (1 << ((node.BitOffset + row) & 7))) != 0;
+    }
+
+    /// <summary>Documents of every shape and of measures, in runs of rows of one document, some null in the second column.</summary>
+    private static Doc[] Repeated(Random random)
+    {
+        List<Doc> rows = [];
+        while (rows.Count < 3_000)
+        {
+            Variant attributes = random.Next(4) == 0 ? Measured(random) : Document(random);
+            Variant? extra = random.Next(10) == 0 ? null : Document(random);
+            for (int run = random.Next(3) == 0 ? 1 + random.Next(40) : 1; run > 0; run--)
+            {
+                rows.Add(new Doc(rows.Count, attributes, random.Next(4) == 0 ? null : extra));
+            }
+        }
+
+        return [.. rows];
+    }
+
     /// <summary>An object whose key twice over is taken once by a shredding and counted twice by a census: counted from its rows.</summary>
     [Fact]
     public void ABlockWhoseObjectHoldsAShreddedKeyTwiceIsCountedFromItsRows()

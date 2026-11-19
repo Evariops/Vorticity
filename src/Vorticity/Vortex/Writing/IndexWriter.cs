@@ -1064,19 +1064,42 @@ internal sealed class IndexWriter : IDisposable
     /// touching no builder, so that it runs beside anything. The nested paths' builders are fed next
     /// (<see cref="FeedNested"/>), and each group's (<see cref="FeedGroup"/>), each on its own.
     /// </summary>
-    internal void TakeKeys(int field, KeyPass pass, CanonicalArena arena, int nodeIndex, int rows)
+    /// <param name="field">The variant column.</param>
+    /// <param name="pass">The batch's pass over the column's keys.</param>
+    /// <param name="arena">The batch's arena.</param>
+    /// <param name="nodeIndex">The column's node.</param>
+    /// <param name="rows">The batch's rows.</param>
+    /// <param name="taken">
+    /// What a read of the batch's rows alone took of the column's shredding, when one did and every key is written from it
+    /// (<see cref="TakenKeys"/>): the rows are then not read for the keys, whose columns each group writes from it.
+    /// </param>
+    internal void TakeKeys(int field, KeyPass pass, CanonicalArena arena, int nodeIndex, int rows, VariantShredder.Shredding? taken = null)
     {
         VariantFeed feed = _variantFeeds![field]!;
         CanonicalArena into = pass.Rows;
-        int variant = CanonicalSlice.SliceAcross(arena, into, nodeIndex, 0, rows);
         int keyed = feed.Slots.Length - feed.Nested.Length;
         Compute.VariantFieldExpr.KeyReads reads = pass.Reads!;
-        pass.Whole = !reads.Read(into, variant);
-        if (pass.Whole)
+        pass.Taken = taken is { Dropped: false } && TakenKeys(field, taken.Plan) is { Length: > 0 } ? taken : null;
+        if (pass.Taken is not null && feed.Nested.Length == 0)
         {
-            for (int i = 0; i < keyed; i++)
+            pass.Whole = false;
+            return;
+        }
+
+        int variant = CanonicalSlice.SliceAcross(arena, into, nodeIndex, 0, rows);
+        if (pass.Taken is not null)
+        {
+            pass.Whole = false;
+        }
+        else
+        {
+            pass.Whole = !reads.Read(into, variant);
+            if (pass.Whole)
             {
-                pass.Nodes[i] = reads.Paths[i].Apply(into, variant);
+                for (int i = 0; i < keyed; i++)
+                {
+                    pass.Nodes[i] = reads.Paths[i].Apply(into, variant);
+                }
             }
         }
 
@@ -1084,6 +1107,41 @@ internal sealed class IndexWriter : IDisposable
         {
             pass.Nodes[keyed + n] = feed.Nested[n].Apply(into, variant);
         }
+    }
+
+    // By variant column, the key of the column's shredding each of its top-level keys is, once known: empty when one of
+    // them is not a key the shredding types in the class it is read in.
+    private int[]?[]? _takenKeys;
+
+    /// <summary>
+    /// For each top-level key variant column <paramref name="field"/> feeds, the key of <paramref name="plan"/>, the column's
+    /// shredding, that it is, when each is one the shredding types in the class it is read in
+    /// (<see cref="VariantShredder.Shredding.Reads"/>): their columns over a block are then written from what the block's
+    /// read took. Empty otherwise.
+    /// </summary>
+    internal int[] TakenKeys(int field, Types.Variants.VariantShredding plan)
+    {
+        int[]?[] known = _takenKeys ??= new int[]?[_fieldCount];
+        if (known[field] is { } made)
+        {
+            return made;
+        }
+
+        Compute.VariantFieldExpr[] paths = _variantFeeds![field]!.Reads?.Paths ?? [];
+        int[] keys = new int[paths.Length];
+        for (int i = 0; i < paths.Length; i++)
+        {
+            keys[i] = plan.Kind == Types.Variants.VariantShreddingKind.Object ? plan.IndexOf(System.Text.Encoding.UTF8.GetBytes(paths[i].Steps[0].Key!)) : -1;
+            if (!VariantShredder.Shredding.Reads(plan, keys[i], paths[i].Read))
+            {
+                keys = [];
+                break;
+            }
+        }
+
+        // Made twice by two blocks' reads at once, the same both times.
+        known[field] = keys;
+        return keys;
     }
 
     /// <summary>Feeds the builders of the nested paths of variant column <paramref name="field"/> what <see cref="TakeKeys"/> read into <paramref name="pass"/>.</summary>
@@ -1137,9 +1195,13 @@ internal sealed class IndexWriter : IDisposable
         /// <summary>Whether the batch's rows could not be read once for every key, and <see cref="ReadKeys"/> fed them all.</summary>
         internal bool Whole { get; set; }
 
+        /// <summary>What a read of the batch's rows alone took of the column's shredding, which the keys' columns are written from; null when they are read from the rows.</summary>
+        internal VariantShredder.Shredding? Taken { get; set; }
+
         /// <summary>Ends the batch's pass: the read given back, the rows let go, the arena's blocks kept for the next batch.</summary>
         internal void End()
         {
+            Taken = null;
             Reads?.Release();
             Rows.ResetKeepingBlocks();
         }
@@ -1174,10 +1236,14 @@ internal sealed class IndexWriter : IDisposable
         CanonicalArena into = feed.GroupRows(group);
         try
         {
+            // From what the block's read took of each key, when it did, and from the notes of a read of the rows otherwise.
             VortexBuffer absent = default;
+            int[]? takenKeys = pass.Taken is { } block ? TakenKeys(field, block.Plan) : null;
             for (int i = group; i < keyed; i += feed.Groups)
             {
-                pass.Nodes[i] = pass.Reads!.Write(into, i, ref absent);
+                pass.Nodes[i] = takenKeys is null
+                    ? pass.Reads!.Write(into, i, ref absent)
+                    : pass.Taken!.KeyColumn(into, takenKeys[i], pass.Reads!.Paths[i].Read, rows, ref absent);
             }
 
             FeedSlots(feed, pass.Nodes, into, group, keyed, feed.Groups, rows, filled, blockRows);

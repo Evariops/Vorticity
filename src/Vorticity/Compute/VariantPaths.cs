@@ -913,7 +913,7 @@ internal sealed class VariantFieldExpr : FieldExpr
     }
 
     /// <summary>The column a path's values are written into: values, a validity bit per row, and for text views of the variant's bytes.</summary>
-    private ref struct Output
+    internal ref struct Output
     {
         private readonly VariantRead _read;
         private readonly int _rows;
@@ -1256,8 +1256,72 @@ internal sealed class VariantFieldExpr : FieldExpr
             return end;
         }
 
-        /// <summary>The node of the column written.</summary>
+        /// <summary>Writes the number <paramref name="value"/> at each of the <paramref name="times"/> rows from <paramref name="row"/> on, of a column of integers or of timestamps.</summary>
+        internal void Put(int row, long value, int times)
+        {
+            MemoryMarshal.Cast<byte, long>(_into.Slice(row * sizeof(long), times * sizeof(long))).Fill(value);
+            Present(row, times);
+        }
+
+        /// <summary>Writes the number <paramref name="value"/> at each of the <paramref name="times"/> rows from <paramref name="row"/> on, of a column of doubles.</summary>
+        internal void Put(int row, double value, int times)
+        {
+            MemoryMarshal.Cast<byte, double>(_into.Slice(row * sizeof(double), times * sizeof(double))).Fill(value);
+            Present(row, times);
+        }
+
+        /// <summary>Writes <paramref name="value"/> at each of the <paramref name="times"/> rows from <paramref name="row"/> on, of a column of booleans.</summary>
+        internal void Put(int row, bool value, int times)
+        {
+            if (value)
+            {
+                SetRange(_into, row, times);
+            }
+
+            Present(row, times);
+        }
+
+        /// <summary>
+        /// Writes <paramref name="view"/> at each of the <paramref name="times"/> rows from <paramref name="row"/> on, of a
+        /// column of texts: a text's view, inline or into a data buffer the column is finished over
+        /// (<see cref="Finish(CanonicalArena, ReadOnlySpan{VortexBuffer})"/>).
+        /// </summary>
+        internal void Put(int row, Int128 view, int times)
+        {
+            MemoryMarshal.Cast<byte, Int128>(_into.Slice(row * CanonicalSupport.ViewSize, times * CanonicalSupport.ViewSize)).Fill(view);
+            Present(row, times);
+        }
+
+        private void Present(int row, int times)
+        {
+            if (times == 1)
+            {
+                Present(row);
+                return;
+            }
+
+            SetRange(_validBits, row, times);
+            _present += times;
+        }
+
+        /// <summary>The node of the column written, its texts' views naming the data buffers of <paramref name="values"/>, the variant's values they lie in.</summary>
         internal readonly int Finish(CanonicalArena arena, in CanonicalNode values)
+        {
+            // The views name the value column's data buffers by index, so they are its own: copied here, the arena's list of
+            // them moving as the node is added.
+            int count = _read == VariantRead.AsString ? values.DataBufferCount : 0;
+            Span<VortexBuffer> stack = stackalloc VortexBuffer[16];
+            using Scratch<VortexBuffer> buffers = new(count, stack);
+            for (int i = 0; i < count; i++)
+            {
+                buffers.Span[i] = values.GetDataBuffer(i);
+            }
+
+            return Finish(arena, buffers.Span);
+        }
+
+        /// <summary>The node of the column written, a column of texts over the data buffers <paramref name="buffers"/>, which its views name by index.</summary>
+        internal readonly int Finish(CanonicalArena arena, ReadOnlySpan<VortexBuffer> buffers)
         {
             if (_read == VariantRead.Has)
             {
@@ -1281,30 +1345,21 @@ internal sealed class VariantFieldExpr : FieldExpr
             Validity validity = _present == _rows ? Validity.AllValid
                 : _present == 0 ? Validity.AllInvalid
                 : Validity.Bitmap(arena.AddBool(BitmapType, _rows, Validity.NonNullable, _validity, 0));
-            return Node(arena, _read, _rows, validity, _values, in values);
+            return Node(arena, _read, _rows, validity, _values, buffers);
         }
 
-        /// <summary>The node of a column of <paramref name="rows"/> rows read as <paramref name="read"/>, its slots or bits in <paramref name="slots"/>.</summary>
-        private static int Node(CanonicalArena arena, VariantRead read, int rows, Validity validity, VortexBuffer slots, in CanonicalNode values)
+        /// <summary>
+        /// The node of a column of <paramref name="rows"/> rows read as <paramref name="read"/>, its slots or bits in
+        /// <paramref name="slots"/>, a column of texts over the data buffers <paramref name="buffers"/>.
+        /// </summary>
+        private static int Node(CanonicalArena arena, VariantRead read, int rows, Validity validity, VortexBuffer slots, ReadOnlySpan<VortexBuffer> buffers)
         {
             switch (read)
             {
                 case VariantRead.AsBool:
                     return arena.AddBool(BoolType, rows, validity, slots, 0);
                 case VariantRead.AsString:
-                {
-                    // The views name the value column's data buffers by index, so they are its own.
-                    int count = values.DataBufferCount;
-                    Span<VortexBuffer> stack = stackalloc VortexBuffer[16];
-                    using Scratch<VortexBuffer> buffers = new(count, stack);
-                    for (int i = 0; i < count; i++)
-                    {
-                        buffers.Span[i] = values.GetDataBuffer(i);
-                    }
-
-                    return arena.AddVarBinView(StringType, rows, validity, slots, buffers.Span);
-                }
-
+                    return arena.AddVarBinView(StringType, rows, validity, slots, buffers);
                 case VariantRead.AsDouble:
                 case VariantRead.ToDouble:
                     return arena.AddPrimitive(DoubleType, rows, validity, PType.F64, slots);
@@ -1327,6 +1382,20 @@ internal sealed class VariantFieldExpr : FieldExpr
         /// </remarks>
         internal static int Absent(CanonicalArena arena, VariantRead read, int rows, in CanonicalNode values, ref VortexBuffer zeros)
         {
+            int count = read == VariantRead.AsString ? values.DataBufferCount : 0;
+            Span<VortexBuffer> stack = stackalloc VortexBuffer[16];
+            using Scratch<VortexBuffer> buffers = new(count, stack);
+            for (int i = 0; i < count; i++)
+            {
+                buffers.Span[i] = values.GetDataBuffer(i);
+            }
+
+            return Absent(arena, read, rows, buffers.Span, ref zeros);
+        }
+
+        /// <summary><see cref="Absent(CanonicalArena, VariantRead, int, in CanonicalNode, ref VortexBuffer)"/> over the data buffers <paramref name="buffers"/>, none for a column that names none.</summary>
+        internal static int Absent(CanonicalArena arena, VariantRead read, int rows, ReadOnlySpan<VortexBuffer> buffers, ref VortexBuffer zeros)
+        {
             int width = read == VariantRead.AsString ? CanonicalSupport.ViewSize : sizeof(long);
             int most = Math.Max(rows, 1) * CanonicalSupport.ViewSize;
             if (zeros.Length < most)
@@ -1334,7 +1403,7 @@ internal sealed class VariantFieldExpr : FieldExpr
                 zeros = arena.Allocate(most, 64, out _);
             }
 
-            return Node(arena, read, rows, Validity.AllInvalid, zeros.Slice(0, Math.Max(rows * width, width)), in values);
+            return Node(arena, read, rows, Validity.AllInvalid, zeros.Slice(0, Math.Max(rows * width, width)), buffers);
         }
     }
 }

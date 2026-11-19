@@ -713,8 +713,9 @@ public sealed partial class VortexFileWriter
         {
             if (indexes!.KeyGroups(field) > 0)
             {
+                // After the block's read of a shredded column, which the keys' columns are written from.
                 flight.PassOf(indexes, field);
-                reads[field] = Add(flight, ReadItem | field, [], -1);
+                reads[field] = Add(flight, ReadItem | field, [], blocks[field]);
             }
         }
 
@@ -966,7 +967,8 @@ public sealed partial class VortexFileWriter
         if ((entry & ReadItem) != 0)
         {
             int field = entry & 0xF_FFFF;
-            _indexes!.TakeKeys(field, flight.Keys[field]!, flight.Arena, flight.FieldNodes[field], rows);
+            VariantShredder.Shredding? taken = field < flight.ShredAt.Length && flight.ShredAt[field] != -1 ? flight.Blocks[field] : null;
+            _indexes!.TakeKeys(field, flight.Keys[field]!, flight.Arena, flight.FieldNodes[field], rows, taken);
             return;
         }
 
