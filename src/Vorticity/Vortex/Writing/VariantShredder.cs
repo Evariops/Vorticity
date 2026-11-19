@@ -1097,6 +1097,15 @@ internal static class VariantShredder
 
         protected override void Take(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row, int offset)
         {
+            // A value of the column's class whose bytes are all there is typed from its header as it lies: read whole into a
+            // scalar of every type's fields first, the values of a consolidation of log records' attributes took a fifth of
+            // their take (2026-11-19).
+            if (!value.IsEmpty && _typed.Plain(row, value, Bounds))
+            {
+                _typedLast = true;
+                return;
+            }
+
             VariantScalar scalar = VariantScalar.Read(value);
             if (_typed.Takes(scalar.Kind))
             {
@@ -1746,6 +1755,21 @@ internal static class VariantShredder
             Value(in scalar);
         }
 
+        /// <summary>
+        /// Takes <paramref name="value"/> at row <paramref name="row"/> from its header as it lies, when it is a value of the
+        /// column's class the encoding writes in one piece and its bytes are all there, counted in <paramref name="bounds"/>
+        /// as <see cref="Indexes.ChunkBlockBounds.KeyBlocks.Note"/> counts it read; false, and nothing taken, for any other
+        /// value, which is read whole.
+        /// </summary>
+        internal abstract bool Plain(int row, ReadOnlySpan<byte> value, Indexes.ChunkBlockBounds.KeyBlocks? bounds);
+
+        /// <summary>A value is taken at row <paramref name="row"/>: its row, and one value more.</summary>
+        protected void Took(int row)
+        {
+            Rows?.Add(row);
+            Count++;
+        }
+
         /// <summary>Takes again at row <paramref name="row"/> the value taken last, which the row repeats.</summary>
         internal void Again(int row)
         {
@@ -1837,6 +1861,39 @@ internal static class VariantShredder
 
         protected override void Value(in VariantScalar scalar) => _values.Add((long)scalar.Integer);
 
+        internal override bool Plain(int row, ReadOnlySpan<byte> value, Indexes.ChunkBlockBounds.KeyBlocks? bounds)
+        {
+            byte header = value[0];
+            if ((header & 0x03) != ParquetVariant.BasicPrimitive)
+            {
+                return false;
+            }
+
+            long integer;
+            switch (header >> 2)
+            {
+                case 3 when value.Length >= 2:
+                    integer = (sbyte)value[1];
+                    break;
+                case 4 when value.Length >= 3:
+                    integer = System.Buffers.Binary.BinaryPrimitives.ReadInt16LittleEndian(value[1..]);
+                    break;
+                case 5 when value.Length >= 5:
+                    integer = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(value[1..]);
+                    break;
+                case 6 when value.Length >= 9:
+                    integer = System.Buffers.Binary.BinaryPrimitives.ReadInt64LittleEndian(value[1..]);
+                    break;
+                default:
+                    return false;
+            }
+
+            Took(row);
+            _values.Add(integer);
+            bounds?.Integer(row, integer);
+            return true;
+        }
+
         protected override void All(TypedValues other) => _values.AddAll(((IntegerValues)other)._values);
 
         internal override void CountNext(in Counting counting, PathCensus.PathCount count, long row, int times, ref TypedCursor cursor)
@@ -1902,6 +1959,20 @@ internal static class VariantShredder
 
         protected override void Value(in VariantScalar scalar) => _values.Add(scalar.Number);
 
+        /// <summary>A double alone: a float, which a question reads as one, is of no typed column's class.</summary>
+        internal override bool Plain(int row, ReadOnlySpan<byte> value, Indexes.ChunkBlockBounds.KeyBlocks? bounds)
+        {
+            // No chunk counts doubles block by block: one that did would count the value read.
+            if (bounds is not null || value[0] != ParquetVariant.Primitive(7) || value.Length < 9)
+            {
+                return false;
+            }
+
+            Took(row);
+            _values.Add(System.Buffers.Binary.BinaryPrimitives.ReadDoubleLittleEndian(value[1..]));
+            return true;
+        }
+
         protected override void All(TypedValues other) => _values.AddAll(((DoubleValues)other)._values);
 
         internal override void CountNext(in Counting counting, PathCensus.PathCount count, long row, int times, ref TypedCursor cursor)
@@ -1955,6 +2026,21 @@ internal static class VariantShredder
         internal override DType Type(DTypeArena types) => types.Bool(Nullability.Nullable);
 
         protected override void Value(in VariantScalar scalar) => _values.Add(scalar.Integer != 0 ? (byte)1 : (byte)0);
+
+        internal override bool Plain(int row, ReadOnlySpan<byte> value, Indexes.ChunkBlockBounds.KeyBlocks? bounds)
+        {
+            byte header = value[0];
+            if (header != ParquetVariant.Primitive(1) && header != ParquetVariant.Primitive(2))
+            {
+                return false;
+            }
+
+            bool held = header == ParquetVariant.Primitive(1);
+            Took(row);
+            _values.Add(held ? (byte)1 : (byte)0);
+            bounds?.Boolean(row, held);
+            return true;
+        }
 
         protected override void All(TypedValues other) => _values.AddAll(((BooleanValues)other)._values);
 
@@ -2045,6 +2131,25 @@ internal static class VariantShredder
             _lengths.Add(text.Length);
             _bytes.AddRange(text);
             _lastLength = text.Length;
+        }
+
+        /// <summary>A short string, its length in its header: the string primitive of a longer text is read whole.</summary>
+        internal override bool Plain(int row, ReadOnlySpan<byte> value, Indexes.ChunkBlockBounds.KeyBlocks? bounds)
+        {
+            byte header = value[0];
+            int length = header >> 2;
+            if ((header & 0x03) != ParquetVariant.BasicShortString || value.Length <= length)
+            {
+                return false;
+            }
+
+            ReadOnlySpan<byte> text = value.Slice(1, length);
+            Took(row);
+            _lengths.Add(length);
+            _bytes.AddRange(text);
+            _lastLength = length;
+            bounds?.String(row, text);
+            return true;
         }
 
         protected override void All(TypedValues other)
