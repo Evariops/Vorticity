@@ -109,6 +109,9 @@ public sealed partial class VortexFileWriter
         chunk.FirstBlock = firstBlock;
         chunk.Blocks = blocks;
 
+        // A chunk of the file is the column's chunk as its writer sizes them: its plan is the column's.
+        chunk.Measures = true;
+
         // What its bytes held while in transit counts toward the writer's size until it lands, at the rate of the rows that wait.
         chunk.Counted = (long)(arena.NamedBytes(node) * Gathering.FirstRate);
 
@@ -276,6 +279,9 @@ public sealed partial class VortexFileWriter
         /// </summary>
         internal bool AsItCame;
 
+        /// <summary>Whether its segment measures its column's rate as it lands (<see cref="Gathering.Measures"/>).</summary>
+        internal bool Measures;
+
         internal int Node;
         internal int Rows;
         internal int FirstBlock;
@@ -435,7 +441,7 @@ public sealed partial class VortexFileWriter
     /// Touches the column's gathering and ingest state alone, so that the column's item of a chunk across the writer's
     /// threads takes it.
     /// </summary>
-    private ColumnEmission Detach(int field, Gathering gathering)
+    private ColumnEmission Detach(int field, Gathering gathering, bool due = true)
     {
         ScanContext context = gathering.Context!;
         int rows = checked((int)gathering.Rows);
@@ -466,6 +472,7 @@ public sealed partial class VortexFileWriter
         chunk.FirstBlock = gathering.FirstBlock;
         chunk.Blocks = gathering.Blocks;
         chunk.Cut = gathering.Bytes;
+        chunk.Measures = gathering.Measures(due);
         chunk.Counted = (long)(gathering.Bytes * gathering.Rate);
         chunk.AsItCame = gathering.AsItCame;
 
@@ -819,7 +826,7 @@ public sealed partial class VortexFileWriter
     private void WriteColumn(ColumnEmission chunk, CompressionLane lane, int local)
     {
         // A column of an object dictionary's codes gathered its codes, which the statistics of its values do not describe.
-        ChunkStats stats = chunk.Stats is { } frozen && !Codes(chunk.Field) ? new ChunkStats(frozen, this) : default;
+        ChunkStats stats = chunk.Stats is { } frozen && !Codes(chunk.Field) ? new ChunkStats(frozen, this, keeps: !chunk.Measures) : default;
         ZstdPlan.Ahead? frames = _emissionFrames?[chunk.Field];
         lane.Blobs.Ahead = frames;
         try
@@ -1079,7 +1086,7 @@ public sealed partial class VortexFileWriter
         bool first = gathering is { AsItCame: true };
         if (gathering is not null)
         {
-            gathering.Cut = chunk.Cut;
+            gathering.Cut = chunk.Measures ? chunk.Cut : 0;
         }
 
         await WriteColumnBlobAsync(field, blob, chunk.FirstBlock, chunk.Blocks, cancellationToken, chunk.Bounds, released: true).ConfigureAwait(false);

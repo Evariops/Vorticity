@@ -103,6 +103,27 @@ public sealed record DatasetOptions
     /// </summary>
     internal double BoundOutPerIn { get; init; } = ObjectBound.OutPerIn;
 
+    /// <summary>
+    /// The share of an object's size it may hold less or more, read at the end of a group of rows its job asked for
+    /// (<see cref="VortexFileWriter.EndGroupAsync"/>): an object that holds the size less this share is sealed at its next
+    /// key, and one that holds less asks for another end.
+    /// </summary>
+    internal double ObjectEndSlack { get; init; } = DefaultObjectEndSlack;
+
+    /// <summary>The default of <see cref="ObjectEndSlack"/>.</summary>
+    internal const double DefaultObjectEndSlack = 1.0 / 32;
+
+    /// <summary>
+    /// The share by which what a row weighs may grow over the rows a job's object can still take, the job's left and those
+    /// of its partition value: a job asks for no end of a group by the weight of the rows while those rows, at what a row
+    /// weighed at the object's last end and this share more, leave the object short of its size, which it then closes
+    /// before it fills.
+    /// </summary>
+    internal double RowWeightDrift { get; init; } = DefaultRowWeightDrift;
+
+    /// <summary>The default of <see cref="RowWeightDrift"/>.</summary>
+    internal const double DefaultRowWeightDrift = 1.0 / 4;
+
     /// <summary>The columns an object's entry summarises, or null for the first <see cref="SummaryColumnLimit"/>.</summary>
     /// <remarks>The summaries are what a scan prunes whole objects by without opening them; the sort key's columns are always among them.</remarks>
     public IReadOnlyList<string>? SummaryColumns { get; init; }

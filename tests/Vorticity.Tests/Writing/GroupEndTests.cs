@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -20,7 +21,7 @@ using Xunit;
 namespace Vorticity.Tests.Writing;
 
 /// <summary>What <see cref="VortexFileWriter.EndGroupAsync"/> does to a file.</summary>
-public sealed class GroupEndTests
+public sealed partial class GroupEndTests
 {
     private const int BlockRows = 1_024;
 
@@ -117,6 +118,73 @@ public sealed class GroupEndTests
             System.IO.File.Delete(many);
         }
     }
+
+    /// <summary>
+    /// Rows taken as they come, a desk among five and a measure, ended inside a block, by an end asked for or by a flush,
+    /// each column gathering to its own chunks: every row reads back as written, the rows short of a block that stay in
+    /// transit past the end among them. A dataset's object, whose desks go against its dictionary, is the case that broke
+    /// (<c>DatasetGroupTests</c>).
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task RowsInTransitPastAnEndReadBackAsTheyWereWritten(bool flush)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        string[] desks = ["rates", "fx", "credit", "equity", "commodities"];
+        Random random = new Random(7);
+        Desk[] rows = [.. Enumerable.Range(0, 30_000).Select(i => new Desk(desks[random.Next(desks.Length)], i * 0.5))];
+        string path = Temp();
+        try
+        {
+            VortexWriteOptions options = new VortexWriteOptions
+            {
+                BlockRows = 1_024,
+                ChunkTargetBytes = 16 << 10,
+                GatheredChunkBytes = 16 << 10,
+                GatheredGroupRows = 8_192,
+                Identity = Pinned,
+            };
+            await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Desk>(path, options))
+            {
+                for (int start = 0; start < rows.Length; start += 1_000)
+                {
+                    if (start is 7_000 or 19_000)
+                    {
+                        if (flush)
+                        {
+                            await writer.FlushAsync(ct);
+                        }
+                        else
+                        {
+                            await writer.EndGroupAsync(ct);
+                        }
+                    }
+
+                    await writer.WriteAsync<Desk>(rows.AsSpan(start, Math.Min(1_000, rows.Length - start)), ct);
+                }
+
+                await writer.CompleteAsync(ct);
+            }
+
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+            List<Desk> read = [];
+            await foreach (Desk row in file.Scan<Desk>().ToRecordsAsync(ct))
+            {
+                read.Add(row);
+            }
+
+            Assert.Equal(rows, read);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [VortexRecord]
+    public partial record struct Desk(string Name, double Measure);
 
     /// <summary>Where the chunks of <paramref name="column"/> end, by rows from the file's first.</summary>
     private static SortedSet<long> Ends(WriteReport report, int column)

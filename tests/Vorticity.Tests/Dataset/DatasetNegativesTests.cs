@@ -91,7 +91,10 @@ public sealed partial class DatasetNegativesTests
 
     /// <summary>
     /// Counts by service and status, which no column's counts answer, settle the blocks of a marked object that hold no
-    /// marked row from their statistics, and read the others as rows: the rows' answer, in fewer bytes than the rows take.
+    /// marked row from their statistics, and read the others as rows: the rows' answer, in two thirds of the bytes the rows
+    /// take at most. The granules a service changes in are read as rows whatever the deletes, three of the ten the objects
+    /// hold once they reach their size, of two granules each, and their opens are read either way: 61 % of the rows' bytes,
+    /// where objects of under a granule each, short of their size, read 47 % (2026-11-20).
     /// </summary>
     [Fact]
     public async Task AMarkedObjectsBlocksAnswerWhereNoDeleteTouchedThem()
@@ -122,7 +125,7 @@ public sealed partial class DatasetNegativesTests
         }
 
         Console.WriteLine($"NEGATIVES counts by service and status over marked objects: {bytes[1]:N0} bytes through their blocks, {bytes[0]:N0} through their rows");
-        Assert.True(bytes[1] * 2 < bytes[0], $"{bytes[1]} bytes through the blocks, {bytes[0]} through the rows");
+        Assert.True(bytes[1] * 3 < bytes[0] * 2, $"{bytes[1]} bytes through the blocks, {bytes[0]} through the rows");
     }
 
     [Fact]

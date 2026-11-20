@@ -61,9 +61,9 @@ internal sealed class ChunkSnapshot
     /// Takes what the chunk was written as, against what it was priced at, into the column's memory of its plans, which the
     /// column's next emission reads; what it decides for the ingest waits here until the chunk lands.
     /// </summary>
-    internal void Remember(in ColumnPlan plan, long actualBytes)
+    internal void Remember(in ColumnPlan plan, long actualBytes, bool keeps = false)
     {
-        (Written, Live, WidthsLive) = Column.RememberPlan(in plan, actualBytes);
+        (Written, Live, WidthsLive) = Column.RememberPlan(in plan, actualBytes, keeps);
         Remembered = true;
     }
 

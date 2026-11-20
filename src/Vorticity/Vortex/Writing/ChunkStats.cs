@@ -36,6 +36,9 @@ internal readonly struct ChunkStats
     private readonly IChunkLedger? _ledger;
     private readonly bool _dry;
 
+    // Whether the chunk leaves the column's memory of its plans as it was: a chunk an end cut short of its target.
+    private readonly bool _keeps;
+
     // What the ingest knew of the chunk as it left for an emission of its own, read in place of the column's state, which
     // the blocks after the chunk change meanwhile; null for a chunk written while nothing ingests the column.
     private readonly ChunkSnapshot? _frozen;
@@ -45,20 +48,22 @@ internal readonly struct ChunkStats
     /// <param name="firstBlock">The chunk's first block.</param>
     /// <param name="blockCount">How many blocks the chunk covers.</param>
     /// <param name="ledger">Where the misses of a list's elements are counted, or none.</param>
-    internal ChunkStats(ColumnWriter? column, int firstBlock, int blockCount, IChunkLedger? ledger = null)
-        : this(column, firstBlock, blockCount, ledger, dry: false, frozen: null)
+    /// <param name="keeps">Whether the chunk leaves the column's memory of its plans as it was (<see cref="ColumnWriter.RememberPlan"/>).</param>
+    internal ChunkStats(ColumnWriter? column, int firstBlock, int blockCount, IChunkLedger? ledger = null, bool keeps = false)
+        : this(column, firstBlock, blockCount, ledger, dry: false, frozen: null, keeps)
     {
     }
 
     /// <summary>Points at what <paramref name="frozen"/> took of a chunk's column (<see cref="ColumnWriter.Freeze"/>).</summary>
     /// <param name="frozen">The chunk's snapshot.</param>
     /// <param name="ledger">Where the misses of a list's elements are counted, or none.</param>
-    internal ChunkStats(ChunkSnapshot frozen, IChunkLedger? ledger)
-        : this(frozen.Column, frozen.FirstBlock, frozen.BlockCount, ledger, dry: false, frozen)
+    /// <param name="keeps">Whether the chunk leaves the column's memory of its plans as it was (<see cref="ColumnWriter.RememberPlan"/>).</param>
+    internal ChunkStats(ChunkSnapshot frozen, IChunkLedger? ledger, bool keeps = false)
+        : this(frozen.Column, frozen.FirstBlock, frozen.BlockCount, ledger, dry: false, frozen, keeps)
     {
     }
 
-    private ChunkStats(ColumnWriter? column, int firstBlock, int blockCount, IChunkLedger? ledger, bool dry, ChunkSnapshot? frozen)
+    private ChunkStats(ColumnWriter? column, int firstBlock, int blockCount, IChunkLedger? ledger, bool dry, ChunkSnapshot? frozen, bool keeps)
     {
         _column = column;
         _firstBlock = firstBlock;
@@ -66,13 +71,14 @@ internal readonly struct ChunkStats
         _ledger = ledger;
         _dry = dry;
         _frozen = frozen;
+        _keeps = keeps;
     }
 
     /// <summary>
     /// The same statistics for a write that is only measured: priced under the rules every profile
     /// but size first applies, and leaving the column's memory and counters as they were.
     /// </summary>
-    internal ChunkStats Dry() => new ChunkStats(_column, _firstBlock, _blockCount, ledger: null, dry: true, _frozen);
+    internal ChunkStats Dry() => new ChunkStats(_column, _firstBlock, _blockCount, ledger: null, dry: true, _frozen, _keeps);
 
     /// <summary>Whether this is a <see cref="Dry"/> chunk: one priced as every profile but size first prices it.</summary>
     internal bool IsDry => _dry;
@@ -174,11 +180,11 @@ internal readonly struct ChunkStats
 
         if (_frozen is { } frozen)
         {
-            frozen.Remember(in plan, actualBytes);
+            frozen.Remember(in plan, actualBytes, _keeps);
             return;
         }
 
-        _column?.Remember(in plan, actualBytes, _firstBlock, _blockCount);
+        _column?.Remember(in plan, actualBytes, _firstBlock, _blockCount, _keeps);
     }
 
     /// <summary>
@@ -191,13 +197,13 @@ internal readonly struct ChunkStats
         if (_frozen is { } frozen)
         {
             return (uint)index < (uint)frozen.ChildCount && frozen.Children[index] is { } child
-                ? new ChunkStats(child.Column, _firstBlock, _blockCount, _ledger, _dry, child)
+                ? new ChunkStats(child.Column, _firstBlock, _blockCount, _ledger, _dry, child, _keeps)
                 : default;
         }
 
         return _column is null
             ? default
-            : new ChunkStats(_column.Field(index), _firstBlock, _blockCount, _ledger, _dry, frozen: null);
+            : new ChunkStats(_column.Field(index), _firstBlock, _blockCount, _ledger, _dry, frozen: null, _keeps);
     }
 
     /// <summary>
@@ -223,7 +229,7 @@ internal readonly struct ChunkStats
                 return default;
             }
 
-            return new ChunkStats(elementsOf.Column, _firstBlock, _blockCount, _ledger, _dry, elementsOf);
+            return new ChunkStats(elementsOf.Column, _firstBlock, _blockCount, _ledger, _dry, elementsOf, _keeps);
         }
 
         ColumnWriter? child = _ledger is { ElementsServe: false }
@@ -235,6 +241,6 @@ internal readonly struct ChunkStats
             return default;
         }
 
-        return new ChunkStats(child, _firstBlock, _blockCount, _ledger, _dry, frozen: null);
+        return new ChunkStats(child, _firstBlock, _blockCount, _ledger, _dry, frozen: null, _keeps);
     }
 }

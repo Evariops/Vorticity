@@ -169,13 +169,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     internal long DataBytes => _writtenBytes.Data;
 
     /// <summary>
-    /// Once the file is completed, the bytes it wrote past its last column chunk: the indexes it writes at its end, its zone
-    /// maps, its statistics and its footer, which <see cref="Size"/> counts none of while the file is written. 0 before.
-    /// </summary>
-    internal long EndBytes =>
-        _writtenBytes.Statistics + _writtenBytes.ZoneMaps + _writtenBytes.Indexes - _writtenBytes.IndexesAmongData + _writtenBytes.Footer;
-
-    /// <summary>
     /// Once a file that carries a table of contents (<see cref="VortexWriteOptions.CarriesContents"/>) is
     /// completed, its table (<see cref="Indexes.ObjectContents"/>), for the entry a dataset keeps of it: what a
     /// reader of a few spans of its rows needs with no open. Null for a file without one.
@@ -838,10 +831,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The lanes above one, rented with the first piece of work that uses them.</summary>
     private CoreBatch? _fan;
 
-    // What the completed file holds by kind, as its report says it (BuildReport), and of its indexes' bytes those written
-    // among its column chunks, which its size counted as they went (EndBytes). Six numbers, as the report's six were with
+    // What the completed file holds by kind, as its report says it (BuildReport). Five numbers, as the report's six are with
     // their total, which is their sum: a writer's object grows by none, and its allocations are held to the byte.
-    private (long Data, long Statistics, long ZoneMaps, long Indexes, long Footer, long IndexesAmongData) _writtenBytes;
+    private (long Data, long Statistics, long ZoneMaps, long Indexes, long Footer) _writtenBytes;
 
     /// <summary>The sink position the write meter has counted to; an append starts it at the file's length.</summary>
     private long _meteredBytes;
@@ -2562,12 +2554,70 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        bool[]? emitted = Emitting(static column => column.Rows > 0);
         await EmitGatheredAsync(cancellationToken).ConfigureAwait(false);
+        ReprobeTransit(emitted);
 
         // The flight staged next reads the columns as they stand: every flight landed.
         _lastCut = false;
         _sized = false;
-        return new GroupEnd(_sink.Position, _rowCount);
+
+        // The indexes' runs written among the chunks are the indexes', as the file's completion counts them: the data is what
+        // the index budget is judged against, and the runs go out when it lets them, a burst at a time.
+        return new GroupEnd(_sink.Position - (_indexes?.FileBytes ?? 0), _rowCount);
+    }
+
+    /// <summary>
+    /// The columns that gather whose chunk the caller writes now, each giving its distinct table to the chunk, as
+    /// <paramref name="emits"/> says; null when no row waits in transit, which their tables would have to see again.
+    /// </summary>
+    private bool[]? Emitting(Func<Gathering, bool> emits)
+    {
+        if (_pendingRows == 0 || _gathering is not { } gathering)
+        {
+            return null;
+        }
+
+        bool[] emitted = new bool[gathering.Length];
+        bool any = false;
+        for (int field = 0; field < gathering.Length; field++)
+        {
+            emitted[field] = gathering[field] is { } column && emits(column);
+            any |= emitted[field];
+        }
+
+        return any ? emitted : null;
+    }
+
+    /// <summary>
+    /// Probes the rows short of a block that stay in transit into the new distinct tables of the columns <paramref name="emitted"/>
+    /// names, whose chunks just took their tables with them.
+    /// </summary>
+    /// <remarks>
+    /// Those rows were probed into the tables the chunks took, a column still gathering keeping its table as rows are carried:
+    /// probed again into those columns' new tables, as the tail a chunk of the file carries is, and into no other, whose table
+    /// holds them already. Left out, a column of a few names coded those rows against a table that never saw them, and its
+    /// values ran one row off the others' from there; probed again into every column, they ran off from the next rows
+    /// (2026-11-21).
+    /// </remarks>
+    private void ReprobeTransit(bool[]? emitted)
+    {
+        if (emitted is null || _transit?[_current] is not { } transit)
+        {
+            return;
+        }
+
+        foreach (int pending in _pending)
+        {
+            CanonicalNode root = transit.Canonical.GetNode(pending);
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                if (emitted[field])
+                {
+                    _columns[field].Reprobe(transit.Canonical, _isTabular ? root.GetFieldIndex(field) : pending, 0, root.Length);
+                }
+            }
+        }
     }
 
     /// <summary>
@@ -4314,7 +4364,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <paramref name="firstBlock"/>; the node holds the column's codes already when <paramref name="coded"/>.
     /// </summary>
     private async ValueTask EmitColumnChunkAsync(
-        int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks, CancellationToken cancellationToken, bool coded = false)
+        int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks, CancellationToken cancellationToken, bool coded = false,
+        bool keeps = false)
     {
         // A shredded variant's chunk is written as its residual and its typed columns, which the
         // statistics of its rows as they came do not describe.
@@ -4332,7 +4383,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
         else
         {
-            stats = ChunkStatsOf(field, arena, node, rows, firstBlock, blocks);
+            stats = ChunkStatsOf(field, arena, node, rows, firstBlock, blocks, keeps);
         }
 
         ArrayBlobWriter.Workspace blobs = Blobs;
@@ -4429,14 +4480,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// The ingest statistics of column <paramref name="field"/> over the chunk, counted for the
     /// writer's ledger: whether they cover the chunk's rows, and whether its distinct table serves.
     /// </summary>
-    private ChunkStats ChunkStatsOf(int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks)
+    private ChunkStats ChunkStatsOf(int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks, bool keeps = false)
     {
         if (Codes(field))
         {
             return default;
         }
 
-        return Tally(new ChunkStats(_columns[field], firstBlock, blocks, this), arena, node, rows);
+        return Tally(new ChunkStats(_columns[field], firstBlock, blocks, this, keeps), arena, node, rows);
     }
 
     /// <summary>
@@ -4700,8 +4751,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
 
-    /// <summary>Writes what column <paramref name="field"/> has gathered as one chunk of its own, after its chunks in emission.</summary>
-    private async ValueTask EmitGatheredAsync(int field, Gathering gathering, CancellationToken cancellationToken)
+    /// <summary>
+    /// Writes what column <paramref name="field"/> has gathered as one chunk of its own, after its chunks in emission: cut by
+    /// its target, or by an end of rows when not <paramref name="due"/> (<see cref="Gathering.Measures"/>).
+    /// </summary>
+    private async ValueTask EmitGatheredAsync(int field, Gathering gathering, CancellationToken cancellationToken, bool due = true)
     {
         await LandEmissionsAsync(field, cancellationToken).ConfigureAwait(false);
 
@@ -4709,7 +4763,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // with a line emits apart.
         if (gathering.ThinNodes > 0)
         {
-            StartEmission(Detach(field, gathering));
+            StartEmission(Detach(field, gathering, due));
             await LandEmissionsAsync(field, cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -4728,14 +4782,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         gathering.Nodes.Clear();
         gathering.Rows = 0;
         gathering.Generation++;
-        gathering.Cut = gathering.Bytes;
+        bool measures = gathering.Measures(due);
+        gathering.Cut = measures ? gathering.Bytes : 0;
         Interlocked.Add(ref _gatheredHeld, -gathering.Held);
         gathering.Held = 0;
         gathering.Bytes = 0;
         gathering.Blocks = 0;
         try
         {
-            await EmitColumnChunkAsync(field, context.Canonical, node, rows, firstBlock, blocks, cancellationToken, coded: Codes(field)).ConfigureAwait(false);
+            await EmitColumnChunkAsync(field, context.Canonical, node, rows, firstBlock, blocks, cancellationToken, coded: Codes(field), keeps: !measures).ConfigureAwait(false);
             gathering.ChunkRows.Add(rows);
         }
         finally
@@ -4772,7 +4827,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 if (gathering[field] is { Rows: > 0 } column)
                 {
-                    StartEmission(Detach(field, column));
+                    StartEmission(Detach(field, column, due: false));
                 }
             }
 
@@ -4784,7 +4839,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 if (gathering[field] is { Rows: > 0 } column)
                 {
-                    await EmitGatheredAsync(field, column, cancellationToken).ConfigureAwait(false);
+                    await EmitGatheredAsync(field, column, cancellationToken, due: false).ConfigureAwait(false);
                 }
             }
         }
@@ -4873,6 +4928,20 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         /// <summary>A column gathering to <paramref name="bytes"/> encoded bytes a chunk.</summary>
         internal static Gathering Encoded(long bytes) => new Gathering(bytes) { IsEncoded = true, Rate = FirstRate, AsItCame = false };
+
+        /// <summary>
+        /// Whether the chunk the column lets go of now measures its rate: one cut by its target (<paramref name="due"/>), or
+        /// by the writer's ceiling, does; one an end of a group of rows, a flush or the completion cuts does when it holds
+        /// half a chunk at least, as its rate counts it, or when the column's target counts canonical bytes, which only a
+        /// chunk measures.
+        /// </summary>
+        /// <remarks>
+        /// A chunk of a few hundred rows encodes to several times what its rows do in a chunk of its size, its tree and its
+        /// headers a fixed cost, and a column of integers of 19 bits wrote one of 256 rows as they were, 8.5 bytes a row:
+        /// taken as its rate, it cut the column's next chunks at 512 rows, which were written as they were too, and the
+        /// column wrote 8.25 bytes a row to the object's end where it wrote 2.4 before (2026-11-21).
+        /// </remarks>
+        internal bool Measures(bool due) => due || !IsEncoded || Bytes * Math.Max(Rate, LeastRate) * 2 >= Target;
 
         /// <summary>
         /// Takes the rate the chunk just written encoded to, <paramref name="encoded"/> bytes of its <see cref="Cut"/>, one
@@ -5369,7 +5438,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         long zoneMaps = zoneMapsEnd - indexStart;
         long indexBytes = interleaved + (indexStart - dataEnd) + (directory?.Length ?? 0);
         long footerBytes = _sink.Position - dtypeOffset;
-        _writtenBytes = (data, statisticsLength, zoneMaps, indexBytes, footerBytes, interleaved);
+        _writtenBytes = (data, statisticsLength, zoneMaps, indexBytes, footerBytes);
     }
 
     /// <summary>What the completed file holds, from the writer's own accounts.</summary>
@@ -5388,7 +5457,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         ImmutableArray<IndexWriteReport> indexes = _indexes is { } writer
             ? [.. writer.Reports]
             : ImmutableArray<IndexWriteReport>.Empty;
-        (long data, long statistics, long zoneMaps, long indexBytes, long footer, _) = _writtenBytes;
+        (long data, long statistics, long zoneMaps, long indexBytes, long footer) = _writtenBytes;
         WriteBytes bytes = new WriteBytes(
             Total: data + zoneMaps + statistics + indexBytes + footer,
             Data: data,

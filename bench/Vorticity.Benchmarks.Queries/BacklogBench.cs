@@ -35,8 +35,9 @@ namespace Vorticity.Benchmarks.Queries;
 /// <c>--object-bytes SIZE</c>, such as <c>64m</c>, builds the backlog with objects that aim at that size
 /// (<see cref="DatasetLayout.ObjectBytes"/>, the dataset's from then on) rather than 1 GiB. <c>--calm</c> runs the maintainer
 /// two hours ahead, every partition then calm and consolidated, as an hour without a row would have it.
-/// <c>--object-sizes</c> adds a line to each job: the size its objects aim at and the size of each object it wrote, in the
-/// order of their rows, which says how near its target a job ends an object. <c>--range-rows N</c> cuts a merge in a range
+/// <c>--object-sizes</c> adds a line to each job: the data its objects aim at and, of each object it wrote, in the order of
+/// their rows, its data, their share of the aim and its bytes in all, which says how near its target a job ends an object.
+/// Each job's line counts the ends of groups of rows it asked its writers for. <c>--range-rows N</c> cuts a merge in a range
 /// each N rows rather than each 2^24 (<see cref="DatasetOptions.RangeRows"/>): past a job's rows, the job runs as one range,
 /// with one writer.
 /// </para>
@@ -279,10 +280,10 @@ internal static class BacklogBench
             refusals += Interlocked.Read(ref s_refused);
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"{(repeat > 1 ? $"round {round} " : "")}job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB (inputs {Mib(result.MemoryReservedBy.Inputs)}, writer {Mib(result.MemoryReservedBy.Writer)}), {result.RangesAtOnce} at once, {result.MergeSlices} slices ({result.MergeSlicesAhead} ahead), {result.InputWindowsAhead} windows ahead, held back {result.AdvancesHeldBack}, {result.BoundRestarts} restarts under a doubled bound, written {(double)result.BytesOut / Math.Max(1, result.BytesIn):F2} of read, {result.InputsToldByDirectories} inputs counted from their directories, {result.CensusParts.Inputs} in {result.CensusParts.Parts} parts, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of lanes, {session.Lanes.PeakHeld} of {session.Lanes.Lanes} lanes at most, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {result.WriterBlocksOnLine:N0} on the line, {result.WriterChunksEndedOnLine:N0} chunks ended there, {result.WriterChunksCutOnLine:N0} cut column by column, {GC.CollectionCount(2) - fullCollections} full collections, {(GC.GetTotalPauseDuration() - paused).TotalSeconds:F2} s paused by the collector, {Slabs.Slab.Made - slabsMade} slabs made, {session.Core.UnitsRun - unitsRun:N0} units of the core on {session.Core.PumpsStarted - pumpsStarted:N0} pumps started, {result.WriterBlocksOfRunsTaken:N0} blocks took their runs of a variant ({result.WriterBlocksPutBack:N0} put back whole, {result.WriterColumnsPutBackApart:N0} columns apart), {result.InputVariantChunks.Held:N0} variant chunks handed over as shredded ({result.InputVariantChunks.Refused:N0} refused, {result.InputVariantChunks.Inexact:N0} of them inexact); passes: {PassesOfJob()}; {sampler.Peaks()}"));
+                $"{(repeat > 1 ? $"round {round} " : "")}job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB (inputs {Mib(result.MemoryReservedBy.Inputs)}, writer {Mib(result.MemoryReservedBy.Writer)}), {result.RangesAtOnce} at once, {result.MergeSlices} slices ({result.MergeSlicesAhead} ahead), {result.InputWindowsAhead} windows ahead, held back {result.AdvancesHeldBack}, {result.BoundRestarts} restarts under a doubled bound, {result.GroupEnds} group ends asked, written {(double)result.BytesOut / Math.Max(1, result.BytesIn):F2} of read, {result.InputsToldByDirectories} inputs counted from their directories, {result.CensusParts.Inputs} in {result.CensusParts.Parts} parts, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of lanes, {session.Lanes.PeakHeld} of {session.Lanes.Lanes} lanes at most, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {result.WriterBlocksOnLine:N0} on the line, {result.WriterChunksEndedOnLine:N0} chunks ended there, {result.WriterChunksCutOnLine:N0} cut column by column, {GC.CollectionCount(2) - fullCollections} full collections, {(GC.GetTotalPauseDuration() - paused).TotalSeconds:F2} s paused by the collector, {Slabs.Slab.Made - slabsMade} slabs made, {session.Core.UnitsRun - unitsRun:N0} units of the core on {session.Core.PumpsStarted - pumpsStarted:N0} pumps started, {result.WriterBlocksOfRunsTaken:N0} blocks took their runs of a variant ({result.WriterBlocksPutBack:N0} put back whole, {result.WriterColumnsPutBackApart:N0} columns apart), {result.InputVariantChunks.Held:N0} variant chunks handed over as shredded ({result.InputVariantChunks.Refused:N0} refused, {result.InputVariantChunks.Inexact:N0} of them inexact); passes: {PassesOfJob()}; {sampler.Peaks()}"));
             if (objectSizes)
             {
-                Console.WriteLine(await ObjectSizesAsync(maintainer, known, repeat > 1 ? $"round {round} job {jobs}" : $"job {jobs}"));
+                Console.WriteLine(await ObjectSizesAsync(maintainer, known, repeat > 1 ? $"round {round} job {jobs}" : $"job {jobs}", result));
             }
         }
 
@@ -343,7 +344,7 @@ internal static class BacklogBench
     /// The objects a job just wrote, those <paramref name="known"/> does not hold yet, which it then does: the size the
     /// dataset's objects aim at, and each new object's size in the order of the dataset's rows, with its share of that aim.
     /// </summary>
-    private static async Task<string> ObjectSizesAsync(VortexDataset dataset, HashSet<string> known, string job)
+    private static async Task<string> ObjectSizesAsync(VortexDataset dataset, HashSet<string> known, string job, CompactionResult result)
     {
         long target = dataset.Layout?.ObjectBytes ?? new DatasetLayout().ObjectBytes;
         List<string> sizes = [];
@@ -351,12 +352,15 @@ internal static class BacklogBench
         {
             if (known.Add(entry.Key) && await dataset.Store.HeadAsync(entry.Key, CancellationToken.None) is { } head)
             {
-                sizes.Add(string.Create(CultureInfo.InvariantCulture, $"{head.Length / (1024.0 * 1024):F1} ({(double)head.Length / target:P0})"));
+                long data = result.ObjectDataBytes.GetValueOrDefault(entry.Key, -1);
+                sizes.Add(string.Create(
+                    CultureInfo.InvariantCulture, $"{data / (1024.0 * 1024):F1} ({(double)data / target:P0}) of {head.Length / (1024.0 * 1024):F1}"));
             }
         }
 
         return string.Create(
-            CultureInfo.InvariantCulture, $"{job} objects: aim {target / (1024.0 * 1024):F0} MiB; {sizes.Count} written, MiB (share of the aim): {string.Join(", ", sizes)}");
+            CultureInfo.InvariantCulture,
+            $"{job} objects: aim {target / (1024.0 * 1024):F0} MiB of data; {sizes.Count} written, MiB of data (share of the aim) of MiB in all: {string.Join(", ", sizes)}");
     }
 
     /// <summary>A clock ahead of the machine's: what a maintainer reads once a partition's rows are that old.</summary>

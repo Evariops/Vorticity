@@ -101,11 +101,14 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
     /// column written against one; and each value decoded (<see cref="Processing"/>).
     /// </summary>
     /// <remarks>
-    /// A column's chunks but its last lie where its writer flushed them, each a read of its own. The last chunks of all the
-    /// columns lie together at the end of the data, in the columns' order, so that a read joins two of them across the last
-    /// chunks of the columns between when those take the joined gap at most, and reads those too: in an object of a few
-    /// mebibytes, where every column is one chunk, what a read of two columns costs past their own bytes. A column's object
-    /// dictionary lies right before its first chunk and is read with it: among the last chunks for a column of one chunk.
+    /// A column's chunks but its last of each group of rows lie where its writer flushed them, each a read of its own. The
+    /// last chunks of all the columns in a group lie together where the group ends, in the columns' order, so that a read
+    /// joins two of them across the last chunks of the columns between when those take the joined gap at most, and reads
+    /// those too: in an object of a few mebibytes, where every column is one chunk, what a read of two columns costs past
+    /// their own bytes. The groups are those the columns' chunks tell (<see cref="GroupsOf"/>): an object whose size its
+    /// compaction read at a group's end, two chunks a column, was priced five requests for the three its read asked. A
+    /// column's object dictionary lies right before its first chunk and is read with it: among the first group's last
+    /// chunks for a column of a chunk a group.
     /// An object a read of rows opens whole (<see cref="OpensWhole"/>) costs that one request and its bytes, whatever the
     /// columns.
     /// </remarks>
@@ -139,6 +142,7 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
         Span<int> read = fields.Length <= 64 ? stackalloc int[fields.Length] : new int[fields.Length];
         fields.CopyTo(read);
         read.Sort();
+        long groups = GroupsOf(columns, chunks);
         long requests = 1;
         long bytes = OpenBytes(entry);
         long joined = profile.JoinedGap;
@@ -151,24 +155,26 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
             }
 
             bytes += columns[field] + (dictionaries ? DictionaryBytes(held, field) : 0);
-            requests += ChunksOf(columns, chunks, field) - 1;
+            requests += ChunksOf(columns, chunks, field) - groups;
 
-            // Its last chunk, a read of its own, or joined to the one before with the last chunks between, each with the
-            // dictionary before it when it is its column's only one.
+            // Its last chunk of each group, a read of its own, or joined to the one before with the last chunks between,
+            // each with the dictionary before it, in the first group, when its column holds a chunk a group alone.
             long gap = 0;
-            for (int between = previous + 1; previous >= 0 && between < field && gap <= joined; between++)
+            long before = 0;
+            for (int between = previous + 1; previous >= 0 && between < field && gap + before <= joined; between++)
             {
                 long count = ChunksOf(columns, chunks, between);
-                gap += (columns[between] / count) + (count == 1 ? DictionaryBytes(held, between) : 0);
+                gap += columns[between] / count;
+                before += count == groups ? DictionaryBytes(held, between) : 0;
             }
 
-            if (previous >= 0 && gap <= joined)
+            if (previous >= 0 && gap + before <= joined)
             {
-                bytes += gap;
+                bytes += (gap * groups) + before;
             }
             else
             {
-                requests++;
+                requests += groups;
             }
 
             previous = field;
@@ -203,6 +209,29 @@ internal sealed class PathCosts(CostProfile profile, long chunkBytes, Func<UInt1
         }
 
         return new Cost(requests, bytes);
+    }
+
+    /// <summary>
+    /// The groups of rows the object's file holds, as far as its columns' chunks tell: the fewest chunks a column holds, one
+    /// when the contents count none. Every group cuts every column's chunk where it ends, and writes the last chunk of each
+    /// column together, in the columns' order, so that a column holds a chunk a group at least, and one that never reached
+    /// its chunk's size within a group, a narrow one, holds a chunk a group exactly. Fewer groups than the file holds count
+    /// each column's chunks past the ones read joined as reads of their own, as one group does.
+    /// </summary>
+    private long GroupsOf(IReadOnlyList<long> columns, IReadOnlyList<long>? chunks)
+    {
+        if (chunks is not { Count: > 0 })
+        {
+            return 1;
+        }
+
+        long fewest = long.MaxValue;
+        for (int field = 0; field < columns.Count; field++)
+        {
+            fewest = Math.Min(fewest, ChunksOf(columns, chunks, field));
+        }
+
+        return fewest == long.MaxValue ? 1 : fewest;
     }
 
     /// <summary>The chunks of column <paramref name="field"/>, as the contents count them or a chunk's bytes each, one at least.</summary>

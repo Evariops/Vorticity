@@ -207,7 +207,7 @@ DatasetOptions options = new()
 
 | setting | default | what it governs |
 |---|---|---|
-| `DatasetLayout.ObjectBytes` | 1 GiB | the largest object a merge or a consolidation writes |
+| `DatasetLayout.ObjectBytes` | 1 GiB | the data of the largest object a merge or a consolidation writes, its indexes and footer apart |
 | `DatasetLayout.MergeFanout` | 8 | objects of one size class merged at once |
 | `DatasetLayout.CalmAfter` | 1 hour | when a partition is consolidated |
 | `DatasetLayout.LateShare` | 8 | late rows wait until they weigh an eighth of what they overlap |

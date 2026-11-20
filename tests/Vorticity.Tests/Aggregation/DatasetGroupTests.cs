@@ -69,6 +69,39 @@ public sealed partial class DatasetGroupTests
         }
     }
 
+    /// <summary>
+    /// One object of trades in the order they came, a tenth of them deleted, compacted into objects of a level's size, each
+    /// ended inside a block of the batches the live rows come in: every live row reads back as it was, in its order. The rows
+    /// short of a block stay in transit past an end, probed into the distinct table each column's chunk takes with it: once
+    /// the desks, written against the object's dictionary, coded them against a new table that never saw them, and from the
+    /// first row after them every desk was its neighbour's.
+    /// </summary>
+    [Fact]
+    public async Task ACompactionThatEndsObjectsInsideABlockKeepsEveryRowAsItWas()
+    {
+        Trade[] rows = Trades();
+        string path = await WriteAsync(rows);
+        try
+        {
+            await using MemoryObjectStore store = new MemoryObjectStore();
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, VortexTypes.ToDType(Trade.Schema, new Vorticity.Types.DTypeArena()), Options(), Ct);
+            await AppendAsync(dataset, path, 1);
+            await dataset.DeleteAsync<Trade>(r => r.Size < 1_000.0f, Ct);
+            int groupEnds = 0;
+            while (await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 0 }, Ct) is { } job)
+            {
+                groupEnds += job.GroupEnds;
+            }
+
+            Assert.True(dataset.ObjectCount > 2 && groupEnds >= dataset.ObjectCount - 1, $"{dataset.ObjectCount} objects, {groupEnds} group ends");
+            Assert.Equal(rows.Where(r => !(r.Size < 1_000.0f)), await ListAsync(dataset.Scan<Trade>()));
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     [Fact]
     public async Task TheCoreOnADatasetIsTheSameBitsWhateverItsObjectsDegreeAndCompaction()
     {

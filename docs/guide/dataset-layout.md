@@ -135,11 +135,7 @@ What the key does not do:
 
 Appends land as small sorted objects. Within each partition, objects of one size class merge: when a partition holds `MergeFanout` objects of a class, 8 by default, a job merges them into one object, which is of the class above once its rows outweigh the fixed cost of a file. A row is rewritten once a class, and a partition of a day stays within a few dozen objects while it receives rows. A partition that fell behind is caught up in few jobs: a merge takes its whole class when the class fits the layout's object size and the jobs' memory budget, and as many neighbouring objects as they let otherwise.
 
-When a partition has received no row for `CalmAfter`, an hour by default, its next job **consolidates** it: it
-rewrites the partition into objects disjoint by key, each up to `ObjectBytes`, 1 GiB by default, cutting no key. An
-entity's rows then lie in one object of the partition. `CalmAfter = null` consolidates only when you call
-`ConsolidateAsync`. The clock is `DatasetOptions.TimeProvider`'s; the sample sets it to the time of its data, so its
-two days become calm as their rows stop coming, though it writes them in seconds.
+When a partition has received no row for `CalmAfter`, an hour by default, its next job **consolidates** it: it rewrites the partition into objects disjoint by key, each holding `ObjectBytes` of data, 1 GiB by default, cutting no key. The size counts an object's columns, not its indexes and footer, which add about a hundredth to an object of a gibibyte. An entity's rows then lie in one object of the partition. `CalmAfter = null` consolidates only when you call `ConsolidateAsync`. The clock is `DatasetOptions.TimeProvider`'s; the sample sets it to the time of its data, so its two days become calm as their rows stop coming, though it writes them in seconds.
 
 Rows that come late for a consolidated partition land as small objects of that partition and wait in its size
 classes; they are merged into the consolidated objects they overlap once they weigh `1 / LateShare` of them, an eighth

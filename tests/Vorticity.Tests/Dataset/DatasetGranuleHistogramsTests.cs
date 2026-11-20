@@ -21,10 +21,13 @@ public sealed partial class DatasetGranuleHistogramsTests
     /// <summary>
     /// Five services of 40 000 latencies each, spread over three orders of magnitude, sorted by the service, then the number
     /// each latency took as it came, and compacted into objects: the 90th percentile by service of those numbered 50 000 or
-    /// more, at a 6 % error, lies within 6 % of LINQ's for each, a third of the blocks decoded at most, every object answered
-    /// by its counts where the window holds it whole, else by its granules' histograms, each granule but those the window
-    /// cuts proven or refuted; at 1 %, the error a quantile asks by default, within 1 %, the histograms' grid as fine. Asked
-    /// of a store close by, which weighs bytes before requests: the objects, of 160 KB, read their rows in two requests.
+    /// more, at a 6 % error, lies within 6 % of LINQ's for each, every object answered by its counts where the window holds
+    /// it whole, else by its granules' histograms, each granule but those the window cuts proven or refuted: no more blocks
+    /// decoded than the granules the window cuts, one a service, and those a service changes in, one a change at most, nine
+    /// of about 25; at 1 %, the error a quantile asks by default, within 1 %, the histograms' grid as fine. Asked of a store
+    /// close by, which weighs bytes before requests: the objects, of 160 KB of data, read their rows in two requests. Five
+    /// blocks were decoded while a job rolled its objects only where a run of the merge began, a service's rows of one
+    /// input here, so that no object held a change of service: an object now ends where its data reaches its size.
     /// </summary>
     [Fact]
     public async Task AQuantileByAKeyConstantInEachGranuleIsAnsweredByItsHistograms()
@@ -59,14 +62,15 @@ public sealed partial class DatasetGranuleHistogramsTests
         Vorticity.Aggregation estimated = dataset.Scan<Latency>().Where(r => r.Id >= 50_000).GroupBy(r => r.Service).Select(g => (g.Key, g.Quantile(r => r.Value, 0.9, 0.06)));
         List<ServiceQuantile> answers = await estimated.As<ServiceQuantile>().ToRecordsAsync(Ct).ToListAsync(Ct);
         long granules = (all.Count + 8191) / 8192;
+        int cut = (2 * 5) - 1;
         Console.WriteLine($"HISTOGRAMS: {estimated.Metrics.BlocksDecoded} blocks decoded of ~{granules} granules; {string.Join(", ", answers.OrderBy(static a => a.Service).Select(a => $"{a.Service} {a.Value90:F1} for {exact[a.Service]:F1}"))}");
         Assert.Equal(5, answers.Count);
         Assert.All(answers, a => Assert.InRange(a.Value90!.Value, exact[a.Service] * 0.94, exact[a.Service] * 1.06));
-        Assert.True(estimated.Metrics.BlocksDecoded <= granules / 3, $"{estimated.Metrics.BlocksDecoded} blocks decoded of ~{granules} granules");
+        Assert.True(estimated.Metrics.BlocksDecoded <= cut, $"{estimated.Metrics.BlocksDecoded} blocks decoded of ~{granules} granules");
 
         Vorticity.Aggregation fine = dataset.Scan<Latency>().Where(r => r.Id >= 50_000).GroupBy(r => r.Service).Select(g => (g.Key, g.Quantile(r => r.Value, 0.9, 0.01)));
         Assert.All(await fine.As<ServiceQuantile>().ToRecordsAsync(Ct).ToListAsync(Ct), a => Assert.InRange(a.Value90!.Value, exact[a.Service] * 0.99, exact[a.Service] * 1.01));
-        Assert.True(fine.Metrics.BlocksDecoded <= granules / 3, $"at 1 %, {fine.Metrics.BlocksDecoded} blocks decoded of ~{granules} granules");
+        Assert.True(fine.Metrics.BlocksDecoded <= cut, $"at 1 %, {fine.Metrics.BlocksDecoded} blocks decoded of ~{granules} granules");
     }
 
     /// <summary>The value below which a share <paramref name="q"/> of <paramref name="values"/> lie, interpolated between ranks.</summary>

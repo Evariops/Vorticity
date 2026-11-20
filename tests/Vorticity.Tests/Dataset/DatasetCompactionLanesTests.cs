@@ -563,21 +563,27 @@ public sealed partial class DatasetCompactionLanesTests
     [Fact]
     public async Task AConsolidationsMergeDecodesTheInputItReadsAheadOnTheLanes()
     {
+        // The appends made once and copied for each degree, with their identities, which order the rows of one key.
+        await using MemoryObjectStore built = new MemoryObjectStore();
+        {
+            Random random = new Random(37);
+            await using VortexDataset appended = await VortexDataset.CreateAsync(built, Doc.Schema, OptionsOf(VortexSession.Default), Ct);
+            for (int a = 0; a < 2; a++)
+            {
+                Doc[] rows = [.. Enumerable.Range(a * 150_000, 150_000).Select(i => new Doc(random.Next(0, 2), $"svc-{random.Next(0, 60):D2}", i, Attributes(random)))];
+                await using ObjectDraft draft = appended.StartObject();
+                await draft.Writer.WriteAsync<Doc>(rows, Ct);
+                await appended.AppendAsync(draft, Ct);
+            }
+        }
+
         List<long> objects = [];
         long ahead = 0;
         foreach (int lanes in new[] { 1, 4 })
         {
-            Random random = new Random(37);
-            await using MemoryObjectStore store = new MemoryObjectStore();
+            await using MemoryObjectStore store = await CopyAsync(built);
             await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = lanes);
-            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, OptionsOf(session), Ct);
-            for (int a = 0; a < 2; a++)
-            {
-                Doc[] rows = [.. Enumerable.Range(a * 150_000, 150_000).Select(i => new Doc(random.Next(0, 2), $"svc-{random.Next(0, 60):D2}", i, Attributes(random)))];
-                await using ObjectDraft draft = dataset.StartObject();
-                await draft.Writer.WriteAsync<Doc>(rows, Ct);
-                await dataset.AppendAsync(draft, Ct);
-            }
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(store, OptionsOf(session), Ct);
 
             // Ahead on the lanes free: windows of the input the merge drains, or slices of a piece merged ahead, which come
             // first, the merge being downstream of the reads.
@@ -613,22 +619,28 @@ public sealed partial class DatasetCompactionLanesTests
     [Fact]
     public async Task AJobGivesItsLaneBackWhileItsObjectsWaitForTheStore()
     {
-        List<long> objects = [];
-        foreach (bool late in new[] { false, true })
+        // The appends made once and copied for each pass, with their identities, which order the objects of equal keys in the
+        // tree, and so the rows of one key: appended anew, a pass wrote its rows of one service in another order.
+        await using MemoryObjectStore built = new MemoryObjectStore();
         {
             Random random = new Random(41);
-            await using MemoryObjectStore memory = new MemoryObjectStore();
-            await using LatePuts store = new LatePuts(memory, late);
-            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 4);
-            await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, OptionsOf(session), Ct);
+            await using VortexDataset appended = await VortexDataset.CreateAsync(built, Doc.Schema, OptionsOf(VortexSession.Default), Ct);
             for (int a = 0; a < 4; a++)
             {
                 Doc[] rows = [.. Enumerable.Range(a * 8_000, 8_000).Select(i => new Doc(random.Next(0, 2), $"svc-{random.Next(0, 60):D2}", i, Attributes(random)))];
-                await using ObjectDraft draft = dataset.StartObject();
+                await using ObjectDraft draft = appended.StartObject();
                 await draft.Writer.WriteAsync<Doc>(rows, Ct);
-                await dataset.AppendAsync(draft, Ct);
+                await appended.AppendAsync(draft, Ct);
             }
+        }
 
+        List<long> objects = [];
+        foreach (bool late in new[] { false, true })
+        {
+            await using MemoryObjectStore memory = await CopyAsync(built);
+            await using LatePuts store = new LatePuts(memory, late);
+            await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 4);
+            await using VortexDataset dataset = await VortexDataset.OpenAsync(store, OptionsOf(session), Ct);
             IReadOnlyList<CompactionResult> results = await dataset.ConsolidateAsync(Ct);
             int waits = results.Sum(static result => result.StoreWaitsWithoutLane);
             Assert.True(late ? waits > 0 : waits == 0, $"{waits} waits for the store without the job's lane, its puts late: {late}");
@@ -866,6 +878,21 @@ public sealed partial class DatasetCompactionLanesTests
         return await SameObjectsAtDegreesAsync(built, degrees, optionsOf, static async dataset => [.. await dataset.ConsolidateAsync(Ct)]);
     }
 
+    /// <summary>A copy of every object of <paramref name="built"/>, under the same keys.</summary>
+    private static async Task<MemoryObjectStore> CopyAsync(MemoryObjectStore built)
+    {
+        MemoryObjectStore copy = new MemoryObjectStore();
+        Vorticity.IO.IObjectStore from = built;
+        await foreach (Vorticity.IO.ObjectListing listed in from.ListAsync(string.Empty, null, Ct))
+        {
+            byte[] bytes = new byte[listed.Head.Length];
+            await from.ReadAsync(listed.Key, 0, bytes, null, Ct);
+            await ((Vorticity.IO.IObjectStore)copy).PutAsync(listed.Key, new System.Buffers.ReadOnlySequence<byte>(bytes), Vorticity.IO.PutCondition.None, Ct);
+        }
+
+        return copy;
+    }
+
     /// <summary>
     /// The store <paramref name="built"/>, copied once a degree of <paramref name="degrees"/>, its jobs run there by
     /// <paramref name="drive"/> under <paramref name="optionsOf"/>: every segment of every object is the same bytes on every
@@ -880,15 +907,7 @@ public sealed partial class DatasetCompactionLanesTests
         // A copy keeps the objects' identities, which order the objects of equal keys in the tree, as a maintainer's store does.
         for (int run = 0; run < degrees.Length; run++)
         {
-            await using MemoryObjectStore copy = new MemoryObjectStore();
-            Vorticity.IO.IObjectStore from = built;
-            await foreach (Vorticity.IO.ObjectListing listed in from.ListAsync(string.Empty, null, Ct))
-            {
-                byte[] bytes = new byte[listed.Head.Length];
-                await from.ReadAsync(listed.Key, 0, bytes, null, Ct);
-                await ((Vorticity.IO.IObjectStore)copy).PutAsync(listed.Key, new System.Buffers.ReadOnlySequence<byte>(bytes), Vorticity.IO.PutCondition.None, Ct);
-            }
-
+            await using MemoryObjectStore copy = await CopyAsync(built);
             int degree = degrees[run];
             await using VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = degree);
             await using VortexDataset dataset = await VortexDataset.OpenAsync(copy, optionsOf(session), Ct);

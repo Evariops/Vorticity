@@ -552,10 +552,13 @@ The price a question announces before a read (`CostAsync`, and the threshold of 
 
 - **the rows**: the open, a request for the 64 KiB read from the object's end, or its footer's bytes when
   more; the bytes of the columns the question reads and filters by; a request a chunk. A column's chunks
-  but its last lie where its writer flushed them; the last chunks of every column lie together at the end
-  of the data, in the columns' order, and a read joins two of them across the last chunks between when
-  those take 256 KiB at most, reading them too. In an object of a few mebibytes every column is one
-  chunk, and a read of the first and fourth column reads the second and third.
+  but its last of each group of rows lie where its writer flushed them; the last chunks of every column
+  in a group lie together where the group ends, in the columns' order, and a read joins two of them
+  across the last chunks between when those take 256 KiB at most, reading them too. In an object of a
+  few mebibytes every column is one chunk, and a read of the first and fourth column reads the second and
+  third. The groups are the fewest chunks a column holds, which a narrow column holds one a group: an
+  object a compaction read at the end of a group, two chunks a column, was priced five requests for the
+  three its read asked.
 - **the regions** of counts, statistics and indexes: their bytes, and the gaps a read joins between them.
 - **the granules**: their statistics, and the rows of the granules they are not expected to answer. A
   granule that holds one value of each key and filtered column may answer; one that gathers short runs

@@ -73,14 +73,7 @@ consolidated into objects disjoint by key. `CompactionOptions` sets the level 0 
 between levels and the size of a level 1 object. `Outcome` says whether the commit applied, or
 whether a concurrent writer had already done the work.
 
-Level 0 goes to the first level large enough to hold it. The ten appends here, 134 KiB, fit in level
-1, which holds ten objects of 128 KiB, while a load of gigabytes skips the levels it would only
-overflow and is written once. A dataset that takes many small commits therefore pays for each one a
-merge into a level a few times its size, never a merge into the levels that hold most of its rows.
-An output object is at most the layout's `ObjectBytes`, 1 GiB by default, reached at level 5 and
-above with the default target of level 1. A job sizes its objects as it writes them, from the
-bytes its columns will encode to; until a column has written a chunk it guesses them, so objects of
-columns that compress well, as here, come out under their target.
+Level 0 goes to the first level large enough to hold it. The ten appends here, 134 KiB, fit in level 1, which holds ten objects of 128 KiB, while a load of gigabytes skips the levels it would only overflow and is written once. A dataset that takes many small commits therefore pays for each one a merge into a level a few times its size, never a merge into the levels that hold most of its rows. An output object holds at most the layout's `ObjectBytes` of data, 1 GiB by default, reached at level 5 and above with the default target of level 1. A job reads what an object holds as it writes it, at ends of groups of rows it asks the object's writer for, and seals the object once its data reaches its target within a thirty-second, whatever its columns compress to.
 
 When a level above 0 grows past its size, it gives up one object, which is merged into the next
 level with the objects there whose keys it overlaps. By default it picks the largest object, the one

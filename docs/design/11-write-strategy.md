@@ -179,6 +179,8 @@ saves is the walks and the trials, never a candidate the statistics already deci
 table is still trained per chunk (sharing one costs 4.3 % more output), and only the decision is
 remembered.
 
+A chunk cut short of its target, by the end of a group of rows, a flush or an end a dataset's job asks for, leaves the column's plan memory and the rate its chunks are sized by as they were, unless it holds half a chunk. Its few rows answer for itself, not for the column: a chunk of 256 integers of 19 bits costs less written as it is than bit-packed in blocks of 1 024 values, and that plan, remembered, held on every chunk after it, which then priced nothing else and were all written as they were, 8.25 bytes a row where the column wrote 2.4.
+
 `VortexWriteOptions.Hints` pins a column's scheme by path (`EncodingHint`: `Canonical`, `RunEnd`,
 `Dictionary`, `BitPacked`, `Fsst`, `Alp`, `AlpRd`, `Sequence`, `Zstd`, `DecimalByteParts`,
 `Constant`, `DateTimeParts`, `Sparse`, `OnPair`, `Pco`). A hint acts as plan memory with an infinite

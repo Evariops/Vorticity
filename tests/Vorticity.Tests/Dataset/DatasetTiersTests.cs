@@ -274,17 +274,18 @@ public sealed partial class DatasetTiersTests
 
     /// <summary>
     /// Four appends of one day that weigh together 99 % of the size the day's objects aim at, merged by tiers: one object,
-    /// and no job after it. The bound of such a merge, its inputs' bytes and 3 %, passes the size, and a job whose bound
-    /// passed the size ended its objects by what its writer said they weighed: here four times what they do, no column
-    /// having written a chunk, so that the merge wrote several objects of its inputs' size class, which the plan took
-    /// again.
+    /// and no job after it. Their rows interleave in the key's order, each append's status and measure its own number,
+    /// which an append writes once and the merge a few bits a row, so that the merge writes more than it reads and its data
+    /// passes the size at a group's end of its writer. A job whose plan chose its inputs to make one object
+    /// (<see cref="CompactionJob.OneObject"/>) ends no object by its size: one that did ended the object there and wrote
+    /// others of its inputs' size class after it, which the plan took again.
     /// </summary>
     [Fact]
     public async Task AMergeOfInputsThatWeighTheSizeAtMostWritesOneObject()
     {
-        long top = await TopOfFourAppendsAsync(percent: 99);
+        long top = await TopOfFourAppendsAsync(percent: 99, interleaved: true);
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await FourAppendsAsync(store, top, ObjectBound.OutPerIn, ObjectSegmentSink.DefaultStreamedFromBytes);
+        await using VortexDataset dataset = await FourAppendsAsync(store, top, ObjectBound.OutPerIn, ObjectSegmentSink.DefaultStreamedFromBytes, interleaved: true);
 
         CompactionResult job = Assert.IsType<CompactionResult>(await dataset.CompactAsync(cancellationToken: Ct));
         string ran = $"{job.Trigger} {job.ObjectsIn}->{job.ObjectsOut}, {job.BytesIn}->{job.BytesOut} B under a size of {top}";
@@ -322,45 +323,68 @@ public sealed partial class DatasetTiersTests
 
     /// <summary>
     /// Sixteen appends of one day consolidated into objects aimed at 512 KiB, in blocks of 256 rows, whose indexes and
-    /// zone maps weigh a fair share of an object: every object after the first, and before the last, weighs its size
-    /// within a twentieth, what it writes past its last column chunk counted at what a row of the objects before it wrote
-    /// there. The first has no object to go by and ends past its size by what its own end weighs, as every object did.
+    /// zone maps weigh a fair share of an object: the data of every object but the last holds its size within a group of
+    /// rows, the first's as the others', whatever the object writes past its data, which its size does not count. An
+    /// object's size once counted what the objects before it wrote past their chunks, which the first had none of to go by,
+    /// and an index kept in one object and given up in the next moved that tenfold.
     /// </summary>
     [Fact]
-    public async Task AnObjectCountsWhatTheOnesBeforeItWrotePastTheirChunks()
+    public async Task AnObjectsDataReachesItsSizeWhateverItsEndWeighs()
     {
         const long Top = 512 << 10;
         Random random = new Random(47);
-        List<long> objects = await ConsolidatedAsync(Top, chunkBytes: 1 << 20, (first, count) => Rows(random, count, first, day: 0));
+        List<(long Bytes, long Data, long Rows)> objects = await ConsolidatedAsync(Top, chunkBytes: 1 << 20, (first, count) => Rows(random, count, first, day: 0));
         string sizes = string.Join(", ", objects);
         Assert.True(objects.Count >= 5, sizes);
-        Assert.True(objects[0] > Top * 1.05, sizes);
-        Assert.All(objects.Skip(1).SkipLast(1), bytes => Assert.True(bytes >= Top * 0.95 && bytes <= Top * 1.05, sizes));
+        HoldsItsSizeWithinAGroup(objects, Top);
+        Assert.All(objects, held => Assert.True(held.Bytes > held.Data, sizes));
+    }
+
+    /// <summary>
+    /// A quarter of the rows under services of their own, each a name of 26 characters that encodes to some ten times what
+    /// the other rows do, and which sort first: an object of those rows, then one that holds the last of them and the first
+    /// of the light ones, then the light ones. The data of every object but the last holds its size within a group of rows:
+    /// no reading placed by what the rows before it weighed seals an object, which the light rows past the heavy ones would
+    /// leave short.
+    /// </summary>
+    [Fact]
+    public async Task AnObjectNeverEndsOnAnEstimate()
+    {
+        const long Top = 256 << 10;
+        List<(long Bytes, long Data, long Rows)> objects = await ConsolidatedAsync(
+            Top,
+            chunkBytes: 1 << 20,
+            static (first, count) => [.. Enumerable.Range(0, count).Select(i => (first + i) % 4 == 0
+                ? new Row(0, $"a-{(uint)((first + i) * 2_654_435_761L):x8}{(uint)((first + i) * 40_503L):x8}{first + i:x8}", first + i, 0, 0)
+                : new Row(0, $"b-{(first + i) % 3}", first + i, (int)((first + i) / 48), 0))]);
+        Assert.True(objects.Count >= 4, string.Join(", ", objects));
+        HoldsItsSizeWithinAGroup(objects, Top);
     }
 
     /// <summary>
     /// The same over rows of some thousand keys whose day, status and measure encode to a hundredth of their bytes, in
-    /// chunks of 4 KiB, so that every column writes chunks within an object: the objects after the first weigh their size
-    /// within a tenth. A column counted at a sixteenth of its bytes at least, the rate its chunk is due by, counted these
-    /// several times over, and the objects ended short of their size.
+    /// chunks of 4 KiB, so that every column writes chunks within an object: the data of every object but the last holds
+    /// its size within a group of rows. A column counted at a sixteenth of its bytes at least, the rate its chunk is due by,
+    /// counted these several times over, and the objects ended short of their size. Its sequence, 19 bits a row, was
+    /// written as it was in a chunk of 256 rows an end of a group cut, and the column wrote every chunk after it so, 8.25
+    /// bytes a row where it wrote 2.4, the plan of that short chunk remembered: an object then passed its size by a half.
     /// </summary>
     [Fact]
     public async Task AColumnThatEncodesToAlmostNothingCountsAtWhatItEncodesTo()
     {
         const long Top = 96 << 10;
-        List<long> objects = await ConsolidatedAsync(
+        List<(long Bytes, long Data, long Rows)> objects = await ConsolidatedAsync(
             Top, chunkBytes: 4 << 10, static (first, count) => [.. Enumerable.Range(0, count).Select(i => new Row(0, $"svc-{i % 3}", first + i, i / 48, i / 4_096))]);
-        string sizes = string.Join(", ", objects);
-        Assert.True(objects.Count >= 3, sizes);
-        Assert.All(objects.Skip(1).SkipLast(1), bytes => Assert.True(bytes >= Top * 0.9 && bytes <= Top * 1.1, sizes));
+        Assert.True(objects.Count >= 3, string.Join(", ", objects));
+        HoldsItsSizeWithinAGroup(objects, Top);
     }
 
     /// <summary>
-    /// The sizes of the objects a consolidation of sixteen appends of 20 000 rows of one day writes, in the order of
-    /// their rows, into objects aimed at <paramref name="top"/> bytes, in blocks of 256 rows and column chunks aimed at
-    /// <paramref name="chunkBytes"/>; every row read back.
+    /// The bytes and the bytes of data of the objects a consolidation of sixteen appends of 20 000 rows of one day writes,
+    /// in the order of their rows, into objects aimed at <paramref name="top"/> bytes of data, in blocks of 256 rows and
+    /// column chunks aimed at <paramref name="chunkBytes"/>; every row read back.
     /// </summary>
-    private static async Task<List<long>> ConsolidatedAsync(long top, int chunkBytes, Func<long, int, Row[]> rows)
+    private static async Task<List<(long Bytes, long Data, long Rows)>> ConsolidatedAsync(long top, int chunkBytes, Func<long, int, Row[]> rows)
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
@@ -376,6 +400,7 @@ public sealed partial class DatasetTiersTests
             Write = new VortexWriteOptions { BlockRows = 256 },
             ChunkBytes = chunkBytes,
             ContentsObjectBytes = 0,
+            GroupRows = GroupRows,
         }, Ct);
         List<Row> all = [];
         for (int a = 0; a < 16; a++)
@@ -383,15 +408,33 @@ public sealed partial class DatasetTiersTests
             await AppendAsync(dataset, all, rows(all.Count, 20_000));
         }
 
-        Assert.NotEmpty(await dataset.ConsolidateAsync(Ct));
-        List<long> objects = [];
+        IReadOnlyList<CompactionResult> jobs = await dataset.ConsolidateAsync(Ct);
+        Assert.NotEmpty(jobs);
+        List<(long Bytes, long Data, long Rows)> objects = [];
         await foreach (PositionedObject written in dataset.ScanBuilder().ObjectsAsync(Ct))
         {
-            objects.Add(written.Entry.Bytes);
+            objects.Add((written.Entry.Bytes, jobs.Select(job => job.ObjectDataBytes.GetValueOrDefault(written.Entry.Key, -1)).Max(), written.Entry.Rows));
         }
 
         await HoldsAsync(dataset, all);
         return objects;
+    }
+
+    /// <summary>
+    /// The rows of a group a job's writer ends by itself (<see cref="DatasetOptions.GroupRows"/>): sixteen blocks of 256
+    /// rows, so that an object of these tests holds several, each where its job reads what the object holds.
+    /// </summary>
+    private const long GroupRows = 4_096;
+
+    /// <summary>
+    /// Asserts that every object but the last holds its size's data within a group of rows: at its size less the slack at
+    /// least, and past it by no more than a group of its rows weighs, which its job reads it at.
+    /// </summary>
+    private static void HoldsItsSizeWithinAGroup(List<(long Bytes, long Data, long Rows)> objects, long top)
+    {
+        string sizes = string.Join(", ", objects);
+        Assert.All(objects.SkipLast(1), held =>
+            Assert.True(held.Data >= top * (1 - DatasetOptions.DefaultObjectEndSlack) && held.Data <= top + (held.Data * GroupRows / held.Rows), sizes));
     }
 
     private const int CompressibleRows = 40_000;
@@ -400,10 +443,10 @@ public sealed partial class DatasetTiersTests
     /// The size four appends of <see cref="CompressibleRows"/> rows weigh <paramref name="percent"/> % of together, each
     /// then within a quarter of it, one size class under the top's.
     /// </summary>
-    private static async Task<long> TopOfFourAppendsAsync(int percent)
+    private static async Task<long> TopOfFourAppendsAsync(int percent, bool interleaved = false)
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset sized = await FourAppendsAsync(store, 1L << 30, ObjectBound.OutPerIn, ObjectSegmentSink.DefaultStreamedFromBytes);
+        await using VortexDataset sized = await FourAppendsAsync(store, 1L << 30, ObjectBound.OutPerIn, ObjectSegmentSink.DefaultStreamedFromBytes, interleaved);
         long largest = 0;
         await foreach (PositionedObject appended in sized.ScanBuilder().ObjectsAsync(Ct))
         {
@@ -417,16 +460,18 @@ public sealed partial class DatasetTiersTests
     /// A day of four appends of rows that encode to a small share of their bytes, far under the quarter a column is guessed
     /// to encode at before its first chunk, in a dataset whose objects aim at <paramref name="top"/> bytes, go to the store
     /// as they are written from <paramref name="streamedFrom"/> bytes, and whose rewrites announce
-    /// <paramref name="outPerIn"/> bytes a byte they read.
+    /// <paramref name="outPerIn"/> bytes a byte they read. <paramref name="interleaved"/> keys them by the service then the
+    /// sequence, which interleaves the appends' rows, each append's status and measure its own number, written once an
+    /// append and a few bits a row by a merge, whose writer ends a group each 4 096 rows.
     /// </summary>
-    private static async Task<VortexDataset> FourAppendsAsync(IObjectStore store, long top, double outPerIn, long streamedFrom)
+    private static async Task<VortexDataset> FourAppendsAsync(IObjectStore store, long top, double outPerIn, long streamedFrom, bool interleaved = false)
     {
         VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
         {
             Layout = new DatasetLayout
             {
                 Partition = LayoutValue.Column(nameof(Row.Day)),
-                SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.Status))],
+                SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(interleaved ? nameof(Row.Sequence) : nameof(Row.Status))],
                 ObjectBytes = top,
                 MergeFanout = 4,
                 CalmAfter = null,
@@ -434,10 +479,13 @@ public sealed partial class DatasetTiersTests
             ContentsObjectBytes = 0,
             StreamedObjectBytes = streamedFrom,
             BoundOutPerIn = outPerIn,
+            GroupRows = interleaved ? GroupRows : new DatasetOptions().GroupRows,
         }, Ct);
         for (int a = 0; a < 4; a++)
         {
-            Row[] rows = [.. Enumerable.Range(0, CompressibleRows).Select(i => new Row(0, $"svc-{i % 3}", ((long)a * CompressibleRows) + i, i % 5, i / 4_096))];
+            Row[] rows = [.. Enumerable.Range(0, CompressibleRows).Select(i => interleaved
+                ? new Row(0, $"svc-{i % 3}", ((long)i * 4) + a, a, a)
+                : new Row(0, $"svc-{i % 3}", ((long)a * CompressibleRows) + i, i % 5, i / 4_096))];
             await using ObjectDraft draft = dataset.StartObject();
             await draft.Writer.WriteAsync<Row>(rows, Ct);
             await dataset.AppendAsync(draft, Ct);

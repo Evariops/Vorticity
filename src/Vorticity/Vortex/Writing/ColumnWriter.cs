@@ -536,9 +536,9 @@ internal sealed class ColumnWriter
     /// decides from that which ingest state the next chunk runs. A plan that was never priced
     /// leaves no memory, since a memory predicting zero cannot hold.
     /// </summary>
-    internal void Remember(in ColumnPlan plan, long actualBytes, int firstBlock, int blockCount)
+    internal void Remember(in ColumnPlan plan, long actualBytes, int firstBlock, int blockCount, bool keeps = false)
     {
-        (byte written, bool live, bool widthsLive) = RememberPlan(in plan, actualBytes);
+        (byte written, bool live, bool widthsLive) = RememberPlan(in plan, actualBytes, keeps);
         MarkWritten(firstBlock, blockCount, written);
 
         // The table's consumer for the next chunk, decided here and nowhere else, so that the probe
@@ -548,41 +548,54 @@ internal sealed class ColumnWriter
     }
 
     /// <summary>
-    /// The part of <see cref="Remember"/> that only the column's emissions read: its memory of its plans, replaced. What the
-    /// chunk was written as and what the next chunk's ingest runs are returned, for whoever applies them.
+    /// The part of <see cref="Remember"/> that only the column's emissions read: its memory of its plans, replaced, unless the
+    /// chunk <paramref name="keeps"/> it as it was. What the chunk was written as and what the next chunk's ingest runs are
+    /// returned, for whoever applies them.
     /// </summary>
-    internal (byte Written, bool Live, bool WidthsLive) RememberPlan(in ColumnPlan plan, long actualBytes)
+    /// <remarks>
+    /// A chunk an end of rows cut short of its target keeps the memory: its plan answers its few rows, not the column's. A
+    /// column of integers of 19 bits wrote such a chunk of 256 rows as it was, the bit-packing's blocks of 1 024 values
+    /// costing more there; remembered, that plan held on every chunk after it, which then priced nothing else, and the
+    /// column wrote its chunks as they were, 8 bytes a row where it wrote 2.4 (2026-11-21).
+    /// </remarks>
+    internal (byte Written, bool Live, bool WidthsLive) RememberPlan(in ColumnPlan plan, long actualBytes, bool keeps = false)
     {
-        // A progression predicts zero buffer bytes and is priced all the same; anything else
-        // predicting zero was never priced at all.
-        bool priced = plan.PredictedBytes > 0 || plan.Scheme == ColumnScheme.Sequence;
-
-        // The hit is counted against the memory the chunk was chosen under, which is the one being replaced.
-        if (Memory is { } previous)
+        if (!keeps)
         {
-            _plansPriced++;
-            if (previous.WithinTolerance && previous.Scheme == plan.Scheme)
+            // A progression predicts zero buffer bytes and is priced all the same; anything else
+            // predicting zero was never priced at all.
+            bool priced = plan.PredictedBytes > 0 || plan.Scheme == ColumnScheme.Sequence;
+
+            // The hit is counted against the memory the chunk was chosen under, which is the one being replaced.
+            if (Memory is { } previous)
             {
-                _plansHeld++;
+                _plansPriced++;
+                if (previous.WithinTolerance && previous.Scheme == plan.Scheme)
+                {
+                    _plansHeld++;
+                }
             }
-        }
 
-        // A pinned memory is not replaced: the caller's scheme is offered to every chunk, and a
-        // chunk written as something else does not withdraw it.
-        if (Memory is not { Pinned: true })
-        {
-            Memory = priced ? new PlanMemory(plan.Scheme, plan.PredictedBytes, actualBytes) : null;
+            // A pinned memory is not replaced: the caller's scheme is offered to every chunk, and a
+            // chunk written as something else does not withdraw it.
+            if (Memory is not { Pinned: true })
+            {
+                Memory = priced ? new PlanMemory(plan.Scheme, plan.PredictedBytes, actualBytes) : null;
+            }
+
+            // The ingest histograms are the raw and the zigzag widths. A frame of reference wants the
+            // framed widths, which are the raw ones exactly when the reference is zero and something
+            // the pack has to walk for otherwise, so counting them there would pay twice.
+            _memoryWidths = plan.BitPack is { } packed && (packed.Transform == BitPackTransform.ZigZag || packed.Reference == 0);
         }
 
         bool live = Memory is { WithinTolerance: true, Scheme: ColumnScheme.Dict };
-        // The ingest histograms are the raw and the zigzag widths. A frame of reference wants the
-        // framed widths, which are the raw ones exactly when the reference is zero and something
-        // the pack has to walk for otherwise, so counting them there would pay twice.
-        bool widthsLive = Memory is { WithinTolerance: true, Scheme: ColumnScheme.BitPacked }
-            && plan.BitPack is { } packed
-            && (packed.Transform == BitPackTransform.ZigZag || packed.Reference == 0);
+        bool widthsLive = Memory is { WithinTolerance: true, Scheme: ColumnScheme.BitPacked } && _memoryWidths;
         return ((byte)(plan.Scheme + 1), live, widthsLive);
     }
+
+    // Whether the plan the memory holds packed bits whose widths the ingest histograms count.
+    private bool _memoryWidths;
 
     /// <summary>Notes, in a byte each closed block had spare, what the chunk over <paramref name="blockCount"/> blocks from <paramref name="firstBlock"/> was written as.</summary>
     private void MarkWritten(int firstBlock, int blockCount, byte written)

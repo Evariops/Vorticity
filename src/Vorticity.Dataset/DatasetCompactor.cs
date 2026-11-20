@@ -117,6 +117,15 @@ public sealed record CompactionResult
     /// <summary>Of <see cref="WriterChunksEndedOnLine"/>, those cut column by column, each column emitted once cut while the blocks after it went through.</summary>
     internal long WriterChunksCutOnLine { get; init; }
 
+    /// <summary>The ends of groups of rows the job asked its writers for, each to read what an object held (<see cref="VortexFileWriter.EndGroupAsync"/>).</summary>
+    internal int GroupEnds { get; init; }
+
+    /// <summary>
+    /// The bytes of data of each object it wrote, by its key: what the object's size counts (<see cref="DatasetLayout.ObjectBytes"/>),
+    /// its statistics, zone maps, indexes and footer apart.
+    /// </summary>
+    internal ImmutableDictionary<string, long> ObjectDataBytes { get; init; } = ImmutableDictionary<string, long>.Empty;
+
     /// <summary>
     /// Of <see cref="WriterBlocksOnLine"/>, those that took their rows of a variant column from what the inputs took of
     /// them as their own shreddings hold them (<see cref="DatasetOptions.TakesVariants"/>), and read none.
@@ -416,11 +425,12 @@ internal static partial class DatasetCompactor
         // job's own flow writes give its lane back while they wait for the store.
         ObjectStream OutputsOf(CompactionJob ran, int doublings, Execution.HeldLane? lane, int ranges = 1) => new ObjectStream(
             dataset, schema, ran.TargetBytes, ran.FirstRow, inKeyOrder: merge, rowBound: ran.Rows,
-            ran.ToLevel, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn))
+            ran.ToLevel, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn), endsBySize: !ran.OneObject || doublings > 0)
         {
             Lane = lane,
             Ranges = ranges,
-            Restarted = doublings > 0,
+            FirstBytesPerRow = (double)ran.Bytes / Math.Max(ran.Rows, 1),
+            RowsByValue = merge ? RowsByValueOf(schema.Cut, ran) : null,
             AdmitsAhead = memory.AdmitsWrite,
             Budget = memory.Writer,
             Keys = indexed ? schema.Tree : null,
@@ -506,7 +516,7 @@ internal static partial class DatasetCompactor
                 {
                     lateOutputs = late is null ? null : new ObjectStream(
                         dataset, schema, ran.Bytes, ran.FirstRow, inKeyOrder: true, rowBound: ran.Rows,
-                        0, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn))
+                        0, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn), endsBySize: false)
                     {
                         Arrival = Latest(ran),
                         Budget = memory.Writer,
@@ -769,9 +779,22 @@ internal static partial class DatasetCompactor
         long windowsKeyed = 0;
         int slicesCut = 0;
         int slicesAhead = 0;
+        int groupEnds = lateOutputs?.GroupEnds ?? 0;
+        ImmutableDictionary<string, long>.Builder dataBytes = ImmutableDictionary.CreateBuilder<string, long>(StringComparer.Ordinal);
+        foreach (WrittenObject made in lateOutputs?.Written ?? [])
+        {
+            dataBytes[made.Entry.Key] = made.DataBytes;
+        }
+
         long windowsAhead = lateOutputs?.InputWindowsAhead ?? 0;
         foreach (ObjectStream outputs in streams)
         {
+            groupEnds += outputs.GroupEnds;
+            foreach (WrittenObject made in outputs.Written)
+            {
+                dataBytes[made.Entry.Key] = made.DataBytes;
+            }
+
             windowsAhead += outputs.InputWindowsAhead;
             objectsOut += outputs.Written.Count;
             bytesOut += outputs.Bytes;
@@ -818,6 +841,8 @@ internal static partial class DatasetCompactor
             WriterBlocksOnLine = onLine,
             WriterChunksEndedOnLine = chunksOnLine,
             WriterChunksCutOnLine = chunksCut,
+            GroupEnds = groupEnds,
+            ObjectDataBytes = dataBytes.ToImmutable(),
             WriterBlocksOfRunsTaken = runsTaken,
             WriterBlocksPutBack = putBack,
             WriterColumnsPutBackApart = putBackApart,
@@ -1555,11 +1580,17 @@ internal static partial class DatasetCompactor
                 {
                     end = values is null ? count : values.EndOfValue(merge, at, count);
 
-                    // An object that reached its size on rows its writer has not measured has them measured first, and goes
-                    // on when what it would take is under the size.
-                    if (outputs.RollsUnmeasured)
+                    // An object the rows handed over since its last reading may bring to its size is read: it is full or it goes
+                    // on, the next reading placed by what a row weighed since this one. Its runs are cut where the next reading
+                    // is asked, so that it falls there whatever runs the merge hands.
+                    if (outputs.AsksReading)
                     {
-                        await outputs.MeasureAsync(cancellationToken).ConfigureAwait(false);
+                        await outputs.ReadSizeAsync(cancellationToken).ConfigureAwait(false);
+                    }
+
+                    if (outputs.RowsToReading < end - at)
+                    {
+                        end = at + (int)outputs.RowsToReading;
                     }
 
                     // A run that goes on with the key the object ends on, past its size: the rows of that key stay with it,
@@ -1587,6 +1618,46 @@ internal static partial class DatasetCompactor
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// The rows the inputs of <paramref name="job"/> hold of each partition value of <paramref name="cut"/>, by the first key
+    /// of the value's first input, in the keys' order: what the objects of one value can take at most, their deleted rows
+    /// counted. Null without a cut, or when an input holds several values, whose rows no one value can be told.
+    /// </summary>
+    internal static IReadOnlyList<(byte[] Key, long Rows)>? RowsByValueOf(ValueCut? cut, CompactionJob job)
+    {
+        if (cut is null)
+        {
+            return null;
+        }
+
+        List<(byte[] Key, long Rows)> inputs = new List<(byte[] Key, long Rows)>(job.Inputs.Count);
+        foreach (CompactionInput input in job.Inputs)
+        {
+            if (!cut.HoldsOne(input))
+            {
+                return null;
+            }
+
+            inputs.Add((input.Key.Span[..^VortexDataset.UidBytes].ToArray(), input.Entry.Rows));
+        }
+
+        inputs.Sort(static (left, right) => left.Key.AsSpan().SequenceCompareTo(right.Key));
+        List<(byte[] Key, long Rows)> values = [];
+        foreach ((byte[] key, long rows) in inputs)
+        {
+            if (values.Count > 0 && cut.Same(values[^1].Key, key))
+            {
+                values[^1] = (values[^1].Key, values[^1].Rows + rows);
+            }
+            else
+            {
+                values.Add((key, rows));
+            }
+        }
+
+        return values;
     }
 
     /// <summary>
@@ -2394,8 +2465,10 @@ internal static partial class DatasetCompactor
         private readonly int _level;
 
         // The rows the job reads, `rowBound`, bound every object it writes, and so the length of their chunks;
-        // its bytes, `byteBound`, bound what the store sizes the parts of one it streams from.
-        internal ObjectStream(VortexDataset dataset, DatasetSchema schema, long target, long firstRow, bool inKeyOrder, long rowBound, int level, long byteBound)
+        // its bytes, `byteBound`, bound what the store sizes the parts of one it streams from. An object ends at `target`
+        // bytes of data when `endsBySize`.
+        internal ObjectStream(
+            VortexDataset dataset, DatasetSchema schema, long target, long firstRow, bool inKeyOrder, long rowBound, int level, long byteBound, bool endsBySize)
         {
             _dataset = dataset;
             _schema = schema;
@@ -2405,11 +2478,14 @@ internal static partial class DatasetCompactor
             _rowBound = rowBound;
             _level = level;
             _byteBound = byteBound;
-            _endsBySize = byteBound > ObjectBound.Of(target, 0, dataset.Options.BoundOutPerIn);
+            _endsBySize = endsBySize;
+            _startRow = firstRow;
+            _slack = (long)(target * dataset.Options.ObjectEndSlack);
+            _drift = dataset.Options.RowWeightDrift;
         }
 
-        // Whether the job ends an object as it reaches the size: its bound passes that of inputs that weigh the size. At a
-        // first attempt that is inputs that weigh more than the size; under a bound doubled, more than half of it, and so on.
+        // Whether the job ends an object as it reaches the size: not when its plan chose its inputs to make one object
+        // (CompactionJob.OneObject), unless its objects ran past the bound of its inputs, which it then starts again under.
         private readonly bool _endsBySize;
 
         /// <summary>The objects it has sealed.</summary>
@@ -2491,75 +2567,191 @@ internal static partial class DatasetCompactor
         internal long InputWindowsAhead { get; set; }
 
         /// <summary>
-        /// Whether the object being written has reached its size, by what its writer says it would take were it ended now
-        /// (<see cref="VortexFileWriter.SizeWith"/>). Never for a job whose bound holds within the bound of inputs of that
-        /// size (<see cref="_endsBySize"/>): the plan chose its inputs to make one object, which then weighs what the merge
-        /// writes of them. The store holds an object it takes as it is written to its bound, so that one passes the size by
-        /// the bound's margin at most, 3 %; a smaller object, put whole, is held to none.
+        /// Whether the object being written holds its size, as the job last read it (<see cref="ReadSizeAsync"/>): within the
+        /// size less its slack (<see cref="DatasetOptions.ObjectEndSlack"/>). Never for a job whose plan chose its inputs to
+        /// make one object (<see cref="CompactionJob.OneObject"/>), which then weighs what the merge writes of them.
         /// </summary>
         /// <remarks>
-        /// A writer's size is an estimate while a column holds rows no chunk measured, which a job has measured before it
-        /// ends an object on them (<see cref="MeasureAsync"/>). Without either rule, a tier merge of five objects of 370 KB,
-        /// 1.85 MB together under a size of 2 MiB, wrote five objects of 370 KB again, each ended at 2 MiB of a variant
-        /// column's rows that encoded to a sixth, and the plan took them again without end (2026-11-20).
+        /// No estimate ends an object: a tier merge of five objects of 370 KB, 1.85 MB together under a size of 2 MiB, wrote
+        /// five objects of 370 KB again when an object was ended on its writer's estimate of its size, each at 2 MiB of a
+        /// variant column's rows that encoded to a sixth, and the plan took them again without end (2026-11-20).
         /// </remarks>
-        internal bool WantsRoll => _output is not null && _endsBySize && _output.Writer.SizeWith(_map.Bytes) + EndBytes >= _target;
+        internal bool WantsRoll => _output is not null && _full;
 
         /// <summary>
-        /// What the object being written is taken to write past its last column chunk at least, which its writer's size
-        /// counts none of: what the object of this stream that wrote the fewest bytes a row there wrote
-        /// (<see cref="_endBytes"/>), in proportion of its rows while this one holds fewer, and no more than it past them.
-        /// Nothing when that end alone weighs the size: no object then holds under it, and counting its end would end
-        /// each at its first key.
+        /// Whether the rows handed over reach where the object's next reading is asked (<see cref="NextReading"/>): the job
+        /// then reads what the object holds (<see cref="ReadSizeAsync"/>).
         /// </summary>
         /// <remarks>
-        /// An object's end is a fixed part, its footer, its sheets, its sketches, and a part that grows with its rows, its
-        /// zone maps, its counts by block: in proportion under the rows measured and capped past them, the count stays
-        /// under what the end will weigh, and the object ends at its size or past it, never before.
+        /// A reading is aimed at the object's size, at what a row weighed in the stream's last object read, or at what a row
+        /// of the job's inputs weighs for its first: one reading an object as a rule, which ends every column's chunk there,
+        /// and another when the rows weighed less than that. Readings aimed short of the size by a quarter of the gap left,
+        /// to be sure of landing under it, left every column two chunks more an object, which a question on one value read
+        /// 1.7 times the bytes of (2026-11-21).
         /// </remarks>
-        private long EndBytes =>
-            _endRows > 0 && _endBytes < _target ? (long)(_endBytes * Math.Min(1.0, (double)_rows / _endRows)) : 0;
-
-        // The end of the object sealed by this stream that wrote the fewest bytes a row past its last column chunk
-        // (VortexFileWriter.EndBytes), and its rows; none before one is sealed, the first object of a stream then ending past
-        // its size by what its own end weighs. By row and not by byte of its chunks: six objects of log records aimed at
-        // 64 MiB wrote 0.39 to 0.78 bytes a row there, 1.4 to 6.6 % of their chunks. The fewest and not the last: an index
-        // kept in one object and given up in the next moves an object's end tenfold, 5 to 65 bytes a row at 256 rows a block,
-        // and the last one's, taken for the next, ended it at a third of its size (2026-11-20).
-        private long _endBytes;
-        private long _endRows;
+        internal bool AsksReading => _rows >= NextReading;
 
         /// <summary>
-        /// Whether the object being written has reached its size while its writer may still count rows no chunk measured:
-        /// the job then has them measured (<see cref="MeasureAsync"/>) before it reads <see cref="WantsRoll"/> to end the
-        /// object.
+        /// The rows the object being written takes before its next reading (<see cref="AsksReading"/>), which the job cuts its
+        /// runs at, so that the reading is asked there whatever runs its merge hands the rows in; <see cref="long.MaxValue"/>
+        /// for none.
         /// </summary>
-        internal bool RollsUnmeasured => !_measured && WantsRoll;
-
-        // Whether the writer of the object being written holds no rows that no chunk measured, whatever rows come: true with
-        // no object, set as one opens (VortexFileWriter.MeasuresLate) and by each measure.
-        private bool _measured = true;
+        /// <remarks>
+        /// A reading due within the object's first block, for a size a block outweighs, cuts no run: it falls where the run it
+        /// is due in ends, as an object of such a size ended at the first run past its size.
+        /// </remarks>
+        internal long RowsToReading =>
+            NextReading is long next && next != long.MaxValue && _output is { } output && next >= output.Writer.BlockRows ? next - _rows : long.MaxValue;
 
         /// <summary>
-        /// Has the object's writer measure what its size counts as it came (<see cref="VortexFileWriter.MeasureAsync"/>),
-        /// the block's map counted as <see cref="WantsRoll"/> counts it: the size read next is what the object would take.
+        /// The rows of the object being written its next reading is asked at: where its writer's grid ends a group
+        /// (<see cref="VortexFileWriter.GroupRows"/>), or before, where the rows at what a row weighed since the last reading
+        /// reach where the reading is aimed; on a block's boundary and a block past the last reading at the soonest.
+        /// <see cref="long.MaxValue"/> for an object that does not end by its size or is full.
         /// </summary>
-        internal async ValueTask MeasureAsync(CancellationToken cancellationToken)
+        /// <remarks>
+        /// Asked as the merge's runs came, a reading fell at rows that hung on where an input's batch ended, which the job's
+        /// memory decides, and the objects ended at other rows (2026-11-21).
+        /// </remarks>
+        private long NextReading
         {
-            if (_output is { } output)
+            get
             {
-                _measured = await output.Writer.MeasureAsync(_map.Bytes, _target - EndBytes, whole: Restarted, cancellationToken).ConfigureAwait(false);
+                if (_output is not { } output || !_endsBySize || _full)
+                {
+                    return long.MaxValue;
+                }
+
+                // Read on the writer's grid of groups at least, so that no estimate spans more than a group of rows.
+                long block = Math.Max(1, output.Writer.BlockRows);
+                long grid = output.Writer.GroupRows;
+                long next = grid > 0 ? ((_rowsRead / grid) + 1) * grid : long.MaxValue;
+
+                // None by the weight of the rows when those the object can take at most, the job's left or its partition
+                // value's, a drift heavier than the last reading says, leave it short of its size: it closes before it fills.
+                if (_bytesPerRow <= 0 || (_dataRead + ((_rows - _rowsRead + RowsLeft) * _bytesPerRow * (1 + _drift))) < _target - _slack)
+                {
+                    return next;
+                }
+
+                // On a block's boundary, where every row handed over is in the file; within an object's first block for a size a
+                // block outweighs, where the rows past the file's whole blocks count at what a row weighs.
+                double rows = (_target - _dataRead) / _bytesPerRow;
+                if (rows < (long.MaxValue >> 2))
+                {
+                    long byWeight = _rowsRead + Math.Max((long)Math.Ceiling(rows), 1);
+                    next = Math.Min(next, byWeight < block ? byWeight : (byWeight + block - 1) / block * block);
+                }
+
+                return next;
             }
         }
 
         /// <summary>
-        /// Whether the job started again under a doubled bound, its objects' content having run past the bound of its
-        /// inputs: it then ends an object by its size where a first attempt would write one (<see cref="_endsBySize"/>), and
-        /// ends none on an estimate: its writer writes all it holds each time the size is reached, so that an object it
-        /// ends weighs the size and leaves its size class. Ended on an estimate, a merge the plan chose to make one object
-        /// of could write as many as it read, which the plan would take again.
+        /// Reads what the object being written holds, exact: a group of rows ends there, every column writing what it holds
+        /// (<see cref="VortexFileWriter.EndGroupAsync"/>), on a block's boundary, where every row handed over is in the file.
+        /// Full once its data reaches its size less its slack, and sealed when its next row starts another key, its last
+        /// chunks the ones that end wrote; otherwise what a row weighs in it places the next reading. The size counts the
+        /// object's data, never its end: its statistics, zone maps, indexes and footer, which its index budget keeps or gives
+        /// up whole at its end (<see cref="DatasetLayout.ObjectBytes"/>).
         /// </summary>
-        internal bool Restarted { get; init; }
+        /// <remarks>
+        /// A reading without ending a chunk counted at their columns' rates what the columns still gathered, which no chunk
+        /// had measured: a column's chunk aimed at a mebibyte holds an object of a few hundred kilobytes whole, and light rows
+        /// read at the rate of heavier ones before them ended objects at a third of their size (2026-11-21).
+        /// </remarks>
+        internal async ValueTask ReadSizeAsync(CancellationToken cancellationToken)
+        {
+            if (_output is not { } output)
+            {
+                return;
+            }
+
+            // Every row handed over, the block's map's among them, which stays where it is.
+            // What the object holds, exact: what a row weighs in it from here is its own mean, which no estimate enters.
+            GroupEnd end = await output.Writer.EndGroupAsync(cancellationToken).ConfigureAwait(false);
+            if (end.Rows > 0)
+            {
+                _bytesPerRow = (double)end.DataBytes / end.Rows;
+            }
+
+            // The rows past the file's whole blocks, which wait for the chunks after, at what a row weighs.
+            long data = end.DataBytes + (long)((_rows - end.Rows) * _bytesPerRow);
+
+            _rowsRead = _rows;
+            _dataRead = data;
+            _full = data >= _target - _slack;
+            GroupEnds++;
+        }
+
+        // The share of the size an object may hold less or more (DatasetOptions.ObjectEndSlack), in bytes; the share by which
+        // a row's weight may drift between two readings (DatasetOptions.RowWeightDrift).
+        private readonly long _slack;
+        private readonly double _drift;
+
+        // What the last reading found the object being written to hold, the rows handed over then, and whether it was full;
+        // none before a reading.
+        private long _dataRead;
+        private long _rowsRead;
+        private bool _full;
+
+        // What a row weighs in the object last read, its data over its rows at that reading, the stream's next object going
+        // by it until its own first reading; before any, what a row of the job's inputs weighs (FirstBytesPerRow).
+        private double _bytesPerRow;
+
+        // The stream's first row, which the rows it handed over count from.
+        private readonly long _startRow;
+
+        /// <summary>
+        /// The rows the object being written takes at most before it closes whatever its size: the job's rows not handed over
+        /// yet, and those its partition value's inputs hold (<see cref="RowsByValue"/>), its own handed over apart.
+        /// </summary>
+        private long RowsLeft => Math.Min(Math.Max(0, _rowBound - (_firstRow - _startRow + _rows)), _valueRowsLeft);
+
+        /// <summary>
+        /// The rows the job's inputs hold of each partition value, by the first key of the value's first input, in the keys'
+        /// order: what the objects of one value take at most; null when the job is not cut by value or an input holds
+        /// several (<see cref="DatasetCompactor.RowsByValueOf"/>).
+        /// </summary>
+        internal IReadOnlyList<(byte[] Key, long Rows)>? RowsByValue { get; init; }
+
+        // The value of RowsByValue the rows being written hold, and its rows not yet handed over; long.MaxValue when unknown.
+        private int _valueAt = -1;
+        private long _valueRowsLeft = long.MaxValue;
+
+        /// <summary>Counts <paramref name="rows"/> rows of key <paramref name="key"/> against its partition value's (<see cref="RowsLeft"/>).</summary>
+        private void CountValue(ReadOnlySpan<byte> key, int rows)
+        {
+            if (Values is not { } values || RowsByValue is not { } byValue)
+            {
+                return;
+            }
+
+            if (_valueAt < 0 || !values.Same(byValue[_valueAt].Key, key))
+            {
+                // The values come in the keys' order: the next one past those done, or none known.
+                int at = Math.Max(_valueAt, 0);
+                while (at < byValue.Count && !values.Same(byValue[at].Key, key) && byValue[at].Key.AsSpan().SequenceCompareTo(key) < 0)
+                {
+                    at++;
+                }
+
+                bool found = at < byValue.Count && values.Same(byValue[at].Key, key);
+                _valueAt = found ? at : _valueAt;
+                _valueRowsLeft = found ? byValue[at].Rows : long.MaxValue;
+            }
+
+            _valueRowsLeft = _valueRowsLeft == long.MaxValue ? long.MaxValue : _valueRowsLeft - rows;
+        }
+
+        /// <summary>What a row of the job's inputs weighs: what places a stream's first reading.</summary>
+        internal double FirstBytesPerRow
+        {
+            init => _bytesPerRow = value;
+        }
+
+        /// <summary>The ends of groups of rows the job asked its objects' writers for, each to read what an object held (<see cref="ReadSizeAsync"/>).</summary>
+        internal int GroupEnds { get; private set; }
 
         /// <summary>Whether the last row written carries this key, which must not be split.</summary>
         internal bool HoldsKey(ReadOnlySpan<byte> key) =>
@@ -2665,6 +2857,7 @@ internal static partial class DatasetCompactor
             int rows = to - from;
             int at = row + from;
             _rows += rows;
+            CountValue(merge.KeyAt(from), rows);
             VortexFileWriter writer = output.Writer;
             int staged = writer.MapRows;
             if (staged == 0)
@@ -2811,7 +3004,6 @@ internal static partial class DatasetCompactor
                 variantChunks: shredding?.VariantChunks, byteBound: _byteBound, countsPaths: shredding is not null, postings: Postings, budget: Budget,
                 lane: Lane, admitsAhead: AdmitsAhead, gatherShare: Ranges);
             _output = output;
-            _measured = !(Restarted || output.Writer.MeasuresLate);
             output.Writer.Ledger = Ledger;
             output.Writer.LandLag = LandLagOf(output.Writer.BlockRows);
             Postings?.BlocksOf(VortexDataset.Uid(output.Identity), output.Writer.BlockRows);
@@ -2839,13 +3031,17 @@ internal static partial class DatasetCompactor
             }
         }
 
-        internal ValueTask RollIfFullAsync(CancellationToken cancellationToken) =>
-            !WantsRoll ? ValueTask.CompletedTask : _measured ? RollAsync(cancellationToken) : MeasuredRollAsync(cancellationToken);
-
-        /// <summary>Seals the object being written when it has reached its size once its writer measured it.</summary>
-        private async ValueTask MeasuredRollAsync(CancellationToken cancellationToken)
+        /// <summary>
+        /// Seals the object being written once it holds its size, read first when the rows handed over since the last
+        /// reading may bring it there (<see cref="AsksReading"/>).
+        /// </summary>
+        internal async ValueTask RollIfFullAsync(CancellationToken cancellationToken)
         {
-            await MeasureAsync(cancellationToken).ConfigureAwait(false);
+            if (AsksReading)
+            {
+                await ReadSizeAsync(cancellationToken).ConfigureAwait(false);
+            }
+
             if (WantsRoll)
             {
                 await RollAsync(cancellationToken).ConfigureAwait(false);
@@ -2885,13 +3081,6 @@ internal static partial class DatasetCompactor
                     await output.Writer.LandAsync().ConfigureAwait(false);
                     _sorted?.Finish(output.Writer);
                     await output.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
-                    long end = output.Writer.EndBytes;
-                    if (_rows > 0 && (_endRows == 0 || (double)end / _rows < (double)_endBytes / _endRows))
-                    {
-                        _endBytes = end;
-                        _endRows = _rows;
-                    }
-
                     ScratchBytes += output.Writer.ScratchBytes;
                     BatchesAcross += output.Writer.BatchesIngestedAcross;
                     BatchesFlown += output.Writer.BatchesFlown;
@@ -2934,6 +3123,9 @@ internal static partial class DatasetCompactor
 
             _firstRow += _rows;
             _rows = 0;
+            _dataRead = 0;
+            _rowsRead = 0;
+            _full = false;
         }
 
         /// <summary>Seals whatever is left.</summary>

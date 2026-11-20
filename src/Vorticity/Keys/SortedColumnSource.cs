@@ -253,6 +253,11 @@ internal sealed class SortedColumnSource : ISortedEntries
     /// leaves it.
     /// </summary>
     /// <param name="entry">A zero-based entry index below <see cref="EntryCount"/>.</param>
+    /// <remarks>
+    /// A zone of one key decodes to a constant, whose element is every row's bytes, and a key of an extension type to its
+    /// storage, as <see cref="LoadedKey"/> reads them: a cursor that lent nothing for such a zone ranked its key below every
+    /// other, and a walk down over the objects of a level took the keys of level 0 below it first, all of them.
+    /// </remarks>
     public ReadOnlySpan<byte> BytesAt(long entry)
     {
         long row = RowOf(entry);
@@ -261,10 +266,14 @@ internal sealed class SortedColumnSource : ISortedEntries
             return default;
         }
 
-        CanonicalNode node = _context.Canonical.GetNode(_column);
-        return node.Kind == CanonicalKind.VarBinView
-            ? LiteralReader.ViewAt(node, (int)(row - _loadedStart))
-            : default;
+        CanonicalArena arena = _context.Canonical;
+        CanonicalNode node = arena.GetNode(ComparisonKernels.Unwrap(arena, _column));
+        return node.Kind switch
+        {
+            CanonicalKind.VarBinView => LiteralReader.ViewAt(node, (int)(row - _loadedStart)),
+            CanonicalKind.Constant when node.DType.Kind is DTypeKind.Utf8 or DTypeKind.Binary => node.ConstantElement,
+            _ => default,
+        };
     }
 
     /// <summary>
