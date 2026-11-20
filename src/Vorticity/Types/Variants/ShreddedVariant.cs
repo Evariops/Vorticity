@@ -395,6 +395,295 @@ internal sealed class ShreddedVariant
     }
 
     /// <summary>
+    /// Whether the rows of the plan's groups are sized without being put back together (<see cref="HollowSlice"/>): an
+    /// object shredded at the top whose keys each hold a value of no keys and no elements of its own.
+    /// </summary>
+    internal bool Sizes => _root is { Kind: ShredKind.Object, Typed: >= 0, Leaves: true };
+
+    /// <summary>
+    /// Begins the views of rows sized a slice at a time and not rebuilt: <see cref="HollowSlice"/> for each slice in turn,
+    /// and <see cref="EndHollow"/> however they end. Only a plan that <see cref="Sizes"/>.
+    /// </summary>
+    internal void BeginHollow()
+    {
+        _busy = true;
+        _used = 0;
+        _top = 0;
+    }
+
+    /// <summary>
+    /// The views <see cref="WriteSlice"/> writes of the group node <paramref name="group"/>'s rows, into
+    /// <paramref name="into"/>, and none of the values it rebuilds: a row that takes its value as it is keeps the value
+    /// column's view, a row rebuilt names the bytes its value would take after those of the rows before, of the slices
+    /// before too, and a row that holds what the row before holds names what that row names. A view of a value not
+    /// rebuilt is hollow: its size, no prefix, the buffer past the value column's and the offset there, whatever its size,
+    /// with no byte behind it. What reads the bytes a batch's rows name reads the same from these views.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A row's size is that of the object <see cref="WriteLeaves"/> and <see cref="WriteObject"/> write: its header, an id
+    /// and an offset a key, and each key's value. The values' sizes are added a key at a time, over the rows that hold
+    /// the key, a word of 64 rows at a time, and no row's keys are listed: a log record holds a dozen of some four hundred
+    /// keys, whose rows put back together took a sixth of a consolidation's processor time on the lanes that decode its
+    /// inputs (2026-11-19).
+    /// </para>
+    /// <para>
+    /// What putting a row back together refuses is not all refused here. A key held both as a value and typed, an empty
+    /// value and a value that is no object beside a typed object are, and so is a row of more than 256 names whose
+    /// metadata lacks one of its keys. A row of fewer names whose metadata lacks a key, and a row whose value names a key
+    /// its typed object holds, or names its keys out of order, are sized as they lie.
+    /// </para>
+    /// </remarks>
+    /// <returns>False, the views then to be written by <see cref="WriteSlice"/>, for a row putting it back together refuses.</returns>
+    internal bool HollowSlice(CanonicalArena arena, int group, Span<byte> into)
+    {
+        Shred root = _root;
+        Bind(arena, root, group);
+        CanonicalNode node = arena.GetNode(group);
+        int rows = node.Length;
+        CanonicalNode metadata = arena.GetNode(node.GetFieldIndex(_metadata));
+        ReadOnlySpan<byte> values = root.Value >= 0 ? root.ValueViews.Span : default;
+
+        // Per row, the bytes of its keys' values, then the keys it holds.
+        Block<int> sized = Blocks.RentCleared<int>(Math.Max(2 * rows, 1));
+        try
+        {
+            Span<int> sizes = sized.AsSpan(0, rows);
+            Span<int> counts = sized.AsSpan(rows, rows);
+            return SizeLeaves(root, rows, sizes, counts)
+                && HollowRows(root, rows, into, values, metadata.Views.Span, metadata.DataBuffers, sizes, counts, root.Value >= 0 ? root.ValueBufferCount : 0);
+        }
+        catch (VortexFormatException)
+        {
+            // A value left of a row that does not read: the rows put back together tell it.
+            return false;
+        }
+        finally
+        {
+            Blocks.Return(sized);
+        }
+    }
+
+    /// <summary>Ends the views of rows sized, however they ended.</summary>
+    internal void EndHollow()
+    {
+        _used = 0;
+        _busy = false;
+    }
+
+    /// <summary>
+    /// Adds to <paramref name="sizes"/> the bytes each row's value of each field of <paramref name="root"/> takes in the
+    /// row's object (<see cref="LeafSize"/>), and to <paramref name="counts"/> the fields each row holds, a field at a time
+    /// over the rows that hold it. False for a field held both typed and as a value, or as an empty value.
+    /// </summary>
+    private static bool SizeLeaves(Shred root, int rows, Span<int> sizes, Span<int> counts)
+    {
+        int words = (rows + 63) >> 6;
+        foreach (Shred field in root.Fields)
+        {
+            int fixedSize = field.Kind switch
+            {
+                ShredKind.Bool => 1,
+                ShredKind.Fixed => 1 + field.Width,
+                ShredKind.Decimal => 2 + field.Width,
+                _ => 0,
+            };
+            bool text = field.Kind == ShredKind.String;
+            ReadOnlySpan<byte> typedViews = field.Typed >= 0 && fixedSize == 0 ? field.Data.Span : default;
+            ReadOnlySpan<byte> valueViews = field.Value >= 0 ? field.ValueViews.Span : default;
+            for (int w = 0; w < words; w++)
+            {
+                ulong held = field.Group.Word(w, rows);
+                if (held == 0)
+                {
+                    continue;
+                }
+
+                ulong typed = field.Typed >= 0 ? held & field.TypedPresent.Word(w, rows) : 0;
+                ulong valued = field.Value >= 0 ? held & field.ValuePresent.Word(w, rows) : 0;
+                if ((typed & valued) != 0)
+                {
+                    return false;
+                }
+
+                int first = w << 6;
+                for (ulong bits = typed; bits != 0; bits &= bits - 1)
+                {
+                    int slot = first + BitOperations.TrailingZeroCount(bits);
+                    int size = fixedSize;
+                    if (size == 0)
+                    {
+                        int length = BinaryPrimitives.ReadInt32LittleEndian(typedViews[(slot * ViewSize)..]);
+                        size = (text && length <= ParquetVariant.MaxShortString ? 1 : 5) + length;
+                    }
+
+                    sizes[slot] += size;
+                    counts[slot]++;
+                }
+
+                for (ulong bits = valued; bits != 0; bits &= bits - 1)
+                {
+                    int slot = first + BitOperations.TrailingZeroCount(bits);
+                    int size = BinaryPrimitives.ReadInt32LittleEndian(valueViews[(slot * ViewSize)..]);
+                    if (size <= 0)
+                    {
+                        return false;
+                    }
+
+                    sizes[slot] += size;
+                    counts[slot]++;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Each row's view into <paramref name="into"/> as <see cref="WriteRows"/> writes it, a row rebuilt there sized here
+    /// from <paramref name="sizes"/> and <paramref name="counts"/> (<see cref="SizeLeaves"/>) and from the object its
+    /// value holds beside them. False for a row putting it back together refuses.
+    /// </summary>
+    private bool HollowRows(
+        Shred root, int rows, Span<byte> into, ReadOnlySpan<byte> values, ReadOnlySpan<byte> metadataViews,
+        ReadOnlySpan<VortexBuffer> metadataBuffers, ReadOnlySpan<int> sizes, ReadOnlySpan<int> counts, int own)
+    {
+        ulong lastLow = 0;
+        ulong lastHigh = 0;
+        bool seen = false;
+
+        // Whether the metadata of the rows read now names more keys than an id of one byte tells: only then does a row's
+        // header depend on which of its keys it holds, and are their names looked up.
+        bool wide = false;
+        int rebuilt = -1;
+        ulong same = 0;
+        for (int row = 0; row < rows; row++)
+        {
+            if ((row & 63) == 0)
+            {
+                same = SameWord(root, row >> 6, rows, metadataViews);
+            }
+
+            Span<byte> view = into.Slice(row * ViewSize, ViewSize);
+            if (!root.Group[row])
+            {
+                view.Clear();
+                rebuilt = -1;
+                continue;
+            }
+
+            if (!root.TypedPresent[row])
+            {
+                if (root.Value >= 0 && root.ValuePresent[row])
+                {
+                    values.Slice(row * ViewSize, ViewSize).CopyTo(view);
+                }
+                else
+                {
+                    view.Clear();
+                    view[0] = 1;
+                }
+
+                rebuilt = -1;
+                continue;
+            }
+
+            bool sameMetadata = true;
+            ReadOnlySpan<byte> metadataView = metadataViews.Slice(row * ViewSize, ViewSize);
+            ulong low = MemoryMarshal.Read<ulong>(metadataView);
+            ulong high = MemoryMarshal.Read<ulong>(metadataView[sizeof(ulong)..]);
+            if (!seen || low != lastLow || high != lastHigh)
+            {
+                VariantDictionary named = Dictionary(BlockStatsPass.Value(metadataBuffers, metadataViews, row));
+                wide = named.Count > OneByteIds;
+                (lastLow, lastHigh, seen) = (low, high, true);
+                sameMetadata = false;
+            }
+
+            if (rebuilt == row - 1 && sameMetadata && rebuilt >= 0 && ((same >> (row & 63)) & 1) != 0)
+            {
+                into.Slice(rebuilt * ViewSize, ViewSize).CopyTo(view);
+                rebuilt = row;
+                continue;
+            }
+
+            int count = counts[row];
+            int size = sizes[row];
+            uint largest = 0;
+            if (root.Value >= 0 && root.ValuePresent[row])
+            {
+                ReadOnlySpan<byte> value = ValueAt(root, row);
+                if (value.IsEmpty || (value[0] & 0x03) != ParquetVariant.BasicObject)
+                {
+                    return false;
+                }
+
+                VariantNested kept = VariantNested.Read(value);
+                for (int i = 0; i < kept.Count; i++)
+                {
+                    size = checked(size + kept.ValueAt(i).Length);
+                    if (wide)
+                    {
+                        largest = Math.Max(largest, (uint)kept.IdAt(i));
+                    }
+                }
+
+                count += kept.Count;
+            }
+
+            int idWidth = 1;
+            if (wide)
+            {
+                if (!LargestId(root, row, ref largest))
+                {
+                    return false;
+                }
+
+                idWidth = ParquetVariant.WidthOf(largest);
+            }
+
+            int countWidth = count > byte.MaxValue ? 4 : 1;
+            int length = checked(1 + countWidth + (count * idWidth) + ((count + 1) * ParquetVariant.WidthOf((uint)size)) + size);
+            MemoryMarshal.Write(view, (ulong)(uint)length);
+            MemoryMarshal.Write(view[sizeof(ulong)..], (uint)own | ((ulong)(uint)_used << 32));
+            _used = checked(_used + length);
+            rebuilt = row;
+        }
+
+        return true;
+    }
+
+    /// <summary>The names a row's metadata holds at most for every id of its keys to take one byte.</summary>
+    private const int OneByteIds = 256;
+
+    /// <summary>
+    /// Raises <paramref name="largest"/> to the largest id, in the metadata read last (<see cref="Dictionary"/>), of the
+    /// fields of <paramref name="root"/> row <paramref name="row"/> holds. False for a field the metadata does not name.
+    /// </summary>
+    private bool LargestId(Shred root, int row, ref uint largest)
+    {
+        VariantDictionary dictionary = VariantDictionary.Read(_lastMetadata.AsSpan(0, _lastLength));
+        _ = Ids(root);
+        for (int f = 0; f < root.Fields.Length; f++)
+        {
+            if (!Defined(root.Fields[f], row))
+            {
+                continue;
+            }
+
+            int id = IdOf(root, f, in dictionary);
+            if (id < 0)
+            {
+                return false;
+            }
+
+            largest = Math.Max(largest, (uint)id);
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// The plans of a context's shredded variants, kept from a batch to the next: a few, a scan's shredded columns, each by
     /// the group's type and the arena of types it was compiled with, unless that arena was cleared since.
     /// </summary>
