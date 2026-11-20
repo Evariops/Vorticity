@@ -107,7 +107,7 @@ internal static class CanonicalConcat
 
         for (int i = 0; i < chunks.Length; i++)
         {
-            if (arena.GetNode(chunks[i]).Kind is CanonicalKind.Dictionary or CanonicalKind.RunEnd)
+            if (arena.GetNode(chunks[i]).Kind is CanonicalKind.Dictionary or CanonicalKind.RunEnd or CanonicalKind.Shredded)
             {
                 return ConcatDecoding(context, dtype, length, chunks, depth);
             }
@@ -177,7 +177,7 @@ internal static class CanonicalConcat
             // than at decode: concatenation is the only place that sees the chunks together.
             CanonicalKind.Constant =>
                 ConcatConstant(context, dtype, length, chunks, validity, depth),
-            CanonicalKind.Dictionary or CanonicalKind.RunEnd => throw new UnreachableException(
+            CanonicalKind.Dictionary or CanonicalKind.RunEnd or CanonicalKind.Shredded => throw new UnreachableException(
                 $"{kind} chunks are decoded above, before ConcatValidity."),
             _ => throw new UnreachableException($"CanonicalKind {(byte)kind} is not defined."),
         };

@@ -107,10 +107,19 @@ internal static class CanonicalRuns
     /// <param name="sources">The nodes the runs take rows of, in the order their first run comes.</param>
     /// <param name="runs">The runs, each of rows within its source's span.</param>
     /// <param name="rows">The rows of the runs together.</param>
+    /// <param name="shredded">
+    /// By field of a struct <paramref name="dtype"/>, whether a variant column whose every source holds its values not put
+    /// back together (<see cref="CanonicalKind.Shredded"/>) is gathered so, its values still not put back, with nothing
+    /// told of what took its rows: for a caller that knows what took the rows gathered, and has the values put back by it
+    /// when one is asked for (<see cref="CanonicalArena.MaterializeShredded(int, CanonicalArena.ITakenRows, int)"/>), or
+    /// asks for none. None, or false, has such values put back over the rows the runs span of their source, and gathered
+    /// as any values.
+    /// </param>
     /// <returns>The node, or -1 when a source holds a form the gather does not take, nothing then to keep of what it laid.</returns>
     /// <exception cref="VortexFormatException">The sources disagree in shape, or a view names bytes its node does not hold.</exception>
     internal static int Gather<TSource>(
-        ArrayDecodeContext context, DType dtype, ReadOnlySpan<TSource> sources, ReadOnlySpan<Run> runs, int rows)
+        ArrayDecodeContext context, DType dtype, ReadOnlySpan<TSource> sources, ReadOnlySpan<Run> runs, int rows,
+        ReadOnlySpan<bool> shredded = default)
         where TSource : struct, ISource
     {
         Span<At> stack = stackalloc At[StackSources];
@@ -123,7 +132,7 @@ internal static class CanonicalRuns
                 at[s] = new At(sources[s].Node, 0, false);
             }
 
-            return Node(new Pass<TSource>(context, sources, runs, rows), dtype, at, depth: 1);
+            return Node(new Pass<TSource>(context, sources, runs, rows, shredded), dtype, at, depth: 1);
         }
         finally
         {
@@ -138,7 +147,8 @@ internal static class CanonicalRuns
     private readonly record struct At(int Node, int Shift, bool Local);
 
     /// <summary>A gather under way: where it gathers into, its sources, its runs and their rows.</summary>
-    private readonly ref struct Pass<TSource>(ArrayDecodeContext context, ReadOnlySpan<TSource> sources, ReadOnlySpan<Run> runs, int rows)
+    private readonly ref struct Pass<TSource>(
+        ArrayDecodeContext context, ReadOnlySpan<TSource> sources, ReadOnlySpan<Run> runs, int rows, ReadOnlySpan<bool> shredded)
         where TSource : struct, ISource
     {
         internal readonly ArrayDecodeContext Context = context;
@@ -146,6 +156,9 @@ internal static class CanonicalRuns
         internal readonly ReadOnlySpan<TSource> Sources = sources;
         internal readonly ReadOnlySpan<Run> Runs = runs;
         internal readonly int Rows = rows;
+
+        /// <summary>By field of the struct gathered, whether a variant column's values not put back are gathered so.</summary>
+        internal readonly ReadOnlySpan<bool> Shredded = shredded;
 
         /// <summary>The arena that holds what source <paramref name="source"/> holds of the column under way.</summary>
         internal CanonicalArena ArenaOf(int source, bool local) => local ? Into : Sources[source].Arena;
@@ -162,18 +175,20 @@ internal static class CanonicalRuns
         }
     }
 
-    private static int Node<TSource>(in Pass<TSource> pass, DType dtype, Span<At> at, int depth)
+    private static int Node<TSource>(in Pass<TSource> pass, DType dtype, Span<At> at, int depth, bool shredded = false)
         where TSource : struct, ISource
     {
         VortexLimits.CheckDepth(depth, VortexLimits.MaxArrayDepth, "Canonical runs");
 
-        // The kind every source holds the column as, a constant aside, which takes the kind of the others.
+        // The kind every source holds the column as, a constant aside, which takes the kind of the others. Values not
+        // put back together are put back here, over the rows the runs span, unless their variant gathers them so
+        // (Struct).
         CanonicalKind kind = CanonicalKind.Constant;
         int first = -1;
         for (int s = 0; s < at.Length; s++)
         {
             CanonicalKind held = pass.NodeOf(s, at[s]).Kind;
-            if (held is CanonicalKind.Dictionary or CanonicalKind.RunEnd)
+            if (held is CanonicalKind.Dictionary or CanonicalKind.RunEnd or CanonicalKind.Shredded)
             {
                 at[s] = pass.Decoded(s, at[s]);
                 held = pass.NodeOf(s, at[s]).Kind;
@@ -209,7 +224,7 @@ internal static class CanonicalRuns
             case CanonicalKind.VarBinView:
                 return Views(in pass, dtype, at);
             case CanonicalKind.Struct:
-                return Struct(in pass, dtype, at, depth);
+                return Struct(in pass, dtype, at, depth, shredded);
             case CanonicalKind.Extension:
                 return Extension(in pass, dtype, at, depth);
             default:
@@ -399,7 +414,7 @@ internal static class CanonicalRuns
         }
     }
 
-    private static int Struct<TSource>(in Pass<TSource> pass, DType dtype, ReadOnlySpan<At> at, int depth)
+    private static int Struct<TSource>(in Pass<TSource> pass, DType dtype, ReadOnlySpan<At> at, int depth, bool shredded)
         where TSource : struct, ISource
     {
         // A variant dtype names no fields: its canonical form is a struct of the rows' metadata and values, whose count and
@@ -434,7 +449,14 @@ internal static class CanonicalRuns
 
                 // Read before the recursion: it adds records, and the arena may move them.
                 DType fieldType = variant ? pass.NodeOf(0, child[0]).DType : dtype.GetField(field);
-                results[field] = Node(in pass, fieldType, child, depth + 1);
+
+                // A variant's values not put back together, when its caller gathers them so and every source holds them so:
+                // their views, under the metadata gathered before them. A column of the struct gathered is asked by its
+                // field.
+                bool asked = variant ? shredded : depth == 1 && field < pass.Shredded.Length && pass.Shredded[field];
+                results[field] = variant && field == 1 && asked && EveryShredded(in pass, child)
+                    ? Hollows(in pass, fieldType, child, results[0])
+                    : Node(in pass, fieldType, child, depth + 1, asked);
                 if (results[field] < 0)
                 {
                     return -1;
@@ -448,6 +470,129 @@ internal static class CanonicalRuns
             children.Dispose();
             fields.Dispose();
         }
+    }
+
+    /// <summary>Whether every source holds the column under way as values not put back together.</summary>
+    private static bool EveryShredded<TSource>(in Pass<TSource> pass, ReadOnlySpan<At> at)
+        where TSource : struct, ISource
+    {
+        for (int s = 0; s < at.Length; s++)
+        {
+            if (pass.NodeOf(s, at[s]).Kind != CanonicalKind.Shredded)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// A variant's values not put back together (<see cref="CanonicalKind.Shredded"/>): the runs' views in order, under
+    /// <paramref name="metadata"/>, the rows' metadata gathered before them. A view of a value not written names the place
+    /// its value would take after those of the rows before it here, and a row of a run that names what the row before it
+    /// names does here too; a value taken as it is, which has bytes, is copied into a buffer of the node's own. The node
+    /// is told nothing of what took the rows gathered, which is its caller's to know
+    /// (<see cref="CanonicalArena.MaterializeShredded(int, CanonicalArena.ITakenRows, int)"/>).
+    /// </summary>
+    /// <remarks>
+    /// The places are given again because two sources' values may be sized at the same place, each in its own, and
+    /// values put back there would lie over each other.
+    /// </remarks>
+    private static int Hollows<TSource>(in Pass<TSource> pass, DType dtype, ReadOnlySpan<At> at, int metadata)
+        where TSource : struct, ISource
+    {
+        CanonicalArena into = pass.Into;
+        int rows = pass.Rows;
+        Validity validity = ValidityOf(in pass, dtype, at);
+
+        // Sized before anything is written: the bytes of the values taken as they are.
+        long referenced = 0;
+        foreach (Run run in pass.Runs)
+        {
+            At from = at[run.Source];
+            CanonicalNode source = pass.NodeOf(run.Source, from);
+            ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(source.HollowViews.Span).Slice((run.Row - from.Shift) * ViewWords, run.Rows * ViewWords);
+            for (int j = 0; j < run.Rows; j++)
+            {
+                uint size = words[j * ViewWords];
+                if (size > MaxInline && words[(j * ViewWords) + 2] != CanonicalSupport.HollowBuffer)
+                {
+                    referenced += size;
+                }
+            }
+        }
+
+        int viewBytes = ArrayDecodeContext.CheckedMultiply(rows, ViewSize, "gathered views");
+        if (viewBytes == 0)
+        {
+            return into.AddShredded(dtype, rows, validity, VortexBuffer.Empty, default, metadata);
+        }
+
+        VortexBuffer views = into.AllocateUninitialized(viewBytes, ViewSize, out Span<byte> writable);
+        Span<Int128> laid = MemoryMarshal.Cast<byte, Int128>(writable);
+        Span<byte> heap = default;
+        VortexBuffer data = referenced == 0 ? VortexBuffer.Empty : into.AllocateUninitialized(checked((int)referenced), 1, out heap).Slice(0, (int)referenced);
+        int filled = 0;
+        long placed = 0;
+        int position = 0;
+        foreach (Run run in pass.Runs)
+        {
+            At from = at[run.Source];
+            CanonicalNode source = pass.NodeOf(run.Source, from);
+            ReadOnlySpan<Int128> held = MemoryMarshal.Cast<byte, Int128>(source.HollowViews.Span).Slice(run.Row - from.Shift, run.Rows);
+            ReadOnlySpan<VortexBuffer> buffers = source.HollowDataBuffers;
+            Span<Int128> target = laid.Slice(position, run.Rows);
+            position += run.Rows;
+            for (int j = 0; j < held.Length; j++)
+            {
+                Int128 view = held[j];
+                ulong low = Low(view);
+                uint size = (uint)low;
+                if (size <= MaxInline)
+                {
+                    target[j] = view;
+                    continue;
+                }
+
+                ulong high = High(view);
+                uint index = (uint)high;
+                if (index == CanonicalSupport.HollowBuffer)
+                {
+                    // A row of the run that names what the row before it names: what that row names here.
+                    if (j > 0 && view == held[j - 1])
+                    {
+                        target[j] = target[j - 1];
+                        continue;
+                    }
+
+                    target[j] = new Int128((ulong)checked((uint)placed) << 32 | CanonicalSupport.HollowBuffer, size);
+                    placed += size;
+                    continue;
+                }
+
+                uint offset = (uint)(high >> 32);
+                if (index >= (uint)buffers.Length)
+                {
+                    NoBuffer(run.Row + j, run.Source, index, buffers.Length);
+                }
+
+                ReadOnlySpan<byte> bytes = buffers[(int)index].Span;
+                if ((ulong)offset + size > (ulong)bytes.Length)
+                {
+                    PastBuffer(run.Row + j, run.Source, offset, size, bytes.Length);
+                }
+
+                bytes.Slice((int)offset, (int)size).CopyTo(heap[filled..]);
+                target[j] = new Int128((ulong)(uint)filled << 32, low);
+                filled += (int)size;
+            }
+        }
+
+        System.Threading.Interlocked.Add(ref CanonicalArena.BytesMaterialized, viewBytes + filled);
+        return filled > 0
+            ? into.AddShredded(dtype, rows, validity, views, [data], metadata)
+            : into.AddShredded(dtype, rows, validity, views, default, metadata);
     }
 
     private static int Extension<TSource>(in Pass<TSource> pass, DType dtype, ReadOnlySpan<At> at, int depth)

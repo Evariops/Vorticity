@@ -1996,6 +1996,11 @@ internal static class ArrayBlobWriter
             // the node took.
             CanonicalKind.Dictionary or CanonicalKind.RunEnd => WriteNode(
                 blob, arena, arena.MaterializeEncoded(nodeIndex), encodings, compress, stats),
+
+            // The values of a shredded variant's rows not put back together, put back: the file holds them as it would
+            // hold them rebuilt.
+            CanonicalKind.Shredded => WriteNode(
+                blob, arena, arena.MaterializeShredded(nodeIndex), encodings, compress, stats),
             _ => throw new UnreachableException($"CanonicalKind {(byte)node.Kind} is not defined."),
         };
     }

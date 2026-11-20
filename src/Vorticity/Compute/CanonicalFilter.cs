@@ -109,6 +109,10 @@ internal static class CanonicalFilter
             // A selection breaks runs apart, and a gather through the ends would cost a search per
             // row for a form the consumer may never read: the runs are expanded once and gathered.
             CanonicalKind.RunEnd => Apply(arena, arena.MaterializeEncoded(nodeIndex), indices, mask),
+
+            // The values of rows not put back together are put back before rows are picked among them: only a job's
+            // writer is handed such a node, and it filters none.
+            CanonicalKind.Shredded => Apply(arena, arena.MaterializeShredded(nodeIndex), indices, mask),
             _ => throw new UnreachableException($"CanonicalKind {(byte)node.Kind} is not defined."),
         };
     }

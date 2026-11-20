@@ -136,6 +136,11 @@ internal static class VariantShredder
 
         void CanonicalArena.ITakenRows.Forgotten() => Lender?.Return(this);
 
+        void CanonicalArena.ITakenRows.Rebuild(
+            int first, int count, ReadOnlySpan<byte> views, ReadOnlySpan<byte> metadataViews, ReadOnlySpan<VortexBuffer> metadataBuffers,
+            Span<byte> into, int origin) =>
+            Rebuild(first, count, views, metadataViews, metadataBuffers, into, origin);
+
         // What the last row read took, node by node, for the rows that repeat its value to take again without reading it.
         private readonly Replay _replay = new Replay();
 
@@ -1998,12 +2003,6 @@ internal static class VariantShredder
             }
         }
 
-        // The id of each key of the plan in the metadata of the row being put back together, looked up when a row first
-        // holds the key under that metadata: stamped with the metadata's number among those met.
-        private int[] _ids = [];
-        private int[] _idStamps = [];
-        private int _idStamp;
-
         /// <summary>
         /// Writes the objects of the rows from <paramref name="first"/> on, <paramref name="count"/> of them, as putting
         /// them back together from the shredding they were taken from writes them
@@ -2029,13 +2028,12 @@ internal static class VariantShredder
         {
             int end = first + count;
             int keys = _fields.Length;
-            if (_ids.Length < keys)
-            {
-                _ids = new int[keys];
-                _idStamps = new int[keys];
-                _idStamp = 0;
-            }
 
+            // The id of each key of the plan in the metadata of the row being put back, looked up when a row first holds
+            // the key under that metadata, and the number of the metadata it was looked up in. Its own for the call: the
+            // rows a shredding took are put back by several readers at once, which only read the shredding.
+            Block<int> looked = Blocks.RentCleared<int>(2 * Math.Max(keys, 1));
+            int stamp = 0;
             Block<FieldAt> cursors = Blocks.Rent<FieldAt>(Math.Max(keys, 1));
             Block<int> listed = Blocks.RentCleared<int>(count + 1);
             Block<int> laid = default;
@@ -2124,7 +2122,7 @@ internal static class VariantShredder
                     {
                         dictionary = VariantDictionary.Read(BlockStatsPass.Value(metadataBuffers, metadataViews, i));
                         (lastLow, lastHigh, seen) = (low, high, true);
-                        _idStamp++;
+                        stamp++;
                     }
 
                     ReadOnlySpan<byte> view = views.Slice(i * ViewSize, ViewSize);
@@ -2145,7 +2143,9 @@ internal static class VariantShredder
                         Span<byte> target = length <= CanonicalSupport.MaxInlineViewLength
                             ? inline[..length]
                             : into.Slice(System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(view[12..]) - origin, length);
-                        Write(target, fields, others, in dictionary, at, merged.AsSpan(0, 3 * (total + 1)), ref crossing);
+                        Write(
+                            target, fields, others, in dictionary, at, merged.AsSpan(0, 3 * (total + 1)), looked.AsSpan(0, keys),
+                            looked.AsSpan(Math.Max(keys, 1), keys), stamp, ref crossing);
                     }
                     catch (ArgumentException)
                     {
@@ -2160,6 +2160,7 @@ internal static class VariantShredder
                 Blocks.Return(laid);
                 Blocks.Return(listed);
                 Blocks.Return(cursors);
+                Blocks.Return(looked);
             }
         }
 
@@ -2167,11 +2168,12 @@ internal static class VariantShredder
         /// Writes into <paramref name="target"/>, the bytes a row's object takes, the object of the row's
         /// <paramref name="fields"/>, each the plan's key doubled and one more for a value kept whole
         /// (<see cref="PrimitiveGroup.List"/>), and of <paramref name="others"/>, the keys kept apart of the row, merged
-        /// in the order of their names.
+        /// in the order of their names. <paramref name="looked"/> holds the id of each key of the plan looked up in the
+        /// metadata numbered <paramref name="stamp"/>, where <paramref name="stamps"/> says so.
         /// </summary>
         private void Write(
             Span<byte> target, ReadOnlySpan<int> fields, VariantNested others, scoped in VariantDictionary dictionary,
-            Span<FieldAt> at, Span<int> room, scoped ref byte[]? crossing)
+            Span<FieldAt> at, Span<int> room, Span<int> looked, Span<int> stamps, int stamp, scoped ref byte[]? crossing)
         {
             int total = fields.Length + others.Count;
             Span<int> order = room[..total];
@@ -2187,18 +2189,18 @@ internal static class VariantShredder
                 if (named)
                 {
                     int key = fields[f] >> 1;
-                    if (_idStamps[key] != _idStamp)
+                    if (stamps[key] != stamp)
                     {
-                        _ids[key] = dictionary.Find(_plan.Keys[key].Utf8);
-                        _idStamps[key] = _idStamp;
+                        looked[key] = dictionary.Find(_plan.Keys[key].Utf8);
+                        stamps[key] = stamp;
                     }
 
-                    if (_ids[key] < 0)
+                    if (looked[key] < 0)
                     {
                         throw new VortexFormatException($"The variant has a field '{_plan.Keys[key].Name}' its row's metadata does not name.");
                     }
 
-                    ids[n] = _ids[key];
+                    ids[n] = looked[key];
                     order[n] = fields[f++];
                 }
                 else

@@ -100,6 +100,29 @@ internal enum CanonicalKind : byte
     /// rather than keeping an offset. The validity is the row validity, as for a dictionary.
     /// </remarks>
     RunEnd = 11,
+
+    /// <summary>
+    /// The values of a shredded variant's rows not put back together: a view a row, of a value that is not written, and
+    /// what puts the values back.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Only produced for a scan whose consumer takes the rows as their shredding holds them and reads none, a job's
+    /// writer. A row's view holds its value's size and the offset it would lie at, and names a buffer that is none
+    /// (<see cref="Decoders.Canonical.CanonicalSupport.HollowBuffer"/>); a row whose value is taken as it is, or lies in
+    /// its view, holds an ordinary view over the node's data buffers. The node's one child is the metadata of the same
+    /// rows, which the values are put back under. What took the rows, and the first of them, is told beside the node by an
+    /// arena that keeps such things (<see cref="CanonicalArena.NoteTaken"/>); a node that reaches an arena that keeps
+    /// none has its values put back as it arrives.
+    /// </para>
+    /// <para>
+    /// What sizes a node by its views' lengths reads this one as any views. The accessors that promise bytes read through
+    /// a twin of ordinary views memoized on the record (<see cref="CanonicalArena.MaterializeShredded(int)"/>), the values
+    /// then put back to the byte as the rebuild of the shredding read writes them; a slice narrows the views and keeps
+    /// what puts them back.
+    /// </para>
+    /// </remarks>
+    Shredded = 12,
 }
 
 /// <summary>
@@ -285,6 +308,30 @@ internal readonly ref struct CanonicalNode
 
         return _arena.DataBufferAt(r.DataBufferStart + index);
     }
+
+    // ------------------------------------------------------------------------------ Shredded
+
+    /// <summary>
+    /// The views of a <see cref="CanonicalKind.Shredded"/> node as they lie, <c>Length * 16</c> bytes, those of the values
+    /// not written among them: read for the rows' sizes, or by what carries the node on. No value is put back.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Shredded"/>.</exception>
+    internal VortexBuffer HollowViews => Require(CanonicalKind.Shredded).BufferA;
+
+    /// <summary>The data buffers the views of a <see cref="CanonicalKind.Shredded"/> node that are not hollow name.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Shredded"/>.</exception>
+    internal ReadOnlySpan<VortexBuffer> HollowDataBuffers
+    {
+        get
+        {
+            ref readonly CanonicalRecord r = ref Require(CanonicalKind.Shredded);
+            return _arena.DataBufferRange(r.DataBufferStart, r.DataBufferCount);
+        }
+    }
+
+    /// <summary>The node of the metadata of a <see cref="CanonicalKind.Shredded"/> node's rows.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Shredded"/>.</exception>
+    internal int ShreddedMetadataIndex => _arena.ChildAt(Require(CanonicalKind.Shredded).ChildStart);
 
     // ------------------------------------------------------------------------------ ListView
 
@@ -488,6 +535,18 @@ internal readonly ref struct CanonicalNode
             if (r.Kind is CanonicalKind.Dictionary or CanonicalKind.RunEnd)
             {
                 return ref RequireDecoded(kind);
+            }
+
+            if (r.Kind == CanonicalKind.Shredded)
+            {
+                // Asking for the views of values not put back is asking for them to be: taken after, as below.
+                ref readonly CanonicalRecord put = ref _arena.RecordRef(_arena.MaterializeShredded(_index));
+                if (put.Kind != kind)
+                {
+                    ArraysThrow.Kind(put.Kind, kind.ToString());
+                }
+
+                return ref put;
             }
 
             if (r.Kind != kind)
@@ -1590,6 +1649,17 @@ internal partial class CanonicalArena
     {
         /// <summary>The arena that held what was taken is reset.</summary>
         void Forgotten();
+
+        /// <summary>
+        /// Writes the values not written of the rows from <paramref name="first"/> on, <paramref name="count"/> of the rows
+        /// taken, each where its view of <paramref name="views"/> says it lies, <paramref name="origin"/> bytes before
+        /// <paramref name="into"/>, in the bytes it says it takes: what a <see cref="CanonicalKind.Shredded"/> node's values
+        /// are put back by (<see cref="MaterializeShredded(int, ITakenRows, int)"/>). The rows' metadata is in
+        /// <paramref name="metadataViews"/> over <paramref name="metadataBuffers"/>.
+        /// </summary>
+        void Rebuild(
+            int first, int count, ReadOnlySpan<byte> views, ReadOnlySpan<byte> metadataViews, ReadOnlySpan<VortexBuffer> metadataBuffers,
+            Span<byte> into, int origin);
     }
 
     /// <summary>Drops what the arena kept of its first <paramref name="records"/> nodes beside the records, as it is reset.</summary>
@@ -1764,7 +1834,8 @@ internal partial class CanonicalArena
         CanonicalRecord record = _records[nodeIndex];
         long total = record.BufferA.Length + record.BufferB.Length;
 
-        if (named && record.Kind == CanonicalKind.VarBinView)
+        // A view of a value not written tells the bytes it names as any view does.
+        if (named && record.Kind is CanonicalKind.VarBinView or CanonicalKind.Shredded)
         {
             total += ViewedBytes(record.BufferA.Span, record.Length);
         }
@@ -1781,7 +1852,8 @@ internal partial class CanonicalArena
             total += Size(record.Validity.CanonicalNodeIndex, named);
         }
 
-        for (int i = 0; i < record.ChildCount; i++)
+        // The child of values not put back is their rows' metadata, which the variant they are of holds and counts.
+        for (int i = 0; record.Kind != CanonicalKind.Shredded && i < record.ChildCount; i++)
         {
             total += Size(_children[record.ChildStart + i], named);
         }
@@ -1947,6 +2019,12 @@ internal partial class CanonicalArena
         // may resize `_records`.
         CanonicalRecord src = source._records[sourceIndex];
 
+        // Values put back already are lent as they were put back.
+        if (src.Kind == CanonicalKind.Shredded && src.Materialized >= 0)
+        {
+            return ReferenceFrom(source, src.Materialized);
+        }
+
         Validity validity = src.Validity;
         if (validity.Kind == ValidityKind.Bitmap)
         {
@@ -1981,6 +2059,14 @@ internal partial class CanonicalArena
             {
                 AddDataBuffer(source._dataBuffers[src.DataBufferStart + i]);
             }
+        }
+
+        // Values not put back together are lent with what took their rows, told beside the node here as it is there. An
+        // arena that keeps no such thing has them put back at once: they could not be later.
+        if (src.Kind == CanonicalKind.Shredded && source.TryTaken(sourceIndex, out ITakenRows? rows, out int first) && rows is not null
+            && !NoteTaken(index, rows, first))
+        {
+            return MaterializeShredded(index, rows, first);
         }
 
         return index;
@@ -2044,6 +2130,13 @@ internal partial class CanonicalArena
         // `_records`, and holding a `ref` into the array across that would be a use-after-move when
         // source and destination are the same arena.
         CanonicalRecord src = source._records[sourceIndex];
+
+        // Values not put back are put back here, never in the source, which its readers only read, and copied from that:
+        // a copy outlives what its source names.
+        if (src.Kind == CanonicalKind.Shredded)
+        {
+            return CopyFrom(this, Decoded(ReferenceFrom(source, sourceIndex)), shareRepeats, viewRepeats);
+        }
 
         // Validity first: its bitmap is a node like any other, and the copy must name the new index.
         Validity validity = src.Validity;
