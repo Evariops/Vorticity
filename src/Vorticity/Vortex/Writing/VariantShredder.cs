@@ -177,8 +177,12 @@ internal static class VariantShredder
         internal static Rows Prepare(CanonicalArena arena, int node)
         {
             CanonicalNode variant = arena.GetNode(node);
+            int value = variant.GetFieldIndex(1);
+
+            // Values not put back together stay so: what took their rows holds them, and no row of them is read here.
+            bool held = arena.GetNode(value).Kind == CanonicalKind.Shredded && arena.PutBack(value) < 0;
             return new Rows(
-                arena, node, ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(0)), ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(1)), variant.Length);
+                arena, node, ArrayBlobWriter.Materialize(arena, variant.GetFieldIndex(0)), held ? value : ArrayBlobWriter.Materialize(arena, value), variant.Length);
         }
 
         /// <summary>

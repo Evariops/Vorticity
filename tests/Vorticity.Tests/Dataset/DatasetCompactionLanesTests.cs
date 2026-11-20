@@ -175,20 +175,25 @@ public sealed partial class DatasetCompactionLanesTests
     /// at four lanes and at fourteen: the segments are those of the consolidation whose writers read every row put back
     /// together, at one lane and at four. The second consolidation reads the objects the first shredded, whose rows it
     /// takes. Blocks of 256 rows, so that a run of a block's holds four rows or more on average and is worth taking, in
-    /// chunks of 4 KiB, dozens an object: an input takes the chunks it decodes once a first block was worth it, which a
-    /// file decoded whole before any block never does.
+    /// chunks of some kilobytes, dozens an object: an input takes the chunks it decodes once a first block was worth it,
+    /// which a file decoded whole before any block never does. The inputs hand their chunks over not put back together.
+    /// In chunks of 4 KiB a block makes a chunk, which the writer's line cuts column by column, and no value of a block
+    /// that took its runs is ever put back. In chunks of 48 KiB a chunk takes several blocks, some of which wait whole
+    /// in transit, their values put back first by what the block took.
     /// </summary>
     /// <remarks>
     /// A key is held by half the records or by one in four hundred, so that both jobs shred the same keys: an input that
     /// types a key its job does not is read as its rows put back together, a window at a time.
     /// </remarks>
-    [Fact]
-    public async Task AConsolidationWhoseInputsHandOverWhatTheyTookOfAVariantWritesTheSameSegments()
+    [Theory]
+    [InlineData(4 << 10)]
+    [InlineData(48 << 10)]
+    public async Task AConsolidationWhoseInputsHandOverWhatTheyTookOfAVariantWritesTheSameSegments(int chunkBytes)
     {
         await using MemoryObjectStore built = new MemoryObjectStore();
         {
             Random random = new Random(43);
-            await using VortexDataset dataset = await VortexDataset.CreateAsync(built, LogDoc.Schema, TakenLogOptionsOf(VortexSession.Default, takes: false), Ct);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(built, LogDoc.Schema, TakenLogOptionsOf(VortexSession.Default, takes: false, chunkBytes), Ct);
             for (int a = 0; a < 12; a++)
             {
                 await AppendLogsAsync(dataset, random, a * 3_000, 3_000, latePercent: 0, dayRows: 96_000, SteadyAttributes);
@@ -204,10 +209,18 @@ public sealed partial class DatasetCompactionLanesTests
         bool[] takes = [false, false, true, true];
         int run = 0;
         List<CompactionResult> jobs = await SameObjectsAtDegreesAsync(
-            built, [1, 4, 4, 14], session => TakenLogOptionsOf(session, takes[run++]), static async dataset => [.. await dataset.ConsolidateAsync(Ct)]);
-        string ran = string.Join(", ", jobs.Select(static job => $"{job.Trigger} {job.ObjectsIn}->{job.ObjectsOut} line {job.WriterBlocksOnLine} taken {job.WriterBlocksOfRunsTaken}"));
+            built, [1, 4, 4, 14], session => TakenLogOptionsOf(session, takes[run++], chunkBytes), static async dataset => [.. await dataset.ConsolidateAsync(Ct)]);
+        string ran = string.Join(", ", jobs.Select(static job =>
+            $"{job.Trigger} {job.ObjectsIn}->{job.ObjectsOut} line {job.WriterBlocksOnLine} taken {job.WriterBlocksOfRunsTaken} put back {job.WriterBlocksPutBack} apart {job.WriterColumnsPutBackApart} chunks {job.InputVariantChunks}"));
         Assert.True(jobs.Sum(static job => job.WriterBlocksOnLine) > 0, ran);
         Assert.True(jobs.Sum(static job => job.WriterBlocksOfRunsTaken) > 0, ran);
+
+        // Chunks handed over not put back together, and blocks written from them whose values never were: every one of
+        // them where each block makes a chunk, which the line cuts column by column; where a chunk takes several blocks,
+        // some wait in transit, their values put back first.
+        Assert.True(jobs.Sum(static job => job.InputVariantChunks.Held) > 0, ran);
+        Assert.True(jobs.Sum(static job => job.WriterBlocksOfRunsTaken - job.WriterBlocksPutBack) > 0, ran);
+        Assert.Equal(chunkBytes > 4 << 10, jobs.Sum(static job => job.WriterBlocksPutBack) > 0);
     }
 
     /// <summary>
@@ -244,7 +257,7 @@ public sealed partial class DatasetCompactionLanesTests
         return Variant.Object([.. fields]);
     }
 
-    private static DatasetOptions TakenLogOptionsOf(VortexSession session, bool takes)
+    private static DatasetOptions TakenLogOptionsOf(VortexSession session, bool takes, int chunkBytes)
     {
         // Objects aimed at 2 MiB, which an append of 3 000 records stays well under and is merged.
         DatasetOptions options = LogOptionsOf(session, LayoutOrganization.Tiered);
@@ -252,7 +265,7 @@ public sealed partial class DatasetCompactionLanesTests
         {
             Write = new VortexWriteOptions { BlockRows = 256 },
             Layout = options.Layout! with { ObjectBytes = 1 << 21 },
-            ChunkBytes = 4 << 10,
+            ChunkBytes = chunkBytes,
             TakesVariants = takes,
         };
     }

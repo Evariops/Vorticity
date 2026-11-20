@@ -123,6 +123,26 @@ public sealed record CompactionResult
     /// </summary>
     internal long WriterBlocksOfRunsTaken { get; init; }
 
+    /// <summary>
+    /// Of <see cref="WriterBlocksOfRunsTaken"/>, those whose values of the column, gathered not put back together, were put
+    /// back whole before the block was read: a block the writer's line did not cut column by column, or whose column no
+    /// chain took, or whose keys are read from its rows.
+    /// </summary>
+    internal long WriterBlocksPutBack { get; init; }
+
+    /// <summary>
+    /// The times an item of a block counted in <see cref="WriterBlocksOfRunsTaken"/> put the column's values back together
+    /// in an arena of its own: a census near its most keys, a gathering whose chain a cut left broken.
+    /// </summary>
+    internal long WriterColumnsPutBackApart { get; init; }
+
+    /// <summary>
+    /// The chunks of a variant column the job's inputs handed over as their shreddings hold them, their rows not put back
+    /// together; those they set out to take and put back together after all, each decoded twice, after which the input's
+    /// scan takes no chunk more; and, of those, the ones taken whole but not byte for byte.
+    /// </summary>
+    internal (long Held, long Refused, long Inexact) InputVariantChunks { get; init; }
+
     /// <summary>The inputs' batches its merge took over from their scans and kept until its writers copied their runs.</summary>
     internal long InputWindowsTaken { get; init; }
 
@@ -740,6 +760,9 @@ internal static partial class DatasetCompactor
         long chunksOnLine = lateOutputs?.ChunksEndedOnLine ?? 0;
         long chunksCut = lateOutputs?.ChunksCutOnLine ?? 0;
         long runsTaken = lateOutputs?.BlocksOfRunsTaken ?? 0;
+        long putBack = lateOutputs?.BlocksPutBack ?? 0;
+        long putBackApart = lateOutputs?.ColumnsPutBackApart ?? 0;
+        (long Held, long Refused, long Inexact) variantChunks = lateOutputs?.VariantChunks ?? default;
         long windowsTaken = 0;
         long windowsCopied = 0;
         long windowsKeyed = 0;
@@ -759,6 +782,9 @@ internal static partial class DatasetCompactor
             chunksOnLine += outputs.ChunksEndedOnLine;
             chunksCut += outputs.ChunksCutOnLine;
             runsTaken += outputs.BlocksOfRunsTaken;
+            putBack += outputs.BlocksPutBack;
+            putBackApart += outputs.ColumnsPutBackApart;
+            variantChunks = (variantChunks.Held + outputs.VariantChunks.Held, variantChunks.Refused + outputs.VariantChunks.Refused, variantChunks.Inexact + outputs.VariantChunks.Inexact);
             windowsTaken += outputs.WindowsTaken;
             windowsCopied += outputs.WindowsCopied;
             windowsKeyed += outputs.WindowsKeyedHere;
@@ -792,6 +818,9 @@ internal static partial class DatasetCompactor
             WriterChunksEndedOnLine = chunksOnLine,
             WriterChunksCutOnLine = chunksCut,
             WriterBlocksOfRunsTaken = runsTaken,
+            WriterBlocksPutBack = putBack,
+            WriterColumnsPutBackApart = putBackApart,
+            InputVariantChunks = variantChunks,
             InputWindowsTaken = windowsTaken,
             InputWindowsCopied = windowsCopied,
             InputWindowsKeyedByMerge = windowsKeyed,
@@ -1455,6 +1484,12 @@ internal static partial class DatasetCompactor
                     outputs.WindowsCopied += one.WindowsCopied;
                     outputs.WindowsKeyedHere += one.WindowsKeyedHere;
                 }
+            }
+
+            foreach ((_, VariantTake take) in takes ?? [])
+            {
+                (long held, long refused, long inexact) = outputs.VariantChunks;
+                outputs.VariantChunks = (held + take.ChunksHeld, refused + take.ChunksRefused + take.ChunksInexact, inexact + take.ChunksInexact);
             }
 
             if (merge is SlicedMerge sliced)
@@ -2408,6 +2443,19 @@ internal static partial class DatasetCompactor
         /// <summary>Of <see cref="BlocksOnLine"/>, those that took their rows of a variant column from what the inputs took of them.</summary>
         internal long BlocksOfRunsTaken { get; private set; }
 
+        /// <summary>Of <see cref="BlocksOfRunsTaken"/>, those whose values of the column were put back together whole before the block was read.</summary>
+        internal long BlocksPutBack { get; private set; }
+
+        /// <summary>The times an item of such a block put the column's values back together in an arena of its own.</summary>
+        internal long ColumnsPutBackApart { get; private set; }
+
+        /// <summary>
+        /// The chunks of a variant column the inputs of the merges into this stream handed over as their shreddings hold
+        /// them, those they set out to take and put back together after all, and, of those, the ones taken whole but not
+        /// byte for byte (<see cref="VariantTake"/>).
+        /// </summary>
+        internal (long Held, long Refused, long Inexact) VariantChunks { get; set; }
+
         /// <summary>The inputs' batches the merges into this stream took over, and those they copied to keep.</summary>
         internal long WindowsTaken { get; set; }
 
@@ -2755,6 +2803,8 @@ internal static partial class DatasetCompactor
                     ChunksEndedOnLine += output.Writer.ChunksEndedOnLine;
                     ChunksCutOnLine += output.Writer.ChunksCutOnLine;
                     BlocksOfRunsTaken += output.Writer.BlocksOfRunsTaken;
+                    BlocksPutBack += output.Writer.BlocksPutBack;
+                    ColumnsPutBackApart += output.Writer.ColumnsPutBackApart;
                 }
 
                 written = await _dataset.SealAsync(output, _rows, _firstRow, cancellationToken).ConfigureAwait(false);

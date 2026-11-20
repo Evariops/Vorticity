@@ -2,7 +2,7 @@
 # bench/speed.sh: the short benches of the throughput work, each run once per source tree and kept in a ledger.
 #
 #   bench/speed.sh [--only B,B…] [--degree N,N…] [--profile|--allocations] [--memory SIZE] [--again] [--base REF|TREE] [--digest]
-#                  [--same-bytes] [--note TEXT]
+#                  [--same-bytes] [--takes] [--note TEXT]
 #
 # Benches (default: logs,metrics):
 #   logs     one tier merge of 5 job outputs of log records, 7.6 M rows, 2 GiB        (~15 s a round)
@@ -42,6 +42,10 @@
 # base's figures come from the ledger and are never run again. The ledger and the kept stores live in
 # ~/.cache/vorticity/speed (VORTICITY_SPEED to move them).
 #
+# --takes runs the compactions with their inputs handing the writers what they took of a variant column's rows, not put
+# back together (DatasetOptions.TakesVariants, off by default), the mode then named after it (plain-takes, plain-takes-16g):
+# the same tree with and without, run in turn, and the same bytes written.
+#
 # --same-bytes is for a change that must not change what is written, a change of how the work runs alone: a run whose
 # bytes differ from those its base wrote at the same bench and degree is not written to the ledger, and the script exits
 # with 1 once every run is done.
@@ -50,7 +54,7 @@ repo=$(cd "$(dirname "$0")/.." && pwd)
 home=${VORTICITY_SPEED:-$HOME/.cache/vorticity/speed}
 ledger=$home/ledger.tsv
 mkdir -p "$home/logs"
-only="logs,metrics"; degrees="14"; profile=0; allocations=0; memory=2g; again=0; base=""; digest=0; note=""; same=0; refused=0
+only="logs,metrics"; degrees="14"; profile=0; allocations=0; memory=2g; again=0; base=""; digest=0; note=""; same=0; refused=0; takes=0
 while [ $# -gt 0 ]; do
   case $1 in
     --only) only=$2; shift ;;
@@ -63,6 +67,7 @@ while [ $# -gt 0 ]; do
     --digest) digest=1 ;;
     --note) note=$2; shift ;;
     --same-bytes) same=1 ;;
+    --takes) takes=1 ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
   shift
@@ -89,6 +94,7 @@ mode=plain
 [ $profile = 1 ] && mode=$([ -n "$xctrace" ] && echo x30 || echo p10)
 [ $allocations = 1 ] && mode=alloc
 [ $profile = 1 ] && [ $allocations = 1 ] && { echo "--profile and --allocations are runs of their own: one at a time" >&2; exit 2; }
+[ $takes = 1 ] && mode="$mode-takes"
 [ "$memory" != 2g ] && mode="$mode-$memory"
 echo "tree ${tree:0:10} ($commit), base ${base:0:10}, mode $mode"
 
@@ -136,6 +142,7 @@ for bench in ${only//,/ }; do
       *) echo "no bench named $bench" >&2; exit 2 ;;
     esac
     [ $digest = 1 ] && [ $kind = compact ] && args+=(--digest)
+    [ $takes = 1 ] && [ $kind = compact ] && args+=(--takes-variants)
     exe=("$queries/vortex-queries.dll"); [ $kind = runner ] && exe=("$runner")
     # The last round alone: a compaction waits a second and a half after saying so, a runner is sampled from its start.
     last_round() {

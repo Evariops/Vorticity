@@ -1109,6 +1109,17 @@ internal sealed class IndexWriter : IDisposable
         }
     }
 
+    /// <summary>
+    /// Whether feeding the keys variant column <paramref name="field"/> shreds reads the rows of a batch
+    /// <paramref name="taken"/> holds the column's shredding of, rather than what <paramref name="taken"/> took
+    /// (<see cref="TakeKeys"/>): its keys fed with the column, not apart (<paramref name="keysApart"/>), or a nested path,
+    /// which is read from the rows, or a key the shredding does not type in the class it is read in, or dropped. False
+    /// for a column that feeds no key.
+    /// </summary>
+    internal bool ReadsRows(int field, VariantShredder.Shredding taken, bool keysApart) =>
+        _variantFeeds?[field] is { } feed
+        && (!keysApart || feed.Groups == 0 || feed.Nested.Length > 0 || taken.Dropped || TakenKeys(field, taken.Plan).Length == 0);
+
     // By variant column, the key of the column's shredding each of its top-level keys is, once known: empty when one of
     // them is not a key the shredding types in the class it is read in.
     private int[]?[]? _takenKeys;

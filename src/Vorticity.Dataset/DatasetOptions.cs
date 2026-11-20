@@ -252,10 +252,12 @@ public sealed record DatasetOptions
 
     /// <summary>
     /// Whether a job's inputs hand its writers what they took of a variant column's rows as their own shredding holds them,
-    /// which a block takes its runs from in place of reading its rows put back together; false by default. The objects
-    /// written are the same either way. On, while an input still puts its rows back together beside what it takes of them,
-    /// a consolidation of log records ran as long for 3.5 % less processor time, its inputs holding 0.5 GiB more
-    /// (2026-11-19): it stays off until an input that takes no longer puts its rows back together.
+    /// which a block takes its runs from in place of reading its rows put back together; false by default. An input
+    /// that hands a chunk over so does not put its rows back together: it sizes them, and a reader that asks for their
+    /// bytes has them put back then (<see cref="Arrays.CanonicalKind.Shredded"/>). The objects written are the same either
+    /// way. It stays off: on the consolidation of log records it was made for, at degree 14 under 16 GiB, a job spent 13 %
+    /// less processor time and ran 1.4 to 4.8 % shorter, its inputs holding 11 % more, a window taken keeping more for
+    /// each of 400 sparse keys than its rows' binary held (2026-11-20).
     /// </summary>
     internal bool TakesVariants { get; init; }
 

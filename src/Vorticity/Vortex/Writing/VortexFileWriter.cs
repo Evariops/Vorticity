@@ -2524,14 +2524,25 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private int Assemble(Staging staging)
     {
-        // Runs still in a merge's inputs: each column gathered run after run from the inputs' batches, in one pass.
-        if (!_mayShareChildren && GatheredByRuns(staging) is >= 0 and int assembled)
+        // Runs still in a merge's inputs: each column gathered run after run from the inputs' batches, in one pass. Which
+        // variant columns' rows are taken from what the inputs took of them is decided first: it decides what is gathered
+        // of their values.
+        if (!_mayShareChildren)
         {
-            TakeRuns(staging, assembled);
-            staging.Gathers = false;
-            staging.Parts.Clear();
-            Ledger?.Release(staging, ref staging.FirstRun);
-            return assembled;
+            bool[]? held = RunsHeld(staging);
+            if (GatheredByRuns(staging, held) is >= 0 and int assembled)
+            {
+                TakeRuns(staging, assembled, held);
+                staging.Gathers = false;
+                staging.Parts.Clear();
+                Ledger?.Release(staging, ref staging.FirstRun);
+                return assembled;
+            }
+
+            if (held is not null)
+            {
+                Array.Clear(held);
+            }
         }
 
         // A schema the gather by runs does not take, a decimal's: a window of each batch, gathered where they lie, then
@@ -2592,16 +2603,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// copied gave the same node, every fixed value and every view copied three times over: 16.6 % of the processor of a
     /// consolidation of 74 appends of metric records, whose blocks take 240 runs of 80 batches each (2026-11-18).
     /// </remarks>
-    private int GatheredByRuns(Staging staging)
+    private int GatheredByRuns(Staging staging, bool[]? held = null)
     {
         List<StagedPart> parts = staging.Parts;
-        bool held = false;
-        for (int i = 0; i < parts.Count && !held; i++)
+        bool lent = false;
+        for (int i = 0; i < parts.Count && !lent; i++)
         {
-            held = parts[i].Source is not null;
+            lent = parts[i].Source is not null;
         }
 
-        if (!held || !CanonicalRuns.Takes(_schema))
+        if (!lent || !CanonicalRuns.Takes(_schema))
         {
             return -1;
         }
@@ -2644,7 +2655,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         windowOf.Clear();
         try
         {
-            return CanonicalRuns.Gather<RunWindow>(staging.Context.Decode, _schema, CollectionsMarshal.AsSpan(windows), runs, rows);
+            return CanonicalRuns.Gather<RunWindow>(staging.Context.Decode, _schema, CollectionsMarshal.AsSpan(windows), runs, rows, held);
         }
         finally
         {
@@ -2653,58 +2664,206 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
-    /// Has the flight of <paramref name="staging"/>, a block gathered run after run into node <paramref name="assembled"/>,
-    /// take its rows of each variant column the merge's inputs take as their own shreddings hold them
-    /// (<see cref="RunLedger.Takes"/>) from what they took of each run's batch
-    /// (<see cref="VariantShredder.Shredding.AppendRange"/>), where every run lies in a batch that tells it and the block's
-    /// rows are worth taking so (<see cref="WorthTaking"/>): the column's item of the flight then reads no row
-    /// (<see cref="Flight.TakeBlock"/>). Tells the inputs whether the block was worth it, which the windows they decode
-    /// next follow. Before the runs' batches are let go.
+    /// Which variant columns of <paramref name="staging"/>'s block take their rows from what the merge's inputs took of
+    /// them (<see cref="TakeRuns"/>), by field, in the flight's <see cref="Flight.RunsTaken"/>: those the inputs take as
+    /// their own shreddings hold them (<see cref="RunLedger.Takes"/>) whose every run lies in a batch that holds the
+    /// column's values not put back together, under a shredding of the column's plan made ready for ranges
+    /// (<see cref="HeldBy"/>). Their values are then gathered not put back either. Null when none does, or for a block no
+    /// flight takes: a writer on one lane, which reads its rows.
     /// </summary>
-    private void TakeRuns(Staging staging, int assembled)
+    private bool[]? RunsHeld(Staging staging)
+    {
+        if (Ledger?.Takes is not { } takes || _shredding is not { } plans || staging.Flight is not { } flight)
+        {
+            return null;
+        }
+
+        flight.SizeShreds(_fieldCount);
+        bool[] held = flight.RunsTaken;
+        List<StagedPart> parts = staging.Parts;
+        bool any = false;
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            held[field] = false;
+            if (plans[field] is not { } plan || TakeOf(takes, plan) is null)
+            {
+                continue;
+            }
+
+            // Runs too short on average are read (WorthTaking): their values are put back as they are gathered.
+            bool every = parts.Count > 0 && (long)parts.Count * TakenRunRows <= staging.Rows;
+            for (int i = 0; i < parts.Count && every; i++)
+            {
+                every = parts[i].Source is { } source && HeldBy(source, parts[i].Root, field, plan, out _) is not null;
+            }
+
+            held[field] = every;
+            any |= every;
+        }
+
+        return any ? held : null;
+    }
+
+    /// <summary>
+    /// What took the rows of variant column <paramref name="field"/> of the batch whose root is <paramref name="root"/> in
+    /// <paramref name="source"/>, a merge's input's, and the row of it the batch's first row is in
+    /// <paramref name="first"/>: a shredding of <paramref name="plan"/> made ready for ranges, told beside the column's
+    /// values, which are not put back together. Null for a batch whose values are, or were taken under another plan.
+    /// </summary>
+    private static VariantShredder.Shredding? HeldBy(CanonicalArena source, int root, int field, VariantShredding plan, out int first)
+    {
+        first = 0;
+        CanonicalNode column = source.GetNode(source.GetNode(root).GetFieldIndex(field));
+        if (column.Kind != CanonicalKind.Struct || column.FieldCount != 2)
+        {
+            return null;
+        }
+
+        int values = column.GetFieldIndex(1);
+        return source.GetNode(values).Kind == CanonicalKind.Shredded && source.PutBack(values) < 0
+            && source.TryTaken(values, out CanonicalArena.ITakenRows? rows, out first)
+            && rows is VariantShredder.Shredding taken && taken.Indexed && ReferenceEquals(taken.Plan, plan)
+            ? taken
+            : null;
+    }
+
+    /// <summary>
+    /// Has the flight of <paramref name="staging"/>, a block gathered run after run into node <paramref name="assembled"/>,
+    /// take its rows of each variant column <paramref name="held"/> names (<see cref="RunsHeld"/>) from what the merge's
+    /// inputs took of each run's batch (<see cref="VariantShredder.Shredding.AppendRange"/>): the column's item of the
+    /// flight then reads no row (<see cref="Flight.TakeBlock"/>), and the block's values of the column, gathered not put
+    /// back together, are put back by what the flight took when a reader asks for them. Tells the inputs whether a block
+    /// as this one is worth it (<see cref="WorthTaking"/>), which the windows they decode next follow. Before the runs'
+    /// batches are let go.
+    /// </summary>
+    private void TakeRuns(Staging staging, int assembled, bool[]? held)
     {
         if (Ledger?.Takes is not { } takes || _shredding is not { } plans || staging.Flight is not { } flight)
         {
             return;
         }
 
-        flight.SizeShreds(_fieldCount);
         CanonicalArena into = staging.Context.Canonical;
         List<StagedPart> parts = staging.Parts;
         for (int field = 0; field < _fieldCount; field++)
         {
-            flight.RunsTaken[field] = false;
             if (plans[field] is not { } plan || TakeOf(takes, plan) is not { } take)
             {
                 continue;
             }
 
-            bool worth = WorthTaking(into, into.GetNode(assembled).GetFieldIndex(field), parts.Count);
-            take.Note(worth);
-            if (!worth)
+            take.Note(WorthTaking(into, into.GetNode(assembled).GetFieldIndex(field), parts.Count));
+            if (held is null || !held[field])
             {
                 continue;
             }
 
             VariantShredder.Shredding block = flight.BeginBlock(field, plan, Account);
             int at = 0;
-            bool every = true;
-            for (int i = 0; i < parts.Count && every; i++)
+            foreach (StagedPart part in parts)
             {
-                StagedPart part = parts[i];
-                every = false;
-                if (part.Source is { } source
-                    && source.TryTaken(source.GetNode(part.Root).GetFieldIndex(field), out CanonicalArena.ITakenRows? held, out int first)
-                    && held is VariantShredder.Shredding taken && ReferenceEquals(taken.Plan, plan))
-                {
-                    block.AppendRange(taken, first + part.Row, part.Rows, at);
-                    at += part.Rows;
-                    every = true;
-                }
+                VariantShredder.Shredding taken = HeldBy(part.Source!, part.Root, field, plan, out int first)!;
+                block.AppendRange(taken, first + part.Row, part.Rows, at);
+                at += part.Rows;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Puts back together, in <paramref name="arena"/>, the values of each variant column <paramref name="which"/> names of
+    /// the block at <paramref name="root"/>, gathered not put back (<see cref="RunsHeld"/>), by what
+    /// <paramref name="flight"/> took of the block's runs (<see cref="TakeRuns"/>), and has the block name them: a root
+    /// of the same rows, whose columns named hold their values as any block's do. On the thread that owns the arena, before
+    /// anything reads the block's rows of those columns.
+    /// </summary>
+    /// <returns>The block's root: <paramref name="root"/> itself when no column named held values not put back.</returns>
+    private int PutBack(Flight flight, CanonicalArena arena, int root, ReadOnlySpan<bool> which)
+    {
+        // Read before anything is added: the additions may move the records.
+        CanonicalNode block = arena.GetNode(root);
+        DType dtype = block.DType;
+        int rows = block.Length;
+        Validity validity = block.Validity;
+        Span<int> fields = stackalloc int[_fieldCount];
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            fields[field] = block.GetFieldIndex(field);
+        }
+
+        bool any = false;
+        for (int field = 0; field < which.Length; field++)
+        {
+            if (!which[field])
+            {
+                continue;
             }
 
-            flight.RunsTaken[field] = every;
+            CanonicalNode variant = arena.GetNode(fields[field]);
+            if (variant.Kind != CanonicalKind.Struct || variant.FieldCount != 2)
+            {
+                continue;
+            }
+
+            int metadata = variant.GetFieldIndex(0);
+            int values = variant.GetFieldIndex(1);
+            if (arena.GetNode(values).Kind != CanonicalKind.Shredded)
+            {
+                continue;
+            }
+
+            DType variantType = variant.DType;
+            Validity variantValidity = variant.Validity;
+            int twin = arena.MaterializeShredded(values, flight.Blocks[field]!, 0);
+            fields[field] = arena.AddStruct(variantType, rows, variantValidity, [metadata, twin]);
+            any = true;
         }
+
+        return any ? arena.AddStruct(dtype, rows, validity, fields) : root;
+    }
+
+    /// <summary>
+    /// Variant column <paramref name="field"/> of <paramref name="flight"/>'s block lent to <paramref name="into"/>, an
+    /// arena of the caller's own, its values, which the flight holds not put back together, put back there by what the
+    /// flight took of the block's runs: the block's arena is read by the flight's items, and takes nothing.
+    /// </summary>
+    private static int PutBackInto(CanonicalArena into, Flight flight, int field)
+    {
+        int lent = into.ReferenceFrom(flight.Arena, flight.FieldNodes[field]);
+        CanonicalNode variant = into.GetNode(lent);
+        int metadata = variant.GetFieldIndex(0);
+        int values = variant.GetFieldIndex(1);
+        if (into.GetNode(values).Kind != CanonicalKind.Shredded)
+        {
+            return lent;
+        }
+
+        DType dtype = variant.DType;
+        int length = variant.Length;
+        Validity validity = variant.Validity;
+        int twin = into.MaterializeShredded(values, flight.Blocks[field]!, 0);
+        return into.AddStruct(dtype, length, validity, [metadata, twin]);
+    }
+
+    /// <summary>
+    /// Puts back together the values of every variant column of <paramref name="staging"/>'s block at <paramref name="node"/>
+    /// that its flight's assembly gathered not put back (<see cref="PutBack"/>), for a block that goes through alone, every
+    /// row of it read: the block's root after it.
+    /// </summary>
+    private int PutBackWhole(Staging staging, int node)
+    {
+        if (node < 0 || staging.Flight is not { } flight || !flight.RunsTaken.AsSpan().Contains(true))
+        {
+            return node;
+        }
+
+        int whole = PutBack(flight, staging.Context.Canonical, node, flight.RunsTaken);
+        Array.Clear(flight.RunsTaken);
+        if (_line is { } line)
+        {
+            line.BlocksPutBack++;
+        }
+
+        return whole;
     }
 
     /// <summary>What takes the column written under <paramref name="plan"/> among <paramref name="takes"/>; null for none.</summary>
@@ -2744,13 +2903,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         CanonicalNode metadata = arena.GetNode(variant.GetFieldIndex(0));
         CanonicalNode value = arena.GetNode(variant.GetFieldIndex(1));
-        if (metadata.Kind != CanonicalKind.VarBinView || value.Kind != CanonicalKind.VarBinView)
+        if (metadata.Kind != CanonicalKind.VarBinView || value.Kind is not (CanonicalKind.VarBinView or CanonicalKind.Shredded))
         {
             return false;
         }
 
-        // A row whose views are the row before's repeats it: the gather has the rows that repeat view one copy.
-        ReadOnlySpan<Int128> values = MemoryMarshal.Cast<byte, Int128>(value.Views.Span)[..rows];
+        // A row whose views are the row before's repeats it: the gather has the rows that repeat view one copy, and a
+        // row not put back together that repeats the row before it in its run name what that row names.
+        ReadOnlySpan<Int128> values = MemoryMarshal.Cast<byte, Int128>(value.Kind == CanonicalKind.Shredded ? value.HollowViews.Span : value.Views.Span)[..rows];
         ReadOnlySpan<Int128> metadatas = MemoryMarshal.Cast<byte, Int128>(metadata.Views.Span)[..rows];
         int repeats = 0;
         for (int row = 1; row < rows; row++)
@@ -3084,7 +3244,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // assembled on its lane already, while the block before it went through.
         ScanContext context = staging.Context;
         int rows = staging.Rows;
-        int node = staging.Assembled >= 0 ? staging.Assembled : Assemble(staging);
+        int node = PutBackWhole(staging, staging.Assembled >= 0 ? staging.Assembled : Assemble(staging));
         staging.Assembled = -1;
         staging.Rows = 0;
         staging.Bytes = 0;
@@ -4204,7 +4364,22 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// column by column passes its own, which the flights before it counted in their order, the owner counting them as it
     /// emits them.
     /// </remarks>
-    private void Gather(int field, Gathering gathering, CanonicalArena arena, int node, long rows, int blocks, int firstBlock = -1, bool thin = false)
+    /// <param name="field">The column.</param>
+    /// <param name="gathering">What the column gathers.</param>
+    /// <param name="arena">The arena of the rows.</param>
+    /// <param name="node">The column's node of the rows.</param>
+    /// <param name="rows">The rows.</param>
+    /// <param name="blocks">The blocks the rows make.</param>
+    /// <param name="firstBlock">The blocks of the file before the rows, -1 for the writer's count now.</param>
+    /// <param name="thin">Whether a shredded column gathers the rows thin, its chain having taken them.</param>
+    /// <param name="hollow">
+    /// The flight whose block the rows are, when it holds the column's values not put back together and the column gathers
+    /// them whole all the same, its chain not taking them: they are put back in the gathering's arena by what the flight
+    /// took of them, the block's arena being read by the flight's other items, then copied as any values.
+    /// </param>
+    private void Gather(
+        int field, Gathering gathering, CanonicalArena arena, int node, long rows, int blocks, int firstBlock = -1, bool thin = false,
+        Flight? hollow = null)
     {
         CanonicalArena into = (gathering.Context ??= TransitContexts.Rent(Account)).Canonical;
         if (gathering.Rows == 0)
@@ -4227,7 +4402,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         int owned = coded
             ? _dictionaries![field]!.CodeInto(arena, node, into, _codesTypes![field])
             : thin && shredded ? Thin(into, arena, node)
+            : hollow is not null ? into.CopyFrom(into, PutBackInto(into, hollow, field), viewRepeats: true)
             : into.CopyFrom(arena, node, viewRepeats: true);
+        if (hollow is not null && _line is { } line)
+        {
+            Interlocked.Increment(ref line.ColumnsPutBackApart);
+        }
+
         gathering.Nodes.Add(owned);
         if (thin && shredded)
         {

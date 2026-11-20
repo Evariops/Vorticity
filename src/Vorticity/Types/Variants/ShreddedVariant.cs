@@ -466,6 +466,14 @@ internal sealed class ShreddedVariant
         }
     }
 
+    /// <summary>
+    /// The node of the <paramref name="rows"/> rows the slices sized (<see cref="HollowSlice"/>), their values not put back
+    /// together (<see cref="CanonicalKind.Shredded"/>): their <paramref name="views"/> over the value column's
+    /// <paramref name="valueBuffers"/>, under <paramref name="metadata"/>, the node of the rows' metadata.
+    /// </summary>
+    internal int CompleteHollow(CanonicalArena arena, int rows, VortexBuffer views, ReadOnlySpan<VortexBuffer> valueBuffers, int metadata) =>
+        arena.AddShredded(_binary, rows, Validity.NonNullable, views, valueBuffers, metadata);
+
     /// <summary>Ends the views of rows sized, however they ended: the scratch a row short enough for its view was rebuilt in given back.</summary>
     internal void EndHollow()
     {

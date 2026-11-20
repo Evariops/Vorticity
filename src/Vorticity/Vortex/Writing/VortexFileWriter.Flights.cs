@@ -204,7 +204,9 @@ public sealed partial class VortexFileWriter
         {
             if (ShredAt.Length != fields)
             {
+                // No column taken until a prologue plans one: the assembly sizes them first, for a writer that may have no chain.
                 ShredAt = new int[fields];
+                System.Array.Fill(ShredAt, -1);
                 Shred = new VariantShredder.Shredding.Rows[fields];
             }
 

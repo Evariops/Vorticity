@@ -147,7 +147,7 @@ internal sealed class FlatLayoutReader : LayoutReader
         }
 
         // A chunk of a variant column the scan's consumer writes under a shredding of its own: its decode takes the rows as
-        // the chunk's shredding holds them, beside the rows it puts back together, while the consumer wants them.
+        // the chunk's shredding holds them and sizes them, not put back together, while the consumer wants them.
         if (context.TakenVariants is { } taken && !node.Bufferless && taken.Find(SpecOf(in node, 0).Offset) is { Wanted: true } take)
         {
             context.TakeNext = take;
@@ -162,22 +162,6 @@ internal sealed class FlatLayoutReader : LayoutReader
         }
 
         return ExecuteChunk(in node, rows, in fields, context, total, length);
-    }
-
-    /// <summary>
-    /// Rows <paramref name="start"/> on of node <paramref name="node"/> of <paramref name="retained"/>, a chunk or a window
-    /// of one retained, as a node of the batch's arena (<see cref="CanonicalSlice.SliceAcross"/>), with what its decode took
-    /// of the retained rows beside them told for the batch's (<see cref="CanonicalArena.NoteTaken"/>).
-    /// </summary>
-    private static int Sliced(CanonicalArena retained, ScanContext context, int node, int start, int length)
-    {
-        int sliced = CanonicalSlice.SliceAcross(retained, context.Canonical, node, start, length);
-        if (retained.TryTaken(node, out CanonicalArena.ITakenRows? taken, out int first))
-        {
-            context.Canonical.NoteTaken(sliced, taken!, first + start);
-        }
-
-        return sliced;
     }
 
     /// <summary>The batch's rows of a chunk read as an array: decoded, retained or sliced, as the batch asks.</summary>
@@ -253,7 +237,8 @@ internal sealed class FlatLayoutReader : LayoutReader
         // whose decode is a set of views pays.
         if (Windowed(context, total) && context.TryPeekRetained(key, out CanonicalArena whole, out int wholeNode))
         {
-            return Narrowed(Sliced(whole, context, wholeNode, (int)rows.Start, length), in fields, context);
+            return Narrowed(
+                CanonicalSlice.SliceAcross(whole, context.Canonical, wholeNode, (int)rows.Start, length), in fields, context);
         }
 
         // A chunk larger than a window is decoded a window at a time when its encoding can decode a
@@ -291,7 +276,8 @@ internal sealed class FlatLayoutReader : LayoutReader
             }
         }
 
-        return Narrowed(Sliced(held, context, retained, (int)rows.Start, length), in fields, context);
+        int sliced = CanonicalSlice.SliceAcross(held, context.Canonical, retained, (int)rows.Start, length);
+        return Narrowed(sliced, in fields, context);
     }
 
     /// <summary>
@@ -501,7 +487,7 @@ internal sealed class FlatLayoutReader : LayoutReader
             context.TryPeekRetained(found, out CanonicalArena hit, out int hitNode) &&
             Holds(hit, hitNode, into + length))
         {
-            result = Narrowed(Sliced(hit, context, hitNode, into, length), in fields, context);
+            result = Narrowed(CanonicalSlice.SliceAcross(hit, context.Canonical, hitNode, into, length), in fields, context);
             return true;
         }
 
@@ -514,7 +500,7 @@ internal sealed class FlatLayoutReader : LayoutReader
             TryAcquireWindow(in root, in node, in fields, context, total, windowStart, windowLength, claimed, out CanonicalArena held, out int window) &&
             Holds(held, window, into + length))
         {
-            result = Narrowed(Sliced(held, context, window, into, length), in fields, context);
+            result = Narrowed(CanonicalSlice.SliceAcross(held, context.Canonical, window, into, length), in fields, context);
             return true;
         }
 

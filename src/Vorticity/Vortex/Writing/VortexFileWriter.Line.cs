@@ -96,6 +96,15 @@ public sealed partial class VortexFileWriter
     /// </summary>
     internal int BlocksOfRunsTaken => _line?.BlocksOfRunsTaken ?? 0;
 
+    /// <summary>
+    /// Of the blocks whose assembly gathered a variant column's values not put back together, those whose values were put
+    /// back whole before the block was read (<see cref="PutBackRead"/>, <see cref="PutBackWhole"/>).
+    /// </summary>
+    internal int BlocksPutBack => _line?.BlocksPutBack ?? 0;
+
+    /// <summary>The times an item of a block on the line put a variant column's values back in an arena of its own (<see cref="CountPutBack"/>, <see cref="Gather"/>).</summary>
+    internal int ColumnsPutBackApart => _line is { } line ? Volatile.Read(ref line.ColumnsPutBackApart) : 0;
+
     /// <summary>The blocks a writer that sends its blocks through its line sent alone, as every block went before the line.</summary>
     internal int BlocksAlone { get; private set; }
 
@@ -379,7 +388,6 @@ public sealed partial class VortexFileWriter
         }
 
         flight.Take(arena, nodes, rows, filled: 0, counted);
-        _indexes?.PrepareCounts(counted, arena, flight.FieldNodes, rows);
         if (afterCut)
         {
             PlanShredsAfterCut(flight);
@@ -388,6 +396,10 @@ public sealed partial class VortexFileWriter
         {
             PlanShreds(flight, arena, rows, pending);
         }
+
+        // Once the takes are planned, which say what of the block reads no row, and before anything reads one.
+        PutBackRead(flight);
+        _indexes?.PrepareCounts(counted, arena, flight.FieldNodes, rows);
 
         // The wide columns' distinct values of the flight before, which this flight's counts attach first: none when a chunk's
         // emission or a block alone attached them since. A flight cut column by column has its own attached by its owner as
@@ -414,6 +426,104 @@ public sealed partial class VortexFileWriter
 
         LayItems(flight);
         return true;
+    }
+
+    /// <summary>
+    /// Puts back together, before anything of <paramref name="flight"/> reads its block, the values of each variant column
+    /// its assembly gathered not put back (<see cref="RunsHeld"/>) that something of the flight reads a row of
+    /// (<see cref="PutBack"/>): every such column of a flight not cut column by column, whose rows wait whole in transit;
+    /// a column no chain takes the flight's rows of, which gathers them whole; a column whose keys are read from its rows
+    /// (<see cref="IndexWriter.ReadsRows"/>). The others stay as gathered: taken along their chain from what the flight
+    /// took of its runs, gathered thin, their keys and their paths written and counted from the same.
+    /// </summary>
+    /// <remarks>
+    /// Two readers find out later that they need the rows, and put them back in an arena of their own: a census too near
+    /// its most keys to count what the flight took (<see cref="CountPutBack"/>), and the gathering of a flight after a cut
+    /// whose chain the cut left broken (<see cref="Gather"/>).
+    /// </remarks>
+    private void PutBackRead(Flight flight)
+    {
+        bool[] taken = flight.RunsTaken;
+        if (!taken.AsSpan().Contains(true))
+        {
+            return;
+        }
+
+        ShredChain?[]? chains = Chains();
+        IndexWriter? indexes = _indexes is { AsksNothing: false, Streams: true } streaming ? streaming : null;
+        bool apart = indexes is not null && KeysApart(indexes) > 0;
+        Span<bool> which = stackalloc bool[taken.Length];
+        bool any = false;
+        for (int field = 0; field < taken.Length; field++)
+        {
+            which[field] = taken[field]
+                && (!flight.Cuts || chains?[field] is null || flight.ShredAt[field] == -1
+                    || (indexes is not null && indexes.ReadsRows(field, flight.Blocks[field]!, apart)));
+            any |= which[field];
+        }
+
+        if (!any)
+        {
+            return;
+        }
+
+        CanonicalArena arena = flight.Arena;
+        flight.Node = PutBack(flight, arena, flight.Node, which);
+        for (int field = 0; field < which.Length; field++)
+        {
+            if (!which[field])
+            {
+                continue;
+            }
+
+            flight.FieldNodes[field] = arena.GetNode(flight.Node).GetFieldIndex(field);
+            if (flight.ShredAt[field] != -1)
+            {
+                flight.Shred[field] = VariantShredder.Shredding.Prepare(arena, flight.FieldNodes[field]);
+            }
+        }
+
+        if (_line is { } line)
+        {
+            line.BlocksPutBack++;
+        }
+    }
+
+    /// <summary>
+    /// Counts in <paramref name="census"/> the paths of <paramref name="flight"/>'s rows of variant column
+    /// <paramref name="field"/>, whose values the flight holds not put back together, from the rows: their values put back
+    /// in an arena of the count's own, the block's being read by the flight's other items, then counted as any rows'.
+    /// </summary>
+    private void CountPutBack(Flight flight, int field, PathCensus census, int rows)
+    {
+        ScanContext own = TransitContexts.Rent(Account);
+        try
+        {
+            CanonicalArena into = own.Canonical;
+            census.Add(PathCensus.Prepare(into, PutBackInto(into, flight, field), rows), 0, rows);
+        }
+        finally
+        {
+            TransitContexts.Return(own);
+        }
+
+        if (_line is { } line)
+        {
+            Interlocked.Increment(ref line.ColumnsPutBackApart);
+        }
+    }
+
+    /// <summary>Whether <paramref name="flight"/> holds the values of variant column <paramref name="field"/> of its block not put back together.</summary>
+    private static bool HoldsHollow(Flight flight, int field)
+    {
+        if (field >= flight.RunsTaken.Length || !flight.RunsTaken[field])
+        {
+            return false;
+        }
+
+        CanonicalNode variant = flight.Arena.GetNode(flight.FieldNodes[field]);
+        return variant.Kind == CanonicalKind.Struct && variant.FieldCount == 2
+            && flight.Arena.GetNode(variant.GetFieldIndex(1)).Kind == CanonicalKind.Shredded;
     }
 
     /// <summary>
@@ -994,7 +1104,14 @@ public sealed partial class VortexFileWriter
             if (field >= flight.ShredAt.Length || flight.ShredAt[field] == -1 || flight.Blocks[field] is not { } block
                 || !block.Count(census, in flight.Shred[field], PathCensus.ValueBytesOf(in flight.Census![field])))
             {
-                census.Add(in flight.Census![field], 0, rows);
+                if (HoldsHollow(flight, field))
+                {
+                    CountPutBack(flight, field, census, rows);
+                }
+                else
+                {
+                    census.Add(in flight.Census![field], 0, rows);
+                }
             }
 
             return;
@@ -1017,7 +1134,9 @@ public sealed partial class VortexFileWriter
             bool thin = field < flight.ShredAt.Length && (flight.AfterCut
                 ? flight.ShredAt[field] != -1 && CutRecordsOf(flight.Index - 1)[field].Takes
                 : flight.ShredAt[field] >= 0);
-            Gather(field, _gathering![field]!, flight.Arena, flight.FieldNodes[field], rows, ChunkBlocks(rows, _blockRows), flight.Cuts || flight.AfterCut ? flight.ChunkFirstBlock : -1, thin);
+            Gather(
+                field, _gathering![field]!, flight.Arena, flight.FieldNodes[field], rows, ChunkBlocks(rows, _blockRows),
+                flight.Cuts || flight.AfterCut ? flight.ChunkFirstBlock : -1, thin, !thin && HoldsHollow(flight, field) ? flight : null);
             return;
         }
 
@@ -1207,6 +1326,8 @@ public sealed partial class VortexFileWriter
         Staging staging = flight.Staging!;
         try
         {
+            // Every row of a block that goes through alone is read: its values gathered not put back together are, first.
+            staging.Assembled = PutBackWhole(staging, staging.Assembled);
             TakeAlone(staging);
             await WriteStagedAsync(staging, cancellationToken).ConfigureAwait(false);
         }
@@ -1291,6 +1412,19 @@ public sealed partial class VortexFileWriter
 
         /// <summary>The flights landed whose block took its rows of a variant column from what the merge's inputs took of them; counted as each lands, in order.</summary>
         internal int BlocksOfRunsTaken;
+
+        /// <summary>
+        /// Of the blocks whose assembly gathered a variant column's values not put back together, those whose values were put
+        /// back whole before the block was read: a block that goes alone, or that the line takes without cutting it, or whose
+        /// column no chain takes, or whose keys are read from its rows.
+        /// </summary>
+        internal int BlocksPutBack;
+
+        /// <summary>
+        /// The times a column's values a flight held not put back together were put back in an arena of their reader's own,
+        /// by an item that found it needed the rows: a census near its most keys, a gathering whose chain a cut left broken.
+        /// </summary>
+        internal int ColumnsPutBackApart;
 
         // Whether a prologue or an epilogue is queued or running: each runs one at a time, in order.
         private bool _prologuing;

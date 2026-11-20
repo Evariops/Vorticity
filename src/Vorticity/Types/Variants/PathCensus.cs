@@ -392,7 +392,11 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
     internal static long ValueBytesOf(in Counting counting)
     {
         Arrays.CanonicalArena arena = counting.Arena;
-        ReadOnlySpan<Int128> views = MemoryMarshal.Cast<byte, Int128>(arena.GetNode(counting.Value).Views.Span);
+
+        // The sizes alone are read: of values not put back together, from their views as they lie, and none is put back.
+        Arrays.CanonicalNode values = arena.GetNode(counting.Value);
+        ReadOnlySpan<Int128> views = MemoryMarshal.Cast<byte, Int128>(
+            values.Kind == Arrays.CanonicalKind.Shredded ? values.HollowViews.Span : values.Views.Span);
         bool everyRow = arena.GetNode(counting.Column).Validity.IsAllValid;
         bool everyValue = arena.GetNode(counting.Value).Validity.IsAllValid;
         long bytes = 0;
