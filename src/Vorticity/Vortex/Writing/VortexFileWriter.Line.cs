@@ -60,8 +60,6 @@ public sealed partial class VortexFileWriter
     {
         long canonical = 0;
         double encoded = 0;
-        double rates = 0;
-        int columns = 0;
         if (_gathering is { } gathering)
         {
             foreach (Gathering? column in gathering)
@@ -70,13 +68,11 @@ public sealed partial class VortexFileWriter
                 {
                     canonical += column.Bytes;
                     encoded += column.Bytes * column.Rate;
-                    rates += column.Rate;
-                    columns++;
                 }
             }
         }
 
-        double rate = canonical > 0 ? encoded / canonical : columns > 0 ? rates / columns : Gathering.FirstRate;
+        double rate = canonical > 0 ? encoded / canonical : _restRate;
         return new Landing(_sink.Position, encoded + _emittingBytes, _pendingBytes, rate);
     }
 
@@ -208,9 +204,8 @@ public sealed partial class VortexFileWriter
 
     // ------------------------------------------------------------------------------------------------- the line's steps
 
-    // The rows in transit the flights prologued count on; the counted rows of the last flight on the line whose wide columns'
-    // distinct values no flight after it attached yet, and its rows.
-    private long _planPending;
+    // The counted rows of the last flight on the line whose wide columns' distinct values no flight after it attached yet,
+    // and its rows.
     private CountedRows? _attachDue;
     private int _attachDueRows;
 
@@ -304,7 +299,8 @@ public sealed partial class VortexFileWriter
         CanonicalArena arena = staging.Context.Canonical;
         int node = staging.Assembled;
         int rows = staging.Rows;
-        long pending = first ? _pendingRows : _planPending;
+        FlightLine line = _line!;
+        long pending = first ? _pendingRows : line.PlanPending;
         if (first)
         {
             // Every flight before landed: the chunks emitted are those the writer counted.
@@ -328,7 +324,7 @@ public sealed partial class VortexFileWriter
 
         flight.Node = node;
         flight.EndsChunk = endsChunk;
-        _planPending = endsChunk ? 0 : pending + rows;
+        line.PlanPending = endsChunk ? 0 : pending + rows;
 
         // A block that makes a whole chunk alone copies its columns in with what each gathers in its items, the column that
         // writes early chosen first, as the emission chooses it before it gathers: no rows wait in transit, so every flight
@@ -1300,7 +1296,7 @@ public sealed partial class VortexFileWriter
     private async ValueTask EmitAfterAsync(Flight flight, CancellationToken cancellationToken)
     {
         FlushAttach();
-        _planPending = 0;
+        _line!.PlanPending = 0;
         _gatheredInIngest = flight.Gathers;
         try
         {
@@ -1338,7 +1334,7 @@ public sealed partial class VortexFileWriter
         }
 
         BlocksAlone++;
-        _planPending = _pendingRows;
+        _line!.PlanPending = _pendingRows;
         RecordLand(flight.Index);
     }
 
@@ -1409,6 +1405,12 @@ public sealed partial class VortexFileWriter
         private long _epilogued;
         private long _landed;
         private long _owning;
+
+        /// <summary>
+        /// The rows in transit the flights prologued count on (<see cref="Prologue"/>): the line's, which a writer that
+        /// sends no block through it has no use for.
+        /// </summary>
+        internal long PlanPending;
 
         /// <summary>The flights landed whose block took its rows of a variant column from what the merge's inputs took of them; counted as each lands, in order.</summary>
         internal int BlocksOfRunsTaken;

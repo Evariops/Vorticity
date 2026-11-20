@@ -345,18 +345,14 @@ public sealed partial class VortexFileWriter
         CutRecord[] cut = CutRecordsOf(flight);
         long canonical = 0;
         double encoded = 0;
-        double rates = 0;
-        int columns = 0;
         for (int field = 0; field < _fieldCount; field++)
         {
             Gathering column = _gathering![field]!;
             canonical += cut[field].Bytes;
             encoded += cut[field].Bytes * column.Rate;
-            rates += column.Rate;
-            columns++;
         }
 
-        double rate = canonical > 0 ? encoded / canonical : columns > 0 ? rates / columns : Gathering.FirstRate;
+        double rate = canonical > 0 ? encoded / canonical : _restRate;
         return new Landing(_sink.Position, encoded + _emittingBytes, _pendingBytes, rate);
     }
 

@@ -166,7 +166,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     internal long TailBytes { get; private set; }
 
     /// <summary>The bytes of the column chunks, once the file is completed: its data, without its indexes.</summary>
-    internal long DataBytes => _reportBytes.Data;
+    internal long DataBytes => _writtenBytes.Data;
+
+    /// <summary>
+    /// Once the file is completed, the bytes it wrote past its last column chunk: the indexes it writes at its end, its zone
+    /// maps, its statistics and its footer, which <see cref="Size"/> counts none of while the file is written. 0 before.
+    /// </summary>
+    internal long EndBytes =>
+        _writtenBytes.Statistics + _writtenBytes.ZoneMaps + _writtenBytes.Indexes - _writtenBytes.IndexesAmongData + _writtenBytes.Footer;
 
     /// <summary>
     /// Once a file that carries a table of contents (<see cref="VortexWriteOptions.CarriesContents"/>) is
@@ -463,8 +470,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// What the writer holds and has not written, as the bytes it would encode to: what each column that gathers holds, at
     /// its last rate, the chunks in emission and not yet written at the rate they were counted at
     /// (<see cref="StartEmission"/>), and the rows that wait for a chunk of the file, staged or in transit, at
-    /// <paramref name="rate"/>, the rate of what the columns hold, their mean rate when they hold nothing, a first guess with
-    /// none.
+    /// <paramref name="rate"/>, the rate of what the columns hold, or, when they hold nothing, the rate they last wrote all
+    /// they held at (<see cref="_restRate"/>).
     /// </summary>
     /// <remarks>
     /// A column's last rate is its last chunk's, whatever its target counts. A column whose target counts canonical bytes, a
@@ -477,8 +484,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         long canonical = 0;
         double encoded = 0;
-        double rates = 0;
-        int columns = 0;
         if (_gathering is { } gathering)
         {
             foreach (Gathering? column in gathering)
@@ -487,15 +492,25 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 {
                     canonical += column.Bytes;
                     encoded += column.Bytes * column.Rate;
-                    rates += column.Rate;
-                    columns++;
                 }
             }
         }
 
-        rate = canonical > 0 ? encoded / canonical : columns > 0 ? rates / columns : Gathering.FirstRate;
+        rate = canonical > 0 ? encoded / canonical : _restRate;
         return (long)(encoded + _emittingBytes + ((_pendingBytes + (_staging?.Bytes ?? 0) + mapBytes) * rate));
     }
+
+    /// <summary>
+    /// The rate the rows that wait count at while the columns hold nothing: what the columns last wrote all they held
+    /// encoded to, over its canonical bytes (<see cref="EmitGatheredAsync(CancellationToken)"/>), and a first guess before
+    /// they did.
+    /// </summary>
+    /// <remarks>
+    /// It was the mean of the columns' rates, a column of a byte a row weighing as much in it as one of a kilobyte: after
+    /// a writer wrote all it held, rows that encoded to a fifteenth of their bytes counted at a third or more, and past
+    /// their bytes once the rates were kept as measured, a column of constants encoding to several times its few bytes.
+    /// </remarks>
+    private float _restRate = (float)Gathering.FirstRate;
 
     /// <summary>
     /// <see cref="Held"/> without the bytes no chunk measured: what the columns that count as they came hold and have in
@@ -506,8 +521,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         long canonical = 0;
         double encoded = 0;
-        double rates = 0;
-        int columns = 0;
         long emitting = _emittingBytes;
         for (int field = 0; field < gathering.Length; field++)
         {
@@ -531,11 +544,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
             canonical += column.Bytes;
             encoded += column.Bytes * column.Rate;
-            rates += column.Rate;
-            columns++;
         }
 
-        double rate = canonical > 0 ? encoded / canonical : columns > 0 ? rates / columns : 0;
+        double rate = canonical > 0 ? encoded / canonical : 0;
         return (long)(encoded + emitting + ((_pendingBytes + (_staging?.Bytes ?? 0) + mapBytes) * rate));
     }
 
@@ -826,7 +837,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>The lanes above one, rented with the first piece of work that uses them.</summary>
     private CoreBatch? _fan;
-    private WriteBytes _reportBytes;
+
+    // What the completed file holds by kind, as its report says it (BuildReport), and of its indexes' bytes those written
+    // among its column chunks, which its size counted as they went (EndBytes). Six numbers, as the report's six were with
+    // their total, which is their sum: a writer's object grows by none, and its allocations are held to the byte.
+    private (long Data, long Statistics, long ZoneMaps, long Indexes, long Footer, long IndexesAmongData) _writtenBytes;
 
     /// <summary>The sink position the write meter has counted to; an append starts it at the file's length.</summary>
     private long _meteredBytes;
@@ -4714,6 +4729,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         _groupTaken = 0;
 
+        // What the columns hold together, and where the file stands before they write it: the rate the rows that wait
+        // count at while the columns hold nothing (_restRate).
+        long canonical = 0;
+        foreach (Gathering? column in gathering)
+        {
+            canonical += column is { Rows: > 0 } ? column.Bytes : 0;
+        }
+
+        long before = _sink.Position;
+
         // What each column holds emitted at once, each by a task of its own, then written in the columns' order.
         if (EmitsApart)
         {
@@ -4726,15 +4751,21 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
 
             await LandEmissionsAsync(cancellationToken).ConfigureAwait(false);
-            return;
+        }
+        else
+        {
+            for (int field = 0; field < gathering.Length; field++)
+            {
+                if (gathering[field] is { Rows: > 0 } column)
+                {
+                    await EmitGatheredAsync(field, column, cancellationToken).ConfigureAwait(false);
+                }
+            }
         }
 
-        for (int field = 0; field < gathering.Length; field++)
+        if (canonical > 0)
         {
-            if (gathering[field] is { Rows: > 0 } column)
-            {
-                await EmitGatheredAsync(field, column, cancellationToken).ConfigureAwait(false);
-            }
+            _restRate = (float)((double)(_sink.Position - before) / canonical);
         }
     }
 
@@ -4794,32 +4825,39 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         internal bool AsItCame { get; private set; } = true;
 
         /// <summary>
-        /// The share of its canonical bytes the column's last chunk encoded to, which the writer's size counts what it holds
-        /// at. Before its first chunk, <see cref="FirstRate"/> for a target in encoded bytes, which also decides when its
-        /// chunk is due, and 1 for a target in canonical bytes (<see cref="AsItCame"/>).
+        /// The share of its canonical bytes the column's last chunk encoded to, as measured and one at most, which the
+        /// writer's size counts what it holds at. Before its first chunk, <see cref="FirstRate"/> for a target in encoded
+        /// bytes and 1 for a target in canonical bytes (<see cref="AsItCame"/>).
         /// </summary>
+        /// <remarks>
+        /// Kept a sixteenth at least, the bound a chunk is due by (<see cref="Due"/>), it counted a column that encodes to
+        /// a hundredth of its bytes six times over: a writer of metric records said 67.1 MB for 61.7 MB of chunks, and says
+        /// 64.3 MB for 63.6 as measured (2026-11-20).
+        /// </remarks>
         internal double Rate { get; private set; } = 1;
 
         /// <summary>The canonical bytes of the chunk being written, which its segment measures the rate against; 0 when none is.</summary>
         internal long Cut;
 
-        /// <summary>Whether what the column holds is a chunk: its target reached, in encoded bytes at the last rate when it counts them.</summary>
-        internal bool Due => (IsEncoded ? Bytes * Rate : Bytes) >= Target;
+        /// <summary>
+        /// Whether what the column holds is a chunk: its target reached, in encoded bytes when it counts them, at its last
+        /// rate held between <see cref="LeastRate"/> and one, so that a column that encodes better still holds no more.
+        /// </summary>
+        internal bool Due => (IsEncoded ? Bytes * Math.Max(Rate, LeastRate) : Bytes) >= Target;
 
         /// <summary>A column gathering to <paramref name="bytes"/> encoded bytes a chunk.</summary>
         internal static Gathering Encoded(long bytes) => new Gathering(bytes) { IsEncoded = true, Rate = FirstRate, AsItCame = false };
 
         /// <summary>
-        /// Takes the rate the chunk just written encoded to, <paramref name="encoded"/> bytes of its <see cref="Cut"/>: held
-        /// within the rates a target in encoded bytes gathers at, and as measured for a target in canonical bytes, which the
-        /// rate does not decide.
+        /// Takes the rate the chunk just written encoded to, <paramref name="encoded"/> bytes of its <see cref="Cut"/>, one
+        /// at most: a chunk of a few rows encodes to several times its bytes, its tree and its headers a fixed cost, which
+        /// the rows the column takes next do not pay again in proportion.
         /// </summary>
         internal void Measured(long encoded)
         {
             if (Cut > 0)
             {
-                double rate = (double)encoded / Cut;
-                Rate = IsEncoded ? Math.Clamp(rate, LeastRate, 1) : rate;
+                Rate = Math.Min(1, (double)encoded / Cut);
                 AsItCame = false;
             }
 
@@ -5305,13 +5343,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         long zoneMaps = zoneMapsEnd - indexStart;
         long indexBytes = interleaved + (indexStart - dataEnd) + (directory?.Length ?? 0);
         long footerBytes = _sink.Position - dtypeOffset;
-        _reportBytes = new WriteBytes(
-            Total: data + zoneMaps + statisticsLength + indexBytes + footerBytes,
-            Data: data,
-            Statistics: statisticsLength,
-            ZoneMaps: zoneMaps,
-            Indexes: indexBytes,
-            Footer: footerBytes);
+        _writtenBytes = (data, statisticsLength, zoneMaps, indexBytes, footerBytes, interleaved);
     }
 
     /// <summary>What the completed file holds, from the writer's own accounts.</summary>
@@ -5330,8 +5362,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         ImmutableArray<IndexWriteReport> indexes = _indexes is { } writer
             ? [.. writer.Reports]
             : ImmutableArray<IndexWriteReport>.Empty;
+        (long data, long statistics, long zoneMaps, long indexBytes, long footer, _) = _writtenBytes;
+        WriteBytes bytes = new WriteBytes(
+            Total: data + zoneMaps + statistics + indexBytes + footer,
+            Data: data,
+            Statistics: statistics,
+            ZoneMaps: zoneMaps,
+            Indexes: indexBytes,
+            Footer: footer);
         return new WriteReport(
-            _rowCount, _blockRows, ImmutableCollectionsMarshal.AsImmutableArray(chunks), _reportBytes, ReportColumns(), indexes)
+            _rowCount, _blockRows, ImmutableCollectionsMarshal.AsImmutableArray(chunks), bytes, ReportColumns(), indexes)
         {
             ColumnChunkRows = ReportColumnChunkRows(),
         };

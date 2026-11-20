@@ -2503,7 +2503,31 @@ internal static partial class DatasetCompactor
         /// 1.85 MB together under a size of 2 MiB, wrote five objects of 370 KB again, each ended at 2 MiB of a variant
         /// column's rows that encoded to a sixth, and the plan took them again without end (2026-11-20).
         /// </remarks>
-        internal bool WantsRoll => _output is not null && _endsBySize && _output.Writer.SizeWith(_map.Bytes) >= _target;
+        internal bool WantsRoll => _output is not null && _endsBySize && _output.Writer.SizeWith(_map.Bytes) + EndBytes >= _target;
+
+        /// <summary>
+        /// What the object being written is taken to write past its last column chunk at least, which its writer's size
+        /// counts none of: what the object of this stream that wrote the fewest bytes a row there wrote
+        /// (<see cref="_endBytes"/>), in proportion of its rows while this one holds fewer, and no more than it past them.
+        /// Nothing when that end alone weighs the size: no object then holds under it, and counting its end would end
+        /// each at its first key.
+        /// </summary>
+        /// <remarks>
+        /// An object's end is a fixed part, its footer, its sheets, its sketches, and a part that grows with its rows, its
+        /// zone maps, its counts by block: in proportion under the rows measured and capped past them, the count stays
+        /// under what the end will weigh, and the object ends at its size or past it, never before.
+        /// </remarks>
+        private long EndBytes =>
+            _endRows > 0 && _endBytes < _target ? (long)(_endBytes * Math.Min(1.0, (double)_rows / _endRows)) : 0;
+
+        // The end of the object sealed by this stream that wrote the fewest bytes a row past its last column chunk
+        // (VortexFileWriter.EndBytes), and its rows; none before one is sealed, the first object of a stream then ending past
+        // its size by what its own end weighs. By row and not by byte of its chunks: six objects of log records aimed at
+        // 64 MiB wrote 0.39 to 0.78 bytes a row there, 1.4 to 6.6 % of their chunks. The fewest and not the last: an index
+        // kept in one object and given up in the next moves an object's end tenfold, 5 to 65 bytes a row at 256 rows a block,
+        // and the last one's, taken for the next, ended it at a third of its size (2026-11-20).
+        private long _endBytes;
+        private long _endRows;
 
         /// <summary>
         /// Whether the object being written has reached its size while its writer may still count rows no chunk measured:
@@ -2524,7 +2548,7 @@ internal static partial class DatasetCompactor
         {
             if (_output is { } output)
             {
-                _measured = await output.Writer.MeasureAsync(_map.Bytes, _target, whole: Restarted, cancellationToken).ConfigureAwait(false);
+                _measured = await output.Writer.MeasureAsync(_map.Bytes, _target - EndBytes, whole: Restarted, cancellationToken).ConfigureAwait(false);
             }
         }
 
@@ -2861,6 +2885,13 @@ internal static partial class DatasetCompactor
                     await output.Writer.LandAsync().ConfigureAwait(false);
                     _sorted?.Finish(output.Writer);
                     await output.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
+                    long end = output.Writer.EndBytes;
+                    if (_rows > 0 && (_endRows == 0 || (double)end / _rows < (double)_endBytes / _endRows))
+                    {
+                        _endBytes = end;
+                        _endRows = _rows;
+                    }
+
                     ScratchBytes += output.Writer.ScratchBytes;
                     BatchesAcross += output.Writer.BatchesIngestedAcross;
                     BatchesFlown += output.Writer.BatchesFlown;

@@ -320,6 +320,80 @@ public sealed partial class DatasetTiersTests
         Assert.Equal(4 * CompressibleRows, await dataset.Scan<Row>().CountAsync(Ct));
     }
 
+    /// <summary>
+    /// Sixteen appends of one day consolidated into objects aimed at 512 KiB, in blocks of 256 rows, whose indexes and
+    /// zone maps weigh a fair share of an object: every object after the first, and before the last, weighs its size
+    /// within a twentieth, what it writes past its last column chunk counted at what a row of the objects before it wrote
+    /// there. The first has no object to go by and ends past its size by what its own end weighs, as every object did.
+    /// </summary>
+    [Fact]
+    public async Task AnObjectCountsWhatTheOnesBeforeItWrotePastTheirChunks()
+    {
+        const long Top = 512 << 10;
+        Random random = new Random(47);
+        List<long> objects = await ConsolidatedAsync(Top, chunkBytes: 1 << 20, (first, count) => Rows(random, count, first, day: 0));
+        string sizes = string.Join(", ", objects);
+        Assert.True(objects.Count >= 5, sizes);
+        Assert.True(objects[0] > Top * 1.05, sizes);
+        Assert.All(objects.Skip(1).SkipLast(1), bytes => Assert.True(bytes >= Top * 0.95 && bytes <= Top * 1.05, sizes));
+    }
+
+    /// <summary>
+    /// The same over rows of some thousand keys whose day, status and measure encode to a hundredth of their bytes, in
+    /// chunks of 4 KiB, so that every column writes chunks within an object: the objects after the first weigh their size
+    /// within a tenth. A column counted at a sixteenth of its bytes at least, the rate its chunk is due by, counted these
+    /// several times over, and the objects ended short of their size.
+    /// </summary>
+    [Fact]
+    public async Task AColumnThatEncodesToAlmostNothingCountsAtWhatItEncodesTo()
+    {
+        const long Top = 96 << 10;
+        List<long> objects = await ConsolidatedAsync(
+            Top, chunkBytes: 4 << 10, static (first, count) => [.. Enumerable.Range(0, count).Select(i => new Row(0, $"svc-{i % 3}", first + i, i / 48, i / 4_096))]);
+        string sizes = string.Join(", ", objects);
+        Assert.True(objects.Count >= 3, sizes);
+        Assert.All(objects.Skip(1).SkipLast(1), bytes => Assert.True(bytes >= Top * 0.9 && bytes <= Top * 1.1, sizes));
+    }
+
+    /// <summary>
+    /// The sizes of the objects a consolidation of sixteen appends of 20 000 rows of one day writes, in the order of
+    /// their rows, into objects aimed at <paramref name="top"/> bytes, in blocks of 256 rows and column chunks aimed at
+    /// <paramref name="chunkBytes"/>; every row read back.
+    /// </summary>
+    private static async Task<List<long>> ConsolidatedAsync(long top, int chunkBytes, Func<long, int, Row[]> rows)
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Row.Day)),
+                SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.Status))],
+                ObjectBytes = top,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            Write = new VortexWriteOptions { BlockRows = 256 },
+            ChunkBytes = chunkBytes,
+            ContentsObjectBytes = 0,
+        }, Ct);
+        List<Row> all = [];
+        for (int a = 0; a < 16; a++)
+        {
+            await AppendAsync(dataset, all, rows(all.Count, 20_000));
+        }
+
+        Assert.NotEmpty(await dataset.ConsolidateAsync(Ct));
+        List<long> objects = [];
+        await foreach (PositionedObject written in dataset.ScanBuilder().ObjectsAsync(Ct))
+        {
+            objects.Add(written.Entry.Bytes);
+        }
+
+        await HoldsAsync(dataset, all);
+        return objects;
+    }
+
     private const int CompressibleRows = 40_000;
 
     /// <summary>
