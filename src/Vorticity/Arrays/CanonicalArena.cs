@@ -1557,6 +1557,41 @@ internal partial class CanonicalArena
     {
     }
 
+    /// <summary>
+    /// What was taken of the rows of node <paramref name="index"/> beside the node, and the row of it the node's first row
+    /// is: none, but for an arena that takes part in retention (<see cref="RetainingArena"/>), which keeps it until it is
+    /// reset.
+    /// </summary>
+    /// <param name="index">The node's index.</param>
+    /// <param name="taken">What was taken: a shredding of a variant column's rows.</param>
+    /// <param name="first">The row of what was taken that the node's row 0 is.</param>
+    internal virtual bool TryTaken(int index, out ITakenRows? taken, out int first)
+    {
+        taken = null;
+        first = 0;
+        return false;
+    }
+
+    /// <summary>
+    /// Records that <paramref name="taken"/> holds what was taken of the rows of node <paramref name="index"/>, the node's
+    /// row 0 its row <paramref name="first"/>, until the arena is reset, when the arena takes part in retention: see
+    /// <see cref="RetainingArena"/>. Whoever reads it owes the lifetime of what was taken, which is that of the arena whose
+    /// node it was taken of. With <paramref name="owned"/>, what was taken is carved from this arena, which tells it once
+    /// it is reset (<see cref="ITakenRows.Forgotten"/>); otherwise it is another arena's, told beside a node lent from it.
+    /// False when the arena keeps nothing of it.
+    /// </summary>
+    internal virtual bool NoteTaken(int index, ITakenRows taken, int first, bool owned = false) => false;
+
+    /// <summary>
+    /// What was taken of a node's rows beside the node, carved from the arena the node lies in, which tells it once it is
+    /// reset (<see cref="NoteTaken"/>): it then holds nothing, and may take other rows.
+    /// </summary>
+    internal interface ITakenRows
+    {
+        /// <summary>The arena that held what was taken is reset.</summary>
+        void Forgotten();
+    }
+
     /// <summary>Drops what the arena kept of its first <paramref name="records"/> nodes beside the records, as it is reset.</summary>
     /// <param name="records">The nodes the arena held.</param>
     private protected virtual void Forget(int records)

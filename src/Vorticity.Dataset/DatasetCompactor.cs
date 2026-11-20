@@ -117,6 +117,12 @@ public sealed record CompactionResult
     /// <summary>Of <see cref="WriterChunksEndedOnLine"/>, those cut column by column, each column emitted once cut while the blocks after it went through.</summary>
     internal long WriterChunksCutOnLine { get; init; }
 
+    /// <summary>
+    /// Of <see cref="WriterBlocksOnLine"/>, those that took their rows of a variant column from what the inputs took of
+    /// them as their own shreddings hold them (<see cref="DatasetOptions.TakesVariants"/>), and read none.
+    /// </summary>
+    internal long WriterBlocksOfRunsTaken { get; init; }
+
     /// <summary>The inputs' batches its merge took over from their scans and kept until its writers copied their runs.</summary>
     internal long InputWindowsTaken { get; init; }
 
@@ -733,6 +739,7 @@ internal static partial class DatasetCompactor
         long onLine = lateOutputs?.BlocksOnLine ?? 0;
         long chunksOnLine = lateOutputs?.ChunksEndedOnLine ?? 0;
         long chunksCut = lateOutputs?.ChunksCutOnLine ?? 0;
+        long runsTaken = lateOutputs?.BlocksOfRunsTaken ?? 0;
         long windowsTaken = 0;
         long windowsCopied = 0;
         long windowsKeyed = 0;
@@ -751,6 +758,7 @@ internal static partial class DatasetCompactor
             onLine += outputs.BlocksOnLine;
             chunksOnLine += outputs.ChunksEndedOnLine;
             chunksCut += outputs.ChunksCutOnLine;
+            runsTaken += outputs.BlocksOfRunsTaken;
             windowsTaken += outputs.WindowsTaken;
             windowsCopied += outputs.WindowsCopied;
             windowsKeyed += outputs.WindowsKeyedHere;
@@ -783,6 +791,7 @@ internal static partial class DatasetCompactor
             WriterBlocksOnLine = onLine,
             WriterChunksEndedOnLine = chunksOnLine,
             WriterChunksCutOnLine = chunksCut,
+            WriterBlocksOfRunsTaken = runsTaken,
             InputWindowsTaken = windowsTaken,
             InputWindowsCopied = windowsCopied,
             InputWindowsKeyedByMerge = windowsKeyed,
@@ -1110,7 +1119,8 @@ internal static partial class DatasetCompactor
     /// </summary>
     private static IAsyncEnumerable<RecordBatch> RowsOfAsync(
         ObjectLease lease, ObjectEntry entry, DatasetSchema schema, CancellationToken cancellationToken, int[]? fields = null, RowRange? rows = null,
-        int batchRows = 0, Buffers.MemoryAccount? account = null, int prefetch = 0, Scanning.BatchHandover? handover = null)
+        int batchRows = 0, Buffers.MemoryAccount? account = null, int prefetch = 0, Scanning.BatchHandover? handover = null,
+        (string Column, VariantTake Take)[]? takes = null)
     {
         // A job's input reads and decodes under the job's inputs' account (JobMemory), which never passes the jobs' budget.
         // Its batches hold its rows at most: an input of 1 924 rows in a merge of batches of 16 384 held 566 KB, a batch's
@@ -1146,12 +1156,33 @@ internal static partial class DatasetCompactor
             {
                 handover.State = new InputShaping(entry.HasDeletions ? entry.Deletions : null, read?.Shape);
             }
+            else if (takes is not null)
+            {
+                // Batches handed over as their decode made them: what it took of a variant column's rows stays beside them.
+                handover.Taken = TakenOf(file, takes);
+            }
 
             return scan.WithHandover(handover).ExecuteAsync();
         }
 
         IAsyncEnumerable<RecordBatch> live = LiveRowsAsync(scan, entry, cancellationToken);
         return read is { } reshaped ? ObjectColumns.ReshapeAsync(live, reshaped.Shape, null, 0, compact: true, cancellationToken) : live;
+    }
+
+    /// <summary>The chunks of <paramref name="file"/>'s columns <paramref name="takes"/> names that a scan of it takes as their shredding holds them; null for none.</summary>
+    private static TakenVariants? TakenOf(VortexFile file, (string Column, VariantTake Take)[] takes)
+    {
+        (int Field, VariantTake Take)[] columns = new (int, VariantTake)[takes.Length];
+        int count = 0;
+        foreach ((string column, VariantTake take) in takes)
+        {
+            if (file.DType.IndexOfField(column) is >= 0 and int field)
+            {
+                columns[count++] = (field, take);
+            }
+        }
+
+        return count == 0 ? null : TakenVariants.Of(file, columns.AsSpan(0, count));
     }
 
     /// <summary>The scan of <paramref name="rows"/> alone, or of every row.</summary>
@@ -1314,7 +1345,13 @@ internal static partial class DatasetCompactor
 
         // The writers keep the runs where they lie in the inputs' batches, and note them in one ledger, which the merge reads
         // to give a batch back once every run on it is copied: the merge's thread neither copies runs nor waits for copies.
-        Writing.RunLedger ledger = new Writing.RunLedger();
+        // The variant columns the job writes under one shredding: its inputs take their rows as their own shreddings hold
+        // them, which its writers take their blocks' runs from in place of reading the rows put back together, for a
+        // dataset that asks it (DatasetOptions.TakesVariants).
+        (string Column, VariantTake Take)[]? takes = dataset.Options.TakesVariants && outputs.Shreddings is [{ Shredded.Count: > 0 } only]
+            ? [.. only.Shredded.Select(static shredded => (shredded.Key, new VariantTake(shredded.Value)))]
+            : null;
+        Writing.RunLedger ledger = new Writing.RunLedger { Takes = takes is null ? null : [.. takes.Select(static held => held.Take)] };
         List<KeyOrderedMerge> made = [];
         int atOnce = ranges is null ? OpenAtOnce(job) : ranges.MostInputs;
 
@@ -1331,7 +1368,7 @@ internal static partial class DatasetCompactor
             long[]? counts = sliceEmitted is null ? emitted : sliceEmitted[slice] = new long[emitted!.Length];
             KeyOrderedMerge one = InputsMerged(
                 dataset, schema, job, batchRows, cancellationToken, ranges: slices ?? ranges, range: slices is null ? range : slice, meter: meter,
-                memory: memory, emitted: counts, ledger: ledger, retiring: retiring, ahead: ahead, account: account);
+                memory: memory, emitted: counts, ledger: ledger, retiring: retiring, ahead: ahead, account: account, takes: takes);
 
             // As its inputs open, the job reprices the batches of those still to open from what the open ones hold; not a
             // merge in slices, whose slices open their inputs in an order its lanes decide, and whose batches, priced for the
@@ -1579,7 +1616,8 @@ internal static partial class DatasetCompactor
         Action<KeyOrderedMerge.Window>? retiring = null,
         Scanning.DecodeAhead? ahead = null,
         Buffers.MemoryAccount? account = null,
-        int prefetch = InputPrefetch)
+        int prefetch = InputPrefetch,
+        (string Column, VariantTake Take)[]? takes = null)
     {
         account ??= memory?.InputsAccount;
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
@@ -1619,8 +1657,8 @@ internal static partial class DatasetCompactor
             // The rows of an input's batches read as it opens: the plan's, or fewer once the job repriced them (JobMemory.Reprice).
             // Under a ledger, its scan hands its batches over, their keys encoded by their decode.
             (lease, entry, handover) => meter is null
-                ? RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], RowsNow(), account, prefetch, handover)
-                : MeteredAsync(RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], RowsNow(), account, prefetch, handover), meter, cancellationToken),
+                ? RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], RowsNow(), account, prefetch, handover, takes)
+                : MeteredAsync(RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], RowsNow(), account, prefetch, handover, takes), meter, cancellationToken),
             opened: null,
             cancellationToken,
             ranges?.Low(range) ?? default,
@@ -2367,6 +2405,9 @@ internal static partial class DatasetCompactor
         /// <summary>Of <see cref="ChunksEndedOnLine"/>, those cut column by column, the flights after them going through meanwhile.</summary>
         internal long ChunksCutOnLine { get; private set; }
 
+        /// <summary>Of <see cref="BlocksOnLine"/>, those that took their rows of a variant column from what the inputs took of them.</summary>
+        internal long BlocksOfRunsTaken { get; private set; }
+
         /// <summary>The inputs' batches the merges into this stream took over, and those they copied to keep.</summary>
         internal long WindowsTaken { get; set; }
 
@@ -2713,6 +2754,7 @@ internal static partial class DatasetCompactor
                     BlocksOnLine += output.Writer.BlocksOnLine;
                     ChunksEndedOnLine += output.Writer.ChunksEndedOnLine;
                     ChunksCutOnLine += output.Writer.ChunksCutOnLine;
+                    BlocksOfRunsTaken += output.Writer.BlocksOfRunsTaken;
                 }
 
                 written = await _dataset.SealAsync(output, _rows, _firstRow, cancellationToken).ConfigureAwait(false);

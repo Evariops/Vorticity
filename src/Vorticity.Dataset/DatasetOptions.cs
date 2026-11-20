@@ -251,6 +251,15 @@ public sealed record DatasetOptions
     internal long CensusPartRows { get; init; } = 1L << 20;
 
     /// <summary>
+    /// Whether a job's inputs hand its writers what they took of a variant column's rows as their own shredding holds them,
+    /// which a block takes its runs from in place of reading its rows put back together; false by default. The objects
+    /// written are the same either way. On, while an input still puts its rows back together beside what it takes of them,
+    /// a consolidation of log records ran as long for 3.5 % less processor time, its inputs holding 0.5 GiB more
+    /// (2026-11-19): it stays off until an input that takes no longer puts its rows back together.
+    /// </summary>
+    internal bool TakesVariants { get; init; }
+
+    /// <summary>
     /// The objects' size a piece of a consolidation reads at most, and the ranges below its cut it merges: 8 by default,
     /// whatever the session's degree, so that a consolidation commits the same pieces at any degree. A piece of eight
     /// objects is what a degree of eight or more cut before; a test consolidates in pieces of one.

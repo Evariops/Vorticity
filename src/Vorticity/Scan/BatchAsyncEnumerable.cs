@@ -645,6 +645,7 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
                 lanes.Handover = handover;
                 lanes.Handed = [];
                 handover.Scan = this;
+                _lanes[0]!.Context.TakenVariants = handover.Taken;
                 if (handover.Ahead is { } shared)
                 {
                     handover.Own = Math.Max(1, window - shared.PerInput);
@@ -701,6 +702,11 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         if (first.FewRowsOfChunks)
         {
             lane.Context.FewRowsOfChunks = true;
+        }
+
+        if (first.TakenVariants is { } taken)
+        {
+            lane.Context.TakenVariants = taken;
         }
 
         lane.Context.ZoneKeys = first.ZoneKeys;

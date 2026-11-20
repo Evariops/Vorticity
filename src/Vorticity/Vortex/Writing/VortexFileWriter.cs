@@ -2485,6 +2485,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // Runs still in a merge's inputs: each column gathered run after run from the inputs' batches, in one pass.
         if (!_mayShareChildren && GatheredByRuns(staging) is >= 0 and int assembled)
         {
+            TakeRuns(staging, assembled);
             staging.Gathers = false;
             staging.Parts.Clear();
             Ledger?.Release(staging, ref staging.FirstRun);
@@ -2607,6 +2608,115 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             windows.Clear();
         }
+    }
+
+    /// <summary>
+    /// Has the flight of <paramref name="staging"/>, a block gathered run after run into node <paramref name="assembled"/>,
+    /// take its rows of each variant column the merge's inputs take as their own shreddings hold them
+    /// (<see cref="RunLedger.Takes"/>) from what they took of each run's batch
+    /// (<see cref="VariantShredder.Shredding.AppendRange"/>), where every run lies in a batch that tells it and the block's
+    /// rows are worth taking so (<see cref="WorthTaking"/>): the column's item of the flight then reads no row
+    /// (<see cref="Flight.TakeBlock"/>). Tells the inputs whether the block was worth it, which the windows they decode
+    /// next follow. Before the runs' batches are let go.
+    /// </summary>
+    private void TakeRuns(Staging staging, int assembled)
+    {
+        if (Ledger?.Takes is not { } takes || _shredding is not { } plans || staging.Flight is not { } flight)
+        {
+            return;
+        }
+
+        flight.SizeShreds(_fieldCount);
+        CanonicalArena into = staging.Context.Canonical;
+        List<StagedPart> parts = staging.Parts;
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            flight.RunsTaken[field] = false;
+            if (plans[field] is not { } plan || TakeOf(takes, plan) is not { } take)
+            {
+                continue;
+            }
+
+            bool worth = WorthTaking(into, into.GetNode(assembled).GetFieldIndex(field), parts.Count);
+            take.Note(worth);
+            if (!worth)
+            {
+                continue;
+            }
+
+            VariantShredder.Shredding block = flight.BeginBlock(field, plan, Account);
+            int at = 0;
+            bool every = true;
+            for (int i = 0; i < parts.Count && every; i++)
+            {
+                StagedPart part = parts[i];
+                every = false;
+                if (part.Source is { } source
+                    && source.TryTaken(source.GetNode(part.Root).GetFieldIndex(field), out CanonicalArena.ITakenRows? held, out int first)
+                    && held is VariantShredder.Shredding taken && ReferenceEquals(taken.Plan, plan))
+                {
+                    block.AppendRange(taken, first + part.Row, part.Rows, at);
+                    at += part.Rows;
+                    every = true;
+                }
+            }
+
+            flight.RunsTaken[field] = every;
+        }
+    }
+
+    /// <summary>What takes the column written under <paramref name="plan"/> among <paramref name="takes"/>; null for none.</summary>
+    private static VariantTake? TakeOf(VariantTake[] takes, VariantShredding plan)
+    {
+        foreach (VariantTake take in takes)
+        {
+            if (ReferenceEquals(take.Plan, plan))
+            {
+                return take;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The rows a run of a block holds at least, on average, for the block's rows of a variant column to be taken from what
+    /// the merge's inputs took of them rather than read: a run costs each node of the shredding its place in the batch's.
+    /// </summary>
+    private const int TakenRunRows = 4;
+
+    /// <summary>
+    /// Whether the rows of variant column <paramref name="column"/> of a block of <paramref name="runs"/> runs, gathered in
+    /// <paramref name="arena"/>, are worth taking from what the merge's inputs took of them rather than read
+    /// (<see cref="TakeRuns"/>): runs long enough on average, and few rows that repeat the row before, which a read takes
+    /// again at once, a run at a time, and which a range takes whole each.
+    /// </summary>
+    private static bool WorthTaking(CanonicalArena arena, int column, int runs)
+    {
+        CanonicalNode variant = arena.GetNode(column);
+        int rows = variant.Length;
+        if (variant.Kind != CanonicalKind.Struct || variant.FieldCount != 2 || (long)runs * TakenRunRows > rows)
+        {
+            return false;
+        }
+
+        CanonicalNode metadata = arena.GetNode(variant.GetFieldIndex(0));
+        CanonicalNode value = arena.GetNode(variant.GetFieldIndex(1));
+        if (metadata.Kind != CanonicalKind.VarBinView || value.Kind != CanonicalKind.VarBinView)
+        {
+            return false;
+        }
+
+        // A row whose views are the row before's repeats it: the gather has the rows that repeat view one copy.
+        ReadOnlySpan<Int128> values = MemoryMarshal.Cast<byte, Int128>(value.Views.Span)[..rows];
+        ReadOnlySpan<Int128> metadatas = MemoryMarshal.Cast<byte, Int128>(metadata.Views.Span)[..rows];
+        int repeats = 0;
+        for (int row = 1; row < rows; row++)
+        {
+            repeats += values[row] == values[row - 1] && metadatas[row] == metadatas[row - 1] ? 1 : 0;
+        }
+
+        return 2L * repeats <= rows;
     }
 
     /// <summary>

@@ -29,6 +29,13 @@ internal sealed class RunLedger
     private long _noted;
     private long _copied;
 
+    /// <summary>
+    /// The variant columns the merge's inputs take as their own shreddings hold them, each for the writers that write it
+    /// under that shredding to take their blocks' runs from (<see cref="Types.Variants.VariantTake"/>); null for none. Set
+    /// before the merge starts.
+    /// </summary>
+    internal Types.Variants.VariantTake[]? Takes { get; init; }
+
     /// <summary>The runs noted so far, on the merge's thread.</summary>
     internal long Noted => Volatile.Read(ref _noted);
 

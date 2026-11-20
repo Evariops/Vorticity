@@ -93,7 +93,7 @@ internal static class VariantShredder
     /// The nodes of a shredding over a chunk's rows, which a workspace keeps from one chunk to the next of the same
     /// plan: what each node takes of the rows, then the tree, laid out whole or written a column at a time.
     /// </summary>
-    internal sealed class Shredding
+    internal sealed class Shredding : CanonicalArena.ITakenRows
     {
         private readonly Group _root;
 
@@ -105,13 +105,36 @@ internal static class VariantShredder
         private int _rows;
         private DTypeArena _types = null!;
 
-        internal Shredding(VariantShredding plan)
+        /// <summary>
+        /// A shredding of <paramref name="plan"/>. With <paramref name="ranged"/>, one whose rows another shredding of the plan
+        /// takes ranges of once they are all in (<see cref="Index"/>, <see cref="AppendRange"/>): its nodes keep what a range
+        /// of their rows is found from.
+        /// </summary>
+        internal Shredding(VariantShredding plan, bool ranged = false)
         {
             Plan = plan;
             _planKeys = KeysOf(plan);
             _root = Group.For(plan);
             _root.Attach(_replay);
+            _ranged = ranged;
+            if (ranged)
+            {
+                _root.Range();
+            }
         }
+
+        // Whether the nodes keep what a range of their rows is found from, the arena they carve it from, and whether it is
+        // built over the rows taken.
+        private readonly bool _ranged;
+        private CanonicalArena? _store;
+
+        /// <summary>
+        /// Who lent the shredding to a decode, for the rows of a window of a job's input, and takes it back once the arena
+        /// the window lies in is reset (<see cref="VariantTake.Rent"/>); null for a shredding nobody lends.
+        /// </summary>
+        internal VariantTake? Lender { get; init; }
+
+        void CanonicalArena.ITakenRows.Forgotten() => Lender?.Return(this);
 
         // What the last row read took, node by node, for the rows that repeat its value to take again without reading it.
         private readonly Replay _replay = new Replay();
@@ -163,6 +186,8 @@ internal static class VariantShredder
         {
             _keepsRuns = counted;
             _runCount = 0;
+            _store = store;
+            Indexed = false;
             _replay.Clear();
             _root.Clear(store);
             if (_root is ObjectGroup keys)
@@ -457,6 +482,48 @@ internal static class VariantShredder
             {
                 Blocks.Return(masks);
             }
+        }
+
+        /// <summary>Whether ranges of the rows taken may be taken by another shredding of the plan (<see cref="Index"/>).</summary>
+        internal bool Indexed { get; private set; }
+
+        /// <summary>
+        /// Makes the rows taken ready for another shredding of the plan to take ranges of them (<see cref="AppendRange"/>),
+        /// once they are all in: where each node holds each row, and where each text's bytes start, carved from the chunk's
+        /// store, after which the shredding only is read, by any thread. False, and no range taken of it, for a shredding
+        /// not made for it, or whose rows took again what the row before them took, a text's bytes then kept once for
+        /// several rows, or one that dropped a key's second value.
+        /// </summary>
+        internal bool Index()
+        {
+            Indexed = _ranged && _store is { } store && !_replay.Dropped && _root.Index(store, Taken);
+            return Indexed;
+        }
+
+        /// <summary>
+        /// Takes what <paramref name="source"/>, a shredding of the same plan made ready for it (<see cref="Index"/>), took of
+        /// its <paramref name="count"/> rows from <paramref name="first"/> on, as the chunk's rows from <paramref name="at"/>
+        /// on, after the rows taken before, which they follow: what <see cref="TakeMore"/> takes of the same rows there, node
+        /// by node, and no row read. Each text is taken whole, a row that repeats the row before's among them, and no key is
+        /// counted block by block: a block read alone takes ranges, which a chunk then takes whole (<see cref="Append"/>).
+        /// </summary>
+        /// <remarks>
+        /// A merge hands its writer runs of its inputs' rows, a block's from several batches: where the scan of an input
+        /// took a batch's rows as its file's shredding holds them (<see cref="TakeGroup"/>), the block takes its runs of them
+        /// here, and no row of it is read.
+        /// </remarks>
+        /// <exception cref="ArgumentException"><paramref name="source"/> is of another plan, or not made ready.</exception>
+        internal void AppendRange(Shredding source, int first, int count, int at)
+        {
+            if (!ReferenceEquals(source.Plan, Plan) || !source.Indexed)
+            {
+                throw new ArgumentException("A range is taken of a shredding of the same plan, made ready for it.", nameof(source));
+            }
+
+            ArgumentOutOfRangeException.ThrowIfNegative(first);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(count, source.Taken - first);
+            _root.AppendRange(source._root, first, count, at - first);
+            Taken = at + count;
         }
 
         /// <summary>The runs kept (<see cref="Begin"/>), a first row and a count each; none for a chunk that keeps none.</summary>
@@ -1137,6 +1204,30 @@ internal static class VariantShredder
             }
         }
 
+        /// <summary>Has the node, and every node below it, keep what a range of its rows is found from (<see cref="Shredding.Index"/>).</summary>
+        internal virtual void Range() => Values.Range();
+
+        /// <summary>
+        /// Makes what the node took of a chunk's <paramref name="rows"/> rows ready for ranges of them to be taken
+        /// (<see cref="AppendRange"/>), carved from <paramref name="arena"/>: the values it kept whole here, a node's own in
+        /// its override. False for a node no range is taken of.
+        /// </summary>
+        internal virtual bool Index(CanonicalArena arena, int rows) => Values.Index(arena, rows);
+
+        /// <summary>
+        /// Takes what <paramref name="other"/>, this node of another shredding of the plan made ready for it
+        /// (<see cref="Index"/>), took of its <paramref name="count"/> rows from <paramref name="first"/> on, each
+        /// <paramref name="shift"/> rows on, after what this one took: the values it kept whole here, a node's own in its
+        /// override.
+        /// </summary>
+        internal virtual void AppendRange(Group other, int first, int count, int shift)
+        {
+            if (Values.AppendRange(other.Values, first, count, shift) > 0)
+            {
+                Last = Math.Max(Last, Values.Rows.Last);
+            }
+        }
+
         internal static Group For(VariantShredding plan) => plan.Kind switch
         {
             VariantShreddingKind.Object => new ObjectGroup(plan),
@@ -1168,6 +1259,32 @@ internal static class VariantShredder
 
         /// <summary>Takes what the node holds of row <paramref name="row"/>, as <see cref="Present"/> says.</summary>
         protected abstract void Take(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row, int offset);
+
+        /// <summary>
+        /// Takes the values of <paramref name="values"/>, the column of a key's values whole in another shredding of the same
+        /// rows, the one column of the key's group <paramref name="pair"/> there, at the rows <paramref name="held"/> selects
+        /// that hold one, as the chunk's rows from <paramref name="offset"/> on: what the node takes of each as the key's
+        /// value read in its row's object, a value at a time and none noted for a row to take again. A node whose values
+        /// name no key of their own, which reads none here.
+        /// </summary>
+        /// <exception cref="VortexFormatException">A value does not decode.</exception>
+        internal void TakeValues(CanonicalArena arena, int pair, int values, ReadOnlySpan<ulong> held, int rows, int offset)
+        {
+            ReadOnlySpan<ulong> there = ArenaWords.Validity(arena, pair);
+            ReadOnlySpan<ulong> valid = ArenaWords.Validity(arena, values);
+            ViewValues read = new ViewValues(arena.GetNode(values));
+            int words = (rows + 63) >> 6;
+            for (int w = 0; w < words; w++)
+            {
+                ulong bits = held[w] & (there.IsEmpty ? ulong.MaxValue : there[w]) & (valid.IsEmpty ? ulong.MaxValue : valid[w]);
+                for (; bits != 0; bits &= bits - 1)
+                {
+                    int at = (w << 6) + System.Numerics.BitOperations.TrailingZeroCount(bits);
+                    Last = offset + at;
+                    Take(default, -1, read.At(at), offset + at, 0);
+                }
+            }
+        }
 
         /// <summary>The dtype of the node's typed node.</summary>
         internal abstract DType TypedType(DTypeArena types);
@@ -1337,6 +1454,23 @@ internal static class VariantShredder
 
             _typed.Append(from._typed, offset);
             _typedLast = from._typedLast;
+        }
+
+        internal override bool Index(CanonicalArena arena, int rows) => base.Index(arena, rows) && _typed.Index(arena, rows);
+
+        /// <summary>
+        /// The other's typed values of the rows after these, and the values it kept whole of them. No row takes again what a
+        /// range's last took, which follows a row read, and a block that takes ranges counts no key block by block.
+        /// </summary>
+        internal override void AppendRange(Group other, int first, int count, int shift)
+        {
+            System.Diagnostics.Debug.Assert(Bounds is null, "A block that takes ranges counts no key.");
+            PrimitiveGroup from = (PrimitiveGroup)other;
+            base.AppendRange(other, first, count, shift);
+            if (_typed.AppendRange(from._typed, first, count, shift) > 0)
+            {
+                Mark(Math.Max(Last, _typed.Rows!.Last));
+            }
         }
 
         /// <summary>The value taken last again, not read: the typed column's last value, or the value kept whole.</summary>
@@ -1559,6 +1693,60 @@ internal static class VariantShredder
             }
         }
 
+        // Where the objects' rows hold each row of the chunk, once made ready for ranges of them (Index).
+        private Ranks _ranks;
+
+        internal override void Range()
+        {
+            base.Range();
+            foreach (Group field in _fields)
+            {
+                field.Range();
+            }
+        }
+
+        internal override bool Index(CanonicalArena arena, int rows)
+        {
+            if (!base.Index(arena, rows))
+            {
+                return false;
+            }
+
+            _ranks.Build(arena, _objects, rows);
+            foreach (Group field in _fields)
+            {
+                if (!field.Index(arena, rows))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>The other's objects' rows of the range after these, and each key what the other's took of it: none where the range holds no object, whose keys hold nothing then.</summary>
+        internal override void AppendRange(Group other, int first, int count, int shift)
+        {
+            ObjectGroup from = (ObjectGroup)other;
+            base.AppendRange(other, first, count, shift);
+            int start = from._ranks.Before(first);
+            int objects = from._ranks.Before(first + count) - start;
+            if (objects == 0)
+            {
+                return;
+            }
+
+            AddRowsOf(_objects, from._objects, start, objects, first, count, shift);
+            Mark(Math.Max(Last, _objects.Last));
+            for (int i = 0; i < _fields.Length; i++)
+            {
+                if (from._fields[i].HeldAny)
+                {
+                    _fields[i].AppendRange(from._fields[i], first, count, shift);
+                }
+            }
+        }
+
         /// <summary>The row's object takes its row again, its keys theirs by their own notes; any other value its value.</summary>
         internal override void Again(ReadOnlySpan<byte> value, int row)
         {
@@ -1631,9 +1819,16 @@ internal static class VariantShredder
             {
                 int key = _plan.IndexOf(node.DType.GetFieldNameUtf8(f));
                 CanonicalNode pair = arena.GetNode(node.GetFieldIndex(f));
-                if (key < 0 || _fields[key] is not PrimitiveGroup column || pair.Kind != CanonicalKind.Struct || pair.FieldCount != 1
-                    || !pair.DType.GetFieldNameUtf8(0).SequenceEqual("typed_value"u8)
-                    || !column.Holds(arena.GetNode(ArrayBlobWriter.Materialize(arena, pair.GetFieldIndex(0)))))
+                if (key < 0 || pair.Kind != CanonicalKind.Struct || pair.FieldCount != 1)
+                {
+                    return false;
+                }
+
+                CanonicalNode held = arena.GetNode(ArrayBlobWriter.Materialize(arena, pair.GetFieldIndex(0)));
+                bool taken = Valued(pair)
+                    ? _fields[key] is not ObjectGroup && held.Kind == CanonicalKind.VarBinView
+                    : pair.DType.GetFieldNameUtf8(0).SequenceEqual("typed_value"u8) && _fields[key] is PrimitiveGroup column && column.Holds(held);
+                if (!taken)
                 {
                     return false;
                 }
@@ -1641,6 +1836,9 @@ internal static class VariantShredder
 
             return true;
         }
+
+        /// <summary>Whether <paramref name="pair"/>, a key's group of one column in another shredding, holds the key's values whole: a key that shredding types in no one class.</summary>
+        private static bool Valued(CanonicalNode pair) => pair.DType.GetFieldNameUtf8(0).SequenceEqual("value"u8);
 
         /// <summary>
         /// Takes what the struct <paramref name="typed"/> holds of the rows <paramref name="held"/> selects, a bit a row, the
@@ -1654,8 +1852,16 @@ internal static class VariantShredder
             for (int f = 0; f < node.FieldCount; f++)
             {
                 int key = _plan.IndexOf(node.DType.GetFieldNameUtf8(f));
-                int column = ArrayBlobWriter.Materialize(arena, arena.GetNode(node.GetFieldIndex(f)).GetFieldIndex(0));
-                ((PrimitiveGroup)_fields[key]).TakeColumn(arena, column, held, rows, offset);
+                int pair = node.GetFieldIndex(f);
+                int column = ArrayBlobWriter.Materialize(arena, arena.GetNode(pair).GetFieldIndex(0));
+                if (Valued(arena.GetNode(pair)))
+                {
+                    _fields[key].TakeValues(arena, pair, column, held, rows, offset);
+                }
+                else
+                {
+                    ((PrimitiveGroup)_fields[key]).TakeColumn(arena, column, held, rows, offset);
+                }
             }
         }
 
@@ -1856,6 +2062,36 @@ internal static class VariantShredder
             _sizes.AddAll(from._sizes);
         }
 
+        // Where the lists' rows hold each row of the chunk, and where each list's elements start among the elements, once
+        // made ready for ranges of them (Index).
+        private Ranks _ranks;
+        private Starts _starts;
+
+        internal override bool Index(CanonicalArena arena, int rows)
+        {
+            _ranks.Build(arena, _lists, rows);
+            return base.Index(arena, rows) && _starts.Build(arena, _sizes) && _elements.Index(arena, rows);
+        }
+
+        /// <summary>The other's lists of the range after these: their rows, their sizes and their elements.</summary>
+        internal override void AppendRange(Group other, int first, int count, int shift)
+        {
+            ListGroup from = (ListGroup)other;
+            base.AppendRange(other, first, count, shift);
+            int start = from._ranks.Before(first);
+            int lists = from._ranks.Before(first + count) - start;
+            if (lists == 0)
+            {
+                return;
+            }
+
+            AddRowsOf(_lists, from._lists, start, lists, first, count, shift);
+            Mark(Math.Max(Last, _lists.Last));
+            _sizes.AddFrom(from._sizes, start, lists);
+            int element = from._starts.Before(start);
+            _elements.AppendSome(from._elements, element, from._starts.Before(start + lists) - element);
+        }
+
         protected override void Take(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row, int offset)
         {
             if ((value[0] & 0x03) == ParquetVariant.BasicArray)
@@ -2032,6 +2268,55 @@ internal static class VariantShredder
         /// <summary>Takes every value of <paramref name="other"/>, of the same class, after these.</summary>
         protected abstract void All(TypedValues other);
 
+        // Where the rows hold each row of the chunk, once made ready for ranges of them (Index).
+        private Ranks _ranks;
+
+        /// <summary>
+        /// Makes the values taken of a chunk's <paramref name="rows"/> rows ready for ranges of them to be taken
+        /// (<see cref="AppendRange"/>), carved from <paramref name="arena"/>. False for values no range is taken of: texts some
+        /// of which repeat the one before, their bytes kept once.
+        /// </summary>
+        internal bool Index(CanonicalArena arena, int rows)
+        {
+            if (Rows is { } held)
+            {
+                _ranks.Build(arena, held, rows);
+            }
+
+            return IndexValues(arena);
+        }
+
+        /// <summary>Makes the values themselves ready for a range of them to be taken, by their place among them (<see cref="Some"/>).</summary>
+        protected virtual bool IndexValues(CanonicalArena arena) => true;
+
+        /// <summary>
+        /// Takes the values <paramref name="other"/>, a column of the same class made ready for it (<see cref="Index"/>), took
+        /// at its <paramref name="count"/> rows from <paramref name="first"/> on, after these, each at its row
+        /// <paramref name="shift"/> rows on; returns how many.
+        /// </summary>
+        internal int AppendRange(TypedValues other, int first, int count, int shift)
+        {
+            int start = other._ranks.Before(first);
+            int values = other._ranks.Before(first + count) - start;
+            if (values > 0)
+            {
+                AddRowsOf(Rows!, other.Rows!, start, values, first, count, shift);
+                AppendSome(other, start, values);
+            }
+
+            return values;
+        }
+
+        /// <summary>Takes the <paramref name="count"/> values of <paramref name="other"/>, of the same class and made ready for it, from its value <paramref name="from"/> on, after these: a list's elements, which are rows of their own.</summary>
+        internal void AppendSome(TypedValues other, int from, int count)
+        {
+            Count += count;
+            Some(other, from, count);
+        }
+
+        /// <summary>Takes the <paramref name="count"/> values of <paramref name="other"/>, of the same class, from its value <paramref name="from"/> on, after these.</summary>
+        protected abstract void Some(TypedValues other, int from, int count);
+
         /// <summary>
         /// Counts the values taken in <paramref name="bounds"/>, each at its row <paramref name="offset"/> rows on, as a take
         /// that counts a chunk's blocks counts them as it types them.
@@ -2133,6 +2418,8 @@ internal static class VariantShredder
 
         protected override void All(TypedValues other) => _values.AddAll(((IntegerValues)other)._values);
 
+        protected override void Some(TypedValues other, int from, int count) => _values.AddFrom(((IntegerValues)other)._values, from, count);
+
         internal override void CountNext(in Counting counting, PathCensus.PathCount count, long row, int times, ref TypedCursor cursor)
         {
             count.TakenInteger(counting.Census, row, _values.Next(ref cursor.Values), times);
@@ -2217,6 +2504,8 @@ internal static class VariantShredder
 
         protected override void All(TypedValues other) => _values.AddAll(((DoubleValues)other)._values);
 
+        protected override void Some(TypedValues other, int from, int count) => _values.AddFrom(((DoubleValues)other)._values, from, count);
+
         internal override void CountNext(in Counting counting, PathCensus.PathCount count, long row, int times, ref TypedCursor cursor)
         {
             count.TakenDouble(counting.Census, row, _values.Next(ref cursor.Values), times);
@@ -2296,6 +2585,8 @@ internal static class VariantShredder
         }
 
         protected override void All(TypedValues other) => _values.AddAll(((BooleanValues)other)._values);
+
+        protected override void Some(TypedValues other, int from, int count) => _values.AddFrom(((BooleanValues)other)._values, from, count);
 
         internal override void CountNext(in Counting counting, PathCensus.PathCount count, long row, int times, ref TypedCursor cursor)
         {
@@ -2427,6 +2718,21 @@ internal static class VariantShredder
             _lastLength = from._lastLength;
         }
 
+        // Where each text's bytes start among the bytes, once made ready for ranges of them (Index).
+        private Starts _starts;
+
+        /// <summary>False for texts some of which repeat the one before: a range of them would start on bytes it does not hold.</summary>
+        protected override bool IndexValues(CanonicalArena arena) => _starts.Build(arena, _lengths);
+
+        protected override void Some(TypedValues other, int from, int count)
+        {
+            StringValues source = (StringValues)other;
+            _lengths.AddFrom(source._lengths, from, count);
+            int start = source._starts.Before(from);
+            _bytes.AddFrom(source._bytes, start, source._starts.Before(from + count) - start);
+            _lastLength = _lengths.Last;
+        }
+
         /// <summary>The next text, a repeat the text it repeats, whose bytes are there once and which the cursor keeps.</summary>
         internal override void CountNext(in Counting counting, PathCensus.PathCount count, long row, int times, ref TypedCursor cursor)
         {
@@ -2540,31 +2846,73 @@ internal static class VariantShredder
         /// <summary>The rows that hold a value, in order.</summary>
         internal Appended<int> Rows => _rows;
 
+        // For values ranges of which are taken (Range): the most keys each names (Keys), which a range sums; and, once made
+        // ready (Index), where the rows hold each row of the chunk and where each value's bytes start among the bytes.
+        private Appended<int>? _keysOf;
+        private Ranks _ranks;
+        private Starts _starts;
+
         internal void Clear(CanonicalArena arena)
         {
             _rows.Clear(arena);
             _lengths.Clear(arena);
             _bytes.Clear(arena);
+            _keysOf?.Clear(arena);
             Keys = 0;
+        }
+
+        /// <summary>Has the values keep what a range of them is found from (<see cref="Index"/>), before any is taken.</summary>
+        internal void Range() => _keysOf = new Appended<int>();
+
+        /// <summary>Makes the values taken of a chunk's <paramref name="rows"/> rows ready for ranges of them to be taken (<see cref="AppendRange"/>), carved from <paramref name="arena"/>.</summary>
+        internal bool Index(CanonicalArena arena, int rows)
+        {
+            _ranks.Build(arena, _rows, rows);
+            return _keysOf is not null && _starts.Build(arena, _lengths);
+        }
+
+        /// <summary>
+        /// Takes the values <paramref name="other"/>, made ready for it (<see cref="Index"/>), took at its
+        /// <paramref name="count"/> rows from <paramref name="first"/> on, after these, each at its row <paramref name="shift"/>
+        /// rows on; returns how many.
+        /// </summary>
+        internal int AppendRange(BinaryValues other, int first, int count, int shift)
+        {
+            int start = other._ranks.Before(first);
+            int values = other._ranks.Before(first + count) - start;
+            if (values == 0)
+            {
+                return 0;
+            }
+
+            AddRowsOf(_rows, other._rows, start, values, first, count, shift);
+            _lengths.AddFrom(other._lengths, start, values);
+            int from = other._starts.Before(start);
+            _bytes.AddFrom(other._bytes, from, other._starts.Before(start + values) - from);
+            _keysOf?.AddFrom(other._keysOf!, start, values);
+            Keys += other._keysOf!.Sum(start, values);
+            return values;
         }
 
         /// <summary>Takes <paramref name="value"/>, a value whole, at row <paramref name="row"/>.</summary>
         internal void Add(int row, ReadOnlySpan<byte> value)
         {
-            Put(row, value);
-            Keys += Nested(value);
+            Put(row, value, Nested(value));
         }
 
-        private void Put(int row, ReadOnlySpan<byte> value)
+        private void Put(int row, ReadOnlySpan<byte> value, long keys)
         {
             _rows.Add(row);
             _lengths.Add(value.Length);
             _bytes.AddRange(value);
+            _keysOf?.Add(checked((int)keys));
+            Keys += keys;
         }
 
         /// <summary>Takes the values <paramref name="other"/> took, after these, each at its row <paramref name="offset"/> rows on.</summary>
         internal void Append(BinaryValues other, int offset)
         {
+            System.Diagnostics.Debug.Assert(_keysOf is null, "A chunk that takes blocks whole is not one ranges are taken of.");
             _rows.AddShifted(other._rows, offset);
             _lengths.AddAll(other._lengths);
             _bytes.AddAll(other._bytes);
@@ -2649,8 +2997,7 @@ internal static class VariantShredder
                     at += value.Length;
                 }
 
-                Put(row, into);
-                Keys += keys;
+                Put(row, into, keys);
             }
             finally
             {
@@ -3088,37 +3435,111 @@ internal static class VariantShredder
                 return;
             }
 
-            Vector128<int> by = Vector128.Create(shift);
             for (int block = 0; block < other.Blocks; block++)
             {
-                ReadOnlySpan<int> rows = MemoryMarshal.Cast<T, int>(other.Block(block));
-                while (!rows.IsEmpty)
-                {
-                    if (_left == 0)
-                    {
-                        Grow();
-                    }
-
-                    int take = Math.Min(_left, rows.Length);
-                    int* into = (int*)_next;
-                    ref int from = ref MemoryMarshal.GetReference(rows);
-                    int i = 0;
-                    for (; i <= take - Vector128<int>.Count; i += Vector128<int>.Count)
-                    {
-                        (Vector128.LoadUnsafe(ref from, (nuint)i) + by).Store(into + i);
-                    }
-
-                    for (; i < take; i++)
-                    {
-                        into[i] = rows[i] + shift;
-                    }
-
-                    _next += take;
-                    _left -= take;
-                    Count += take;
-                    rows = rows[take..];
-                }
+                AddShifted(MemoryMarshal.Cast<T, int>(other.Block(block)), shift);
             }
+        }
+
+        /// <summary>Appends <paramref name="rows"/>, each <paramref name="shift"/> rows on, to a list of rows.</summary>
+        private void AddShifted(ReadOnlySpan<int> rows, int shift)
+        {
+            Vector128<int> by = Vector128.Create(shift);
+            while (!rows.IsEmpty)
+            {
+                if (_left == 0)
+                {
+                    Grow();
+                }
+
+                int take = Math.Min(_left, rows.Length);
+                int* into = (int*)_next;
+                ref int from = ref MemoryMarshal.GetReference(rows);
+                int i = 0;
+                for (; i <= take - Vector128<int>.Count; i += Vector128<int>.Count)
+                {
+                    (Vector128.LoadUnsafe(ref from, (nuint)i) + by).Store(into + i);
+                }
+
+                for (; i < take; i++)
+                {
+                    into[i] = rows[i] + shift;
+                }
+
+                _next += take;
+                _left -= take;
+                Count += take;
+                rows = rows[take..];
+            }
+        }
+
+        /// <summary>Appends the <paramref name="count"/> values of <paramref name="other"/>, another list, from its value <paramref name="from"/> on.</summary>
+        internal void AddFrom(Appended<T> other, int from, int count)
+        {
+            for (int b = 0; b < other._blockCount && count > 0; b++)
+            {
+                ReadOnlySpan<T> block = other.Block(b);
+                if (from >= block.Length)
+                {
+                    from -= block.Length;
+                    continue;
+                }
+
+                int take = Math.Min(block.Length - from, count);
+                AddRange(block.Slice(from, take));
+                from = 0;
+                count -= take;
+            }
+        }
+
+        /// <summary>
+        /// Appends the <paramref name="count"/> rows of <paramref name="other"/>, another list of rows, from its row
+        /// <paramref name="from"/> on, each <paramref name="shift"/> rows on.
+        /// </summary>
+        internal void AddShiftedFrom(Appended<T> other, int from, int count, int shift)
+        {
+            System.Diagnostics.Debug.Assert(typeof(T) == typeof(int), "Rows are shifted.");
+            for (int b = 0; b < other._blockCount && count > 0; b++)
+            {
+                ReadOnlySpan<int> block = MemoryMarshal.Cast<T, int>(other.Block(b));
+                if (from >= block.Length)
+                {
+                    from -= block.Length;
+                    continue;
+                }
+
+                int take = Math.Min(block.Length - from, count);
+                AddShifted(block.Slice(from, take), shift);
+                from = 0;
+                count -= take;
+            }
+        }
+
+        /// <summary>The sum of the <paramref name="count"/> values from value <paramref name="from"/> on, of a list of counts.</summary>
+        internal long Sum(int from, int count)
+        {
+            System.Diagnostics.Debug.Assert(typeof(T) == typeof(int), "Counts are summed.");
+            long sum = 0;
+            for (int b = 0; b < _blockCount && count > 0; b++)
+            {
+                ReadOnlySpan<int> block = MemoryMarshal.Cast<T, int>(Block(b));
+                if (from >= block.Length)
+                {
+                    from -= block.Length;
+                    continue;
+                }
+
+                int take = Math.Min(block.Length - from, count);
+                foreach (int value in block.Slice(from, take))
+                {
+                    sum += value;
+                }
+
+                from = 0;
+                count -= take;
+            }
+
+            return sum;
         }
 
         /// <summary>Moves <paramref name="cursor"/> past the <paramref name="count"/> values after the one read last.</summary>
@@ -3293,6 +3714,136 @@ internal static class VariantShredder
                 bits = length == 64 ? 0 : bits & ~(((1UL << length) - 1) << start);
             }
         }
+    }
+
+    /// <summary>
+    /// Appends to <paramref name="list"/> the <paramref name="held"/> rows of <paramref name="from"/>, another list of rows,
+    /// from its row <paramref name="start"/> on, which are those it holds of the <paramref name="count"/> rows from
+    /// <paramref name="first"/> on, each <paramref name="shift"/> rows on: the range whole at once when it holds every row of it.
+    /// </summary>
+    private static void AddRowsOf(Appended<int> list, Appended<int> from, int start, int held, int first, int count, int shift)
+    {
+        if (held == count)
+        {
+            list.AddSequence(first + shift, count);
+        }
+        else
+        {
+            list.AddShiftedFrom(from, start, held, shift);
+        }
+    }
+
+    /// <summary>
+    /// Where a list of rising rows holds each row of a chunk, told at any row once built (<see cref="Shredding.Index"/>):
+    /// a bit a row and the rows held before each word of them, and neither for a list that holds every row or none.
+    /// </summary>
+    /// <remarks>
+    /// A block takes of a batch's shredding as many ranges as the merge handed it runs of the batch, a row or two long where
+    /// its inputs' keys interleave closely: a search of the rows for each end of each range, of each node, would cost a row
+    /// read whole.
+    /// </remarks>
+    private struct Ranks
+    {
+        private VortexBuffer _bits;
+        private VortexBuffer _before;
+        private int _rows;
+        private int _held;
+
+        /// <summary>Builds it for <paramref name="held"/>, rising rows below <paramref name="rows"/>, in <paramref name="arena"/>.</summary>
+        internal void Build(CanonicalArena arena, Appended<int> held, int rows)
+        {
+            _rows = rows;
+            _held = held.Count;
+            _bits = default;
+            _before = default;
+            if (_held == 0 || _held == rows)
+            {
+                return;
+            }
+
+            // A word more than the rows fill, for the rows held below the chunk's end.
+            int words = (rows >> 6) + 1;
+            _bits = arena.Allocate(words * sizeof(ulong), 8, out Span<byte> zeroed).Slice(0, words * sizeof(ulong));
+            _before = arena.AllocateUninitialized(words * sizeof(int), 8, out Span<byte> counted).Slice(0, words * sizeof(int));
+            Span<ulong> bits = MemoryMarshal.Cast<byte, ulong>(zeroed)[..words];
+            for (int b = 0; b < held.Blocks; b++)
+            {
+                foreach (int row in held.Block(b))
+                {
+                    bits[row >> 6] |= 1UL << (row & 63);
+                }
+            }
+
+            Span<int> before = MemoryMarshal.Cast<byte, int>(counted)[..words];
+            int sum = 0;
+            for (int w = 0; w < words; w++)
+            {
+                before[w] = sum;
+                sum += System.Numerics.BitOperations.PopCount(bits[w]);
+            }
+        }
+
+        /// <summary>How many of the rows held lie below <paramref name="row"/>, at most the chunk's rows: the place among them of the first one from it on.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal readonly int Before(int row)
+        {
+            if (_held == 0)
+            {
+                return 0;
+            }
+
+            if (_held == _rows)
+            {
+                return row;
+            }
+
+            int word = row >> 6;
+            ulong below = _bits.Cast<ulong>()[word] & ((1UL << (row & 63)) - 1);
+            return _before.Cast<int>()[word] + System.Numerics.BitOperations.PopCount(below);
+        }
+    }
+
+    /// <summary>
+    /// The sum of the counts before each of a list of counts, and of them all, told at any place once built
+    /// (<see cref="Shredding.Index"/>): where a text's bytes start among its list's bytes, or a list's elements among the
+    /// elements.
+    /// </summary>
+    private struct Starts
+    {
+        private VortexBuffer _held;
+
+        /// <summary>Builds it for <paramref name="counts"/> in <paramref name="arena"/>. False when a count is complemented, a repeat that holds no bytes of its own.</summary>
+        internal bool Build(CanonicalArena arena, Appended<int> counts)
+        {
+            _held = default;
+            if (counts.Count == 0)
+            {
+                return true;
+            }
+
+            int bytes = checked((counts.Count + 1) * sizeof(int));
+            _held = arena.AllocateUninitialized(bytes, 8, out Span<byte> into).Slice(0, bytes);
+            Span<int> starts = MemoryMarshal.Cast<byte, int>(into)[..(counts.Count + 1)];
+            int sum = 0;
+            int at = 0;
+            int signs = 0;
+            for (int b = 0; b < counts.Blocks; b++)
+            {
+                foreach (int count in counts.Block(b))
+                {
+                    starts[at++] = sum;
+                    sum += count;
+                    signs |= count;
+                }
+            }
+
+            starts[at] = sum;
+            return signs >= 0;
+        }
+
+        /// <summary>The sum of the counts before the one at <paramref name="index"/>, at most the list's count.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal readonly int Before(int index) => _held.Cast<int>()[index];
     }
 
     /// <summary>Where a list of values is read back from, a value or a few at a time (<see cref="Appended{T}.Next(ref Cursor)"/>): its first value at its default.</summary>

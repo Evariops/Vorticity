@@ -170,6 +170,94 @@ public sealed partial class DatasetCompactionLanesTests
     }
 
     /// <summary>
+    /// Log records consolidated once, then appended to and consolidated again with the job's inputs handing its writers
+    /// what they took of the variant's rows as their own shreddings hold them (<see cref="DatasetOptions.TakesVariants"/>),
+    /// at four lanes and at fourteen: the segments are those of the consolidation whose writers read every row put back
+    /// together, at one lane and at four. The second consolidation reads the objects the first shredded, whose rows it
+    /// takes. Blocks of 256 rows, so that a run of a block's holds four rows or more on average and is worth taking, in
+    /// chunks of 4 KiB, dozens an object: an input takes the chunks it decodes once a first block was worth it, which a
+    /// file decoded whole before any block never does.
+    /// </summary>
+    /// <remarks>
+    /// A key is held by half the records or by one in four hundred, so that both jobs shred the same keys: an input that
+    /// types a key its job does not is read as its rows put back together, a window at a time.
+    /// </remarks>
+    [Fact]
+    public async Task AConsolidationWhoseInputsHandOverWhatTheyTookOfAVariantWritesTheSameSegments()
+    {
+        await using MemoryObjectStore built = new MemoryObjectStore();
+        {
+            Random random = new Random(43);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(built, LogDoc.Schema, TakenLogOptionsOf(VortexSession.Default, takes: false), Ct);
+            for (int a = 0; a < 12; a++)
+            {
+                await AppendLogsAsync(dataset, random, a * 3_000, 3_000, latePercent: 0, dayRows: 96_000, SteadyAttributes);
+            }
+
+            await dataset.ConsolidateAsync(Ct);
+            for (int a = 12; a < 16; a++)
+            {
+                await AppendLogsAsync(dataset, random, a * 3_000, 3_000, latePercent: 0, dayRows: 96_000, SteadyAttributes);
+            }
+        }
+
+        bool[] takes = [false, false, true, true];
+        int run = 0;
+        List<CompactionResult> jobs = await SameObjectsAtDegreesAsync(
+            built, [1, 4, 4, 14], session => TakenLogOptionsOf(session, takes[run++]), static async dataset => [.. await dataset.ConsolidateAsync(Ct)]);
+        string ran = string.Join(", ", jobs.Select(static job => $"{job.Trigger} {job.ObjectsIn}->{job.ObjectsOut} line {job.WriterBlocksOnLine} taken {job.WriterBlocksOfRunsTaken}"));
+        Assert.True(jobs.Sum(static job => job.WriterBlocksOnLine) > 0, ran);
+        Assert.True(jobs.Sum(static job => job.WriterBlocksOfRunsTaken) > 0, ran);
+    }
+
+    /// <summary>
+    /// A log record's attributes whose keys every job of some thousands of records shreds alike: six keys every record has,
+    /// six half of them have, and ten one in four hundred has, too few for any job to shred.
+    /// </summary>
+    private static Variant SteadyAttributes(Random random)
+    {
+        List<(string, Variant)> fields =
+        [
+            ("route", Variant.From($"/api/r{random.Next(30)}")),
+            ("status", Variant.From(200 + (random.Next(4) * 100))),
+            ("duration", Variant.From(random.NextDouble() * 100)),
+            ("user", Variant.From($"user-{random.Next(800)}")),
+            ("host", Variant.From($"host-{random.Next(16)}")),
+            ("region", Variant.From(random.Next(3) == 0 ? "eu" : "us")),
+        ];
+        for (int key = 0; key < 6; key++)
+        {
+            if (random.Next(2) == 0)
+            {
+                fields.Add(($"k{key:D2}", key % 3 == 0 ? Variant.From(random.Next(1_000)) : Variant.From($"v{random.Next(50)}")));
+            }
+        }
+
+        for (int key = 0; key < 10; key++)
+        {
+            if (random.Next(400) == 0)
+            {
+                fields.Add(($"r{key:D2}", key % 2 == 0 ? Variant.From(random.Next(100_000)) : Variant.From($"rare-{random.Next(9)}")));
+            }
+        }
+
+        return Variant.Object([.. fields]);
+    }
+
+    private static DatasetOptions TakenLogOptionsOf(VortexSession session, bool takes)
+    {
+        // Objects aimed at 2 MiB, which an append of 3 000 records stays well under and is merged.
+        DatasetOptions options = LogOptionsOf(session, LayoutOrganization.Tiered);
+        return options with
+        {
+            Write = new VortexWriteOptions { BlockRows = 256 },
+            Layout = options.Layout! with { ObjectBytes = 1 << 21 },
+            ChunkBytes = 4 << 10,
+            TakesVariants = takes,
+        };
+    }
+
+    /// <summary>
     /// The same records over a leveled tree of one day, a few of every append a little late, behind the rows level 1 already
     /// holds, and nine appends left in level 0, past its ceiling: the exits of level 0, which keep the late rows apart,
     /// write the same segments at one lane, four and fourteen.
@@ -252,7 +340,10 @@ public sealed partial class DatasetCompactionLanesTests
         List<CompactionResult> jobs = [];
         for (int step = 0; await dataset.CompactAsync(cancellationToken: Ct) is { } job; step++)
         {
-            Assert.True(step < 1_000, "compaction never runs out of jobs");
+            Assert.True(
+                step < 1_000,
+                "compaction never runs out of jobs, the last: "
+                    + string.Join(", ", jobs.TakeLast(6).Select(static last => $"{last.Trigger} {last.FromLevel}->{last.ToLevel} {last.ObjectsIn}->{last.ObjectsOut} {last.Rows} rows {last.BytesIn}->{last.BytesOut} B")));
             jobs.Add(job);
         }
 
@@ -263,8 +354,10 @@ public sealed partial class DatasetCompactionLanesTests
     /// Appends <paramref name="rows"/> log records from instant <paramref name="from"/> on, a millisecond apart, a day each
     /// <paramref name="dayRows"/>, <paramref name="latePercent"/> of them a little behind the last.
     /// </summary>
-    private static async Task AppendLogsAsync(VortexDataset dataset, Random random, long from, int rows, int latePercent, long dayRows)
+    private static async Task AppendLogsAsync(
+        VortexDataset dataset, Random random, long from, int rows, int latePercent, long dayRows, Func<Random, Variant>? attributes = null)
     {
+        attributes ??= LogAttributes;
         LogDoc[] logs = new LogDoc[rows];
         for (int i = 0; i < rows; i++)
         {
@@ -279,7 +372,7 @@ public sealed partial class DatasetCompactionLanesTests
                 $"svc-{random.Next(0, 12):D2}",
                 random.Next(4) == 0 ? null : $"request {random.Next(1_000)} served in {random.Next(500)} ms",
                 at,
-                LogAttributes(random));
+                attributes(random));
         }
 
         await using ObjectDraft draft = dataset.StartObject();

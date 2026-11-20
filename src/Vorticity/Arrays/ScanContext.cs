@@ -585,6 +585,50 @@ internal sealed class ScanContext : IDisposable
     }
 
     /// <summary>
+    /// The chunks of variant columns the scan takes as their file's shredding holds them, beside the rows it puts back
+    /// together, for a consumer that writes them under a shredding of its own (<see cref="Types.Variants.VariantTake"/>);
+    /// null for none. Behind the pushed holder, as <see cref="ApartKeys"/>.
+    /// </summary>
+    internal Types.Variants.TakenVariants? TakenVariants
+    {
+        get => _pushed?.Taken;
+        set
+        {
+            if (value is not null || _pushed is not null)
+            {
+                (_pushed ??= new Pushed()).Taken = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// What takes the variant of the chunk a flat layout decodes next as its shredding holds it; null clears it, which the
+    /// reader does after the decode.
+    /// </summary>
+    internal Types.Variants.VariantTake? TakeNext
+    {
+        set
+        {
+            if (value is not null || _pushed is not null)
+            {
+                (_pushed ??= new Pushed()).TakeNext = value;
+            }
+        }
+    }
+
+    /// <summary>Takes <see cref="TakeNext"/>, clearing it, so that no variant decoded below the one that takes it is taken so.</summary>
+    internal Types.Variants.VariantTake? TakeTaken()
+    {
+        if (_pushed is not { TakeNext: { } take } pushed)
+        {
+            return null;
+        }
+
+        pushed.TakeNext = null;
+        return take;
+    }
+
+    /// <summary>
     /// Whether the scan reads a few rows of each chunk it reads, a part of a file's rows read again: a decoder then decodes
     /// of a child that every range of its node reads whole the part the range reads, where a scan of many ranges of the node
     /// decodes the child once for all of them. Behind the pushed holder, as <see cref="ApartKeys"/>.
@@ -785,6 +829,8 @@ internal sealed class ScanContext : IDisposable
         internal ulong EncodedFields;
         internal Types.Variants.ApartKeys? ApartKeys;
         internal bool FewRowsOfChunks;
+        internal Types.Variants.TakenVariants? Taken;
+        internal Types.Variants.VariantTake? TakeNext;
     }
 
     private Pushed? _pushed;
@@ -1948,6 +1994,8 @@ internal sealed class ScanContext : IDisposable
         VariantsApart = false;
         ApartKeys = null;
         FewRowsOfChunks = false;
+        TakenVariants = null;
+        TakeNext = null;
         Along?.Clear();
         ForgetNodeTables();
         if (_memory is { } memory)

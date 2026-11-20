@@ -89,6 +89,13 @@ public sealed partial class VortexFileWriter
     /// <summary>The blocks that went through the line beside others, each column's work on them in order.</summary>
     internal int BlocksOnLine { get; private set; }
 
+    /// <summary>
+    /// Of <see cref="BlocksOnLine"/>, those that took their rows of a variant column from what the merge's inputs took of
+    /// them (<see cref="TakeRuns"/>), and read none. Counted by the line, which a writer that sends no block through it
+    /// never makes.
+    /// </summary>
+    internal int BlocksOfRunsTaken => _line?.BlocksOfRunsTaken ?? 0;
+
     /// <summary>The blocks a writer that sends its blocks through its line sent alone, as every block went before the line.</summary>
     internal int BlocksAlone { get; private set; }
 
@@ -1096,6 +1103,11 @@ public sealed partial class VortexFileWriter
 
             BatchesIngestedAcross++;
             BlocksOnLine++;
+            if (_line is { } line && flight.RunsTaken.AsSpan().Contains(true))
+            {
+                line.BlocksOfRunsTaken++;
+            }
+
             if (flight.KeysApart)
             {
                 BatchesKeysApart++;
@@ -1276,6 +1288,9 @@ public sealed partial class VortexFileWriter
         private long _epilogued;
         private long _landed;
         private long _owning;
+
+        /// <summary>The flights landed whose block took its rows of a variant column from what the merge's inputs took of them; counted as each lands, in order.</summary>
+        internal int BlocksOfRunsTaken;
 
         // Whether a prologue or an epilogue is queued or running: each runs one at a time, in order.
         private bool _prologuing;

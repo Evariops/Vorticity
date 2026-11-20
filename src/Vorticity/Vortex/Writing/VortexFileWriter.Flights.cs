@@ -190,7 +190,16 @@ public sealed partial class VortexFileWriter
         /// <inheritdoc cref="Blocks"/>
         internal CanonicalArena?[] BlockStores = [];
 
-        /// <summary>Room for the takes of <paramref name="fields"/> columns, on the thread that runs the flight's prologue: what a flight before it took of a column kept.</summary>
+        /// <summary>
+        /// Per shredded column, whether the flight's assembly filled <see cref="Blocks"/> from what the merge's inputs took of
+        /// its runs' rows (<see cref="TakeRuns"/>), which <see cref="TakeBlock"/> then leaves as it is; until the flight lands.
+        /// </summary>
+        internal bool[] RunsTaken = [];
+
+        /// <summary>
+        /// Room for the takes of <paramref name="fields"/> columns, on the thread that assembles the flight's block, then on
+        /// the one that runs its prologue, which follows it: what a flight before it took of a column kept.
+        /// </summary>
         internal void SizeShreds(int fields)
         {
             if (ShredAt.Length != fields)
@@ -203,7 +212,21 @@ public sealed partial class VortexFileWriter
             {
                 System.Array.Resize(ref Blocks, fields);
                 System.Array.Resize(ref BlockStores, fields);
+                RunsTaken = new bool[fields];
             }
+        }
+
+        /// <summary>
+        /// The shredding of <paramref name="plan"/> the flight's rows of column <paramref name="field"/> are taken into,
+        /// begun for them alone, numbered from the block's first: made on the column's first block of the flight and kept.
+        /// </summary>
+        internal VariantShredder.Shredding BeginBlock(int field, VariantShredding plan, MemoryAccount account)
+        {
+            VariantShredder.Shredding block = Blocks[field] ??= new VariantShredder.Shredding(plan);
+            CanonicalArena store = BlockStores[field] ??= new CanonicalArena(64, account);
+            store.ResetKeepingBlocks();
+            block.Begin(store, null, counted: true);
+            return block;
         }
 
         /// <summary>
@@ -213,15 +236,15 @@ public sealed partial class VortexFileWriter
         /// </summary>
         /// <remarks>
         /// Each column's item touches its own slot alone, of arrays the flight's prologue sized (<see cref="SizeShreds"/>): the
-        /// items of two variant columns of a flight run beside each other.
+        /// items of two variant columns of a flight run beside each other. A column whose runs the flight's assembly took
+        /// from what the merge's inputs took of them (<see cref="RunsTaken"/>) holds its rows already, and none is read.
         /// </remarks>
         internal void TakeBlock(int field, VariantShredding plan, MemoryAccount account)
         {
-            VariantShredder.Shredding block = Blocks[field] ??= new VariantShredder.Shredding(plan);
-            CanonicalArena store = BlockStores[field] ??= new CanonicalArena(64, account);
-            store.ResetKeepingBlocks();
-            block.Begin(store, null, counted: true);
-            block.TakeMore(in Shred[field], 0);
+            if (!RunsTaken[field])
+            {
+                BeginBlock(field, plan, account).TakeMore(in Shred[field], 0);
+            }
         }
 
         /// <summary>The flight's items, as the ingest across the lanes numbers them.</summary>
@@ -302,6 +325,7 @@ public sealed partial class VortexFileWriter
             Staging = null;
             Census = null;
             AttachFrom = null;
+            System.Array.Clear(RunsTaken);
         }
 
         /// <summary>Gives back the key passes' arenas, for a writer done.</summary>

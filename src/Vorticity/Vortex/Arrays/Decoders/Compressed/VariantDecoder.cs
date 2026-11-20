@@ -84,6 +84,7 @@ internal sealed class VariantDecoder : ArrayDecoder
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         VariantMetadata metadata = VariantMetadata.Read(node.Metadata);
         bool residual = context.TakeResidual();
+        VariantTake? take = context.Scan.TakeTaken();
 
         if (dtype.Kind != DTypeKind.Variant)
         {
@@ -144,6 +145,15 @@ internal sealed class VariantDecoder : ArrayDecoder
             return core;
         }
 
+        // For a consumer that writes the rows under a shredding of its own: the rows taken into it as this chunk's shredding
+        // holds them, a slice at a time beside the slice's rows put back together, carved from the arena the rows go to.
+        Writing.VariantShredder.Shredding? taken = null;
+        if (take is not null)
+        {
+            taken = take.Rent();
+            taken.Begin(context.Canonical, null);
+        }
+
         bool sliceable = rows == ChildRows.Selected
             ? context.ChildSelectsWithoutFullDecode(in node, 1, shreddedType)
             : context.ChildDecodesRange(in node, 1);
@@ -159,10 +169,13 @@ internal sealed class VariantDecoder : ArrayDecoder
                         ? context.DecodeChildSelected(in node, 1, shreddedType, length, wanted.Slice(at, part))
                         : context.DecodeChildRange(in node, 1, shreddedType, length, start + at, part);
                     int group = ShreddedTree.Group(context, dtype, coreSlice, shreddedSlice, out DType groupType);
+                    taken = Taken(taken, context.Canonical, group, at);
                     slices.Write(context, group, groupType, at);
                 }
 
-                return slices.Complete(dtype, storage.GetFieldIndex(0), storage.GetFieldIndex(1), storage.Validity);
+                int rebuilt = slices.Complete(dtype, storage.GetFieldIndex(0), storage.GetFieldIndex(1), storage.Validity);
+                Note(slices.Destination, rebuilt, taken);
+                return rebuilt;
             }
             finally
             {
@@ -171,7 +184,60 @@ internal sealed class VariantDecoder : ArrayDecoder
         }
 
         int shredded = context.DecodeChildRows(in node, 1, shreddedType, length, start, count, wanted, rows);
-        return ShreddedTree.Assemble(context, dtype, core, shredded);
+        int whole = ShreddedTree.Group(context, dtype, core, shredded, out DType wholeType);
+        taken = Taken(taken, context.Canonical, whole, 0);
+        int assembled = ShreddedTree.Assemble(context, dtype, whole, wholeType);
+        Note(context.Canonical, assembled, taken);
+        return assembled;
+    }
+
+    /// <summary>
+    /// Has <paramref name="taken"/> take the rows of <paramref name="group"/>, a part of a chunk as its shredding holds it,
+    /// as its rows from <paramref name="at"/> on; null, for the rows to be read as they are put back together, when there
+    /// is none, when it does not take a group of this shape, or when what the shredding left of a row does not read as it
+    /// lies, which the rows put back together then tell.
+    /// </summary>
+    private static Writing.VariantShredder.Shredding? Taken(Writing.VariantShredder.Shredding? taken, CanonicalArena arena, int group, int at)
+    {
+        if (taken is null)
+        {
+            return null;
+        }
+
+        bool took;
+        try
+        {
+            took = taken.TakeGroup(arena, group, at);
+        }
+        catch (VortexFormatException)
+        {
+            took = false;
+        }
+
+        if (!took)
+        {
+            taken.Lender?.Return(taken);
+            return null;
+        }
+
+        return taken;
+    }
+
+    /// <summary>
+    /// Tells <paramref name="arena"/> what was taken of the rows of its node <paramref name="node"/>, carved from it, once
+    /// made ready for ranges of them to be taken; what is not, or what the arena does not keep, goes back to its lender.
+    /// </summary>
+    private static void Note(CanonicalArena arena, int node, Writing.VariantShredder.Shredding? taken)
+    {
+        if (taken is null)
+        {
+            return;
+        }
+
+        if (!taken.Index() || !arena.NoteTaken(node, taken, 0, owned: true))
+        {
+            taken.Lender?.Return(taken);
+        }
     }
 }
 
@@ -382,6 +448,16 @@ internal static class ShreddedTree
     internal static int Assemble(ArrayDecodeContext context, DType variant, int core, int shredded)
     {
         int node = Group(context, variant, core, shredded, out DType group);
+        return Assemble(context, variant, node, group);
+    }
+
+    /// <summary>
+    /// The variant node of the rows of <paramref name="node"/>, the group of <paramref name="group"/> they are shredded into
+    /// (<see cref="Group(ArrayDecodeContext, DType, int, int, out DType)"/>).
+    /// </summary>
+    /// <exception cref="VortexFormatException">The tree is not one a shredding builds.</exception>
+    internal static int Assemble(ArrayDecodeContext context, DType variant, int node, DType group)
+    {
         try
         {
             return ShreddedVariant.For(context.Scan, group).Assemble(context.Canonical, variant, node);

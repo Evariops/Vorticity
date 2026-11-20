@@ -33,6 +33,12 @@ internal sealed class BatchHandover
     internal DecodeAhead? Ahead { get; init; }
 
     /// <summary>
+    /// The chunks of the file's variant columns the scan takes as their shredding holds them, for a consumer that writes
+    /// them under a shredding of its own (<see cref="Arrays.ScanContext.TakenVariants"/>); null for none. Set before the scan starts.
+    /// </summary>
+    internal Types.Variants.TakenVariants? Taken { get; set; }
+
+    /// <summary>
     /// The splits in flight the scan keeps of its own, past which it takes windows of <see cref="Ahead"/>; and those it holds
     /// now. Here rather than in the scan, which every scan would pay for; on the consumer's flow, the scan's pump.
     /// </summary>

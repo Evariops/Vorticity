@@ -206,8 +206,9 @@ public sealed partial class ShreddedVariantWriteTests
     /// Rows written under one shredding, read back as that shredding holds them and taken as they lie into another
     /// (<see cref="VariantShredder.Shredding.TakeGroup"/>): the chunk written from it is the chunk written from the rows put
     /// back together, to the byte, and its census theirs, when every key the first types is one the second types in the
-    /// same class, whatever else the second types of what the first left. A shredding that types fewer keys, or one in
-    /// another class, is refused, and nothing taken.
+    /// same class, or one the first keeps whole, values of several classes, that the second names as a column or a list,
+    /// whatever else the second types of what the first left. A shredding that types fewer keys, one in another class, or
+    /// that names as an object a key kept whole, is refused, and nothing taken.
     /// </summary>
     [Theory]
     [InlineData(31)]
@@ -218,12 +219,24 @@ public sealed partial class ShreddedVariantWriteTests
     {
         Random random = new Random(seed);
         Doc[] rows = [.. Enumerable.Range(0, 3_000).Select(i => new Doc(i, Flat(random), random.Next(10) == 0 ? null : Flat(random)))];
+
+        // "m" holds integers and texts, "t" lists of integers and others: the file keeps each as a variant of its own.
         VariantShredding written = VariantShredding.Object(
             ("n", VariantShredding.Primitive(VariantClass.Integer)),
             ("d", VariantShredding.Primitive(VariantClass.Double)),
             ("s", VariantShredding.Primitive(VariantClass.String)),
             ("l", VariantShredding.Primitive(VariantClass.String)),
-            ("b", VariantShredding.Primitive(VariantClass.Boolean)));
+            ("b", VariantShredding.Primitive(VariantClass.Boolean)),
+            ("m", VariantShredding.Primitive(VariantClass.Integer)),
+            ("t", VariantShredding.List(VariantClass.Integer)));
+        VariantShredding objected = VariantShredding.Object(
+            ("n", VariantShredding.Primitive(VariantClass.Integer)),
+            ("d", VariantShredding.Primitive(VariantClass.Double)),
+            ("s", VariantShredding.Primitive(VariantClass.String)),
+            ("l", VariantShredding.Primitive(VariantClass.String)),
+            ("b", VariantShredding.Primitive(VariantClass.Boolean)),
+            ("m", VariantShredding.Object(("id", VariantShredding.Primitive(VariantClass.Integer)))),
+            ("t", VariantShredding.List(VariantClass.Integer)));
         VariantShredding wider = VariantShredding.Object(
             ("n", VariantShredding.Primitive(VariantClass.Integer)),
             ("d", VariantShredding.Primitive(VariantClass.Double)),
@@ -243,7 +256,9 @@ public sealed partial class ShreddedVariantWriteTests
             ("d", VariantShredding.Primitive(VariantClass.Double)),
             ("s", VariantShredding.Primitive(VariantClass.String)),
             ("l", VariantShredding.Primitive(VariantClass.String)),
-            ("b", VariantShredding.Primitive(VariantClass.Boolean)));
+            ("b", VariantShredding.Primitive(VariantClass.Boolean)),
+            ("m", VariantShredding.Primitive(VariantClass.Integer)),
+            ("t", VariantShredding.List(VariantClass.Integer)));
 
         string path = await WriteAsync(rows, new() { [nameof(Doc.Attributes)] = written, [nameof(Doc.Extra)] = written }, 1, blockRows: rows.Length);
         try
@@ -261,7 +276,7 @@ public sealed partial class ShreddedVariantWriteTests
                 foreach (string name in new[] { nameof(Doc.Attributes), nameof(Doc.Extra) })
                 {
                     int column = back.Arena.GetNode(back.RootIndex).GetFieldIndex(file.DType.IndexOfField(name));
-                    foreach ((VariantShredding plan, bool taken) in new[] { (written, true), (wider, true), (narrower, false), (otherwise, false) })
+                    foreach ((VariantShredding plan, bool taken) in new[] { (written, true), (wider, true), (narrower, false), (otherwise, false), (objected, false) })
                     {
                         using ArrayBlobWriter.Workspace asRows = new ArrayBlobWriter.Workspace { Account = TestAccount.Shared };
                         using ArrayBlobWriter.Workspace asItLies = new ArrayBlobWriter.Workspace { Account = TestAccount.Shared };
@@ -316,6 +331,239 @@ public sealed partial class ShreddedVariantWriteTests
         {
             System.IO.File.Delete(path);
         }
+    }
+
+    /// <summary>
+    /// Blocks that take runs of a batch's rows as a shredding of the batch holds them (<see cref="VariantShredder.Shredding.Index"/>,
+    /// <see cref="VariantShredder.Shredding.AppendRange"/>), a row here and hundreds there, in any order, as a merge hands
+    /// its writer the rows of its inputs: each block's census is the census of the same rows gathered and read one after the
+    /// other, each key's column the column read from them, and the chunk the blocks are added to the chunk written from the
+    /// rows, to the byte, its keys counted block by block alike.
+    /// </summary>
+    [Theory]
+    [InlineData(41)]
+    [InlineData(42)]
+    [InlineData(43)]
+    [InlineData(44)]
+    public async Task BlocksThatTakeRangesOfABatchsShreddingAreTheBlocksReadFromTheirRows(int seed)
+    {
+        Random random = new Random(seed);
+        List<Doc> rows = [];
+        while (rows.Count < 3_000)
+        {
+            // A run of rows of one document now and then: a read of the rows takes the run at once, a range each row whole.
+            Variant attributes = Flat(random);
+            Variant? extra = random.Next(10) == 0 ? null : Flat(random);
+            for (int run = random.Next(6) == 0 ? 1 + random.Next(5) : 1; run > 0; run--)
+            {
+                rows.Add(new Doc(rows.Count, attributes, extra));
+            }
+        }
+
+        // "m" holds integers and texts, "t" lists of integers and others: the file keeps each as a variant of its own.
+        VariantShredding written = VariantShredding.Object(
+            ("n", VariantShredding.Primitive(VariantClass.Integer)),
+            ("d", VariantShredding.Primitive(VariantClass.Double)),
+            ("s", VariantShredding.Primitive(VariantClass.String)),
+            ("l", VariantShredding.Primitive(VariantClass.String)),
+            ("b", VariantShredding.Primitive(VariantClass.Boolean)),
+            ("m", VariantShredding.Primitive(VariantClass.Integer)),
+            ("t", VariantShredding.List(VariantClass.Integer)));
+        VariantShredding plan = VariantShredding.Object(
+            ("n", VariantShredding.Primitive(VariantClass.Integer)),
+            ("d", VariantShredding.Primitive(VariantClass.Double)),
+            ("s", VariantShredding.Primitive(VariantClass.String)),
+            ("l", VariantShredding.Primitive(VariantClass.String)),
+            ("b", VariantShredding.Primitive(VariantClass.Boolean)),
+            ("m", VariantShredding.Primitive(VariantClass.Integer)),
+            ("o", VariantShredding.Object(("id", VariantShredding.Primitive(VariantClass.Integer)))),
+            ("t", VariantShredding.List(VariantClass.Integer)),
+            ("never", VariantShredding.Primitive(VariantClass.String)));
+
+        // Each key the plan types as a column, read in its column's class.
+        int[] typed = [.. Enumerable.Range(0, plan.Keys.Count).Where(key => plan.Keys[key].Field.Kind == VariantShreddingKind.Primitive)];
+        Vorticity.Compute.VariantRead[] reads = [.. typed.Select(key => plan.Keys[key].Field.Class switch
+        {
+            VariantClass.Integer => Vorticity.Compute.VariantRead.AsInt64,
+            VariantClass.Double => Vorticity.Compute.VariantRead.AsDouble,
+            VariantClass.String => Vorticity.Compute.VariantRead.AsString,
+            _ => Vorticity.Compute.VariantRead.AsBool,
+        })];
+
+        string path = await WriteAsync([.. rows], new() { [nameof(Doc.Attributes)] = written, [nameof(Doc.Extra)] = written }, 1, blockRows: rows.Count);
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            List<RecordBatch> whole = [];
+            await foreach (RecordBatch batch in file.Scan<Doc>().ToBatchesAsync(Ct))
+            {
+                whole.Add(batch);
+            }
+
+            RecordBatch back = Assert.Single(whole);
+            using (back)
+            {
+                foreach (string name in new[] { nameof(Doc.Attributes), nameof(Doc.Extra) })
+                {
+                    int field = file.DType.IndexOfField(name);
+
+                    // The batch's rows as the file's shredding holds them, taken into a shredding of the plan and made ready.
+                    VariantShredder.Shredding source = new VariantShredder.Shredding(plan, ranged: true);
+                    source.Begin(new CanonicalArena(), null);
+                    Assert.False(source.Indexed);
+                    await foreach (RecordBatch apart in file.ScanBuilder().Project(name).ApartAsync(null).WithCancellation(Ct))
+                    {
+                        using (apart)
+                        {
+                            Assert.True(source.TakeGroup(apart.Arena, apart.Arena.GetNode(apart.RootIndex).GetFieldIndex(0), checked((int)apart.StartRow)));
+                        }
+                    }
+
+                    Assert.Equal(back.RowCount, source.Taken);
+                    Assert.True(source.Index(), $"{name}: a shredding taken from columns is made ready for ranges");
+
+                    // Runs in any order, most of a row or two, some of hundreds; the same rows gathered, to be read.
+                    List<(int First, int Count)> runs = [];
+                    List<int> picks = [];
+                    while (picks.Count < 2_400)
+                    {
+                        int first = random.Next(back.RowCount);
+                        int count = Math.Min(back.RowCount - first, random.Next(8) == 0 ? 1 + random.Next(500) : 1 + random.Next(3));
+                        runs.Add((first, count));
+                        picks.AddRange(Enumerable.Range(first, count));
+                    }
+
+                    int gathered = Vorticity.Compute.CanonicalFilter.Apply(back.Arena, back.RootIndex, [.. picks]);
+                    int column = back.Arena.GetNode(gathered).GetFieldIndex(field);
+
+                    Vorticity.Compute.VariantFieldExpr[] paths = [.. typed.Select((key, i) => new Vorticity.Compute.VariantFieldExpr(
+                        new Vorticity.Expressions.ColumnFieldExpr(name), [Vorticity.Compute.VariantStep.Of(plan.Keys[key].Name)], reads[i]))];
+                    Vorticity.Compute.VariantFieldExpr.KeyReads together = new(paths);
+                    int[] read = new int[paths.Length];
+
+                    using ArrayBlobWriter.Workspace asRows = new ArrayBlobWriter.Workspace { Account = TestAccount.Shared };
+                    using ArrayBlobWriter.Workspace asRanges = new ArrayBlobWriter.Workspace { Account = TestAccount.Shared };
+                    using ArrayBlobWriter.BlobLease expected = VariantShredder.Write(
+                        asRows, back.Arena, column, plan, null, new EncodingDictionary(ComponentKind.Array, Vorticity.Editions.EditionRegistry.Newest), compress: true);
+
+                    VariantShredder.Shredding added = asRanges.Shredding(plan);
+                    VariantShredder.Shredding inPlace = new VariantShredder.Shredding(plan);
+                    VariantShredder.Shredding block = new VariantShredder.Shredding(plan);
+                    CanonicalArena blockStore = new CanonicalArena();
+                    CanonicalArena part = new CanonicalArena();
+                    Vorticity.Indexes.ChunkBlockBounds addedBounds = new(Vorticity.Indexes.ChunkBlockBounds.Counted(plan), 256, 16);
+                    Vorticity.Indexes.ChunkBlockBounds inPlaceBounds = new(Vorticity.Indexes.ChunkBlockBounds.Counted(plan), 256, 16);
+                    added.Begin(new CanonicalArena(), addedBounds);
+                    inPlace.Begin(new CanonicalArena(), inPlaceBounds);
+                    PathCensus byRows = new PathCensus(16, CensusGap);
+                    PathCensus byRanges = new PathCensus(16, CensusGap);
+
+                    // A block takes runs until it holds 700 rows or more, as a merge fills its writer's.
+                    int start = 0;
+                    for (int run = 0; run < runs.Count;)
+                    {
+                        blockStore.Reset();
+                        block.Begin(blockStore, null, counted: true);
+                        int count = 0;
+                        for (; run < runs.Count && count < 700; run++)
+                        {
+                            block.AppendRange(source, runs[run].First, runs[run].Count, count);
+                            count += runs[run].Count;
+                        }
+
+                        Assert.Equal(count, block.Taken);
+                        int slice = Vorticity.Layouts.CanonicalSlice.SliceAcross(back.Arena, part, gathered, start, count);
+                        int blockColumn = part.GetNode(slice).GetFieldIndex(field);
+                        PathCensus.Counting counting = PathCensus.Prepare(part, blockColumn, count);
+                        byRows.Add(in counting);
+                        VariantShredder.Shredding.Rows put = VariantShredder.Shredding.Prepare(part, blockColumn);
+                        Assert.True(block.Count(byRanges, in put, PathCensus.ValueBytesOf(in counting)), $"{name}: a block of ranges is counted from what it took");
+
+                        Vorticity.Compute.VariantFieldExpr.ApplyKeys(part, blockColumn, together, read);
+                        Vorticity.Buffers.VortexBuffer absent = default;
+                        for (int i = 0; i < typed.Length; i++)
+                        {
+                            Assert.True(VariantShredder.Shredding.Reads(plan, typed[i], reads[i]));
+                            SameColumn(part, read[i], block.KeyColumn(part, typed[i], reads[i], count, ref absent), $"{name}.{plan.Keys[typed[i]].Name} from row {start}");
+                        }
+
+                        added.Append(block, start);
+                        inPlace.TakeMore(in put, start);
+                        part.Reset();
+                        start += count;
+                    }
+
+                    Assert.Equal(picks.Count, start);
+                    Assert.Equal(byRows.Rows, byRanges.Rows);
+                    Assert.Equal(byRows.ValueBytes, byRanges.ValueBytes);
+                    Assert.Equal(byRows.Partial, byRanges.Partial);
+                    SameCounts(byRows.Root, byRanges.Root, name);
+
+                    added.Settle(back.Arena, column);
+                    using ArrayBlobWriter.BlobLease actual = added.Write(
+                        asRanges, new EncodingDictionary(ComponentKind.Array, Vorticity.Editions.EditionRegistry.Newest), compress: true);
+                    Assert.True(
+                        expected.Memory.Span.SequenceEqual(actual.Memory.Span),
+                        $"{name}: {actual.Length} bytes written from blocks of ranges against {expected.Length} from the rows");
+                    Assert.Equal(inPlaceBounds.Keys.Count, addedBounds.Keys.Count);
+                    for (int key = 0; key < addedBounds.Keys.Count; key++)
+                    {
+                        Assert.Equal(inPlaceBounds.Keys[key].Count, addedBounds.Keys[key].Count);
+                        Assert.Equal(inPlaceBounds.Keys[key].First, addedBounds.Keys[key].First);
+                        Assert.Equal(inPlaceBounds.Keys[key].Last, addedBounds.Keys[key].Last);
+                        Assert.True(
+                            inPlaceBounds.Keys[key].Body.SequenceEqual(addedBounds.Keys[key].Body),
+                            $"{name}, key {key}: the blocks counted from blocks of ranges differ from those counted as the rows are taken");
+                    }
+                }
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    /// <summary>
+    /// No range is taken of a shredding not made for it, nor of one whose rows took again what the row before them took, a
+    /// text's bytes kept once for the run: neither is made ready, and a range of it is refused.
+    /// </summary>
+    [Fact]
+    public void ARangeIsTakenOnlyOfAShreddingMadeReadyForIt()
+    {
+        // {"a": "text"} three rows over: the second and the third take the first's text again.
+        byte[] metadata = [0x01, 0x01, 0x00, 0x01, (byte)'a'];
+        byte[] value = [0x02, 0x01, 0x00, 0x00, 0x05, 0x11, (byte)'t', (byte)'e', (byte)'x', (byte)'t'];
+        VariantShredding plan = VariantShredding.Object(("a", VariantShredding.Primitive(VariantClass.String)));
+        CanonicalArena arena = new CanonicalArena();
+        Vorticity.Types.DTypeArena types = new Vorticity.Types.DTypeArena();
+        VariantShredder.Shredding.Rows repeated = VariantShredder.Shredding.Prepare(arena, VariantColumn(arena, types, metadata, value, rows: 3));
+        VariantShredder.Shredding.Rows once = VariantShredder.Shredding.Prepare(arena, VariantColumn(arena, types, metadata, value, rows: 1));
+
+        VariantShredder.Shredding plain = new VariantShredder.Shredding(plan);
+        plain.Begin(new CanonicalArena(), null);
+        plain.TakeMore(in once, 0);
+        Assert.False(plain.Index());
+
+        VariantShredder.Shredding again = new VariantShredder.Shredding(plan, ranged: true);
+        again.Begin(new CanonicalArena(), null);
+        again.TakeMore(in repeated, 0);
+        Assert.False(again.Index());
+
+        VariantShredder.Shredding ready = new VariantShredder.Shredding(plan, ranged: true);
+        ready.Begin(new CanonicalArena(), null);
+        ready.TakeMore(in once, 0);
+        Assert.True(ready.Index());
+
+        VariantShredder.Shredding block = new VariantShredder.Shredding(plan);
+        block.Begin(new CanonicalArena(), null, counted: true);
+        Assert.Throws<ArgumentException>(() => block.AppendRange(plain, 0, 1, 0));
+        Assert.Throws<ArgumentException>(() => block.AppendRange(again, 0, 1, 0));
+        Assert.Throws<ArgumentException>(() => block.AppendRange(new VariantShredder.Shredding(VariantShredding.Object(("a", VariantShredding.Primitive(VariantClass.String))), ranged: true), 0, 0, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() => block.AppendRange(ready, 0, 2, 0));
+        block.AppendRange(ready, 0, 1, 0);
+        block.AppendRange(ready, 0, 1, 1);
+        Assert.Equal(2, block.Taken);
     }
 
     /// <summary>
