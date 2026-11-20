@@ -124,12 +124,14 @@ public sealed class WriteAllocationTests
         // symbol table a trial trains -- 128 KiB of lookup for two-byte symbols -- goes back to the
         // trainer once its plan is written or loses, rather than to the collector: 136 KiB on a
         // text column FSST loses on. The shared pool keeps what a batch rents at once: 28 000
-        // bytes of owners on the zoned file.
-        ("containers/zoned_many_zones_nulls", 70_900),   // 69 376 measured, including 40 bytes more on each batch it reads, the public writer and report, and its text column's string bounds; the read back decompresses through one zstd decoder a scan and, reading only, in batches of several zones
-        ("distributions/high_cardinality_i64_r8193", 10_220),   // 9 864 measured, including the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row
-        ("encodings/fsst", 9_040),   // 8 576 measured
-        ("encodings/onpair", 9_976),   // 9 528 measured, including the public writer and report and the text column's string bounds
-        ("types/utf8_nullable_r1025", 14_100),   // 13 520 measured, its FSST tables reordered on the stack and the trained one reused, including the public writer and report and the text column's string bounds
+        // bytes of owners on the zoned file. The writer keeps no estimate of its size, its rates,
+        // the record of what each flight landed and what its chunks in emission counted toward it:
+        // 88 bytes less on every file, 376 on the zoned one (2026-11-21).
+        ("containers/zoned_many_zones_nulls", 70_524),   // 69 376 measured, including 40 bytes more on each batch it reads, the public writer and report, and its text column's string bounds; the read back decompresses through one zstd decoder a scan and, reading only, in batches of several zones
+        ("distributions/high_cardinality_i64_r8193", 10_132),   // 9 864 measured, including the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row
+        ("encodings/fsst", 8_952),   // 8 576 measured
+        ("encodings/onpair", 9_888),   // 9 528 measured, including the public writer and report and the text column's string bounds
+        ("types/utf8_nullable_r1025", 14_012),   // 13 520 measured, its FSST tables reordered on the stack and the trained one reused, including the public writer and report and the text column's string bounds
 
         // THE REMAINING COMPONENTS, on the write side, so that each has an allocation ratchet:
         // `fastlanes.delta`, `vortex.pco`, `vortex.zstd`, `vortex.map` and `vortex.variant`. Note
@@ -138,13 +140,13 @@ public sealed class WriteAllocationTests
         // this SHAPE of data cost", which is the question a ratchet can answer. Whether our writer
         // re-elects the same encoding is a different question and `bench/crosscheck.sh` is where
         // it is asked.
-        ("encodings/fastlanes_delta", 7_692),   // 7 352 measured, including the file statistics segment: per file, not per row; 7 608 on 2026-10-27, 256 bytes more: the writer's fields for object dictionaries, chunk geometry and gathered columns, the NaN counts its blocks' statistics keep, and the read back's scan, which holds its granules' geometry and its pushed predicates
-        ("encodings/pco", 7_680),   // 7 560 measured on 2026-10-27, 256 bytes more as fastlanes_delta's above; 7 304 measured in the suite before, where dynamic PGO adds the JIT's instrumentation, 72 bytes that are not the writer's; the read half reads its page sizes in place and keeps the chunk metadata, its ANS tables and the latent states from one decode to the next
+        ("encodings/fastlanes_delta", 7_604),   // 7 352 measured, including the file statistics segment: per file, not per row; 7 608 on 2026-10-27, 256 bytes more: the writer's fields for object dictionaries, chunk geometry and gathered columns, the NaN counts its blocks' statistics keep, and the read back's scan, which holds its granules' geometry and its pushed predicates
+        ("encodings/pco", 7_592),   // 7 560 measured on 2026-10-27, 256 bytes more as fastlanes_delta's above; 7 304 measured in the suite before, where dynamic PGO adds the JIT's instrumentation, 72 bytes that are not the writer's; the read half reads its page sizes in place and keeps the chunk metadata, its ANS tables and the latent states from one decode to the next
         // The read half of this axis decompresses through the scan's `ZstdDecompressor`, so a
         // change on the zstd read path can move this ceiling while the write path stays put.
-        ("encodings/zstd", 8_880),   // 8 464 measured, the FSST table its trial trains reused, including the public writer and report and the text column's string bounds, whose two zone-map fields bring the writer's encoding table enough encodings to grow it once more
-        ("encodings/map", 12_076),   // 11 968 measured on 2026-10-27, 488 bytes more as fastlanes_delta's above, the NaN counts kept for each block of the three nodes under the map; 11 480 measured before, including the three nodes the column tree keeps under a map -- the entries, the key, the value -- each with its block lists, its previous row and the map's window cursor: per column, not per row
-        ("encodings/variant", 10_336),   // 10 152 measured, including the file statistics segment and the public writer and report: per file, not per row
+        ("encodings/zstd", 8_792),   // 8 464 measured, the FSST table its trial trains reused, including the public writer and report and the text column's string bounds, whose two zone-map fields bring the writer's encoding table enough encodings to grow it once more
+        ("encodings/map", 11_988),   // 11 968 measured on 2026-10-27, 488 bytes more as fastlanes_delta's above, the NaN counts kept for each block of the three nodes under the map; 11 480 measured before, including the three nodes the column tree keeps under a map -- the entries, the key, the value -- each with its block lists, its previous row and the map's window cursor: per column, not per row
+        ("encodings/variant", 10_248),   // 10 152 measured, including the file statistics segment and the public writer and report: per file, not per row
 
         // THE TWO ALP SHAPES, so that the ALP write path is watched on both of its cases:
         // `alp` is a column ALP fits, `alprd` is one built to defeat it so that every row becomes a
@@ -153,8 +155,8 @@ public sealed class WriteAllocationTests
         // ALP-RD, `alprd` is written as ALP-RD rather than plain, its column about an eighth
         // smaller: the ceiling rose by 552 bytes for it, the file's encoding table growing once more
         // for its two extra ids and the plan and its two packed children.
-        ("encodings/alp", 8_180),   // 7 744 measured, the ALP plan a value rather than an object
-        ("encodings/alprd", 8_396),   // 7 888 measured
+        ("encodings/alp", 8_092),   // 7 744 measured, the ALP plan a value rather than an object
+        ("encodings/alprd", 8_308),   // 7 888 measured
     ];
 
     // Pricing FSST means training a table and compressing the whole column, and on a column it
@@ -320,9 +322,12 @@ public sealed class WriteAllocationTests
     /// alone on a task of its own before the line is made. 11,368 to 13,624 bytes past one thread measured at 262,144 rows,
     /// over four runs, and 12,672 at twice that (2026-11-17): a writer's, not a row's. Its stagings, four to six as its
     /// flights come and go, made their arrays up front, and the bytes past one thread reached 15,300 to 17,450 over eight
-    /// runs; made as a block needs them, 9,970 to 12,740 (2026-11-18).
+    /// runs; made as a block needs them, 9,970 to 12,740 (2026-11-18). A block that makes its chunk alone cut column by
+    /// column (7066ec65) keeps what each column held at each flight's cut, a ring of records by flight and column, and the
+    /// slots its cuts write into: 15,152 to 15,712 past one thread at that commit, 12,608 to 13,560 at the one before, and
+    /// 15,432 to 16,400 once the writer kept no estimate of its size (2026-11-21), over three runs each.
     /// </summary>
-    private const long LineState = 14 << 10;
+    private const long LineState = 16 << 10;
 
     /// <summary>
     /// The degree axis: zstd columns compressed side by side on four threads cost nothing one thread

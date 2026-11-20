@@ -15,66 +15,31 @@ namespace Vorticity;
 public sealed partial class VortexFileWriter
 {
     /// <summary>
-    /// L, the blocks a merge's writer sends through ahead of the one whose landing its size is read at: a merge reads the
-    /// size the writer had when the block L before the one it fills landed, with the rows staged since at its rate then
-    /// (G1 and G3 of the parallel flows). The same at any degree, so that a merge's objects end at the same rows at any
-    /// degree: the degree changes only how many of those blocks go through at once. Four, so that the columns quick to
-    /// ingest run up to three blocks ahead of the slowest while it takes one.
+    /// The blocks a merge's writer sends through its line at once, at most (G1 and G3 of the parallel flows). The degree
+    /// changes only how many of them go through side by side, never the file. Four, so that the columns quick to ingest run
+    /// up to three blocks ahead of the slowest while it takes one.
     /// </summary>
     internal const int FlightsAhead = 4;
 
     /// <summary>
-    /// The blocks an object is aimed at, at least, for its writer to read its size <see cref="FlightsAhead"/> blocks back:
-    /// four blocks of lag in thirty-two. An object aimed at fewer reads it one block back, as before the line, and sends its
-    /// blocks through one at a time (G1 of the parallel flows).
+    /// The blocks an object is aimed at, at least, for its writer to send its blocks through its line,
+    /// <see cref="FlightsAhead"/> at once. An object aimed at fewer sends them through one at a time, as before the line
+    /// (G1 of the parallel flows). The bound was set when a merge read its writer's size that many blocks back, four blocks
+    /// of lag in thirty-two, and stays the line's until measured otherwise.
     /// </summary>
     internal const int LineObjectBlocks = 32;
 
     /// <summary>
-    /// The blocks back the size a merge reads is the writer's, as that block landed: <see cref="FlightsAhead"/> for an object
-    /// aimed at many blocks, which sends that many through at once, 1 otherwise. Set before the first row, the same at any
-    /// degree, so that a merge's objects end at the same rows at any degree.
+    /// The blocks the writer sends through its line at once, at most: <see cref="FlightsAhead"/> for an object aimed at many
+    /// blocks, 1 otherwise, which makes no line. Set before the first row.
     /// </summary>
-    internal int LandLag { get; set; } = 1;
+    internal int FlightDepth { get; set; } = 1;
 
-    /// <summary>The ring of the flights not landed and of what was recorded as each landed: the flights FlightsAhead back and since.</summary>
-    private const int LandRing = FlightsAhead + 2;
+    /// <summary>The ring of the flights a cut's records are kept for (<see cref="CutRecordsOf"/>): the flights FlightsAhead back and since.</summary>
+    private const int FlightRing = FlightsAhead + 2;
 
-    // What the writer's size read as each flight landed, and at what rate, by flight; the bytes each flight staged; the
-    // flights flown; the first flight since the size was last read as it stood, and what it read then.
-    private Landing[] _lands = [];
-    private long[] _flownBytes = [];
+    // The flights flown.
     private long _flown;
-    private long _landBase;
-    private Landing _landStart;
-
-    /// <summary>
-    /// What the writer's size read as a flight landed, in the parts <see cref="Held"/> sums: the sink's position, what the
-    /// columns hold at their rates and the chunks compressed ahead, the bytes in transit, and the rate the rows not yet
-    /// written count at; summed with the rows staged since as <see cref="Held"/> sums the staged ones, to the byte.
-    /// </summary>
-    private readonly record struct Landing(long Sink, double Fixed, long Pending, double Rate);
-
-    /// <summary>What the writer's size reads now, the rows staged left out.</summary>
-    private Landing Landed()
-    {
-        long canonical = 0;
-        double encoded = 0;
-        if (_gathering is { } gathering)
-        {
-            foreach (Gathering? column in gathering)
-            {
-                if (column is not null)
-                {
-                    canonical += column.Bytes;
-                    encoded += column.Bytes * column.Rate;
-                }
-            }
-        }
-
-        double rate = canonical > 0 ? encoded / canonical : _restRate;
-        return new Landing(_sink.Position, encoded + _emittingBytes, _pendingBytes, rate);
-    }
 
     // The line the flights go through when the writer sends a merge's blocks several at once; null otherwise.
     private FlightLine? _line;
@@ -107,52 +72,8 @@ public sealed partial class VortexFileWriter
     /// <summary>The chunks of the file the line's blocks ended, each emitted once every block of it landed and before the next one ingested.</summary>
     internal int ChunksEndedOnLine { get; private set; }
 
-    /// <summary>Records what the writer's size reads once flight <paramref name="flight"/> landed: its rows in transit or emitted.</summary>
-    private void RecordLand(long flight) => _lands[flight % LandRing] = Landed();
-
-    /// <summary>
-    /// Sets the size a merge reads while flight <paramref name="flight"/> is the last flown: what the writer read as the
-    /// flight <see cref="FlightsAhead"/> before it landed, or as the flights began, with the bytes staged by every flight
-    /// since at the rate read then.
-    /// </summary>
-    private void SizeAtFlight(long flight)
-    {
-        long from = flight - LandLag;
-        Landing land = from < _landBase ? _landStart : _lands[from % LandRing];
-        long staged = 0;
-        for (long i = Math.Max(from + 1, _landBase); i <= flight; i++)
-        {
-            staged += _flownBytes[i % LandRing];
-        }
-
-        _sizedBytes = land.Sink + (long)(land.Fixed + ((land.Pending + staged) * land.Rate));
-        _sizedRate = land.Rate;
-        _sized = true;
-    }
-
-    /// <summary>
-    /// The number of the flight of the block staged now, which stages <paramref name="bytes"/>: a size read as it stood, every
-    /// flight before landed, begins the flights anew from what it reads.
-    /// </summary>
-    private long NextFlight(long bytes)
-    {
-        if (_lands.Length == 0)
-        {
-            // Made with the writer's first flight: a writer that stages nothing makes none.
-            _lands = new Landing[LandRing];
-            _flownBytes = new long[LandRing];
-        }
-
-        if (!_sized)
-        {
-            _landBase = _flown;
-            _landStart = Landed();
-        }
-
-        long flight = _flown++;
-        _flownBytes[flight % LandRing] = bytes;
-        return flight;
-    }
+    /// <summary>The number of the flight of the block staged now.</summary>
+    private long NextFlight() => _flown++;
 
     /// <summary>A staging for the block staged next: one a flight landed left, or a new one.</summary>
     private Staging SpareStaging()
@@ -195,7 +116,7 @@ public sealed partial class VortexFileWriter
     /// object it aims at, makes it at its first block.
     /// </remarks>
     private bool UsesLine =>
-        LandLag > 1 && _lanes > 1 && _rowBlock > 0 && _stagedRows == _rowBlock && _blockRows == _rowBlock && _automaticChunks && _isTabular
+        FlightDepth > 1 && _lanes > 1 && _rowBlock > 0 && _stagedRows == _rowBlock && _blockRows == _rowBlock && _automaticChunks && _isTabular
         && _fieldCount > 1 && _rowBlock < 2 * CensusSliceRows && (_line is not null || !_blocksExactly || _flown >= FlightsAhead)
         && ColumnCompressor.Differential.Value is null && ArrayBlobWriter.ElementsHanded.Value is null;
 
@@ -1188,8 +1109,7 @@ public sealed partial class VortexFileWriter
 
     /// <summary>
     /// The epilogue of <paramref name="flight"/>, its items run, in the order of the flights: its keys' passes ended, its
-    /// rows into transit, the counted rows its counts attached given back, its staging kept for a block staged later; and,
-    /// unless it ends a chunk, what the writer's size reads of it recorded.
+    /// rows into transit, the counted rows its counts attached given back, its staging kept for a block staged later.
     /// </summary>
     private void Epilogue(Flight flight, bool failed)
     {
@@ -1250,13 +1170,7 @@ public sealed partial class VortexFileWriter
         }
 
         SpareStaging(staging);
-        bool ends = flight.EndsChunk;
-        long index = flight.Index;
         flight.Land();
-        if (!failed && !ends)
-        {
-            RecordLand(index);
-        }
     }
 
     private void SpareCounted(CountedRows counted)
@@ -1308,7 +1222,6 @@ public sealed partial class VortexFileWriter
         }
 
         ChunksEndedOnLine++;
-        RecordLand(flight.Index);
     }
 
     /// <summary>
@@ -1335,7 +1248,6 @@ public sealed partial class VortexFileWriter
 
         BlocksAlone++;
         _line!.PlanPending = _pendingRows;
-        RecordLand(flight.Index);
     }
 
     /// <summary>Gives back the stagings and counted rows the line kept, for a writer done.</summary>
@@ -1389,7 +1301,7 @@ public sealed partial class VortexFileWriter
         private static readonly OperationCanceledException GivenUp = new OperationCanceledException("The writer was given up.");
 
         private readonly Lock _gate = new Lock();
-        private readonly Flight?[] _ring = new Flight?[LandRing];
+        private readonly Flight?[] _ring = new Flight?[FlightRing];
         private readonly Queue<long> _ready = new Queue<long>();
         private readonly Stack<Flight> _spare = new Stack<Flight>();
         private int[] _posed = [];
@@ -1473,7 +1385,7 @@ public sealed partial class VortexFileWriter
                 flight.LandsFailed = false;
                 staging.Flight = flight;
                 staging.Ready = false;
-                _ring[index % LandRing] = flight;
+                _ring[index % FlightRing] = flight;
                 _admitted = index + 1;
             }
         }
@@ -1537,7 +1449,7 @@ public sealed partial class VortexFileWriter
 
                         // Nothing ready: the block the next prologue waits for, assembled here when no pump took it. What holds a
                         // lane never waits for work a free lane would have to run.
-                        if (!_prologuing && _prologued < _admitted && _ring[_prologued % LandRing] is { Staging: { Ready: false } waiting })
+                        if (!_prologuing && _prologued < _admitted && _ring[_prologued % FlightRing] is { Staging: { Ready: false } waiting })
                         {
                             assemble = waiting;
                         }
@@ -1706,7 +1618,7 @@ public sealed partial class VortexFileWriter
         private int LandInOrder()
         {
             int ready = 0;
-            while (_landed < _prologued && _ring[_landed % LandRing] is { Phase: FlightPhase.Held } head
+            while (_landed < _prologued && _ring[_landed % FlightRing] is { Phase: FlightPhase.Held } head
                 && (head.Cuts ? head.Finished : !head.EndsChunk || head.LandsFailed || Volatile.Read(ref _error) is not null))
             {
                 ready += Land(head);
@@ -1731,7 +1643,7 @@ public sealed partial class VortexFileWriter
 
             flight.Phase = FlightPhase.Landed;
             _landed = flight.Index + 1;
-            _ring[flight.Index % LandRing] = null;
+            _ring[flight.Index % FlightRing] = null;
             _spare.Push(flight);
             return ready;
         }
@@ -1775,7 +1687,7 @@ public sealed partial class VortexFileWriter
                 }
 
                 _posed[state] = past;
-                if (flight.Index + 1 < _prologued && _ring[(flight.Index + 1) % LandRing] is { Phase: FlightPhase.Running } next)
+                if (flight.Index + 1 < _prologued && _ring[(flight.Index + 1) % FlightRing] is { Phase: FlightPhase.Running } next)
                 {
                     for (int i = 0; i < next.Count; i++)
                     {
@@ -1814,7 +1726,7 @@ public sealed partial class VortexFileWriter
         /// <summary>Runs the entry <paramref name="ticket"/> names, catching what fails it: whether it failed.</summary>
         private bool Execute(long ticket)
         {
-            Flight flight = _ring[(ticket >> TicketBits) % LandRing]!;
+            Flight flight = _ring[(ticket >> TicketBits) % FlightRing]!;
             int code = (int)(ticket & ((1 << TicketBits) - 1));
             bool failed = Volatile.Read(ref _error) is not null;
             try
@@ -1863,7 +1775,7 @@ public sealed partial class VortexFileWriter
             bool signal;
             lock (_gate)
             {
-                Flight flight = _ring[index % LandRing]!;
+                Flight flight = _ring[index % FlightRing]!;
                 if (code == Prologues)
                 {
                     _prologuing = false;
@@ -1926,7 +1838,7 @@ public sealed partial class VortexFileWriter
         /// </summary>
         private Flight? OwnerFlight()
         {
-            if (_owning >= _prologued || _ring[_owning % LandRing] is not { } flight)
+            if (_owning >= _prologued || _ring[_owning % FlightRing] is not { } flight)
             {
                 return null;
             }
@@ -1947,13 +1859,13 @@ public sealed partial class VortexFileWriter
         /// </summary>
         private bool QueuePrologue()
         {
-            if (_prologuing || _prologued >= _admitted || _ring[_prologued % LandRing] is not { Staging.Ready: true } flight)
+            if (_prologuing || _prologued >= _admitted || _ring[_prologued % FlightRing] is not { Staging.Ready: true } flight)
             {
                 return false;
             }
 
             // A flight cut column by column lets the next start once its prologue ran: the next one's columns follow its cuts.
-            if (_prologued > _landed && _ring[(_prologued - 1) % LandRing] is { } before
+            if (_prologued > _landed && _ring[(_prologued - 1) % FlightRing] is { } before
                 && ((before.EndsChunk && !before.Cuts) || before.Phase == FlightPhase.Alone))
             {
                 return false;
@@ -1967,7 +1879,7 @@ public sealed partial class VortexFileWriter
         /// <summary>Queues the epilogue of the next flight whose items all ran, under the lock.</summary>
         private bool QueueEpilogue()
         {
-            if (_epiloguing || _epilogued >= _prologued || _ring[_epilogued % LandRing] is not { Phase: FlightPhase.Ran } flight)
+            if (_epiloguing || _epilogued >= _prologued || _ring[_epilogued % FlightRing] is not { Phase: FlightPhase.Ran } flight)
             {
                 return false;
             }
@@ -2040,7 +1952,7 @@ public sealed partial class VortexFileWriter
                 _posed[state] = past;
             }
 
-            if (states.Length > 0 && flight.Index + 1 < _prologued && _ring[(flight.Index + 1) % LandRing] is { Phase: FlightPhase.Running } next)
+            if (states.Length > 0 && flight.Index + 1 < _prologued && _ring[(flight.Index + 1) % FlightRing] is { Phase: FlightPhase.Running } next)
             {
                 for (int i = 0; i < next.Count; i++)
                 {
@@ -2110,7 +2022,7 @@ public sealed partial class VortexFileWriter
             }
 
             int ready = 0;
-            if (flight.Index + 1 < _prologued && _ring[(flight.Index + 1) % LandRing] is { Phase: FlightPhase.Running } next)
+            if (flight.Index + 1 < _prologued && _ring[(flight.Index + 1) % FlightRing] is { Phase: FlightPhase.Running } next)
             {
                 for (int i = 0; i < next.Count; i++)
                 {

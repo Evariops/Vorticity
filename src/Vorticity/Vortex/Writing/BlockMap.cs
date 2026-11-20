@@ -11,8 +11,7 @@ namespace Vorticity.Writing;
 /// The merge fills a map up to the writer's block (<see cref="VortexFileWriter.MapRows"/>), cutting the run that crosses
 /// it, and notes each run in its ledger as it adds it, the map holding them there until the writer takes them over
 /// (<see cref="VortexFileWriter.WriteBlockAsync"/>). The rows a run names are sized at the bytes a row of its batch names,
-/// as the writer's staging sized them, so that the writer's size read with the map's (<see cref="VortexFileWriter.SizeWith"/>)
-/// is the one it read with the rows staged.
+/// as the writer's staging sized them, so that the block's staging counts the same bytes either way.
 /// </remarks>
 internal sealed class BlockMap
 {

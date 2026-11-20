@@ -2969,12 +2969,12 @@ internal static partial class DatasetCompactor
         }
 
         /// <summary>
-        /// The blocks back an object's writer reads its size at as the object nears its target (<see cref="VortexFileWriter.LandLag"/>):
+        /// The blocks an object's writer sends through its line at once (<see cref="VortexFileWriter.FlightDepth"/>):
         /// <see cref="VortexFileWriter.FlightsAhead"/> for an object aimed at <see cref="VortexFileWriter.LineObjectBlocks"/>
-        /// blocks or more, at the bytes a row of the job's inputs holds, whose writer then sends that many blocks through at
-        /// once; one block for a smaller one, as before. Read from the job alone, the same at any degree.
+        /// blocks or more, at the bytes a row of the job's inputs holds; one block for a smaller one, which makes no line.
+        /// Read from the job alone, the same at any degree.
         /// </summary>
-        private int LandLagOf(int blockRows)
+        private int FlightDepthOf(int blockRows)
         {
             if (_rowBound <= 0 || _byteBound <= 0 || blockRows <= 0)
             {
@@ -3005,7 +3005,7 @@ internal static partial class DatasetCompactor
                 lane: Lane, admitsAhead: AdmitsAhead, gatherShare: Ranges);
             _output = output;
             output.Writer.Ledger = Ledger;
-            output.Writer.LandLag = LandLagOf(output.Writer.BlockRows);
+            output.Writer.FlightDepth = FlightDepthOf(output.Writer.BlockRows);
             Postings?.BlocksOf(VortexDataset.Uid(output.Identity), output.Writer.BlockRows);
             foreach ((int field, ObjectDictionary dictionary, long rowBytes) in Dictionaries)
             {

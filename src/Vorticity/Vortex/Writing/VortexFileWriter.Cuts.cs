@@ -17,7 +17,7 @@ namespace Vorticity;
 /// </remarks>
 public sealed partial class VortexFileWriter
 {
-    // By flight modulo LandRing, then by column, what the column held once the flight's cut of it ran (CloseItem): what the
+    // By flight modulo FlightRing, then by column, what the column held once the flight's cut of it ran (CloseItem): what the
     // next flight's cut decides from and its takes are placed by, in place of the column's state as it stands, which the
     // flights after it change as they go.
     private CutRecord[][]? _cutRecords;
@@ -45,15 +45,14 @@ public sealed partial class VortexFileWriter
     private bool CutsAt(long flight, int rows) => (flight + 2) * (long)_blockRows <= int.MaxValue && CutsOnLine(rows);
 
     /// <summary>
-    /// What a column held once its cut ran: its gathering's canonical bytes, the bytes it holds, its rows and the chunks it
-    /// began, what it and its chunks in emission count toward the writer's ceiling (<see cref="Over"/>), and for a shredded
-    /// column, whether its chain takes the next flight's rows (<see cref="ShredChain.Accepts"/>), which that flight then
-    /// gathers thin.
+    /// What a column held once its cut ran: the bytes it holds, its rows and the chunks it began, what it and its chunks in
+    /// emission count toward the writer's ceiling (<see cref="Over"/>), and for a shredded column, whether its chain takes
+    /// the next flight's rows (<see cref="ShredChain.Accepts"/>), which that flight then gathers thin.
     /// </summary>
-    private readonly record struct CutRecord(long Bytes, long Held, long Rows, long Generation, long Counted, bool Takes);
+    private readonly record struct CutRecord(long Held, long Rows, long Generation, long Counted, bool Takes);
 
     /// <summary>The columns' records of flight <paramref name="flight"/>'s cuts, made by the prologue of the first flight cut (<see cref="MakeCutRecords"/>).</summary>
-    private CutRecord[] CutRecordsOf(long flight) => _cutRecords![flight % LandRing];
+    private CutRecord[] CutRecordsOf(long flight) => _cutRecords![flight % FlightRing];
 
     /// <summary>
     /// Makes the records of the cuts, whole, in the prologue of the first flight cut, before any cut: made by the first of
@@ -68,8 +67,8 @@ public sealed partial class VortexFileWriter
 
         MakeSlotsAtCut();
 
-        CutRecord[][] records = new CutRecord[LandRing][];
-        for (int slot = 0; slot < LandRing; slot++)
+        CutRecord[][] records = new CutRecord[FlightRing][];
+        for (int slot = 0; slot < FlightRing; slot++)
         {
             records[slot] = new CutRecord[_fieldCount];
         }
@@ -170,7 +169,7 @@ public sealed partial class VortexFileWriter
         // Whether the chain takes the next flight's rows, decided here, where its state stands as the next take finds it: the
         // next flight's take and gathering both wait for this cut, and the take alone changes the chain.
         bool takes = _chains is { Length: > 0 } chains && chains[field] is { } chain && chain.Accepts(column.Generation, column.Rows);
-        CutRecordsOf(flight.Index)[field] = new CutRecord(column.Bytes, column.Held, column.Rows, column.Generation, counted, takes);
+        CutRecordsOf(flight.Index)[field] = new CutRecord(column.Held, column.Rows, column.Generation, counted, takes);
 
         // A column whose builders all close at once has its chunk closed here, the flight's wide counts attached first, as the
         // owner does it for one that closes later: the next flight's builders of the column then wait for this cut rather
@@ -335,25 +334,7 @@ public sealed partial class VortexFileWriter
 
         await FlushIndexesAsync(cancellationToken).ConfigureAwait(false);
         ChunksEndedOnLine++;
-        _lands[flight.Index % LandRing] = LandedAtCut(flight.Index);
         return true;
-    }
-
-    /// <summary>What the writer's size reads as flight <paramref name="flight"/>, cut column by column, lands: its columns at the bytes they held once cut.</summary>
-    private Landing LandedAtCut(long flight)
-    {
-        CutRecord[] cut = CutRecordsOf(flight);
-        long canonical = 0;
-        double encoded = 0;
-        for (int field = 0; field < _fieldCount; field++)
-        {
-            Gathering column = _gathering![field]!;
-            canonical += cut[field].Bytes;
-            encoded += cut[field].Bytes * column.Rate;
-        }
-
-        double rate = canonical > 0 ? encoded / canonical : _restRate;
-        return new Landing(_sink.Position, encoded + _emittingBytes, _pendingBytes, rate);
     }
 
     /// <summary>Gives back the chunks <paramref name="flight"/>'s cuts took that a failure kept from leaving for their emissions.</summary>

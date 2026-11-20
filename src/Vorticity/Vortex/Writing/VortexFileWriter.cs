@@ -450,110 +450,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The bytes from which the file keeps the sheets it gathers, or null (<see cref="VortexWriteOptions.ColumnSheetBytes"/>).</summary>
     private long? _sheetBytes;
 
-    /// <summary>
-    /// The bytes the file would take were it finished now, for a caller sizing it: those its sink took, and those the writer
-    /// holds and has not written (<see cref="Held"/>). A merge's writer, which stages its runs
-    /// (<see cref="VortexWriteOptions.StagedRows"/>), reads it as it stood when the rows staged last went through, and the
-    /// rows staged since at its rate then: the same whether they went through on a lane of their own or on the caller's, and
-    /// however far along they are, so that a merge's objects end at the same rows at any degree.
-    /// </summary>
-    internal long Size => _sized ? _sizedBytes + (long)((_staging?.Bytes ?? 0) * _sizedRate) : _sink.Position + Held(out _);
-
-    /// <summary>
-    /// What the writer holds and has not written, as the bytes it would encode to: what each column that gathers holds, at
-    /// its last rate, the chunks in emission and not yet written at the rate they were counted at
-    /// (<see cref="StartEmission"/>), and the rows that wait for a chunk of the file, staged or in transit, at
-    /// <paramref name="rate"/>, the rate of what the columns hold, or, when they hold nothing, the rate they last wrote all
-    /// they held at (<see cref="_restRate"/>).
-    /// </summary>
-    /// <remarks>
-    /// A column's last rate is its last chunk's, whatever its target counts. A column whose target counts canonical bytes, a
-    /// shredded variant's, kept a rate of 1 for ever: under a gathering ceiling of 675 MiB, a consolidation of metric records
-    /// aimed at 64 MiB wrote 834 objects of 0.6 MiB, each ended on 64 MiB of attributes as they came, and one of log records
-    /// aimed at 256 MiB wrote objects of 150 MiB (2026-11-20). Before its first chunk such a column still counts as it came,
-    /// which a job has measured before it ends an object on it (<see cref="MeasureAsync"/>).
-    /// </remarks>
-    private long Held(out double rate, long mapBytes = 0)
-    {
-        long canonical = 0;
-        double encoded = 0;
-        if (_gathering is { } gathering)
-        {
-            foreach (Gathering? column in gathering)
-            {
-                if (column is not null)
-                {
-                    canonical += column.Bytes;
-                    encoded += column.Bytes * column.Rate;
-                }
-            }
-        }
-
-        rate = canonical > 0 ? encoded / canonical : _restRate;
-        return (long)(encoded + _emittingBytes + ((_pendingBytes + (_staging?.Bytes ?? 0) + mapBytes) * rate));
-    }
-
-    /// <summary>
-    /// The rate the rows that wait count at while the columns hold nothing: what the columns last wrote all they held
-    /// encoded to, over its canonical bytes (<see cref="EmitGatheredAsync(CancellationToken)"/>), and a first guess before
-    /// they did.
-    /// </summary>
-    /// <remarks>
-    /// It was the mean of the columns' rates, a column of a byte a row weighing as much in it as one of a kilobyte: after
-    /// a writer wrote all it held, rows that encoded to a fifteenth of their bytes counted at a third or more, and past
-    /// their bytes once the rates were kept as measured, a column of constants encoding to several times its few bytes.
-    /// </remarks>
-    private float _restRate = (float)Gathering.FirstRate;
-
-    /// <summary>
-    /// <see cref="Held"/> without the bytes no chunk measured: what the columns that count as they came hold and have in
-    /// emission (<see cref="Gathering.AsItCame"/>) left out, and the rows that wait counted at the rate of the other
-    /// columns alone, at nothing when there is none. Read once every block in flight landed (<see cref="MeasureAsync"/>).
-    /// </summary>
-    private long HeldMeasured(Gathering?[] gathering, long mapBytes)
-    {
-        long canonical = 0;
-        double encoded = 0;
-        long emitting = _emittingBytes;
-        for (int field = 0; field < gathering.Length; field++)
-        {
-            if (gathering[field] is not { } column)
-            {
-                continue;
-            }
-
-            if (column.AsItCame)
-            {
-                if (_emissions?[field] is { } chunks)
-                {
-                    foreach (ColumnEmission chunk in chunks)
-                    {
-                        emitting -= chunk.Counted;
-                    }
-                }
-
-                continue;
-            }
-
-            canonical += column.Bytes;
-            encoded += column.Bytes * column.Rate;
-        }
-
-        double rate = canonical > 0 ? encoded / canonical : 0;
-        return (long)(encoded + emitting + ((_pendingBytes + (_staging?.Bytes ?? 0) + mapBytes) * rate));
-    }
-
     // The rows staged before, going through on a lane of their own while the next ones stage (FlyAsync): their task, null
     // when none flies, and their staging, which the rows after the next ones stage in once they landed (LandAsync).
     private Task? _flight;
     private Staging? _flying;
     private Staging? _landed;
-
-    // What Size read when the rows staged last went through, and the rate it counted their rows at: read since while _sized
-    // holds, which a write that does not stage ends. Nothing flies while it does not hold.
-    private bool _sized;
-    private long _sizedBytes;
-    private double _sizedRate;
 
     /// <summary>The staged batches that went through on a lane of their own while the caller staged the next ones.</summary>
     internal int BatchesFlown { get; private set; }
@@ -1188,14 +1089,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         writer._admitsAhead = options.AdmitsAhead;
 
         // A table of several columns cut into chunks by their bytes takes its caller's rows a block at a time, whatever its
-        // degree, and sends them through its line, four at once: its blocks go as a merge's do, and nothing reads its size
-        // blocks back but a merge, which says how far itself (LandLag). Its chunks are cut block by block, as a merge's are.
+        // degree, and sends them through its line, four at once: its blocks go as a merge's do, a merge saying itself how
+        // many at once (FlightDepth). Its chunks are cut block by block, as a merge's are.
         if (writer._stagedRows == 0 && rowBlock > 0 && rowBlock < 2 * CensusSliceRows && options.AutomaticChunks && writer._isTabular
             && writer._fieldCount > 1)
         {
             writer._stagedRows = rowBlock;
             writer._blocksExactly = true;
-            writer.LandLag = FlightsAhead;
+            writer.FlightDepth = FlightsAhead;
         }
 
         // A sheet of each column a sheet describes, fed as the column's indexes are.
@@ -1549,7 +1450,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             await StartAsync(cancellationToken).ConfigureAwait(false);
             await WriteInBlocksAsync(arena, root, rows, cancellationToken).ConfigureAwait(false);
-            _sized = false;
             return;
         }
 
@@ -1577,9 +1477,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             await CountedPathsAsync(quietly: false).ConfigureAwait(false);
         }
-
-        // Nothing flies now, and the size is read as it stands until rows staged next go through.
-        _sized = false;
     }
 
     /// <summary>The rows of a group the paths the writer counts name: a block's, a granule's.</summary>
@@ -2193,14 +2090,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// The bytes the rows of <paramref name="node"/>, a block of <paramref name="arena"/> adopted where it was assembled,
-    /// count for in the writer's size while it waits for its chunk: what its buffers hold, and for a shredded variant
-    /// column's values, what their rows name.
+    /// count for among the bytes in transit while it waits for its chunk (<see cref="UnflushedBytes"/>): what its buffers
+    /// hold, and for a shredded variant column's values, what their rows name.
     /// </summary>
     /// <remarks>
     /// A block assembled run after run holds once a value equal, byte for byte, to the one gathered before it
-    /// (<c>CanonicalRuns</c>), and counted by its buffers its size depended on which rows' values were equal: what a block
+    /// (<c>CanonicalRuns</c>), and counted by its buffers its count depended on which rows' values were equal: what a block
     /// whose values are not put back together cannot tell. A block copied into the transit holds each row's bytes
-    /// (<see cref="Hold"/>), and a column cut on the line counts what its rows name (<see cref="Gather"/>), so the size
+    /// (<see cref="Hold"/>), and a column cut on the line counts what its rows name (<see cref="Gather"/>), so the count
     /// follows the rows' own bytes on the three ways a block lands. Measured on the three benches of the throughput work
     /// under 16 GiB at degree 14, 78 to 204 blocks adopted a process and the two counts apart on 26 to 204 of them: not a
     /// byte written differed (2026-11-20).
@@ -2383,152 +2280,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
-    /// <see cref="Size"/>, with the rows of a block's map not yet handed over, which name <paramref name="mapBytes"/> bytes,
-    /// counted as staged: what the size reads once the map is handed over, at the same rate.
-    /// </summary>
-    internal long SizeWith(long mapBytes) =>
-        _sized ? _sizedBytes + (long)(((_staging?.Bytes ?? 0) + mapBytes) * _sizedRate) : _sink.Position + Held(out _, mapBytes);
-
-    /// <summary>
-    /// Whether a column gathers to a target in canonical bytes, whose bytes the size counts as they came until its first
-    /// chunk is written (<see cref="Gathering.AsItCame"/>): a caller that ends its file by its size has them measured
-    /// first (<see cref="MeasureAsync"/>).
-    /// </summary>
-    internal bool MeasuresLate
-    {
-        get
-        {
-            if (_gathering is { } gathering)
-            {
-                foreach (Gathering? column in gathering)
-                {
-                    if (column is { IsEncoded: false })
-                    {
-                        return true;
-                    }
-                }
-            }
-
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Has the size read what the file would take, not what its rows held as they came, once it reached
-    /// <paramref name="target"/> with the rows of a block's map that name <paramref name="mapBytes"/> bytes: what a caller
-    /// asks before it ends the file on its size. The blocks in flight land. When the size without the bytes no chunk measured
-    /// (<see cref="HeldMeasured"/>) is under the target, the whole blocks in transit end their chunk of the file, as a flush
-    /// ends it, each column that holds such bytes writes its chunks in emission, then what it holds as a chunk of its own
-    /// when none of them measured it, and the size is read as it stands until the rows staged next go through. Nothing is
-    /// written when the size reaches the target without those bytes: the file ends on what it measured.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// The bytes no chunk measured are those of the columns that count as they came (<see cref="Gathering.AsItCame"/>),
-    /// a shredded variant's, which hold up to a chunk of a million rows at five to a hundred times what it encodes to. The
-    /// other columns count at the rate of their last chunk, or at a first rate before one
-    /// (<see cref="Gathering.FirstRate"/>), of which each holds less than a chunk of its own: a file aimed at many chunks
-    /// ends a little off by them, and one aimed at less than its columns' first chunks several times early.
-    /// </para>
-    /// <para>
-    /// With <paramref name="whole"/>, no estimate is left to end the file on: while the sink holds less than the target,
-    /// the blocks in transit end their chunk and every column writes what it holds, so that the size is the sink's and the
-    /// rows of the block being staged. What a caller asks that must not end its file early at any price, each time the
-    /// size reaches the target.
-    /// </para>
-    /// <para>
-    /// The same at any degree: decided once every block in flight landed, from what the columns then hold, and asked by a
-    /// caller that read the size as the block <see cref="LandLag"/> back landed. A chunk written here ends before its
-    /// target: once a column and a file at most without <paramref name="whole"/>, a column that measured a chunk never
-    /// being asked again.
-    /// </para>
-    /// </remarks>
-    /// <returns>
-    /// Whether the size holds no such bytes any more, whatever rows come, so that the caller need not ask again; false
-    /// with <paramref name="whole"/>, and when a column that wrote no chunk held no row to write and may yet take some.
-    /// </returns>
-    internal async ValueTask<bool> MeasureAsync(long mapBytes, long target, bool whole, CancellationToken cancellationToken)
-    {
-        ThrowIfDone();
-        if (_gathering is not { } gathering)
-        {
-            return true;
-        }
-
-        await LandAsync().ConfigureAwait(false);
-        bool transit = _rowBlock > 0 && _pendingRows >= _rowBlock;
-        if (whole)
-        {
-            if (_sink.Position < target)
-            {
-                await EndGroupAsync(cancellationToken).ConfigureAwait(false);
-            }
-
-            return false;
-        }
-
-        // Whether a column counts bytes no chunk measured, and whether one has some to write: in what it gathered, in a chunk
-        // in emission, or in the whole blocks in transit, which wait for their chunk of the file to be gathered.
-        bool unmeasured = false;
-        bool holds = false;
-        for (int field = 0; field < gathering.Length; field++)
-        {
-            if (gathering[field] is { AsItCame: true } column)
-            {
-                unmeasured = true;
-                holds |= column.Bytes > 0 || _emissions?[field] is { Count: > 0 };
-            }
-        }
-
-        if (!unmeasured || !(holds || transit))
-        {
-            return !unmeasured;
-        }
-
-        if (_sink.Position + HeldMeasured(gathering, mapBytes) >= target)
-        {
-            return true;
-        }
-
-        // The rows in transit join what the columns hold: a chain that took them ahead hands over rows its column gathered.
-        if (transit)
-        {
-            await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
-        }
-
-        bool left = false;
-        for (int field = 0; field < gathering.Length; field++)
-        {
-            if (gathering[field] is not { AsItCame: true } column)
-            {
-                continue;
-            }
-
-            await LandEmissionsAsync(field, cancellationToken).ConfigureAwait(false);
-            if (column.AsItCame && column.Rows > 0)
-            {
-                if (EmitsApart)
-                {
-                    StartEmission(Detach(field, column));
-                    await LandEmissionsAsync(field, cancellationToken).ConfigureAwait(false);
-                }
-                else
-                {
-                    await EmitGatheredAsync(field, column, cancellationToken).ConfigureAwait(false);
-                }
-            }
-
-            left |= column.AsItCame;
-        }
-
-        // The flight staged next reads the columns as they stand, not as the cuts of the last flight recorded them, and the
-        // size is read as it stands: every flight landed.
-        _lastCut = false;
-        _sized = false;
-        return !left;
-    }
-
-    /// <summary>
     /// Ends the group of rows being taken, as the caller asks: the blocks in flight land, the whole blocks in transit end
     /// their chunk of the file, and every column that gathers writes what it holds. What the file then holds is exact: the
     /// bytes its sink took and the rows its chunks hold. The rows of the block being staged, and those in transit short of a
@@ -2560,7 +2311,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         // The flight staged next reads the columns as they stand: every flight landed.
         _lastCut = false;
-        _sized = false;
 
         // The indexes' runs written among the chunks are the indexes', as the file's completion counts them: the data is what
         // the index budget is judged against, and the runs go out when it lets them, a burst at a time.
@@ -3313,8 +3063,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// Sends the rows staged, a merge's batch of <see cref="VortexWriteOptions.StagedRows"/>, through the writer: on a lane
     /// of the session's of their own when one is free, the caller going on to stage the next ones meanwhile; on the
     /// caller's otherwise, as any other staged rows. The rows staged before land first, so that the batches go through one
-    /// at a time and in order: the file is the same either way, and so is the size the caller reads (<see cref="Size"/>),
-    /// taken before they go.
+    /// at a time and in order: the file is the same either way.
     /// </summary>
     /// <remarks>
     /// The merge and the writer took turns on one thread: at degree 14, the merge's thread spent 46 % of the job's processor
@@ -3326,15 +3075,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         Staging staging = _staging!;
         if (UsesLine)
         {
-            // The line made now: the blocks that went through one at a time before it land first, and what the size reads
-            // as the last of them landed is recorded, as the line records each of its own.
+            // The line made now: the blocks that went through one at a time before it land first.
             if (_line is null)
             {
                 await LandAsync().ConfigureAwait(false);
-                if (_sized && _flown > _landBase)
-                {
-                    RecordLand(_flown - 1);
-                }
             }
 
             await FlyOnLineAsync(staging, cancellationToken).ConfigureAwait(false);
@@ -3380,14 +3124,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             throw;
         }
 
-        // The flight before landed: what the size reads of it recorded, and the size read as the flight FlightsAhead back
-        // landed, at any degree.
-        if (_sized && _flown > _landBase)
-        {
-            RecordLand(_flown - 1);
-        }
-
-        SizeAtFlight(NextFlight(staging.Bytes));
+        // The flight before landed: this one is the next.
+        _flown++;
         if (budget is null || !Execution.LaneWorkers.TryTake(budget, out long entered))
         {
             // No lane free: the block goes through on the merge's thread, and its staging takes the next rows.
@@ -3416,22 +3154,21 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// <see cref="FlyAsync"/> on the writer's line: the block admitted as the next flight and its assembly offered, then the
-    /// flights up to the one <see cref="FlightsAhead"/> back waited for, the entries ready run meanwhile, and the size read
-    /// as that one landed.
+    /// flights up to the one <see cref="FlightDepth"/> back waited for, the entries ready run meanwhile.
     /// </summary>
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
     private async ValueTask FlyOnLineAsync(Staging staging, CancellationToken cancellationToken)
     {
         FlightLine line = Line;
-        long flight = NextFlight(staging.Bytes);
+        long flight = NextFlight();
         _staging = null;
         BatchesFlown++;
         line.Admit(staging, flight);
         (staging.Assembly ??= new AssemblyUnit(this, staging)).Offer(_core, Flow.Write);
 
-        // Up to LandLag blocks in flight while the work's memory admits them, the blocks before this one landed otherwise: the
-        // size read LandLag blocks back is the same either way.
-        long settled = flight - LandLag + 1;
+        // Up to FlightDepth blocks in flight while the work's memory admits them, the blocks before this one landed otherwise:
+        // the file is the same either way.
+        long settled = flight - FlightDepth + 1;
         if (settled < flight && _admitsAhead is { } admits && !admits(staging.Bytes))
         {
             settled = flight;
@@ -3439,7 +3176,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         await line.SettleAsync(settled, quietly: false, cancellationToken).ConfigureAwait(false);
-        SizeAtFlight(flight);
     }
 
     /// <summary>The assembly of a staging's block, a unit of the core (<see cref="Assemble"/>).</summary>
@@ -4810,16 +4546,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             return;
         }
 
-        // What the columns hold together, and where the file stands before they write it: the rate the rows that wait
-        // count at while the columns hold nothing (_restRate).
-        long canonical = 0;
-        foreach (Gathering? column in gathering)
-        {
-            canonical += column is { Rows: > 0 } ? column.Bytes : 0;
-        }
-
-        long before = _sink.Position;
-
         // What each column holds emitted at once, each by a task of its own, then written in the columns' order.
         if (EmitsApart)
         {
@@ -4842,11 +4568,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     await EmitGatheredAsync(field, column, cancellationToken, due: false).ConfigureAwait(false);
                 }
             }
-        }
-
-        if (canonical > 0)
-        {
-            _restRate = (float)((double)(_sink.Position - before) / canonical);
         }
     }
 
@@ -4899,22 +4620,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         internal bool IsEncoded { get; private init; }
 
         /// <summary>
-        /// Whether the writer's size counts what the column holds as it came: its target in canonical bytes and no chunk
-        /// written yet, a <see cref="Rate"/> of 1 over up to a whole chunk of it. A column whose target counts encoded bytes
-        /// begins at a first rate, which its chunk is due by, and holds less than a chunk at it.
+        /// The share of its canonical bytes the column's last chunk encoded to, as measured and one at most, by which its
+        /// chunk is due (<see cref="Due"/>). Before its first chunk, <see cref="FirstRate"/> for a target in encoded bytes,
+        /// and 1 for a target in canonical bytes, which no rate enters.
         /// </summary>
-        internal bool AsItCame { get; private set; } = true;
-
-        /// <summary>
-        /// The share of its canonical bytes the column's last chunk encoded to, as measured and one at most, which the
-        /// writer's size counts what it holds at. Before its first chunk, <see cref="FirstRate"/> for a target in encoded
-        /// bytes and 1 for a target in canonical bytes (<see cref="AsItCame"/>).
-        /// </summary>
-        /// <remarks>
-        /// Kept a sixteenth at least, the bound a chunk is due by (<see cref="Due"/>), it counted a column that encodes to
-        /// a hundredth of its bytes six times over: a writer of metric records said 67.1 MB for 61.7 MB of chunks, and says
-        /// 64.3 MB for 63.6 as measured (2026-11-20).
-        /// </remarks>
         internal double Rate { get; private set; } = 1;
 
         /// <summary>The canonical bytes of the chunk being written, which its segment measures the rate against; 0 when none is.</summary>
@@ -4927,7 +4636,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         internal bool Due => (IsEncoded ? Bytes * Math.Max(Rate, LeastRate) : Bytes) >= Target;
 
         /// <summary>A column gathering to <paramref name="bytes"/> encoded bytes a chunk.</summary>
-        internal static Gathering Encoded(long bytes) => new Gathering(bytes) { IsEncoded = true, Rate = FirstRate, AsItCame = false };
+        internal static Gathering Encoded(long bytes) => new Gathering(bytes) { IsEncoded = true, Rate = FirstRate };
 
         /// <summary>
         /// Whether the chunk the column lets go of now measures its rate: one cut by its target (<paramref name="due"/>), or
@@ -4953,7 +4662,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             if (Cut > 0)
             {
                 Rate = Math.Min(1, (double)encoded / Cut);
-                AsItCame = false;
             }
 
             Cut = 0;

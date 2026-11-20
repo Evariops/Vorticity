@@ -16,11 +16,9 @@ namespace Vorticity;
 /// </summary>
 public sealed partial class VortexFileWriter
 {
-    // By column, its chunks taken to emission and not yet written, oldest first, at most EmissionDepth of them; what Held
-    // counts them at, the bytes their columns counted them at when they reached their targets; and the block bounds a
-    // shredded column's chunks count into, free for the next, by column.
+    // By column, its chunks taken to emission and not yet written, oldest first, at most EmissionDepth of them; and the block
+    // bounds a shredded column's chunks count into, free for the next, by column.
     private List<ColumnEmission>?[]? _emissions;
-    private long _emittingBytes;
     private List<ChunkBlockBounds>?[]? _emissionBounds;
 
     // By column whose emissions follow one another, one with a memory of its plans, the last one started, which the next
@@ -80,7 +78,6 @@ public sealed partial class VortexFileWriter
         chunk.Owned = null;
         chunk.Shared = null;
         chunk.Inline = false;
-        chunk.AsItCame = false;
         chunk.Stats = null;
         chunk.Bounds = null;
         chunk.Blob = default;
@@ -89,7 +86,6 @@ public sealed partial class VortexFileWriter
         chunk.Then = null;
         chunk.FreshCount = 0;
         chunk.Cut = 0;
-        chunk.Counted = 0;
         chunk.Held = 0;
         (_spareEmissions ??= new ColumnEmission?[_fieldCount])[chunk.Field] ??= chunk;
     }
@@ -111,9 +107,6 @@ public sealed partial class VortexFileWriter
 
         // A chunk of the file is the column's chunk as its writer sizes them: its plan is the column's.
         chunk.Measures = true;
-
-        // What its bytes held while in transit counts toward the writer's size until it lands, at the rate of the rows that wait.
-        chunk.Counted = (long)(arena.NamedBytes(node) * Gathering.FirstRate);
 
         // A column written against an object dictionary goes as its codes, which the statistics of its values do not describe.
         if (Codes(field))
@@ -272,13 +265,6 @@ public sealed partial class VortexFileWriter
         /// <summary>Whether it is compressed on the writer's flow as it leaves rather than by a unit of the core.</summary>
         internal bool Inline;
 
-        /// <summary>
-        /// Whether <see cref="Counted"/> is its canonical bytes as they came, its column counting so when it left
-        /// (<see cref="Gathering.AsItCame"/>): counted again at the column's rate once a chunk measures it
-        /// (<see cref="Recount"/>).
-        /// </summary>
-        internal bool AsItCame;
-
         /// <summary>Whether its segment measures its column's rate as it lands (<see cref="Gathering.Measures"/>).</summary>
         internal bool Measures;
 
@@ -287,7 +273,6 @@ public sealed partial class VortexFileWriter
         internal int FirstBlock;
         internal int Blocks;
         internal long Cut;
-        internal long Counted;
         internal long Held;
         internal string[] Known = [];
         internal int KnownCount;
@@ -473,8 +458,6 @@ public sealed partial class VortexFileWriter
         chunk.Blocks = gathering.Blocks;
         chunk.Cut = gathering.Bytes;
         chunk.Measures = gathering.Measures(due);
-        chunk.Counted = (long)(gathering.Bytes * gathering.Rate);
-        chunk.AsItCame = gathering.AsItCame;
 
         // What its ingest knew of it, read by its emission while the column ingests the blocks after it, and counted as a
         // chunk compressed on the writer's flow counts it.
@@ -576,8 +559,6 @@ public sealed partial class VortexFileWriter
     {
         int field = chunk.Field;
         ((_emissions ??= new List<ColumnEmission>?[_fieldCount])[field] ??= []).Add(chunk);
-        Recount(chunk);
-        _emittingBytes += chunk.Counted;
         ChunksEmittedApart++;
         int known = _arrayEncodings.Count;
         if (chunk.Known.Length < known)
@@ -1004,20 +985,6 @@ public sealed partial class VortexFileWriter
         }
     }
 
-    /// <summary>
-    /// Counts <paramref name="chunk"/> at its column's rate once a chunk of the column measured one, when it left its column
-    /// counted as it came (<see cref="ColumnEmission.AsItCame"/>): the writer's size then reads what it encodes to rather
-    /// than its rows' bytes, which a shredded variant's chunk of a million rows holds five to a hundred times over.
-    /// </summary>
-    private void Recount(ColumnEmission chunk)
-    {
-        if (chunk.AsItCame && _gathering?[chunk.Field] is { AsItCame: false } column)
-        {
-            chunk.Counted = (long)(chunk.Cut * column.Rate);
-            chunk.AsItCame = false;
-        }
-    }
-
     /// <summary>Takes what <paramref name="chunk"/> held off the writer's ceiling, once: as it is written, or given up.</summary>
     private void Uncount(ColumnEmission chunk)
     {
@@ -1044,7 +1011,6 @@ public sealed partial class VortexFileWriter
     /// <summary>Writes <paramref name="chunk"/>, column <paramref name="field"/>'s oldest chunk in emission (<see cref="LandEmissionsAsync(int, CancellationToken, int)"/>).</summary>
     private async ValueTask LandEmissionAsync(int field, ColumnEmission chunk, CancellationToken cancellationToken)
     {
-        _emittingBytes -= chunk.Counted;
         Uncount(chunk);
         try
         {
@@ -1083,7 +1049,6 @@ public sealed partial class VortexFileWriter
 
         // A column that gathers measures its rate on the chunk; one chunked with the file has none to measure.
         Gathering? gathering = _gathering?[field];
-        bool first = gathering is { AsItCame: true };
         if (gathering is not null)
         {
             gathering.Cut = chunk.Measures ? chunk.Cut : 0;
@@ -1091,18 +1056,6 @@ public sealed partial class VortexFileWriter
 
         await WriteColumnBlobAsync(field, blob, chunk.FirstBlock, chunk.Blocks, cancellationToken, chunk.Bounds, released: true).ConfigureAwait(false);
         gathering?.ChunkRows.Add(chunk.Rows);
-
-        // The column's first chunk measured: its chunks still in emission, which left counted as they came, count at its rate
-        // from here, a point of the rows' own order.
-        if (first && _emissions?[field] is { } later)
-        {
-            foreach (ColumnEmission after in later)
-            {
-                long before = after.Counted;
-                Recount(after);
-                _emittingBytes += after.Counted - before;
-            }
-        }
 
         if (chunk.Bounds is { } bounds)
         {
@@ -1170,7 +1123,6 @@ public sealed partial class VortexFileWriter
             chunks.Clear();
         }
 
-        _emittingBytes = 0;
         if (_lastEmission is { } last)
         {
             Array.Clear(last);

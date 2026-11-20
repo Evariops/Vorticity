@@ -367,7 +367,7 @@ public sealed partial class VortexFileWriter
         /// <summary>Its epilogue ran: its rows wait in transit; a flight that ends a chunk waits for the chunk's emission.</summary>
         Held,
 
-        /// <summary>Landed: what the writer's size reads of it is recorded.</summary>
+        /// <summary>Landed: its rows are in transit or in the file, and its slot of the ring is free.</summary>
         Landed,
     }
 }
