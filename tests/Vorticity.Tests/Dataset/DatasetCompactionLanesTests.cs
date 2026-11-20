@@ -178,8 +178,8 @@ public sealed partial class DatasetCompactionLanesTests
     /// chunks of some kilobytes, dozens an object: an input takes the chunks it decodes once a first block was worth it,
     /// which a file decoded whole before any block never does. The inputs hand their chunks over not put back together.
     /// In chunks of 4 KiB a block makes a chunk, which the writer's line cuts column by column, and no value of a block
-    /// that took its runs is ever put back. In chunks of 48 KiB a chunk takes several blocks, some of which wait whole
-    /// in transit, their values put back first by what the block took.
+    /// that took its runs is ever put back. In chunks of 96 KiB a chunk takes several blocks, which wait whole in
+    /// transit, their values put back first by what the block took.
     /// </summary>
     /// <remarks>
     /// A key is held by half the records or by one in four hundred, so that both jobs shred the same keys: an input that
@@ -187,7 +187,7 @@ public sealed partial class DatasetCompactionLanesTests
     /// </remarks>
     [Theory]
     [InlineData(4 << 10)]
-    [InlineData(48 << 10)]
+    [InlineData(96 << 10)]
     public async Task AConsolidationWhoseInputsHandOverWhatTheyTookOfAVariantWritesTheSameSegments(int chunkBytes)
     {
         await using MemoryObjectStore built = new MemoryObjectStore();
@@ -215,12 +215,19 @@ public sealed partial class DatasetCompactionLanesTests
         Assert.True(jobs.Sum(static job => job.WriterBlocksOnLine) > 0, ran);
         Assert.True(jobs.Sum(static job => job.WriterBlocksOfRunsTaken) > 0, ran);
 
-        // Chunks handed over not put back together, and blocks written from them whose values never were: every one of
-        // them where each block makes a chunk, which the line cuts column by column; where a chunk takes several blocks,
-        // some wait in transit, their values put back first.
+        // Chunks handed over not put back together, and blocks written from them. Where each block makes a chunk, the line
+        // cuts it column by column and its values never are put back. Where a chunk takes several blocks, they wait whole
+        // in transit, their values put back first by what the block took.
         Assert.True(jobs.Sum(static job => job.InputVariantChunks.Held) > 0, ran);
-        Assert.True(jobs.Sum(static job => job.WriterBlocksOfRunsTaken - job.WriterBlocksPutBack) > 0, ran);
-        Assert.Equal(chunkBytes > 4 << 10, jobs.Sum(static job => job.WriterBlocksPutBack) > 0);
+        long putBack = jobs.Sum(static job => job.WriterBlocksPutBack);
+        if (chunkBytes == 4 << 10)
+        {
+            Assert.True(putBack == 0, ran);
+        }
+        else
+        {
+            Assert.True(putBack > 0, ran);
+        }
     }
 
     /// <summary>
@@ -345,6 +352,42 @@ public sealed partial class DatasetCompactionLanesTests
             Assert.Equal(kept[i].Message, read[i].Message);
             Assert.True(kept[i].Attributes.Equals(read[i].Attributes), $"record {kept[i].At}");
         }
+    }
+
+    /// <summary>
+    /// Thirty-two appends of log records merged by tiers into objects aimed at 2 MiB: each merge reads less than an
+    /// object holds and writes one object, and the plan runs out of jobs. The variant column, shredded, is written in
+    /// chunks of a million rows, so none of it is encoded before an object of some ten thousand rows ends, and its writer
+    /// counts it at the size of its rows as they come, six times what they encode to: ended at that size, a merge of
+    /// five objects wrote five again, which the plan took again without end.
+    /// </summary>
+    [Fact]
+    public async Task ATierMergeWhoseInputsHoldLessThanAnObjectWritesOne()
+    {
+        await using MemoryObjectStore built = new MemoryObjectStore();
+        Random random = new Random(43);
+        DatasetOptions options = TakenLogOptionsOf(VortexSession.Default, takes: false, 4 << 10);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(built, LogDoc.Schema, options, Ct);
+        for (int a = 0; a < 32; a++)
+        {
+            await AppendLogsAsync(dataset, random, a * 3_000, 3_000, latePercent: 0, dayRows: 96_000, SteadyAttributes);
+        }
+
+        // Twelve jobs at most: the plan asks for three, and asked for one more without end.
+        List<CompactionResult> jobs = [];
+        for (int step = 0; step < 12 && await dataset.CompactAsync(cancellationToken: Ct) is { } job; step++)
+        {
+            jobs.Add(job);
+        }
+
+        string ran = string.Join(", ", jobs.Select(static job => $"{job.Trigger} {job.ObjectsIn}->{job.ObjectsOut} {job.BytesIn}->{job.BytesOut} B"));
+        Assert.NotEmpty(jobs);
+        Assert.All(jobs, job =>
+        {
+            Assert.True(job.Trigger == CompactionTrigger.Tier && job.BytesIn * ObjectBound.OutPerIn <= options.Layout!.ObjectBytes, ran);
+            Assert.True(job.ObjectsOut == 1, ran);
+        });
+        Assert.Null(await dataset.CompactAsync(cancellationToken: Ct));
     }
 
     /// <summary>Every job the plan gives, run until none is left.</summary>

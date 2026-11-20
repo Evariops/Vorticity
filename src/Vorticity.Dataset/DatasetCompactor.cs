@@ -2481,7 +2481,21 @@ internal static partial class DatasetCompactor
         /// Whether the object being written has reached the destination's size: its writer's, with the rows of the block's map
         /// counted as the writer counts the rows it stages.
         /// </summary>
-        internal bool WantsRoll => _output is not null && _output.Writer.SizeWith(_map.Bytes) >= _target;
+        /// <summary>
+        /// Whether the object being written has reached its size, by what its writer says it would take were it ended now
+        /// (<see cref="VortexFileWriter.SizeWith"/>). Never for a job whose bound holds the size at most: no object of it
+        /// passes what its inputs weigh times the most a rewrite writes a byte read (<see cref="ObjectBound"/>), so none
+        /// reaches the size, and a writer that says one did counts bytes it has not encoded yet.
+        /// </summary>
+        /// <remarks>
+        /// A writer counts what a column holds toward its next chunk at the rate the column's last chunk encoded to, and at
+        /// its canonical bytes for a column whose chunk is aimed at canonical bytes, a shredded variant's of a million rows.
+        /// In an object aimed at less than such a chunk the column writes none before the object's end, and the object
+        /// ended at the size of its rows as they come: a tier merge of five objects of 370 KB, 1.85 MB together under a size
+        /// of 2 MiB, wrote five objects of 370 KB again, each ended at 2 MiB of rows that encoded to a sixth, and the plan
+        /// took them again without end (2026-11-20).
+        /// </remarks>
+        internal bool WantsRoll => _output is not null && _byteBound > _target && _output.Writer.SizeWith(_map.Bytes) >= _target;
 
         /// <summary>Whether the last row written carries this key, which must not be split.</summary>
         internal bool HoldsKey(ReadOnlySpan<byte> key) =>
