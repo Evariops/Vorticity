@@ -46,9 +46,9 @@ parquet = { version = "=60.1.0", default-features = false }
 # the parquet crate pinned at 60.1.0 above for its SBBF alone, default features off, so that no
 # arrow 60 comes with it: the two families meet in no type the examples pass between them. A major
 # of these three moves with the vortex crates, never alone.
-arrow-array = "=59.3.2"
-arrow-schema = "=59.3.2"
-parquet-variant-compute = "=59.3.2"
+arrow-array = "=59.3.3"
+arrow-schema = "=59.3.3"
+parquet-variant-compute = "=59.3.3"
 
 [profile.release]
 opt-level = 1
