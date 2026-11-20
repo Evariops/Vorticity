@@ -169,8 +169,9 @@ public sealed partial class JobMemoryTests
 
     /// <summary>
     /// A job refused its blocks narrows the next: half its inputs for a merge by size class, and for any job half the rows of
-    /// its batches, as many inputs open at once at most. A refusal that narrowed nothing of the one before it fails, one
-    /// given up on its price alone excepted, and a job that ran to its end lifts the caps.
+    /// its batches, as many inputs open at once at most. A refusal that narrowed none of those of the one before it halves
+    /// what the next job's writer gathers, down to a mebibyte, then fails, one given up on its price alone excepted; and a
+    /// job that ran to its end lifts the caps, its writer's among them.
     /// </summary>
     [Fact]
     public async Task AJobRefusedNarrowsTheNextUntilNothingIsLeftToNarrow()
@@ -185,14 +186,33 @@ public sealed partial class JobMemoryTests
         JobTooWideException first = new JobTooWideException(job, 8L << 20, 8L << 20, new VortexMemoryException("refused")) { Sizing = (16_384, 8) };
         JobTooWideException shorter = new JobTooWideException(job, 8L << 20, 8L << 20, new VortexMemoryException("refused")) { Sizing = (8_192, 8) };
         JobTooWideException same = new JobTooWideException(job, 8L << 20, 8L << 20, new VortexMemoryException("refused")) { Sizing = (8_192, 8) };
-        VortexDataset.Narrowed(null, first);
-        VortexDataset.Narrowed(first, shorter);
-        Assert.Throws<VortexMemoryException>(() => VortexDataset.Narrowed(shorter, same));
-        VortexDataset.Narrowed(new JobTooWideException(job, 1, 8L << 20), same);
+        long whole = DatasetCompactor.GatherCeiling(dataset);
+        dataset.Narrowed(null, first);
+        dataset.Narrowed(first, shorter);
+        Assert.Equal(whole, DatasetCompactor.GatherCeiling(dataset));
+
+        // Nothing narrower of its inputs or its batches: its writer gathers half as much, refusal after refusal, down to a
+        // mebibyte, where a refusal fails.
+        Assert.True(whole > DatasetCompactor.LeastGatherCeiling, $"a writer that gathers {whole} bytes has nothing to halve");
+        for (long halved = whole / 2; halved >= DatasetCompactor.LeastGatherCeiling; halved /= 2)
+        {
+            dataset.Narrowed(shorter, same);
+            Assert.Equal(Math.Max(halved, DatasetCompactor.LeastGatherCeiling), DatasetCompactor.GatherCeiling(dataset));
+        }
+
+        if (DatasetCompactor.GatherCeiling(dataset) > DatasetCompactor.LeastGatherCeiling)
+        {
+            dataset.Narrowed(shorter, same);
+        }
+
+        Assert.Equal(DatasetCompactor.LeastGatherCeiling, DatasetCompactor.GatherCeiling(dataset));
+        Assert.Throws<VortexMemoryException>(() => dataset.Narrowed(shorter, same));
+        dataset.Narrowed(new JobTooWideException(job, 1, 8L << 20), same);
 
         dataset.LearnJobCosts(1L << 20, 8_192, writerBytes: 0, width: int.MaxValue);
         Assert.Equal(0, dataset.JobWidthCap);
         Assert.Equal((0, 0), dataset.JobSizingCap);
+        Assert.Equal(whole, DatasetCompactor.GatherCeiling(dataset));
     }
 
     /// <summary>The same partition under the default budget, which holds it at once: one consolidation, no pass.</summary>

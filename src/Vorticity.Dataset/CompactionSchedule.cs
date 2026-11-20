@@ -139,7 +139,7 @@ internal static class CompactionLoop
             catch (JobTooWideException tooWide)
             {
                 // The jobs' budget refused it: the next plan narrows the job, and a refusal that narrowed nothing fails the loop.
-                VortexDataset.Narrowed(refused, tooWide);
+                dataset.Narrowed(refused, tooWide);
                 refused = tooWide;
                 continue;
             }

@@ -245,6 +245,36 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     private int _jobOpenCap;
 
     /// <summary>
+    /// How many times the writer of the next job gathers half its share of the jobs' budget
+    /// (<see cref="DatasetCompactor.GatherCeiling"/>): once a refusal that left a job nothing else to narrow
+    /// (<see cref="NarrowWriter"/>), until a job as wide as the cap runs to its end, as the caps on its inputs and its
+    /// batches are lifted; 0 before any.
+    /// </summary>
+    internal int JobGatherHalvings => Volatile.Read(ref _jobGatherHalvings);
+
+    private int _jobGatherHalvings;
+
+    /// <summary>
+    /// Has the writer of the next job gather half as much, which a writer that holds less writes its chunks early for:
+    /// what is left to narrow of a job refused at its fewest inputs and its shortest batches. False when its writer
+    /// gathers a mebibyte already.
+    /// </summary>
+    /// <remarks>
+    /// Until that job runs, and not for the handle's life: kept for every job as wide, a merge of three hundred small
+    /// appends gathered as little as a consolidation of thirty-five objects that no writer made fit.
+    /// </remarks>
+    internal bool NarrowWriter()
+    {
+        if (DatasetCompactor.GatherCeiling(this) <= DatasetCompactor.LeastGatherCeiling)
+        {
+            return false;
+        }
+
+        Interlocked.Increment(ref _jobGatherHalvings);
+        return true;
+    }
+
+    /// <summary>
     /// The bytes a second the last job of this handle that ran to its end read and wrote, its inputs' bytes over its time:
     /// what the next plan bounds a job's bytes by, so that it commits within its share of the retention window; 0 before any.
     /// </summary>
@@ -358,6 +388,7 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             Volatile.Write(ref _jobWidthCap, 0);
             Volatile.Write(ref _jobBatchCap, 0);
             Volatile.Write(ref _jobOpenCap, 0);
+            Volatile.Write(ref _jobGatherHalvings, 0);
         }
     }
 
@@ -1234,7 +1265,8 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             Granulated = contents && synopses,
 
             // A job's writer gathers its columns within its share of the jobs' budget, writing a chunk early past it: a range's
-            // writer within the job's share over its ranges (gatherShare), the job's writers together within the job's.
+            // writer within the job's share over its ranges (gatherShare), the job's writers together within the job's; the
+            // job after one refused at its narrowest within less (GatherCeiling).
             GatheredBytesCeiling = budget is null ? 0 : DatasetCompactor.GatherCeiling(this) / Math.Max(1, gatherShare),
 
             // And takes its merge's runs a block at a time, which its ingest then spreads over its lanes, as many blocks in
@@ -2326,18 +2358,22 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// <summary>
     /// Whether the job refused, <paramref name="now"/>, narrowed something of the one of its kind refused <paramref name="before"/>
     /// it: fewer inputs, shorter batches, or fewer inputs open at once; or <paramref name="before"/> was given up on a price
-    /// alone, before it read anything. A throw otherwise, which says what the job held and what the budget holds: every
+    /// alone, before it read anything; or, with none of those left, its writer gathers half as much from now on
+    /// (<see cref="NarrowWriter"/>). A throw otherwise, which says what the job held and what the budget holds: every
     /// refusal narrows the next job (<see cref="NarrowJobs"/>), so one that narrowed nothing has nothing left to narrow. The
     /// rule was fewer inputs alone, and a consolidation refused with no merge due before it, as many inputs again however
-    /// short its batches, failed at its second refusal (2026-11-15).
+    /// short its batches, failed at its second refusal (2026-11-15); then inputs and batches alone, and a consolidation
+    /// of ten inputs of log records under 2 GiB, 330 MiB in its inputs at their shortest batches and 361 to 385 in its
+    /// writer, failed every time under a jobs' budget of 672 (2026-11-20).
     /// </summary>
-    /// <exception cref="VortexMemoryException">The job narrowed nothing of the one before it.</exception>
-    internal static void Narrowed(JobTooWideException? before, JobTooWideException now)
+    /// <exception cref="VortexMemoryException">The job narrowed nothing of the one before it, its writer gathering a mebibyte already.</exception>
+    internal void Narrowed(JobTooWideException? before, JobTooWideException now)
     {
         if (before is null || before.Job.Trigger != now.Job.Trigger || before.Priced
             || now.Job.Inputs.Count < before.Job.Inputs.Count
             || (now.Sizing.BatchRows > 0 && now.Sizing.BatchRows < before.Sizing.BatchRows)
-            || (now.Sizing.Open > 0 && now.Sizing.Open < before.Sizing.Open))
+            || (now.Sizing.Open > 0 && now.Sizing.Open < before.Sizing.Open)
+            || NarrowWriter())
         {
             return;
         }
@@ -2345,7 +2381,7 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         throw new VortexMemoryException(
             string.Create(
                 CultureInfo.InvariantCulture,
-                $"A compaction of {now.Job.Inputs.Count} objects, at its fewest inputs and shortest batches, needs more than the jobs' budget of {now.Budget:N0} bytes: its blocks held {now.Held:N0} when one was refused{(now.Reason is { } reason ? $", {reason}" : "")}. Give the process more memory, or the session a larger JobMemoryBudget."),
+                $"A compaction of {now.Job.Inputs.Count} objects, at its fewest inputs, its shortest batches and its writer's least, needs more than the jobs' budget of {now.Budget:N0} bytes: its blocks held {now.Held:N0} when one was refused{(now.Reason is { } reason ? $", {reason}" : "")}. Give the process more memory, or the session a larger JobMemoryBudget."),
             now);
     }
 
