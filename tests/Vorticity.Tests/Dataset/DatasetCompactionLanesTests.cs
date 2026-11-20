@@ -390,6 +390,55 @@ public sealed partial class DatasetCompactionLanesTests
         Assert.Null(await dataset.CompactAsync(cancellationToken: Ct));
     }
 
+    /// <summary>
+    /// Thirty appends of 12 000 log records of one day, consolidated into objects aimed at 2 MiB: the segments of every
+    /// object but the last, its columns' chunks, its zone maps and its statistics, weigh the size within a tenth under it
+    /// and a twentieth over, and the objects are the same at one lane, four and fourteen. The variant column, shredded,
+    /// aims its chunks at a million rows, so that an object holds none of it encoded when its rows as they came reach the
+    /// size, at a sixth of it: the job has the column write what it holds then, and goes on at the rate that chunk encoded
+    /// to. Without it, each object ended there.
+    /// </summary>
+    /// <remarks>
+    /// The segments, not the object: a writer's size counts no index the file writes at its end, here its counts by block,
+    /// which at 256 rows a block weigh more than the rows.
+    /// </remarks>
+    [Fact]
+    public async Task AConsolidationEndsEachObjectAtItsSize()
+    {
+        await using MemoryObjectStore built = new MemoryObjectStore();
+        {
+            Random random = new Random(43);
+            await using VortexDataset dataset = await VortexDataset.CreateAsync(built, LogDoc.Schema, TakenLogOptionsOf(VortexSession.Default, takes: false, 4 << 10), Ct);
+            for (int a = 0; a < 30; a++)
+            {
+                await AppendLogsAsync(dataset, random, a * 12_000, 12_000, latePercent: 0, dayRows: 1_000_000, SteadyAttributes);
+            }
+        }
+
+        List<long[]> weighed = [];
+        await SameObjectsAtDegreesAsync(
+            built, [1, 4, 14], static session => TakenLogOptionsOf(session, takes: false, 4 << 10), async dataset =>
+            {
+                List<CompactionResult> jobs = [.. await dataset.ConsolidateAsync(Ct)];
+                List<long> objects = [];
+                await foreach (PositionedObject positioned in dataset.ScanBuilder().ObjectsAsync(Ct))
+                {
+                    byte[] bytes = new byte[positioned.Entry.Bytes];
+                    await dataset.Store.ReadAsync(positioned.Entry.Key, 0, bytes, null, Ct);
+                    await using VortexFile file = await VortexSession.Default.OpenAsync(new Vorticity.IO.MemorySegmentSource(bytes), cancellationToken: Ct);
+                    objects.Add(file.SegmentMap.Sum(static segment => (long)segment.Length));
+                }
+
+                weighed.Add([.. objects]);
+                return jobs;
+            });
+
+        const long Size = 1 << 21;
+        string sizes = string.Join(", ", weighed[0]);
+        Assert.True(weighed[0].Length >= 4, sizes);
+        Assert.All(weighed[0][..^1], bytes => Assert.True(bytes >= Size * 0.9 && bytes <= Size * 1.05, sizes));
+    }
+
     /// <summary>Every job the plan gives, run until none is left.</summary>
     private static async Task<List<CompactionResult>> DrainAsync(VortexDataset dataset)
     {

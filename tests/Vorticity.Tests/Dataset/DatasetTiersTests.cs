@@ -272,6 +272,106 @@ public sealed partial class DatasetTiersTests
         await HoldsAsync(dataset, all);
     }
 
+    /// <summary>
+    /// Four appends of one day that weigh together 99 % of the size the day's objects aim at, merged by tiers: one object,
+    /// and no job after it. The bound of such a merge, its inputs' bytes and 3 %, passes the size, and a job whose bound
+    /// passed the size ended its objects by what its writer said they weighed: here four times what they do, no column
+    /// having written a chunk, so that the merge wrote several objects of its inputs' size class, which the plan took
+    /// again.
+    /// </summary>
+    [Fact]
+    public async Task AMergeOfInputsThatWeighTheSizeAtMostWritesOneObject()
+    {
+        long top = await TopOfFourAppendsAsync(percent: 99);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await FourAppendsAsync(store, top, ObjectBound.OutPerIn, ObjectSegmentSink.DefaultStreamedFromBytes);
+
+        CompactionResult job = Assert.IsType<CompactionResult>(await dataset.CompactAsync(cancellationToken: Ct));
+        string ran = $"{job.Trigger} {job.ObjectsIn}->{job.ObjectsOut}, {job.BytesIn}->{job.BytesOut} B under a size of {top}";
+        Assert.True(job.Trigger == CompactionTrigger.Tier && job.ObjectsIn == 4, ran);
+
+        // Within the size, and past what the bound's margin leaves under it.
+        Assert.True(job.BytesIn <= top && job.BytesIn * ObjectBound.OutPerIn > top, ran);
+        Assert.True(job.ObjectsOut == 1, ran);
+        Assert.Null(await dataset.CompactAsync(cancellationToken: Ct));
+        Assert.Equal(4 * CompressibleRows, await dataset.Scan<Row>().CountAsync(Ct));
+    }
+
+    /// <summary>
+    /// Four appends that weigh 90 % of the size, merged into an object the store takes as it is written, announced at half
+    /// of what the merge reads: the object runs past that bound and the job starts again under twice as much, which passes
+    /// the bound of inputs of the size, so that it ends an object as it reaches the size. It has every column measured
+    /// before it ends one, finds its object under the size, and writes one. Ended on the rate a column is guessed to
+    /// encode at before its first chunk, four times what these do, it wrote several, as many as it read.
+    /// </summary>
+    [Fact]
+    public async Task AMergeStartedAgainUnderADoubledBoundEndsNoObjectOnAGuess()
+    {
+        long top = await TopOfFourAppendsAsync(percent: 90);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await FourAppendsAsync(store, top, outPerIn: 0.5, streamedFrom: 64 << 10);
+
+        CompactionResult job = Assert.IsType<CompactionResult>(await dataset.CompactAsync(cancellationToken: Ct));
+        string ran = $"{job.Trigger} {job.ObjectsIn}->{job.ObjectsOut}, {job.BytesIn}->{job.BytesOut} B under a size of {top}, {job.BoundRestarts} restarts";
+        Assert.True(job.Trigger == CompactionTrigger.Tier && job.ObjectsIn == 4, ran);
+        Assert.True(job.BoundRestarts >= 1, ran);
+        Assert.True(job.ObjectsOut == 1 && job.BytesOut <= top, ran);
+        Assert.Null(await dataset.CompactAsync(cancellationToken: Ct));
+        Assert.Equal(4 * CompressibleRows, await dataset.Scan<Row>().CountAsync(Ct));
+    }
+
+    private const int CompressibleRows = 40_000;
+
+    /// <summary>
+    /// The size four appends of <see cref="CompressibleRows"/> rows weigh <paramref name="percent"/> % of together, each
+    /// then within a quarter of it, one size class under the top's.
+    /// </summary>
+    private static async Task<long> TopOfFourAppendsAsync(int percent)
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset sized = await FourAppendsAsync(store, 1L << 30, ObjectBound.OutPerIn, ObjectSegmentSink.DefaultStreamedFromBytes);
+        long largest = 0;
+        await foreach (PositionedObject appended in sized.ScanBuilder().ObjectsAsync(Ct))
+        {
+            largest = Math.Max(largest, appended.Entry.Bytes);
+        }
+
+        return largest * 4 * 100 / percent;
+    }
+
+    /// <summary>
+    /// A day of four appends of rows that encode to a small share of their bytes, far under the quarter a column is guessed
+    /// to encode at before its first chunk, in a dataset whose objects aim at <paramref name="top"/> bytes, go to the store
+    /// as they are written from <paramref name="streamedFrom"/> bytes, and whose rewrites announce
+    /// <paramref name="outPerIn"/> bytes a byte they read.
+    /// </summary>
+    private static async Task<VortexDataset> FourAppendsAsync(IObjectStore store, long top, double outPerIn, long streamedFrom)
+    {
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Row.Day)),
+                SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.Status))],
+                ObjectBytes = top,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            ContentsObjectBytes = 0,
+            StreamedObjectBytes = streamedFrom,
+            BoundOutPerIn = outPerIn,
+        }, Ct);
+        for (int a = 0; a < 4; a++)
+        {
+            Row[] rows = [.. Enumerable.Range(0, CompressibleRows).Select(i => new Row(0, $"svc-{i % 3}", ((long)a * CompressibleRows) + i, i % 5, i / 4_096))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Row>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        return dataset;
+    }
+
     /// <summary>A store that holds the first put of a data object once armed, until released.</summary>
     private sealed class GatedStore(IObjectStore inner) : ForwardingStore(inner)
     {

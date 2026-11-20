@@ -466,6 +466,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <paramref name="rate"/>, the rate of what the columns hold, their mean rate when they hold nothing, a first guess with
     /// none.
     /// </summary>
+    /// <remarks>
+    /// A column's last rate is its last chunk's, whatever its target counts. A column whose target counts canonical bytes, a
+    /// shredded variant's, kept a rate of 1 for ever: under a gathering ceiling of 675 MiB, a consolidation of metric records
+    /// aimed at 64 MiB wrote 834 objects of 0.6 MiB, each ended on 64 MiB of attributes as they came, and one of log records
+    /// aimed at 256 MiB wrote objects of 150 MiB (2026-11-20). Before its first chunk such a column still counts as it came,
+    /// which a job has measured before it ends an object on it (<see cref="MeasureAsync"/>).
+    /// </remarks>
     private long Held(out double rate, long mapBytes = 0)
     {
         long canonical = 0;
@@ -488,6 +495,48 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         rate = canonical > 0 ? encoded / canonical : columns > 0 ? rates / columns : Gathering.FirstRate;
         return (long)(encoded + _emittingBytes + ((_pendingBytes + (_staging?.Bytes ?? 0) + mapBytes) * rate));
+    }
+
+    /// <summary>
+    /// <see cref="Held"/> without the bytes no chunk measured: what the columns that count as they came hold and have in
+    /// emission (<see cref="Gathering.AsItCame"/>) left out, and the rows that wait counted at the rate of the other
+    /// columns alone, at nothing when there is none. Read once every block in flight landed (<see cref="MeasureAsync"/>).
+    /// </summary>
+    private long HeldMeasured(Gathering?[] gathering, long mapBytes)
+    {
+        long canonical = 0;
+        double encoded = 0;
+        double rates = 0;
+        int columns = 0;
+        long emitting = _emittingBytes;
+        for (int field = 0; field < gathering.Length; field++)
+        {
+            if (gathering[field] is not { } column)
+            {
+                continue;
+            }
+
+            if (column.AsItCame)
+            {
+                if (_emissions?[field] is { } chunks)
+                {
+                    foreach (ColumnEmission chunk in chunks)
+                    {
+                        emitting -= chunk.Counted;
+                    }
+                }
+
+                continue;
+            }
+
+            canonical += column.Bytes;
+            encoded += column.Bytes * column.Rate;
+            rates += column.Rate;
+            columns++;
+        }
+
+        double rate = canonical > 0 ? encoded / canonical : columns > 0 ? rates / columns : 0;
+        return (long)(encoded + emitting + ((_pendingBytes + (_staging?.Bytes ?? 0) + mapBytes) * rate));
     }
 
     // The rows staged before, going through on a lane of their own while the next ones stage (FlyAsync): their task, null
@@ -2332,6 +2381,152 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     internal long SizeWith(long mapBytes) =>
         _sized ? _sizedBytes + (long)(((_staging?.Bytes ?? 0) + mapBytes) * _sizedRate) : _sink.Position + Held(out _, mapBytes);
+
+    /// <summary>
+    /// Whether a column gathers to a target in canonical bytes, whose bytes the size counts as they came until its first
+    /// chunk is written (<see cref="Gathering.AsItCame"/>): a caller that ends its file by its size has them measured
+    /// first (<see cref="MeasureAsync"/>).
+    /// </summary>
+    internal bool MeasuresLate
+    {
+        get
+        {
+            if (_gathering is { } gathering)
+            {
+                foreach (Gathering? column in gathering)
+                {
+                    if (column is { IsEncoded: false })
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Has the size read what the file would take, not what its rows held as they came, once it reached
+    /// <paramref name="target"/> with the rows of a block's map that name <paramref name="mapBytes"/> bytes: what a caller
+    /// asks before it ends the file on its size. The blocks in flight land. When the size without the bytes no chunk measured
+    /// (<see cref="HeldMeasured"/>) is under the target, the whole blocks in transit end their chunk of the file, as a flush
+    /// ends it, each column that holds such bytes writes its chunks in emission, then what it holds as a chunk of its own
+    /// when none of them measured it, and the size is read as it stands until the rows staged next go through. Nothing is
+    /// written when the size reaches the target without those bytes: the file ends on what it measured.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The bytes no chunk measured are those of the columns that count as they came (<see cref="Gathering.AsItCame"/>),
+    /// a shredded variant's, which hold up to a chunk of a million rows at five to a hundred times what it encodes to. The
+    /// other columns count at the rate of their last chunk, or at a first rate before one
+    /// (<see cref="Gathering.FirstRate"/>), of which each holds less than a chunk of its own: a file aimed at many chunks
+    /// ends a little off by them, and one aimed at less than its columns' first chunks several times early.
+    /// </para>
+    /// <para>
+    /// With <paramref name="whole"/>, no estimate is left to end the file on: while the sink holds less than the target,
+    /// the blocks in transit end their chunk and every column writes what it holds, so that the size is the sink's and the
+    /// rows of the block being staged. What a caller asks that must not end its file early at any price, each time the
+    /// size reaches the target.
+    /// </para>
+    /// <para>
+    /// The same at any degree: decided once every block in flight landed, from what the columns then hold, and asked by a
+    /// caller that read the size as the block <see cref="LandLag"/> back landed. A chunk written here ends before its
+    /// target: once a column and a file at most without <paramref name="whole"/>, a column that measured a chunk never
+    /// being asked again.
+    /// </para>
+    /// </remarks>
+    /// <returns>
+    /// Whether the size holds no such bytes any more, whatever rows come, so that the caller need not ask again; false
+    /// with <paramref name="whole"/>, and when a column that wrote no chunk held no row to write and may yet take some.
+    /// </returns>
+    internal async ValueTask<bool> MeasureAsync(long mapBytes, long target, bool whole, CancellationToken cancellationToken)
+    {
+        ThrowIfDone();
+        if (_gathering is not { } gathering)
+        {
+            return true;
+        }
+
+        await LandAsync().ConfigureAwait(false);
+        bool transit = _rowBlock > 0 && _pendingRows >= _rowBlock;
+        if (whole)
+        {
+            if (_sink.Position < target)
+            {
+                if (transit)
+                {
+                    await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                await EmitGatheredAsync(cancellationToken).ConfigureAwait(false);
+                _lastCut = false;
+                _sized = false;
+            }
+
+            return false;
+        }
+
+        // Whether a column counts bytes no chunk measured, and whether one has some to write: in what it gathered, in a chunk
+        // in emission, or in the whole blocks in transit, which wait for their chunk of the file to be gathered.
+        bool unmeasured = false;
+        bool holds = false;
+        for (int field = 0; field < gathering.Length; field++)
+        {
+            if (gathering[field] is { AsItCame: true } column)
+            {
+                unmeasured = true;
+                holds |= column.Bytes > 0 || _emissions?[field] is { Count: > 0 };
+            }
+        }
+
+        if (!unmeasured || !(holds || transit))
+        {
+            return !unmeasured;
+        }
+
+        if (_sink.Position + HeldMeasured(gathering, mapBytes) >= target)
+        {
+            return true;
+        }
+
+        // The rows in transit join what the columns hold: a chain that took them ahead hands over rows its column gathered.
+        if (transit)
+        {
+            await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        bool left = false;
+        for (int field = 0; field < gathering.Length; field++)
+        {
+            if (gathering[field] is not { AsItCame: true } column)
+            {
+                continue;
+            }
+
+            await LandEmissionsAsync(field, cancellationToken).ConfigureAwait(false);
+            if (column.AsItCame && column.Rows > 0)
+            {
+                if (EmitsApart)
+                {
+                    StartEmission(Detach(field, column));
+                    await LandEmissionsAsync(field, cancellationToken).ConfigureAwait(false);
+                }
+                else
+                {
+                    await EmitGatheredAsync(field, column, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            left |= column.AsItCame;
+        }
+
+        // The flight staged next reads the columns as they stand, not as the cuts of the last flight recorded them, and the
+        // size is read as it stands: every flight landed.
+        _lastCut = false;
+        _sized = false;
+        return !left;
+    }
 
     /// <summary>
     /// The runs of a merge this writer and the merge's other writers keep where they lie in its inputs' batches, which the
@@ -4591,24 +4786,41 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         /// <summary>Whether the target counts encoded bytes, at <see cref="Rate"/>, rather than canonical ones.</summary>
         internal bool IsEncoded { get; private init; }
 
-        /// <summary>The share of its canonical bytes the column's last chunk encoded to; 1 for a target in canonical bytes.</summary>
+        /// <summary>
+        /// Whether the writer's size counts what the column holds as it came: its target in canonical bytes and no chunk
+        /// written yet, a <see cref="Rate"/> of 1 over up to a whole chunk of it. A column whose target counts encoded bytes
+        /// begins at a first rate, which its chunk is due by, and holds less than a chunk at it.
+        /// </summary>
+        internal bool AsItCame { get; private set; } = true;
+
+        /// <summary>
+        /// The share of its canonical bytes the column's last chunk encoded to, which the writer's size counts what it holds
+        /// at. Before its first chunk, <see cref="FirstRate"/> for a target in encoded bytes, which also decides when its
+        /// chunk is due, and 1 for a target in canonical bytes (<see cref="AsItCame"/>).
+        /// </summary>
         internal double Rate { get; private set; } = 1;
 
         /// <summary>The canonical bytes of the chunk being written, which its segment measures the rate against; 0 when none is.</summary>
         internal long Cut;
 
         /// <summary>Whether what the column holds is a chunk: its target reached, in encoded bytes at the last rate when it counts them.</summary>
-        internal bool Due => Bytes * Rate >= Target;
+        internal bool Due => (IsEncoded ? Bytes * Rate : Bytes) >= Target;
 
         /// <summary>A column gathering to <paramref name="bytes"/> encoded bytes a chunk.</summary>
-        internal static Gathering Encoded(long bytes) => new Gathering(bytes) { IsEncoded = true, Rate = FirstRate };
+        internal static Gathering Encoded(long bytes) => new Gathering(bytes) { IsEncoded = true, Rate = FirstRate, AsItCame = false };
 
-        /// <summary>Takes the rate the chunk just written encoded to, <paramref name="encoded"/> bytes of its <see cref="Cut"/>.</summary>
+        /// <summary>
+        /// Takes the rate the chunk just written encoded to, <paramref name="encoded"/> bytes of its <see cref="Cut"/>: held
+        /// within the rates a target in encoded bytes gathers at, and as measured for a target in canonical bytes, which the
+        /// rate does not decide.
+        /// </summary>
         internal void Measured(long encoded)
         {
-            if (IsEncoded && Cut > 0)
+            if (Cut > 0)
             {
-                Rate = Math.Clamp((double)encoded / Cut, LeastRate, 1);
+                double rate = (double)encoded / Cut;
+                Rate = IsEncoded ? Math.Clamp(rate, LeastRate, 1) : rate;
+                AsItCame = false;
             }
 
             Cut = 0;

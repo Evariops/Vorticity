@@ -420,6 +420,7 @@ internal static partial class DatasetCompactor
         {
             Lane = lane,
             Ranges = ranges,
+            Restarted = doublings > 0,
             AdmitsAhead = memory.AdmitsWrite,
             Budget = memory.Writer,
             Keys = indexed ? schema.Tree : null,
@@ -1554,6 +1555,13 @@ internal static partial class DatasetCompactor
                 {
                     end = values is null ? count : values.EndOfValue(merge, at, count);
 
+                    // An object that reached its size on rows its writer has not measured has them measured first, and goes
+                    // on when what it would take is under the size.
+                    if (outputs.RollsUnmeasured)
+                    {
+                        await outputs.MeasureAsync(cancellationToken).ConfigureAwait(false);
+                    }
+
                     // A run that goes on with the key the object ends on, past its size: the rows of that key stay with it,
                     // and the next part starts where the key changes. An input runs through the rows of a key it shares
                     // with others, into the next key, so that a key repeated across the inputs changes inside runs: without
@@ -2397,7 +2405,12 @@ internal static partial class DatasetCompactor
             _rowBound = rowBound;
             _level = level;
             _byteBound = byteBound;
+            _endsBySize = byteBound > ObjectBound.Of(target, 0, dataset.Options.BoundOutPerIn);
         }
+
+        // Whether the job ends an object as it reaches the size: its bound passes that of inputs that weigh the size. At a
+        // first attempt that is inputs that weigh more than the size; under a bound doubled, more than half of it, and so on.
+        private readonly bool _endsBySize;
 
         /// <summary>The objects it has sealed.</summary>
         internal IReadOnlyList<WrittenObject> Written => _written;
@@ -2478,24 +2491,51 @@ internal static partial class DatasetCompactor
         internal long InputWindowsAhead { get; set; }
 
         /// <summary>
-        /// Whether the object being written has reached the destination's size: its writer's, with the rows of the block's map
-        /// counted as the writer counts the rows it stages.
-        /// </summary>
-        /// <summary>
         /// Whether the object being written has reached its size, by what its writer says it would take were it ended now
-        /// (<see cref="VortexFileWriter.SizeWith"/>). Never for a job whose bound holds the size at most: no object of it
-        /// passes what its inputs weigh times the most a rewrite writes a byte read (<see cref="ObjectBound"/>), so none
-        /// reaches the size, and a writer that says one did counts bytes it has not encoded yet.
+        /// (<see cref="VortexFileWriter.SizeWith"/>). Never for a job whose bound holds within the bound of inputs of that
+        /// size (<see cref="_endsBySize"/>): the plan chose its inputs to make one object, which then weighs what the merge
+        /// writes of them. The store holds an object it takes as it is written to its bound, so that one passes the size by
+        /// the bound's margin at most, 3 %; a smaller object, put whole, is held to none.
         /// </summary>
         /// <remarks>
-        /// A writer counts what a column holds toward its next chunk at the rate the column's last chunk encoded to, and at
-        /// its canonical bytes for a column whose chunk is aimed at canonical bytes, a shredded variant's of a million rows.
-        /// In an object aimed at less than such a chunk the column writes none before the object's end, and the object
-        /// ended at the size of its rows as they come: a tier merge of five objects of 370 KB, 1.85 MB together under a size
-        /// of 2 MiB, wrote five objects of 370 KB again, each ended at 2 MiB of rows that encoded to a sixth, and the plan
-        /// took them again without end (2026-11-20).
+        /// A writer's size is an estimate while a column holds rows no chunk measured, which a job has measured before it
+        /// ends an object on them (<see cref="MeasureAsync"/>). Without either rule, a tier merge of five objects of 370 KB,
+        /// 1.85 MB together under a size of 2 MiB, wrote five objects of 370 KB again, each ended at 2 MiB of a variant
+        /// column's rows that encoded to a sixth, and the plan took them again without end (2026-11-20).
         /// </remarks>
-        internal bool WantsRoll => _output is not null && _byteBound > _target && _output.Writer.SizeWith(_map.Bytes) >= _target;
+        internal bool WantsRoll => _output is not null && _endsBySize && _output.Writer.SizeWith(_map.Bytes) >= _target;
+
+        /// <summary>
+        /// Whether the object being written has reached its size while its writer may still count rows no chunk measured:
+        /// the job then has them measured (<see cref="MeasureAsync"/>) before it reads <see cref="WantsRoll"/> to end the
+        /// object.
+        /// </summary>
+        internal bool RollsUnmeasured => !_measured && WantsRoll;
+
+        // Whether the writer of the object being written holds no rows that no chunk measured, whatever rows come: true with
+        // no object, set as one opens (VortexFileWriter.MeasuresLate) and by each measure.
+        private bool _measured = true;
+
+        /// <summary>
+        /// Has the object's writer measure what its size counts as it came (<see cref="VortexFileWriter.MeasureAsync"/>),
+        /// the block's map counted as <see cref="WantsRoll"/> counts it: the size read next is what the object would take.
+        /// </summary>
+        internal async ValueTask MeasureAsync(CancellationToken cancellationToken)
+        {
+            if (_output is { } output)
+            {
+                _measured = await output.Writer.MeasureAsync(_map.Bytes, _target, whole: Restarted, cancellationToken).ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>
+        /// Whether the job started again under a doubled bound, its objects' content having run past the bound of its
+        /// inputs: it then ends an object by its size where a first attempt would write one (<see cref="_endsBySize"/>), and
+        /// ends none on an estimate: its writer writes all it holds each time the size is reached, so that an object it
+        /// ends weighs the size and leaves its size class. Ended on an estimate, a merge the plan chose to make one object
+        /// of could write as many as it read, which the plan would take again.
+        /// </summary>
+        internal bool Restarted { get; init; }
 
         /// <summary>Whether the last row written carries this key, which must not be split.</summary>
         internal bool HoldsKey(ReadOnlySpan<byte> key) =>
@@ -2747,6 +2787,7 @@ internal static partial class DatasetCompactor
                 variantChunks: shredding?.VariantChunks, byteBound: _byteBound, countsPaths: shredding is not null, postings: Postings, budget: Budget,
                 lane: Lane, admitsAhead: AdmitsAhead, gatherShare: Ranges);
             _output = output;
+            _measured = !(Restarted || output.Writer.MeasuresLate);
             output.Writer.Ledger = Ledger;
             output.Writer.LandLag = LandLagOf(output.Writer.BlockRows);
             Postings?.BlocksOf(VortexDataset.Uid(output.Identity), output.Writer.BlockRows);
@@ -2775,7 +2816,17 @@ internal static partial class DatasetCompactor
         }
 
         internal ValueTask RollIfFullAsync(CancellationToken cancellationToken) =>
-            WantsRoll ? RollAsync(cancellationToken) : ValueTask.CompletedTask;
+            !WantsRoll ? ValueTask.CompletedTask : _measured ? RollAsync(cancellationToken) : MeasuredRollAsync(cancellationToken);
+
+        /// <summary>Seals the object being written when it has reached its size once its writer measured it.</summary>
+        private async ValueTask MeasuredRollAsync(CancellationToken cancellationToken)
+        {
+            await MeasureAsync(cancellationToken).ConfigureAwait(false);
+            if (WantsRoll)
+            {
+                await RollAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
 
         /// <summary>Seals the object being written and starts the next one.</summary>
         internal async ValueTask RollAsync(CancellationToken cancellationToken)
