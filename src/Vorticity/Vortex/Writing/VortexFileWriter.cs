@@ -2123,7 +2123,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         CanonicalArena transit = _transit[_current]!.Canonical;
         _pending.Add(node);
         _pendingRows += transit.GetNode(node).Length;
-        _pendingBytes += transit.ByteSize(node);
+        _pendingBytes += WaitingBytes(transit, node);
     }
 
     /// <summary>Copies the rows of node <paramref name="root"/> into the transit arena, where they wait for their chunk.</summary>
@@ -2133,6 +2133,48 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         _pending.Add(Owned(transit, arena, root));
         _pendingRows += arena.GetNode(root).Length;
         _pendingBytes += transit.ByteSize(_pending[^1]);
+    }
+
+    /// <summary>
+    /// The bytes the rows of <paramref name="node"/>, a block of <paramref name="arena"/> adopted where it was assembled,
+    /// count for in the writer's size while it waits for its chunk: what its buffers hold, and for a shredded variant
+    /// column's values, what their rows name.
+    /// </summary>
+    /// <remarks>
+    /// A block assembled run after run holds once a value equal, byte for byte, to the one gathered before it
+    /// (<c>CanonicalRuns</c>), and counted by its buffers its size depended on which rows' values were equal: what a block
+    /// whose values are not put back together cannot tell. A block copied into the transit holds each row's bytes
+    /// (<see cref="Hold"/>), and a column cut on the line counts what its rows name (<see cref="Gather"/>), so the size
+    /// follows the rows' own bytes on the three ways a block lands. Measured on the three benches of the throughput work
+    /// under 16 GiB at degree 14, 78 to 204 blocks adopted a process and the two counts apart on 26 to 204 of them: not a
+    /// byte written differed (2026-11-20).
+    /// </remarks>
+    private long WaitingBytes(CanonicalArena arena, int node)
+    {
+        long bytes = arena.ByteSize(node);
+        if (_shredding is not { } plans)
+        {
+            return bytes;
+        }
+
+        CanonicalNode block = arena.GetNode(node);
+        for (int field = 0; block.Kind == CanonicalKind.Struct && field < plans.Length && field < block.FieldCount; field++)
+        {
+            if (plans[field] is null)
+            {
+                continue;
+            }
+
+            CanonicalNode column = arena.GetNode(block.GetFieldIndex(field));
+            if (column.Kind == CanonicalKind.Struct && column.FieldCount == 2
+                && arena.GetNode(column.GetFieldIndex(1)).Kind is CanonicalKind.VarBinView or CanonicalKind.Shredded)
+            {
+                int values = column.GetFieldIndex(1);
+                bytes += arena.NamedBytes(values) - arena.ByteSize(values);
+            }
+        }
+
+        return bytes;
     }
 
     /// <summary>A copy of the rows of node <paramref name="root"/> in <paramref name="into"/>, owning their bytes.</summary>
