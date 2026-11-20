@@ -594,8 +594,14 @@ internal sealed class ShreddedVariant
             ulong high = MemoryMarshal.Read<ulong>(metadataView[sizeof(ulong)..]);
             if (!seen || low != lastLow || high != lastHigh)
             {
-                VariantDictionary named = Dictionary(BlockStatsPass.Value(metadataBuffers, metadataViews, row));
-                wide = named.Count > OneByteIds;
+                // The names are counted where they lie: only a row of many is kept to look its keys up in (LargestId).
+                ReadOnlySpan<byte> named = BlockStatsPass.Value(metadataBuffers, metadataViews, row);
+                wide = VariantDictionary.Read(named).Count > OneByteIds;
+                if (wide)
+                {
+                    _ = Dictionary(named);
+                }
+
                 (lastLow, lastHigh, seen) = (low, high, true);
                 sameMetadata = false;
             }

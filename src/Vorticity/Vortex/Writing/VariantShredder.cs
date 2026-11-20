@@ -188,6 +188,7 @@ internal static class VariantShredder
             _runCount = 0;
             _store = store;
             Indexed = false;
+            _reshaped = false;
             _replay.Clear();
             _root.Clear(store);
             if (_root is ObjectGroup keys)
@@ -455,7 +456,9 @@ internal static class VariantShredder
                         ReadOnlySpan<byte> bytes = holds ? values.At(at) : VariantEncoding.NullValue;
                         if (((held[at >> 6] >> (at & 63)) & 1) == 0)
                         {
-                            // No object: the value whole, as the row's value read is kept.
+                            // No object: the value whole, as the row's value read is kept. An object left whole there, which
+                            // no shredding of ours writes, would be read key by key: kept whole, the rows are not those read.
+                            _reshaped |= !bytes.IsEmpty && (bytes[0] & 0x03) == ParquetVariant.BasicObject;
                             root.Values.Add(offset + at, bytes);
                             continue;
                         }
@@ -482,6 +485,45 @@ internal static class VariantShredder
             {
                 Blocks.Return(masks);
             }
+        }
+
+        // Whether a row taken as another shredding holds it (TakeGroup) was taken otherwise than its rows read would be.
+        private bool _reshaped;
+
+        /// <summary>
+        /// Whether the rows taken as another shredding holds them (<see cref="TakeGroup"/>) are put back together, to the
+        /// byte, as that shredding puts them back together (<see cref="Rebuild"/>): an object at the top whose every key
+        /// took values of no keys of their own, each in the form its class is put back in, no key dropped for being held
+        /// twice, and no object left whole where the other shredding types none.
+        /// </summary>
+        /// <remarks>
+        /// What a typed column does not keep of the bytes it read is kept beside it or tells here. An integer read in fewer
+        /// than eight bytes keeps its width (<c>IntegerValues</c>), since a job that types a key its inputs left in their
+        /// rows' values meets them at every merge. A short text read in the long form, which no writer of ours writes,
+        /// tells here.
+        /// </remarks>
+        internal bool Exact => !_reshaped && !_replay.Dropped && _root is ObjectGroup root && root.Exact;
+
+        /// <summary>
+        /// Writes the values of the rows from <paramref name="first"/> on, <paramref name="count"/> of the rows taken, that
+        /// are objects, as the shredding they were taken from puts them back together (<see cref="ObjectGroup.Rebuild"/>):
+        /// each where its view of <paramref name="views"/> says it lies, <paramref name="origin"/> bytes before
+        /// <paramref name="into"/>. Any range of a shredding made ready for ranges (<see cref="Index"/>), found at once; of
+        /// another, searched for.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">The shredding is not <see cref="Exact"/>, or a row does not take the bytes it was sized at.</exception>
+        internal void Rebuild(
+            int first, int count, ReadOnlySpan<byte> views, ReadOnlySpan<byte> metadataViews, ReadOnlySpan<VortexBuffer> metadataBuffers,
+            Span<byte> into, int origin)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(first);
+            ArgumentOutOfRangeException.ThrowIfGreaterThan(count, Taken - first);
+            if (!Exact || _root is not ObjectGroup root)
+            {
+                throw new InvalidOperationException("Only a shredding that kept every byte of the rows it took puts them back together.");
+            }
+
+            root.Rebuild(first, count, Indexed, views, metadataViews, metadataBuffers, into, origin);
         }
 
         /// <summary>Whether ranges of the rows taken may be taken by another shredding of the plan (<see cref="Index"/>).</summary>
@@ -1328,6 +1370,13 @@ internal static class VariantShredder
         {
             base.Clear(arena);
             _typed.Clear(arena);
+            _reformed = false;
+        }
+
+        internal override void Range()
+        {
+            base.Range();
+            _typed.Range();
         }
 
         protected override void Take(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row, int offset)
@@ -1344,6 +1393,9 @@ internal static class VariantShredder
             VariantScalar scalar = VariantScalar.Read(value);
             if (_typed.Takes(scalar.Kind))
             {
+                // A text typed here and not from its header is one in the long form: put back in the short one when it is
+                // short enough for it, other bytes than those read.
+                _reformed |= scalar.Kind == VariantKind.String && scalar.Bytes.Length <= ParquetVariant.MaxShortString;
                 _typed.Add(row, in scalar);
                 Bounds?.Note(row, scalar);
                 _typedLast = true;
@@ -1356,6 +1408,67 @@ internal static class VariantShredder
 
         // Whether the value taken last went to the typed column, which a row that repeats it takes again there.
         private bool _typedLast;
+
+        // Whether a value typed was read in a form its class does not put it back in (Put): a short text in the long form.
+        private bool _reformed;
+
+        /// <summary>Whether every value the node typed is put back in the bytes it was read in (<see cref="PutTyped"/>).</summary>
+        internal bool Exact => !_reformed;
+
+        /// <summary>Sets <paramref name="at"/> on what the node took of the rows from <paramref name="first"/> to <paramref name="end"/>.</summary>
+        internal void Seek(int first, int end, bool indexed, ref FieldAt at)
+        {
+            _typed.Seek(first, end, indexed, ref at);
+            Values.Seek(first, end, indexed, ref at.KeptRows, ref at.KeptLengths, ref at.KeptBytes, out at.Kept);
+        }
+
+        /// <summary>
+        /// For each row of the range <paramref name="at"/> is set on that holds a value of the node, counts it at the row
+        /// after it in <paramref name="starts"/>, or, with <paramref name="defined"/>, lays there the node's
+        /// <paramref name="key"/> doubled, and one more for a value kept whole, at the row's place in
+        /// <paramref name="starts"/>, which moves past it.
+        /// </summary>
+        internal void List(in FieldAt at, int first, Span<int> starts, Span<int> defined, int key)
+        {
+            Cursor rows = at.TypedRows;
+            for (int left = at.Typed; left > 0; left--)
+            {
+                int row = _typed.Rows!.Next(ref rows) - first;
+                if (defined.IsEmpty)
+                {
+                    starts[row + 1]++;
+                }
+                else
+                {
+                    defined[starts[row]++] = key << 1;
+                }
+            }
+
+            rows = at.KeptRows;
+            for (int left = at.Kept; left > 0; left--)
+            {
+                int row = Values.Rows.Next(ref rows) - first;
+                if (defined.IsEmpty)
+                {
+                    starts[row + 1]++;
+                }
+                else
+                {
+                    defined[starts[row]++] = (key << 1) | 1;
+                }
+            }
+        }
+
+        /// <summary>Writes the typed value at <paramref name="at"/>, which moves past it, as a variant value; the bytes written.</summary>
+        internal int PutTyped(ref FieldAt at, Span<byte> into, scoped ref byte[]? crossing) => _typed.Put(ref at, into, ref crossing);
+
+        /// <summary>Writes the value kept whole at <paramref name="at"/>, which moves past it, as it was read; the bytes written.</summary>
+        internal int PutKept(ref FieldAt at, Span<byte> into, scoped ref byte[]? crossing)
+        {
+            ReadOnlySpan<byte> value = Values.Next(ref at.KeptLengths, ref at.KeptBytes, ref crossing);
+            value.CopyTo(into);
+            return value.Length;
+        }
 
         /// <summary>Whether <paramref name="column"/>, a typed column of another shredding, holds values of this node's class in the form its typed column takes them.</summary>
         internal bool Holds(CanonicalNode column) => _typed.Holds(column);
@@ -1865,6 +1978,296 @@ internal static class VariantShredder
             }
         }
 
+        /// <summary>
+        /// Whether the rows the node took are put back together in the bytes they were read in (<see cref="Rebuild"/>):
+        /// every key a column of values of no keys of their own, each typed value in the form its class is put back in.
+        /// </summary>
+        internal bool Exact
+        {
+            get
+            {
+                foreach (Group node in _fields)
+                {
+                    if (node is PrimitiveGroup typed ? !typed.Exact : node.HeldAny)
+                    {
+                        return false;
+                    }
+                }
+
+                return true;
+            }
+        }
+
+        // The id of each key of the plan in the metadata of the row being put back together, looked up when a row first
+        // holds the key under that metadata: stamped with the metadata's number among those met.
+        private int[] _ids = [];
+        private int[] _idStamps = [];
+        private int _idStamp;
+
+        /// <summary>
+        /// Writes the objects of the rows from <paramref name="first"/> on, <paramref name="count"/> of them, as putting
+        /// them back together from the shredding they were taken from writes them
+        /// (<c>ShreddedVariant.WriteSlice</c>): each key the node's keys hold of a row and each key kept apart of it, in
+        /// the order of their names, under the ids the row's metadata gives them. A row's object goes where its view of
+        /// <paramref name="views"/>, the rows' sixteen bytes each, says it lies, <paramref name="origin"/> bytes before
+        /// <paramref name="into"/>, in the bytes it says it takes. A row that is no object is left alone.
+        /// </summary>
+        /// <param name="first">The first row, among the rows taken.</param>
+        /// <param name="count">The rows.</param>
+        /// <param name="indexed">Whether the node is made ready for ranges (<see cref="Index"/>): a range is then found at once, and searched for otherwise.</param>
+        /// <param name="views">The rows' views, sized as the rows put back together are (<c>ShreddedVariant.HollowSlice</c>).</param>
+        /// <param name="metadataViews">The views of the rows' metadata.</param>
+        /// <param name="metadataBuffers">The buffers those views name.</param>
+        /// <param name="into">Where the objects are written.</param>
+        /// <param name="origin">The offset, in the buffer the views name, <paramref name="into"/> starts at.</param>
+        /// <exception cref="InvalidOperationException">A row put back together does not take the bytes it was sized at: the node is not <see cref="Exact"/>.</exception>
+        /// <exception cref="VortexFormatException">A row's metadata does not name a key the row holds.</exception>
+        internal void Rebuild(
+            int first, int count, bool indexed, ReadOnlySpan<byte> views, ReadOnlySpan<byte> metadataViews,
+            ReadOnlySpan<VortexBuffer> metadataBuffers, Span<byte> into, int origin)
+        {
+            int end = first + count;
+            int keys = _fields.Length;
+            if (_ids.Length < keys)
+            {
+                _ids = new int[keys];
+                _idStamps = new int[keys];
+                _idStamp = 0;
+            }
+
+            Block<FieldAt> cursors = Blocks.Rent<FieldAt>(Math.Max(keys, 1));
+            Block<int> listed = Blocks.RentCleared<int>(count + 1);
+            Block<int> laid = default;
+            Block<int> merged = Blocks.Rent<int>(3 * 64);
+            byte[]? crossing = null;
+            byte[]? keptCrossing = null;
+            try
+            {
+                // The keys each row holds, in the order of their names: counted a key at a time, then laid row after row.
+                Span<FieldAt> at = cursors.AsSpan(0, keys);
+                Span<int> starts = listed.AsSpan(0, count + 1);
+                int held = 0;
+                for (int k = 0; k < keys; k++)
+                {
+                    at[k] = default;
+                    if (_fields[k] is PrimitiveGroup { HeldAny: true } field)
+                    {
+                        field.Seek(first, end, indexed, ref at[k]);
+                        field.List(in at[k], first, starts, default, k);
+                        held += at[k].Typed + at[k].Kept;
+                    }
+                }
+
+                for (int i = 1; i <= count; i++)
+                {
+                    starts[i] += starts[i - 1];
+                }
+
+                laid = Blocks.Rent<int>(Math.Max(held, 1));
+                Span<int> defined = laid.AsSpan(0, held);
+                for (int k = 0; held > 0 && k < keys; k++)
+                {
+                    if (_fields[k] is PrimitiveGroup { HeldAny: true } field)
+                    {
+                        field.List(in at[k], first, starts, defined, k);
+                    }
+                }
+
+                for (int i = count; i > 0; i--)
+                {
+                    starts[i] = starts[i - 1];
+                }
+
+                starts[0] = 0;
+
+                // The rows that are objects, and what the node kept of each row: the keys kept apart of an object, or the
+                // value of a row that is none.
+                Cursor objectsAt = default;
+                int objectsStart = Below(_objects, in _ranks, indexed, first);
+                int objectsLeft = Below(_objects, in _ranks, indexed, end) - objectsStart;
+                _objects.Skip(ref objectsAt, objectsStart);
+                Cursor keptRows = default;
+                Cursor keptLengths = default;
+                Cursor keptBytes = default;
+                Values.Seek(first, end, indexed, ref keptRows, ref keptLengths, ref keptBytes, out int keptLeft);
+                int nextObject = objectsLeft > 0 ? _objects.Next(ref objectsAt) : int.MaxValue;
+                int nextKept = keptLeft > 0 ? Values.Rows.Next(ref keptRows) : int.MaxValue;
+
+                VariantDictionary dictionary = default;
+                ulong lastLow = 0;
+                ulong lastHigh = 0;
+                bool seen = false;
+                for (int i = 0; i < count; i++)
+                {
+                    int row = first + i;
+                    ReadOnlySpan<byte> kept = default;
+                    if (nextKept == row)
+                    {
+                        kept = Values.Next(ref keptLengths, ref keptBytes, ref keptCrossing);
+                        nextKept = --keptLeft > 0 ? Values.Rows.Next(ref keptRows) : int.MaxValue;
+                    }
+
+                    if (nextObject != row)
+                    {
+                        continue;
+                    }
+
+                    nextObject = --objectsLeft > 0 ? _objects.Next(ref objectsAt) : int.MaxValue;
+
+                    // The row's metadata, read again only when its view is not the last row's.
+                    ReadOnlySpan<byte> metadataView = metadataViews.Slice(i * ViewSize, ViewSize);
+                    ulong low = MemoryMarshal.Read<ulong>(metadataView);
+                    ulong high = MemoryMarshal.Read<ulong>(metadataView[sizeof(ulong)..]);
+                    if (!seen || low != lastLow || high != lastHigh)
+                    {
+                        dictionary = VariantDictionary.Read(BlockStatsPass.Value(metadataBuffers, metadataViews, i));
+                        (lastLow, lastHigh, seen) = (low, high, true);
+                        _idStamp++;
+                    }
+
+                    ReadOnlySpan<byte> view = views.Slice(i * ViewSize, ViewSize);
+                    int length = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(view);
+                    int offset = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(view[12..]) - origin;
+                    ReadOnlySpan<int> fields = defined[starts[i]..starts[i + 1]];
+                    VariantNested others = kept.IsEmpty ? default : VariantNested.Read(kept);
+                    int total = fields.Length + others.Count;
+                    if (merged.Length < 3 * (total + 1))
+                    {
+                        Blocks.Return(merged);
+                        merged = default;
+                        merged = Blocks.Rent<int>(3 * (total + 1));
+                    }
+
+                    try
+                    {
+                        Write(into.Slice(offset, length), fields, others, in dictionary, at, merged.AsSpan(0, 3 * (total + 1)), ref crossing);
+                    }
+                    catch (ArgumentException)
+                    {
+                        // A value past the bytes the row was sized at.
+                        throw NotAsSized(row, length);
+                    }
+                }
+            }
+            finally
+            {
+                Blocks.Return(merged);
+                Blocks.Return(laid);
+                Blocks.Return(listed);
+                Blocks.Return(cursors);
+            }
+        }
+
+        /// <summary>
+        /// Writes into <paramref name="target"/>, the bytes a row's object takes, the object of the row's
+        /// <paramref name="fields"/>, each the plan's key doubled and one more for a value kept whole
+        /// (<see cref="PrimitiveGroup.List"/>), and of <paramref name="others"/>, the keys kept apart of the row, merged
+        /// in the order of their names.
+        /// </summary>
+        private void Write(
+            Span<byte> target, ReadOnlySpan<int> fields, VariantNested others, scoped in VariantDictionary dictionary,
+            Span<FieldAt> at, Span<int> room, scoped ref byte[]? crossing)
+        {
+            int total = fields.Length + others.Count;
+            Span<int> order = room[..total];
+            Span<int> ids = room.Slice(total, total);
+            Span<int> offsets = room.Slice(2 * total, total + 1);
+
+            // Each field's source, a key of the plan's or the complement of a key kept apart, and its id.
+            uint largest = 0;
+            for (int n = 0, f = 0, o = 0; n < total; n++)
+            {
+                bool named = o == others.Count
+                    || (f < fields.Length && _plan.Keys[fields[f] >> 1].Utf8.AsSpan().SequenceCompareTo(dictionary[others.IdAt(o)]) < 0);
+                if (named)
+                {
+                    int key = fields[f] >> 1;
+                    if (_idStamps[key] != _idStamp)
+                    {
+                        _ids[key] = dictionary.Find(_plan.Keys[key].Utf8);
+                        _idStamps[key] = _idStamp;
+                    }
+
+                    if (_ids[key] < 0)
+                    {
+                        throw new VortexFormatException($"The variant has a field '{_plan.Keys[key].Name}' its row's metadata does not name.");
+                    }
+
+                    ids[n] = _ids[key];
+                    order[n] = fields[f++];
+                }
+                else
+                {
+                    ids[n] = others.IdAt(o);
+                    order[n] = ~o++;
+                }
+
+                largest = Math.Max(largest, (uint)ids[n]);
+            }
+
+            // The header's widths: the offsets' is the one under which the values take what the header leaves of the row.
+            int length = target.Length;
+            int countWidth = total > byte.MaxValue ? 4 : 1;
+            int idWidth = ParquetVariant.WidthOf(largest);
+            int named0 = 1 + countWidth + (total * idWidth);
+            int offsetWidth = 1;
+            for (; offsetWidth <= 4; offsetWidth++)
+            {
+                int size = length - named0 - ((total + 1) * offsetWidth);
+                if (size >= 0 && ParquetVariant.WidthOf((uint)size) == offsetWidth)
+                {
+                    break;
+                }
+            }
+
+            if (offsetWidth > 4)
+            {
+                throw new ArgumentException("No width of offsets fits the row's bytes.", nameof(target));
+            }
+
+            int header = named0 + ((total + 1) * offsetWidth);
+            int written = header;
+            for (int n = 0; n < total; n++)
+            {
+                offsets[n] = written - header;
+                int source = order[n];
+                if (source < 0)
+                {
+                    ReadOnlySpan<byte> value = others.ValueAt(~source);
+                    value.CopyTo(target[written..]);
+                    written += value.Length;
+                    continue;
+                }
+
+                PrimitiveGroup field = (PrimitiveGroup)_fields[source >> 1];
+                written += (source & 1) == 0
+                    ? field.PutTyped(ref at[source >> 1], target[written..], ref crossing)
+                    : field.PutKept(ref at[source >> 1], target[written..], ref crossing);
+            }
+
+            if (written != length)
+            {
+                throw new ArgumentException("The row's values do not fill the row's bytes.", nameof(target));
+            }
+
+            offsets[total] = written - header;
+            target[0] = (byte)(((((countWidth == 4 ? 1 : 0) << 4) | ((idWidth - 1) << 2) | (offsetWidth - 1)) << 2) | ParquetVariant.BasicObject);
+            int put = 1;
+            ParquetVariant.Put(target, ref put, (uint)total, countWidth);
+            for (int n = 0; n < total; n++)
+            {
+                ParquetVariant.Put(target, ref put, (uint)ids[n], idWidth);
+            }
+
+            for (int n = 0; n <= total; n++)
+            {
+                ParquetVariant.Put(target, ref put, (uint)offsets[n], offsetWidth);
+            }
+        }
+
+        private static InvalidOperationException NotAsSized(int row, int length) =>
+            new($"Row {row} put back together from what a shredding took of it does not take the {length} bytes it was sized at.");
+
         /// <summary>The keys of <paramref name="value"/>, an object at row <paramref name="row"/>: each key the plan names taken by its node, the others kept in an object of their own.</summary>
         private void Fields(in VariantDictionary dictionary, int epoch, ReadOnlySpan<byte> value, int row, int offset)
         {
@@ -2289,6 +2692,35 @@ internal static class VariantShredder
         /// <summary>Makes the values themselves ready for a range of them to be taken, by their place among them (<see cref="Some"/>).</summary>
         protected virtual bool IndexValues(CanonicalArena arena) => true;
 
+        /// <summary>Has the values keep what putting a range of their rows back together reads beside them (<see cref="Put"/>), before any is taken.</summary>
+        internal virtual void Range()
+        {
+        }
+
+        /// <summary>
+        /// Sets <paramref name="at"/> on the values taken at the rows from <paramref name="first"/> to <paramref name="end"/>,
+        /// the first of them next: found by the rows' ranks when the values are made ready for ranges
+        /// (<paramref name="indexed"/>), counted otherwise.
+        /// </summary>
+        internal void Seek(int first, int end, bool indexed, ref FieldAt at)
+        {
+            int start = Below(Rows!, in _ranks, indexed, first);
+            at.Typed = Below(Rows!, in _ranks, indexed, end) - start;
+            at.TypedRows = default;
+            Rows!.Skip(ref at.TypedRows, start);
+            SeekValues(start, indexed, ref at);
+        }
+
+        /// <summary>Sets <paramref name="at"/> on the value at place <paramref name="start"/> among the values.</summary>
+        protected abstract void SeekValues(int start, bool indexed, ref FieldAt at);
+
+        /// <summary>
+        /// Writes the value at <paramref name="at"/>, which moves past it, into <paramref name="into"/> as a variant value in
+        /// the form putting a typed column's rows back together writes it in (<c>ShreddedVariant.WritePrimitive</c>); the
+        /// bytes written.
+        /// </summary>
+        internal abstract int Put(ref FieldAt at, Span<byte> into, scoped ref byte[]? crossing);
+
         /// <summary>
         /// Takes the values <paramref name="other"/>, a column of the same class made ready for it (<see cref="Index"/>), took
         /// at its <paramref name="count"/> rows from <paramref name="first"/> on, after these, each at its row
@@ -2368,15 +2800,66 @@ internal static class VariantShredder
     {
         private readonly Appended<long> _values = new Appended<long>();
 
+        // The bytes each value was read in, one a value, from the first read in fewer than eight on (Noted): what putting
+        // the rows back together writes it in again (Put). Kept by values ranges of which are taken (Range), and by those
+        // that take such ranges; made with the first value noted, so that values no range is taken of hold none.
+        private Appended<byte>? _widths;
+        private bool _keepsWidths;
+
+        private bool Noted => _widths is { Count: > 0 };
+
         internal override void Clear(CanonicalArena arena)
         {
             base.Clear(arena);
             _values.Clear(arena);
+            _widths?.Clear(arena);
         }
+
+        internal override void Range() => _keepsWidths = true;
 
         internal override DType Type(DTypeArena types) => types.Primitive(PType.I64, Nullability.Nullable);
 
-        protected override void Value(in VariantScalar scalar) => _values.Add((long)scalar.Integer);
+        protected override void Value(in VariantScalar scalar)
+        {
+            _values.Add((long)scalar.Integer);
+            if (Noted)
+            {
+                _widths!.Add(sizeof(long));
+            }
+        }
+
+        /// <summary>The widths, made in the arena the values are carved from when none was noted since it was set.</summary>
+        private Appended<byte> Widths()
+        {
+            if (_widths is null)
+            {
+                _widths = new Appended<byte>();
+                _widths.Clear(_values.Arena);
+            }
+
+            return _widths;
+        }
+
+        /// <summary>
+        /// Notes that the value about to be taken was read in <paramref name="width"/> bytes: nothing until one is read in
+        /// fewer than eight, the values before it then noted at eight.
+        /// </summary>
+        private void Width(int width)
+        {
+            Appended<byte>? widths = _widths;
+            if (widths is not { Count: > 0 })
+            {
+                if (width == sizeof(long))
+                {
+                    return;
+                }
+
+                widths = Widths();
+                widths.AddRepeated(sizeof(long), Count);
+            }
+
+            widths.Add((byte)width);
+        }
 
         internal override bool Plain(int row, ReadOnlySpan<byte> value, Indexes.ChunkBlockBounds.KeyBlocks? bounds)
         {
@@ -2405,6 +2888,12 @@ internal static class VariantShredder
                     return false;
             }
 
+            if (_keepsWidths)
+            {
+                // Types 3 to 6 are integers of one, two, four and eight bytes.
+                Width(1 << ((header >> 2) - 3));
+            }
+
             Took(row);
             _values.Add(integer);
             bounds?.Integer(row, integer);
@@ -2413,12 +2902,79 @@ internal static class VariantShredder
 
         internal override bool Holds(CanonicalNode column) => column.Kind == CanonicalKind.Primitive && column.PType == PType.I64;
 
-        protected override void Range(in ColumnValues column, int first, int count) =>
+        protected override void Range(in ColumnValues column, int first, int count)
+        {
             _values.AddRange(MemoryMarshal.Cast<byte, long>(column.Fixed).Slice(first, count));
+            if (Noted)
+            {
+                _widths!.AddRepeated(sizeof(long), count);
+            }
+        }
 
-        protected override void All(TypedValues other) => _values.AddAll(((IntegerValues)other)._values);
+        protected override void All(TypedValues other)
+        {
+            _values.AddAll(((IntegerValues)other)._values);
+            if (Noted)
+            {
+                _widths!.AddRepeated(sizeof(long), other.Count);
+            }
+        }
 
-        protected override void Some(TypedValues other, int from, int count) => _values.AddFrom(((IntegerValues)other)._values, from, count);
+        /// <summary>The other's values of the range, and the bytes each was read in when either notes them: <see cref="TypedValues.Count"/> counts the range already.</summary>
+        protected override void Some(TypedValues other, int from, int count)
+        {
+            IntegerValues source = (IntegerValues)other;
+            _values.AddFrom(source._values, from, count);
+            if (source.Noted)
+            {
+                Appended<byte> widths = Widths();
+                if (widths.Count == 0)
+                {
+                    widths.AddRepeated(sizeof(long), Count - count);
+                }
+
+                widths.AddFrom(source._widths!, from, count);
+            }
+            else if (Noted)
+            {
+                _widths!.AddRepeated(sizeof(long), count);
+            }
+        }
+
+        protected override void SeekValues(int start, bool indexed, ref FieldAt at)
+        {
+            at.Values = default;
+            _values.Skip(ref at.Values, start);
+            at.Widths = default;
+            if (Noted)
+            {
+                _widths!.Skip(ref at.Widths, start);
+            }
+        }
+
+        internal override int Put(ref FieldAt at, Span<byte> into, scoped ref byte[]? crossing)
+        {
+            long value = _values.Next(ref at.Values);
+            switch (Noted ? _widths!.Next(ref at.Widths) : sizeof(long))
+            {
+                case 1:
+                    into[0] = ParquetVariant.Primitive(3);
+                    into[1] = unchecked((byte)value);
+                    return 2;
+                case 2:
+                    into[0] = ParquetVariant.Primitive(4);
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt16LittleEndian(into[1..], unchecked((short)value));
+                    return 3;
+                case 4:
+                    into[0] = ParquetVariant.Primitive(5);
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(into[1..], unchecked((int)value));
+                    return 5;
+                default:
+                    into[0] = ParquetVariant.Primitive(6);
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(into[1..], value);
+                    return 9;
+            }
+        }
 
         internal override void CountNext(in Counting counting, PathCensus.PathCount count, long row, int times, ref TypedCursor cursor)
         {
@@ -2460,9 +3016,23 @@ internal static class VariantShredder
             }
         }
 
-        protected override void Repeat() => _values.Add(_values.Last);
+        protected override void Repeat()
+        {
+            _values.Add(_values.Last);
+            if (Noted)
+            {
+                _widths!.Add(_widths.Last);
+            }
+        }
 
-        protected override void Repeat(int count) => _values.AddRepeated(_values.Last, count);
+        protected override void Repeat(int count)
+        {
+            _values.AddRepeated(_values.Last, count);
+            if (Noted)
+            {
+                _widths!.AddRepeated(_widths.Last, count);
+            }
+        }
 
         protected override int Lay(CanonicalArena arena, DType dtype, int rows, Validity validity) =>
             arena.AddPrimitive(dtype, rows, validity, PType.I64, Fixed(arena, rows, Rows, _values));
@@ -2498,6 +3068,19 @@ internal static class VariantShredder
         }
 
         internal override bool Holds(CanonicalNode column) => column.Kind == CanonicalKind.Primitive && column.PType == PType.F64;
+
+        protected override void SeekValues(int start, bool indexed, ref FieldAt at)
+        {
+            at.Values = default;
+            _values.Skip(ref at.Values, start);
+        }
+
+        internal override int Put(ref FieldAt at, Span<byte> into, scoped ref byte[]? crossing)
+        {
+            into[0] = ParquetVariant.Primitive(7);
+            System.Buffers.Binary.BinaryPrimitives.WriteDoubleLittleEndian(into[1..], _values.Next(ref at.Values));
+            return 9;
+        }
 
         protected override void Range(in ColumnValues column, int first, int count) =>
             _values.AddRange(MemoryMarshal.Cast<byte, double>(column.Fixed).Slice(first, count));
@@ -2574,6 +3157,18 @@ internal static class VariantShredder
         }
 
         internal override bool Holds(CanonicalNode column) => column.Kind == CanonicalKind.Bool;
+
+        protected override void SeekValues(int start, bool indexed, ref FieldAt at)
+        {
+            at.Values = default;
+            _values.Skip(ref at.Values, start);
+        }
+
+        internal override int Put(ref FieldAt at, Span<byte> into, scoped ref byte[]? crossing)
+        {
+            into[0] = ParquetVariant.Primitive(_values.Next(ref at.Values) != 0 ? 1 : 2);
+            return 1;
+        }
 
         protected override void Range(in ColumnValues column, int first, int count)
         {
@@ -2697,6 +3292,37 @@ internal static class VariantShredder
         }
 
         internal override bool Holds(CanonicalNode column) => column.Kind == CanonicalKind.VarBinView && column.DType.Kind == DTypeKind.Utf8;
+
+        protected override void SeekValues(int start, bool indexed, ref FieldAt at)
+        {
+            at.Lengths = default;
+            _lengths.Skip(ref at.Lengths, start);
+            at.Bytes = default;
+            _bytes.Skip(ref at.Bytes, start == 0 ? 0 : indexed ? _starts.Before(start) : _lengths.Sum(0, start));
+        }
+
+        /// <exception cref="InvalidOperationException">The text repeats the one before, its bytes kept once: no range is taken of such texts.</exception>
+        internal override int Put(ref FieldAt at, Span<byte> into, scoped ref byte[]? crossing)
+        {
+            int length = _lengths.Next(ref at.Lengths);
+            if (length < 0)
+            {
+                throw new InvalidOperationException("A text that repeats the one before is not put back from its place among the texts.");
+            }
+
+            ReadOnlySpan<byte> text = _bytes.Next(ref at.Bytes, length, ref crossing);
+            if (length <= ParquetVariant.MaxShortString)
+            {
+                into[0] = (byte)((length << 2) | ParquetVariant.BasicShortString);
+                text.CopyTo(into[1..]);
+                return 1 + length;
+            }
+
+            into[0] = ParquetVariant.Primitive(16);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(into[1..], (uint)length);
+            text.CopyTo(into[5..]);
+            return 5 + length;
+        }
 
         /// <summary>Each text whole, its bytes its own: a column says nothing of the row that repeats the one before.</summary>
         protected override void Range(in ColumnValues column, int first, int count)
@@ -2898,6 +3524,23 @@ internal static class VariantShredder
         internal void Add(int row, ReadOnlySpan<byte> value)
         {
             Put(row, value, Nested(value));
+        }
+
+        /// <summary>
+        /// Sets the cursors on the values taken at the rows from <paramref name="first"/> to <paramref name="end"/>, the
+        /// first of them next (<see cref="Next"/>), <paramref name="left"/> of them: found by the rows' ranks when the values
+        /// are made ready for ranges (<paramref name="indexed"/>), counted otherwise.
+        /// </summary>
+        internal void Seek(int first, int end, bool indexed, ref Cursor rows, ref Cursor lengths, ref Cursor bytes, out int left)
+        {
+            int start = Below(_rows, in _ranks, indexed, first);
+            left = Below(_rows, in _ranks, indexed, end) - start;
+            rows = default;
+            _rows.Skip(ref rows, start);
+            lengths = default;
+            _lengths.Skip(ref lengths, start);
+            bytes = default;
+            _bytes.Skip(ref bytes, start == 0 ? 0 : indexed ? _starts.Before(start) : _lengths.Sum(0, start));
         }
 
         private void Put(int row, ReadOnlySpan<byte> value, long keys)
@@ -3265,6 +3908,9 @@ internal static class VariantShredder
 
         /// <summary>The values appended.</summary>
         internal int Count { get; private set; }
+
+        /// <summary>The arena the values are carved from (<see cref="Clear"/>).</summary>
+        internal CanonicalArena Arena => _arena;
 
         /// <summary>The blocks that hold the values.</summary>
         internal int Blocks => _blockCount;
@@ -3851,6 +4497,68 @@ internal static class VariantShredder
     {
         internal int Block;
         internal int At;
+    }
+
+    /// <summary>
+    /// Where what one key's node took of a range of rows is read back from, as the rows' values are put back together
+    /// (<see cref="ObjectGroup.Rebuild"/>): the values it typed, and those it kept whole, each with how many the range
+    /// still holds.
+    /// </summary>
+    private struct FieldAt
+    {
+        internal Cursor TypedRows;
+        internal int Typed;
+        internal Cursor Values;
+        internal Cursor Lengths;
+        internal Cursor Bytes;
+        internal Cursor Widths;
+        internal Cursor KeptRows;
+        internal int Kept;
+        internal Cursor KeptLengths;
+        internal Cursor KeptBytes;
+    }
+
+    /// <summary>
+    /// How many of <paramref name="held"/>, rising rows, lie below <paramref name="row"/>: told by
+    /// <paramref name="ranks"/> when they are built over the rows (<paramref name="indexed"/>), searched block by block
+    /// otherwise.
+    /// </summary>
+    private static int Below(Appended<int> held, in Ranks ranks, bool indexed, int row)
+    {
+        if (indexed)
+        {
+            return ranks.Before(row);
+        }
+
+        int below = 0;
+        for (int b = 0; row > 0 && b < held.Blocks; b++)
+        {
+            ReadOnlySpan<int> block = held.Block(b);
+            if (block.Length > 0 && block[^1] < row)
+            {
+                below += block.Length;
+                continue;
+            }
+
+            int low = 0;
+            int high = block.Length;
+            while (low < high)
+            {
+                int middle = (low + high) >>> 1;
+                if (block[middle] < row)
+                {
+                    low = middle + 1;
+                }
+                else
+                {
+                    high = middle;
+                }
+            }
+
+            return below + low;
+        }
+
+        return below;
     }
 
     /// <summary>
