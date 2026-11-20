@@ -36,7 +36,9 @@ namespace Vorticity.Benchmarks.Queries;
 /// (<see cref="DatasetLayout.ObjectBytes"/>, the dataset's from then on) rather than 1 GiB. <c>--calm</c> runs the maintainer
 /// two hours ahead, every partition then calm and consolidated, as an hour without a row would have it.
 /// <c>--object-sizes</c> adds a line to each job: the size its objects aim at and the size of each object it wrote, in the
-/// order of their rows, which says how near its target a job ends an object.
+/// order of their rows, which says how near its target a job ends an object. <c>--range-rows N</c> cuts a merge in a range
+/// each N rows rather than each 2^24 (<see cref="DatasetOptions.RangeRows"/>): past a job's rows, the job runs as one range,
+/// with one writer.
 /// </para>
 /// <para>
 /// The records are a gauge's, as an ingestion of metrics writes them: a service, a metric, the hash of the series'
@@ -133,7 +135,7 @@ internal static class BacklogBench
     // stopAfter: the jobs the maintainer runs at most, -1 for all of them (--jobs N). keep: where the store the jobs left is
     // kept as a backlog of its own (--keep DIR), null for nowhere: a store a few jobs in, whose next job a run compacts alone
     // (--store DIR --compact-only --jobs 1), in seconds rather than the minutes the whole backlog takes.
-    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false, bool logs = false, int stopAfter = -1, string? keep = null, int repeat = 1, bool quickExit = false, bool bytesOf = false, string? memoryTimeline = null, string? segments = null, bool takes = false, long objectBytes = 0, bool calm = false, bool objectSizes = false)
+    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false, bool logs = false, int stopAfter = -1, string? keep = null, int repeat = 1, bool quickExit = false, bool bytesOf = false, string? memoryTimeline = null, string? segments = null, bool takes = false, long objectBytes = 0, bool calm = false, bool objectSizes = false, long rangeRows = 0)
     {
         if (memoryLimit > 0)
         {
@@ -223,8 +225,8 @@ internal static class BacklogBench
         clock.Restart();
 
         await using IObjectStore store = new LatencyObjectStore(new FileObjectStore(work)) { Latency = TimeSpan.FromMilliseconds(latency) };
-        await using VortexDataset maintainer = await VortexDataset.OpenAsync(
-            store, new DatasetOptions { Session = session, Encrypted = true, TakesVariants = takes, TimeProvider = calm ? new Ahead(TimeSpan.FromHours(2)) : TimeProvider.System });
+        DatasetOptions opened = new DatasetOptions { Session = session, Encrypted = true, TakesVariants = takes, TimeProvider = calm ? new Ahead(TimeSpan.FromHours(2)) : TimeProvider.System };
+        await using VortexDataset maintainer = await VortexDataset.OpenAsync(store, rangeRows > 0 ? opened with { RangeRows = rangeRows } : opened);
 
         // --object-sizes: the data objects before the first job, by their keys, so that each job's own are told apart.
         HashSet<string> known = [];
