@@ -2469,14 +2469,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             if (_sink.Position < target)
             {
-                if (transit)
-                {
-                    await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
-                }
-
-                await EmitGatheredAsync(cancellationToken).ConfigureAwait(false);
-                _lastCut = false;
-                _sized = false;
+                await EndGroupAsync(cancellationToken).ConfigureAwait(false);
             }
 
             return false;
@@ -2541,6 +2534,40 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         _lastCut = false;
         _sized = false;
         return !left;
+    }
+
+    /// <summary>
+    /// Ends the group of rows being taken, as the caller asks: the blocks in flight land, the whole blocks in transit end
+    /// their chunk of the file, and every column that gathers writes what it holds. What the file then holds is exact: the
+    /// bytes its sink took and the rows its chunks hold. The rows of the block being staged, and those in transit short of a
+    /// block, stay for the chunks after.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The groups the writer ends by itself every <see cref="GroupRows"/> rows (<see cref="VortexWriteOptions.GatheredGroupRows"/>)
+    /// stay where they were: an end asked for is not counted as one of them, so that the chunks of every column still end
+    /// together where a reader cuts the rows between lanes, whatever ends were asked between.
+    /// </para>
+    /// <para>
+    /// The same bytes at any degree: decided once every block in flight landed, from what the columns then hold, as the
+    /// file's own chunks are.
+    /// </para>
+    /// </remarks>
+    internal async ValueTask<GroupEnd> EndGroupAsync(CancellationToken cancellationToken)
+    {
+        ThrowIfDone();
+        await LandAsync().ConfigureAwait(false);
+        if (_rowBlock > 0 && _pendingRows >= _rowBlock)
+        {
+            await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        await EmitGatheredAsync(cancellationToken).ConfigureAwait(false);
+
+        // The flight staged next reads the columns as they stand: every flight landed.
+        _lastCut = false;
+        _sized = false;
+        return new GroupEnd(_sink.Position, _rowCount);
     }
 
     /// <summary>
@@ -4257,6 +4284,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // rows between lanes without a chunk two of them read.
         if (_groupRows > 0 && (_groupTaken += rows) >= _groupRows)
         {
+            _groupTaken = 0;
             await EmitGatheredAsync(cancellationToken).ConfigureAwait(false);
         }
 
@@ -4726,8 +4754,6 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             return;
         }
-
-        _groupTaken = 0;
 
         // What the columns hold together, and where the file stands before they write it: the rate the rows that wait
         // count at while the columns hold nothing (_restRate).

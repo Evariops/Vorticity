@@ -370,6 +370,9 @@ public sealed partial class VortexFileWriter
         }
 
         await SealAsync(cancellationToken).ConfigureAwait(false);
+
+        // A flush ends the group of rows: the next one is counted from here.
+        _groupTaken = 0;
         await EmitGatheredAsync(cancellationToken).ConfigureAwait(false);
         await FlushSinkAsync(cancellationToken).ConfigureAwait(false);
     }
