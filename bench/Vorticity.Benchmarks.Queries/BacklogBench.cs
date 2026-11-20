@@ -32,6 +32,13 @@ namespace Vorticity.Benchmarks.Queries;
 /// (<see cref="DatasetOptions.TakesVariants"/>), which a job's line then counts: the same bytes written, with and without.
 /// </para>
 /// <para>
+/// <c>--object-bytes SIZE</c>, such as <c>64m</c>, builds the backlog with objects that aim at that size
+/// (<see cref="DatasetLayout.ObjectBytes"/>, the dataset's from then on) rather than 1 GiB. <c>--calm</c> runs the maintainer
+/// two hours ahead, every partition then calm and consolidated, as an hour without a row would have it.
+/// <c>--object-sizes</c> adds a line to each job: the size its objects aim at and the size of each object it wrote, in the
+/// order of their rows, which says how near its target a job ends an object.
+/// </para>
+/// <para>
 /// The records are a gauge's, as an ingestion of metrics writes them: a service, a metric, the hash of the series'
 /// attributes, an instant and a value, and two variant columns, the series' attributes and its service's resource
 /// attributes, constant along a series, which a job's decoders expand row by row. With <c>--logs</c>, they are log records
@@ -126,7 +133,7 @@ internal static class BacklogBench
     // stopAfter: the jobs the maintainer runs at most, -1 for all of them (--jobs N). keep: where the store the jobs left is
     // kept as a backlog of its own (--keep DIR), null for nowhere: a store a few jobs in, whose next job a run compacts alone
     // (--store DIR --compact-only --jobs 1), in seconds rather than the minutes the whole backlog takes.
-    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false, bool logs = false, int stopAfter = -1, string? keep = null, int repeat = 1, bool quickExit = false, bool bytesOf = false, string? memoryTimeline = null, string? segments = null, bool takes = false)
+    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false, bool logs = false, int stopAfter = -1, string? keep = null, int repeat = 1, bool quickExit = false, bool bytesOf = false, string? memoryTimeline = null, string? segments = null, bool takes = false, long objectBytes = 0, bool calm = false, bool objectSizes = false)
     {
         if (memoryLimit > 0)
         {
@@ -157,8 +164,8 @@ internal static class BacklogBench
             TimeSpan buildProcessor = builder.TotalProcessorTime;
             long buildLanes = session.Lanes.HeldTicks;
             (long read, int made) = logs
-                ? await BuildLogsAsync(session, backlog, appends, rows, bytes)
-                : await BuildAsync(session, backlog, appends, rows, series, scans, bytes);
+                ? await BuildLogsAsync(session, backlog, appends, rows, bytes, objectBytes)
+                : await BuildAsync(session, backlog, appends, rows, series, scans, bytes, objectBytes);
             builder.Refresh();
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
@@ -216,7 +223,19 @@ internal static class BacklogBench
         clock.Restart();
 
         await using IObjectStore store = new LatencyObjectStore(new FileObjectStore(work)) { Latency = TimeSpan.FromMilliseconds(latency) };
-        await using VortexDataset maintainer = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, Encrypted = true, TakesVariants = takes });
+        await using VortexDataset maintainer = await VortexDataset.OpenAsync(
+            store, new DatasetOptions { Session = session, Encrypted = true, TakesVariants = takes, TimeProvider = calm ? new Ahead(TimeSpan.FromHours(2)) : TimeProvider.System });
+
+        // --object-sizes: the data objects before the first job, by their keys, so that each job's own are told apart.
+        HashSet<string> known = [];
+        if (objectSizes)
+        {
+            await foreach (DataObject entry in maintainer.ListObjectsAsync())
+            {
+                known.Add(entry.Key);
+            }
+        }
+
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
             $"maintainer on {maintainer.RowCount:N0} rows in {maintainer.ObjectCount} objects, lag {maintainer.Lag}; jobs' budget {Mib(QueryMemoryBudget.JobsOf(session).CeilingBytes)} MiB of a limit of {Mib(VortexDiagnostics.GetMemoryReport().LimitBytes)} MiB; degree {session.Options.MaxDegreeOfParallelism}"));
@@ -259,6 +278,10 @@ internal static class BacklogBench
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
                 $"{(repeat > 1 ? $"round {round} " : "")}job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB (inputs {Mib(result.MemoryReservedBy.Inputs)}, writer {Mib(result.MemoryReservedBy.Writer)}), {result.RangesAtOnce} at once, {result.MergeSlices} slices ({result.MergeSlicesAhead} ahead), {result.InputWindowsAhead} windows ahead, held back {result.AdvancesHeldBack}, {result.BoundRestarts} restarts under a doubled bound, written {(double)result.BytesOut / Math.Max(1, result.BytesIn):F2} of read, {result.InputsToldByDirectories} inputs counted from their directories, {result.CensusParts.Inputs} in {result.CensusParts.Parts} parts, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of lanes, {session.Lanes.PeakHeld} of {session.Lanes.Lanes} lanes at most, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {result.WriterBlocksOnLine:N0} on the line, {result.WriterChunksEndedOnLine:N0} chunks ended there, {result.WriterChunksCutOnLine:N0} cut column by column, {GC.CollectionCount(2) - fullCollections} full collections, {(GC.GetTotalPauseDuration() - paused).TotalSeconds:F2} s paused by the collector, {Slabs.Slab.Made - slabsMade} slabs made, {session.Core.UnitsRun - unitsRun:N0} units of the core on {session.Core.PumpsStarted - pumpsStarted:N0} pumps started, {result.WriterBlocksOfRunsTaken:N0} blocks took their runs of a variant ({result.WriterBlocksPutBack:N0} put back whole, {result.WriterColumnsPutBackApart:N0} columns apart), {result.InputVariantChunks.Held:N0} variant chunks handed over as shredded ({result.InputVariantChunks.Refused:N0} refused, {result.InputVariantChunks.Inexact:N0} of them inexact); passes: {PassesOfJob()}; {sampler.Peaks()}"));
+            if (objectSizes)
+            {
+                Console.WriteLine(await ObjectSizesAsync(maintainer, known, repeat > 1 ? $"round {round} job {jobs}" : $"job {jobs}"));
+            }
         }
 
         Console.WriteLine(string.Create(
@@ -315,26 +338,53 @@ internal static class BacklogBench
     }
 
     /// <summary>
+    /// The objects a job just wrote, those <paramref name="known"/> does not hold yet, which it then does: the size the
+    /// dataset's objects aim at, and each new object's size in the order of the dataset's rows, with its share of that aim.
+    /// </summary>
+    private static async Task<string> ObjectSizesAsync(VortexDataset dataset, HashSet<string> known, string job)
+    {
+        long target = dataset.Layout?.ObjectBytes ?? new DatasetLayout().ObjectBytes;
+        List<string> sizes = [];
+        await foreach (DataObject entry in dataset.ListObjectsAsync())
+        {
+            if (known.Add(entry.Key) && await dataset.Store.HeadAsync(entry.Key, CancellationToken.None) is { } head)
+            {
+                sizes.Add(string.Create(CultureInfo.InvariantCulture, $"{head.Length / (1024.0 * 1024):F1} ({(double)head.Length / target:P0})"));
+            }
+        }
+
+        return string.Create(
+            CultureInfo.InvariantCulture, $"{job} objects: aim {target / (1024.0 * 1024):F0} MiB; {sizes.Count} written, MiB (share of the aim): {string.Join(", ", sizes)}");
+    }
+
+    /// <summary>A clock ahead of the machine's: what a maintainer reads once a partition's rows are that old.</summary>
+    private sealed class Ahead(TimeSpan by) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => base.GetUtcNow() + by;
+    }
+
+    /// <summary>
     /// The backlog: appends of metric records each spanning every series' keys, none compacted; while <paramref name="scans"/>
     /// readers scan the dataset in batches, each again and again from its latest version, as the readers of a pipeline's
     /// source would. The rows they read.
     /// </summary>
-    private static async Task<(long Read, int Appends)> BuildAsync(VortexSession session, string root, int appends, int rows, int series, int scans, long bytes)
+    private static async Task<(long Read, int Appends)> BuildAsync(VortexSession session, string root, int appends, int rows, int series, int scans, long bytes, long objectBytes)
     {
         IObjectStore store = new FileObjectStore(root);
+        DatasetLayout layout = new DatasetLayout
+        {
+            Partition = LayoutValue.Column(nameof(MetricRow.TimeUnix)).Truncate(CalendarUnit.Day),
+            SortKey =
+            [
+                LayoutValue.Column(nameof(MetricRow.ServiceName)), LayoutValue.Column(nameof(MetricRow.MetricName)),
+                LayoutValue.Column(nameof(MetricRow.AttributesHash)), LayoutValue.Column(nameof(MetricRow.TimeUnix)),
+            ],
+        };
         DatasetOptions options = new DatasetOptions
         {
             Session = session,
             Encrypted = true,
-            Layout = new DatasetLayout
-            {
-                Partition = LayoutValue.Column(nameof(MetricRow.TimeUnix)).Truncate(CalendarUnit.Day),
-                SortKey =
-                [
-                    LayoutValue.Column(nameof(MetricRow.ServiceName)), LayoutValue.Column(nameof(MetricRow.MetricName)),
-                    LayoutValue.Column(nameof(MetricRow.AttributesHash)), LayoutValue.Column(nameof(MetricRow.TimeUnix)),
-                ],
-            },
+            Layout = objectBytes > 0 ? layout with { ObjectBytes = objectBytes } : layout,
         };
         await using VortexDataset writer = await VortexDataset.CreateAsync(store, MetricRow.Schema, options);
 
@@ -394,18 +444,19 @@ internal static class BacklogBench
     /// Their attributes hardly repeat from one record to the next, which a series' do: what the comparisons with the row
     /// before cost where they find nothing.
     /// </summary>
-    private static async Task<(long Read, int Appends)> BuildLogsAsync(VortexSession session, string root, int appends, int rows, long bytes)
+    private static async Task<(long Read, int Appends)> BuildLogsAsync(VortexSession session, string root, int appends, int rows, long bytes, long objectBytes)
     {
         IObjectStore store = new FileObjectStore(root);
+        DatasetLayout layout = new DatasetLayout
+        {
+            Partition = LayoutValue.Column(nameof(LogRow.At)).Truncate(CalendarUnit.Day),
+            SortKey = [LayoutValue.Column(nameof(LogRow.ServiceName)), LayoutValue.Column(nameof(LogRow.At))],
+        };
         DatasetOptions options = new DatasetOptions
         {
             Session = session,
             Encrypted = true,
-            Layout = new DatasetLayout
-            {
-                Partition = LayoutValue.Column(nameof(LogRow.At)).Truncate(CalendarUnit.Day),
-                SortKey = [LayoutValue.Column(nameof(LogRow.ServiceName)), LayoutValue.Column(nameof(LogRow.At))],
-            },
+            Layout = objectBytes > 0 ? layout with { ObjectBytes = objectBytes } : layout,
         };
         await using VortexDataset writer = await VortexDataset.CreateAsync(store, LogRow.Schema, options);
         LogGeneratorV2 generator = new LogGeneratorV2(31);
