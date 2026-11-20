@@ -232,11 +232,12 @@ public sealed record DatasetOptions
     internal long SliceRows { get; init; } = 1L << 18;
 
     /// <summary>
-    /// The rows of a range a compaction's merge is cut in, each range merged into objects of its own, side by side as the
-    /// job's room holds them: 2^24 by default, the job's rows over it rounded, whatever the session's degree, so that a job
-    /// writes the same objects at any degree. A merge of one range ran its writer's line alone, and a consolidation of 74
-    /// appends of metric records, 51.8 M rows, wrote at 474 µs a block from 12 lanes as from 14 (2026-11-18). A test cuts its
-    /// small merges with less.
+    /// The rows of a range a compaction's merge is cut in at least, each range merged into objects of its own, side by side
+    /// as the job's room holds them: 2^24 by default, the job's rows over it rounded and no more ranges than the objects its
+    /// inputs weigh divide into evenly (<c>KeyRanges.RangesOf</c>), whatever the session's degree, so that a job writes the
+    /// same objects at any degree. A merge of one range ran its writer's line alone, and a consolidation of 74 appends of
+    /// metric records, 51.8 M rows, wrote at 474 µs a block from 12 lanes as from 14 (2026-11-18). A test cuts its small
+    /// merges with less.
     /// </summary>
     internal long RangeRows { get; init; } = 1L << 24;
 

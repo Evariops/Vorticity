@@ -145,6 +145,34 @@ public sealed partial class DatasetCompactionLanesTests
     }
 
     /// <summary>
+    /// Six appends of two days into objects aimed at a gibibyte, consolidated with a range each 12 000 rows: a day, some
+    /// 24 000 rows that weigh far less than an object, is merged as one range into one object. Cut by its rows alone, in
+    /// two ranges, a day wrote two objects, one a range, whatever the size its objects aim at.
+    /// </summary>
+    [Fact]
+    public async Task AMergeOfAnObjectsWorthAtMostRunsAsOneRange()
+    {
+        Random random = new Random(29);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        DatasetOptions options = OptionsOf(VortexSession.Default);
+        options = options with { Layout = options.Layout! with { ObjectBytes = 1L << 30 }, RangeRows = 12_000 };
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, options, Ct);
+        for (int a = 0; a < 6; a++)
+        {
+            Doc[] rows = [.. Enumerable.Range(a * 8_000, 8_000).Select(i => new Doc(random.Next(0, 2), $"svc-{random.Next(0, 60):D2}", i, Attributes(random)))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Doc>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        IReadOnlyList<CompactionResult> results = await dataset.ConsolidateAsync(Ct);
+        string ran = string.Join(", ", results.Select(static job => $"{job.Trigger} {job.ObjectsIn}->{job.ObjectsOut}, {job.Rows} rows, {job.RangesAtOnce} ranges at once"));
+        Assert.True(results.Count == 2, ran);
+        Assert.All(results, job => Assert.True(job.Rows > 12_000 * 3 / 2 && job.ObjectsOut == 1 && job.RangesAtOnce == 1, ran));
+        Assert.Equal(48_000, await dataset.ScanBuilder().CountAsync(Ct));
+    }
+
+    /// <summary>
     /// Log records, a nullable message beside a variant of some forty keys, most of them sparse, in twelve appends a day over
     /// two days, merged by size class: the tier merges write the same segments at one lane, four and fourteen, their
     /// variant shredded, their blocks through their writers' lines past one lane.

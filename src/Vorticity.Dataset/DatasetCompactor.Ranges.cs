@@ -573,14 +573,47 @@ internal static partial class DatasetCompactor
         }
 
         /// <summary>
-        /// The ranges a merge of <paramref name="job"/> is cut in, each writing objects of its own: its rows over
-        /// <see cref="DatasetOptions.RangeRows"/>, rounded, at most <see cref="MostRanges"/>, and never the degree, so that its
-        /// objects are the same at any degree; fewer than two for none.
+        /// The ranges a merge of <paramref name="job"/> is cut in, each writing objects of its own: the most that the objects
+        /// its inputs weigh divide into evenly, one a <see cref="DatasetOptions.RangeRows"/> of its rows at most, rounded,
+        /// and <see cref="MostRanges"/> at most; never the degree, so that its objects are the same at any degree. Fewer than
+        /// two for none.
         /// </summary>
+        /// <remarks>
+        /// <para>
+        /// A range ends its last object where its rows end, whatever the size its objects aim at. Cut by its rows alone, a
+        /// consolidation of 200 million metric records aimed at 256 MiB wrote eight objects of 107 MiB, one a range, and
+        /// one of 51.8 million aimed at 1 GiB three objects for 248 MB. A whole number of objects a range, by what the
+        /// inputs weigh: a job of an object at most runs as one range and writes one object, and one of three objects as
+        /// three ranges of an object each.
+        /// </para>
+        /// <para>
+        /// What the ranges are worth, measured on those jobs at degree 14 once a writer's line cut its chunks column by
+        /// column (2026-11-20): 2.1 s in three ranges for 2.2 to 2.3 s in one under 16 GiB on metric records, 2.9 s for
+        /// 2.7 to 2.8 s under 2 GiB, where the ranges go one after another, and 6.3 to 6.5 s in two ranges for 6.1 to
+        /// 6.2 s in one on log records.
+        /// </para>
+        /// </remarks>
         internal static int RangesOf(VortexDataset dataset, CompactionJob job)
         {
             long rows = Math.Max(1, dataset.Options.RangeRows);
-            return (int)Math.Clamp((job.Rows + (rows / 2)) / rows, 0, MostRanges);
+            long byRows = Math.Clamp((job.Rows + (rows / 2)) / rows, 0, MostRanges);
+            long objects = ObjectsOf(job);
+            for (long ranges = Math.Min(byRows, objects); ranges >= 2; ranges--)
+            {
+                if (objects % ranges == 0)
+                {
+                    return (int)ranges;
+                }
+            }
+
+            return 1;
+        }
+
+        /// <summary>The objects the inputs of <paramref name="job"/> weigh, at the size its objects aim at, rounded up.</summary>
+        internal static long ObjectsOf(CompactionJob job)
+        {
+            long target = Math.Max(1, job.TargetBytes);
+            return Math.Max(1, (job.Bytes + target - 1) / target);
         }
 
         /// <summary>The ranges.</summary>
