@@ -289,7 +289,8 @@ public sealed partial class ObjectContentsTests
     private static async Task PathReadsAsync(string directory, bool synopsisCache)
     {
         await using MemoryObjectStore inner = new MemoryObjectStore();
-        await using CountingObjectStore store = new CountingObjectStore(inner);
+        await using RoundStore rounds = new RoundStore(inner);
+        await using CountingObjectStore store = new CountingObjectStore(rounds);
 
         // A session of its own, with a cache that keeps what a read fetched for the next.
         await using VortexSession session = VortexSession.Create(options =>
@@ -342,16 +343,16 @@ public sealed partial class ObjectContentsTests
             long expected = stored.Count(r => r.Attributes.Has("rare"));
             Assert.True(expected > 0);
 
-            // Cold: the directories, then the slices.
-            inner.Latency = TimeSpan.FromMilliseconds(20);
+            // Cold: the directories, three requests sent together, then the slices, one. The requests are held in rounds, each
+            // let go once all of it is in: a round is a round trip, however late a busy thread sends a request of it, where a
+            // latency of 20 ms counted a third step under the load of the whole suite.
             store.Reset();
-            List<RecordBatch> cold = (await dataset.ReadPathAsync(hour, field, "rare", Ct))!;
-            Assert.Equal(2, store.DependentSteps);
+            List<RecordBatch> cold = (await rounds.RoundsAsync(() => dataset.ReadPathAsync(hour, field, "rare", Ct).AsTask(), [3, 1], Ct))!;
             Assert.Equal(expected, Held(cold, "rare"));
 
             // Warm: the session's cache holds every region.
             store.Reset();
-            List<RecordBatch> warm = (await dataset.ReadPathAsync(hour, field, "rare", Ct))!;
+            List<RecordBatch> warm = (await rounds.RoundsAsync(() => dataset.ReadPathAsync(hour, field, "rare", Ct).AsTask(), [], Ct))!;
             Assert.Equal(0, store.Requests);
             Assert.Equal(expected, Held(warm, "rare"));
         }
