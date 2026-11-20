@@ -416,8 +416,10 @@ internal sealed class ShreddedVariant
     /// <paramref name="into"/>, and none of the values it rebuilds: a row that takes its value as it is keeps the value
     /// column's view, a row rebuilt names the bytes its value would take after those of the rows before, of the slices
     /// before too, and a row that holds what the row before holds names what that row names. A view of a value not
-    /// rebuilt is hollow: its size, no prefix, the buffer past the value column's and the offset there, whatever its size,
-    /// with no byte behind it. What reads the bytes a batch's rows name reads the same from these views.
+    /// rebuilt is hollow: its size, no prefix, a buffer that is none (<see cref="CanonicalSupport.HollowBuffer"/>) and
+    /// the offset the value would lie at past the value column's buffers, with no byte behind it. A value short enough
+    /// to lie in its view, which names no place, is rebuilt there. What reads the sizes a batch's rows name reads the
+    /// same from these views.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -451,7 +453,7 @@ internal sealed class ShreddedVariant
             Span<int> sizes = sized.AsSpan(0, rows);
             Span<int> counts = sized.AsSpan(rows, rows);
             return SizeLeaves(root, rows, sizes, counts)
-                && HollowRows(root, rows, into, values, metadata.Views.Span, metadata.DataBuffers, sizes, counts, root.Value >= 0 ? root.ValueBufferCount : 0);
+                && HollowRows(root, rows, into, values, metadata.Views.Span, metadata.DataBuffers, sizes, counts);
         }
         catch (VortexFormatException)
         {
@@ -464,9 +466,11 @@ internal sealed class ShreddedVariant
         }
     }
 
-    /// <summary>Ends the views of rows sized, however they ended.</summary>
+    /// <summary>Ends the views of rows sized, however they ended: the scratch a row short enough for its view was rebuilt in given back.</summary>
     internal void EndHollow()
     {
+        Blocks.Return(_scratch);
+        _scratch = default;
         _used = 0;
         _busy = false;
     }
@@ -546,7 +550,7 @@ internal sealed class ShreddedVariant
     /// </summary>
     private bool HollowRows(
         Shred root, int rows, Span<byte> into, ReadOnlySpan<byte> values, ReadOnlySpan<byte> metadataViews,
-        ReadOnlySpan<VortexBuffer> metadataBuffers, ReadOnlySpan<int> sizes, ReadOnlySpan<int> counts, int own)
+        ReadOnlySpan<VortexBuffer> metadataBuffers, ReadOnlySpan<int> sizes, ReadOnlySpan<int> counts)
     {
         ulong lastLow = 0;
         ulong lastHigh = 0;
@@ -650,12 +654,56 @@ internal sealed class ShreddedVariant
 
             int countWidth = count > byte.MaxValue ? 4 : 1;
             int length = checked(1 + countWidth + (count * idWidth) + ((count + 1) * ParquetVariant.WidthOf((uint)size)) + size);
-            MemoryMarshal.Write(view, (ulong)(uint)length);
-            MemoryMarshal.Write(view[sizeof(ulong)..], (uint)own | ((ulong)(uint)_used << 32));
+            if (length <= CanonicalSupport.MaxInlineViewLength)
+            {
+                // A value its view holds has no place to name: rebuilt in its view, an object of no key or of one short one.
+                if (!Inline(root, row, length, view, BlockStatsPass.Value(metadataBuffers, metadataViews, row)))
+                {
+                    return false;
+                }
+            }
+            else
+            {
+                MemoryMarshal.Write(view, (ulong)(uint)length);
+                MemoryMarshal.Write(view[sizeof(ulong)..], CanonicalSupport.HollowBuffer | ((ulong)(uint)_used << 32));
+            }
+
             _used = checked(_used + length);
             rebuilt = row;
         }
 
+        return true;
+    }
+
+    /// <summary>
+    /// Rebuilds the value of row <paramref name="row"/>, sized at <paramref name="length"/> bytes its view holds, into
+    /// <paramref name="view"/>, the offset the rows after it are sized from kept. False for a value of another size.
+    /// </summary>
+    private bool Inline(Shred root, int row, int length, Span<byte> view, ReadOnlySpan<byte> metadata)
+    {
+        VariantDictionary dictionary = Dictionary(metadata);
+        if (_scratch.Length == 0)
+        {
+            _scratch = Blocks.Rent<byte>(256);
+        }
+
+        int offset = _used;
+        _used = 0;
+        _top = 0;
+        try
+        {
+            Write(root, row, in dictionary);
+            if (_used != length)
+            {
+                return false;
+            }
+        }
+        finally
+        {
+            _used = offset;
+        }
+
+        CanonicalSupport.WriteView(ref MemoryMarshal.GetReference(view), ref _scratch[0], length, 0, 0);
         return true;
     }
 

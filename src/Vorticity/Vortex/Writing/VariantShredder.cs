@@ -2010,7 +2010,8 @@ internal static class VariantShredder
         /// (<c>ShreddedVariant.WriteSlice</c>): each key the node's keys hold of a row and each key kept apart of it, in
         /// the order of their names, under the ids the row's metadata gives them. A row's object goes where its view of
         /// <paramref name="views"/>, the rows' sixteen bytes each, says it lies, <paramref name="origin"/> bytes before
-        /// <paramref name="into"/>, in the bytes it says it takes. A row that is no object is left alone.
+        /// <paramref name="into"/>, in the bytes it says it takes. A row that is no object is left alone, and so is one
+        /// whose view holds its value, which is read past.
         /// </summary>
         /// <param name="first">The first row, among the rows taken.</param>
         /// <param name="count">The rows.</param>
@@ -2041,6 +2042,7 @@ internal static class VariantShredder
             Block<int> merged = Blocks.Rent<int>(3 * 64);
             byte[]? crossing = null;
             byte[]? keptCrossing = null;
+            Span<byte> inline = stackalloc byte[CanonicalSupport.MaxInlineViewLength];
             try
             {
                 // The keys each row holds, in the order of their names: counted a key at a time, then laid row after row.
@@ -2127,7 +2129,6 @@ internal static class VariantShredder
 
                     ReadOnlySpan<byte> view = views.Slice(i * ViewSize, ViewSize);
                     int length = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(view);
-                    int offset = System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(view[12..]) - origin;
                     ReadOnlySpan<int> fields = defined[starts[i]..starts[i + 1]];
                     VariantNested others = kept.IsEmpty ? default : VariantNested.Read(kept);
                     int total = fields.Length + others.Count;
@@ -2140,7 +2141,11 @@ internal static class VariantShredder
 
                     try
                     {
-                        Write(into.Slice(offset, length), fields, others, in dictionary, at, merged.AsSpan(0, 3 * (total + 1)), ref crossing);
+                        // A value its view holds names no place: written apart, for what its keys took to be read past.
+                        Span<byte> target = length <= CanonicalSupport.MaxInlineViewLength
+                            ? inline[..length]
+                            : into.Slice(System.Buffers.Binary.BinaryPrimitives.ReadInt32LittleEndian(view[12..]) - origin, length);
+                        Write(target, fields, others, in dictionary, at, merged.AsSpan(0, 3 * (total + 1)), ref crossing);
                     }
                     catch (ArgumentException)
                     {

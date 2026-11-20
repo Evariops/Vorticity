@@ -25,6 +25,12 @@ internal static class CanonicalSupport
     internal const int MaxInlineViewLength = 12;
 
     /// <summary>
+    /// The data buffer a hollow view names: none. A view of a value too long to lie in it, sized and not written, holds
+    /// its size, no prefix, this index and the offset the value would lie at; only what puts the value back reads it.
+    /// </summary>
+    internal const uint HollowBuffer = uint.MaxValue;
+
+    /// <summary>
     /// The strictest alignment ever demanded of a file-supplied buffer. No element type needs more
     /// than this, and demanding more would reject files from writers that align their segments to
     /// sixteen bytes.

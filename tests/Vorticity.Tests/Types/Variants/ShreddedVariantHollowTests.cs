@@ -245,15 +245,16 @@ public sealed partial class ShreddedVariantHollowTests
             tally.WideOffsets += size > 300 ? 1 : 0;
             if (size <= InlineBytes)
             {
-                // The rebuild holds the value in its view: only its size is told of a value not written.
+                // A value its view holds names no place: it is rebuilt there, as the rebuild holds it.
+                Assert.True(expected.SequenceEqual(actual), $"{name} row {row}: the view of a value it holds, {Convert.ToHexString(actual)} against {Convert.ToHexString(expected)}");
                 tally.Inline++;
                 continue;
             }
 
             Assert.True(
-                expected[8..].SequenceEqual(actual[8..]),
-                $"{name} row {row}: its value named at buffer {MemoryMarshal.Read<int>(actual[8..])}, offset {MemoryMarshal.Read<int>(actual[12..])}, "
-                    + $"and rebuilt at buffer {MemoryMarshal.Read<int>(expected[8..])}, offset {MemoryMarshal.Read<int>(expected[12..])}");
+                expected[12..].SequenceEqual(actual[12..]),
+                $"{name} row {row}: its value named at offset {MemoryMarshal.Read<int>(actual[12..])} and rebuilt at offset {MemoryMarshal.Read<int>(expected[12..])}");
+            Assert.True(MemoryMarshal.Read<uint>(actual[8..]) == uint.MaxValue, $"{name} row {row}: a value not written lies in no buffer");
             Assert.True(MemoryMarshal.Read<int>(actual[4..]) == 0, $"{name} row {row}: a value not written has no prefix");
             bool repeats = row > 0 && expected.SequenceEqual(rebuilt.AsSpan((row - 1) * ViewSize, ViewSize));
             bool names = row > 0 && actual.SequenceEqual(sized.AsSpan((row - 1) * ViewSize, ViewSize));

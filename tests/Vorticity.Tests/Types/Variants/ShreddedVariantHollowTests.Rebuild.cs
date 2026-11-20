@@ -143,16 +143,27 @@ public sealed partial class ShreddedVariantHollowTests
         (int metadata, int value, int typed) = Parts(arena, group);
         byte[] metadataViews = arena.GetNode(metadata).Views.Span.ToArray();
         VortexBuffer[] metadataBuffers = [.. arena.GetNode(metadata).DataBuffers];
+        // The objects too long to lie in their views: those put back. One short enough is rebuilt in its view as it is sized.
         bool[] objects = new bool[rows];
         int end = 0;
+        int inline = 0;
         for (int row = 0; row < rows; row++)
         {
-            objects[row] = ArenaWords.IsValid(arena, group, row) && ArenaWords.IsValid(arena, typed, row);
+            bool holds = ArenaWords.IsValid(arena, group, row) && ArenaWords.IsValid(arena, typed, row);
+            int size = MemoryMarshal.Read<int>(sized.AsSpan(row * ViewSize));
+            objects[row] = holds && size > InlineBytes;
             if (objects[row])
             {
-                end = Math.Max(end, MemoryMarshal.Read<int>(sized.AsSpan((row * ViewSize) + 12)) + MemoryMarshal.Read<int>(sized.AsSpan(row * ViewSize)));
+                end = Math.Max(end, MemoryMarshal.Read<int>(sized.AsSpan((row * ViewSize) + 12)) + size);
+            }
+            else if (holds)
+            {
+                Assert.True(sized.AsSpan(row * ViewSize, ViewSize).SequenceEqual(rebuiltViews.AsSpan(row * ViewSize, ViewSize)), $"{name} row {row}: the view of a value it holds");
+                inline++;
             }
         }
+
+        Assert.True(inline > 0, $"{name}: no object is short enough to lie in its view");
 
         // Whole.
         byte[] whole = new byte[end];
@@ -203,11 +214,14 @@ public sealed partial class ShreddedVariantHollowTests
             metadataViews.AsSpan(source[row] * ViewSize, ViewSize).CopyTo(blockMetadata.AsSpan(row * ViewSize));
             if (!objects[source[row]])
             {
+                // A row that is no object, or one its view holds: its view as it is.
+                sized.AsSpan(source[row] * ViewSize, ViewSize).CopyTo(blockViews.AsSpan(row * ViewSize));
                 continue;
             }
 
             int size = MemoryMarshal.Read<int>(sized.AsSpan(source[row] * ViewSize));
             MemoryMarshal.Write(blockViews.AsSpan(row * ViewSize), size);
+            MemoryMarshal.Write(blockViews.AsSpan((row * ViewSize) + 8), uint.MaxValue);
             MemoryMarshal.Write(blockViews.AsSpan((row * ViewSize) + 12), used);
             used += size;
         }
