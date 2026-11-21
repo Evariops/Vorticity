@@ -283,7 +283,7 @@ public sealed partial class VortexFileWriter
         // and was refused every time, with or without a room of two blocks asked (2026-11-18). Cut or not, the bytes are the
         // same.
         flight.Cuts = flight.Gathers && CutsAt(flight.Index, rows)
-            && (_admitsAhead is null || _admitsAhead((2 * staging.Bytes) + _gatheredCeiling));
+            && (_room is null || _room.Admits((2 * staging.Bytes) + _gatheredCeiling));
         flight.AfterCut = afterCut;
         if (flight.Gathers)
         {
@@ -1139,7 +1139,7 @@ public sealed partial class VortexFileWriter
         Staging staging = flight.Staging!;
         foreach (IndexWriter.KeyPass? pass in flight.Keys)
         {
-            pass?.End();
+            pass?.End(KeepsBlocks);
         }
 
         if (!failed)
@@ -1190,7 +1190,7 @@ public sealed partial class VortexFileWriter
 
         // A block cut gives its blocks back, as the transit that adopts one gives them back at its emission: kept by each of
         // the four to six stagings a writer makes, they held a block's rows each (2026-11-18).
-        if (flight.Cuts)
+        if (flight.Cuts || !KeepsBlocks)
         {
             staging.Context.Canonical.Reset();
         }

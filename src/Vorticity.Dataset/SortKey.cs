@@ -68,6 +68,28 @@ internal sealed class SortKey
     internal bool IsFunctionOfColumn(int position) => _sources[position] is { Function: not null, Read: null };
 
     /// <summary>
+    /// The columns of <paramref name="schema"/> the key's values are read from, each once, in the schema's order: what a
+    /// read of a row's key alone projects. Null when a value is a key of a variant column, which no read takes without
+    /// the column's chunk, or names no column.
+    /// </summary>
+    internal int[]? ColumnsOf(DType schema)
+    {
+        SortedSet<int> columns = [];
+        foreach (Source source in _sources)
+        {
+            int column = ColumnPath.TopOf(schema, source.Path);
+            if (source.Read is not null || column < 0)
+            {
+                return null;
+            }
+
+            columns.Add(column);
+        }
+
+        return [.. columns];
+    }
+
+    /// <summary>
     /// The key of <paramref name="plan"/>: its components, the first <paramref name="components"/> of them, led by the
     /// partition when <paramref name="partition"/> asks and the layout has one.
     /// </summary>

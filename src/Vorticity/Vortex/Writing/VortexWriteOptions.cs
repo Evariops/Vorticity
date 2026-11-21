@@ -327,11 +327,13 @@ public sealed record VortexWriteOptions
     internal int StagedRows { get; init; }
 
     /// <summary>
-    /// Whether the memory of the work the writer is part of admits one more block of the given bytes in flight on its line past
-    /// the one that must go, or null for always: what a compaction job gives its writer (its write advance). A block not
-    /// admitted goes through once the blocks before it landed, which changes when, and not what, the writer writes.
+    /// What the work the writer is part of tells it of the work's memory, or null for a writer on its own: what a
+    /// compaction job gives its writer (<see cref="Writing.WriteRoom"/>). A block it does not admit in flight past the one
+    /// that must go goes through once the blocks before it landed; a chunk it does not admit in emission waits for those
+    /// before it; the arenas of a writer it does not hold give back the blocks they kept idle. Each changes when, and not
+    /// what, the writer writes.
     /// </summary>
-    internal Func<long, bool>? AdmitsAhead { get; init; }
+    internal Writing.WriteRoom? Room { get; init; }
 
     /// <summary>
     /// The bytes from which the file keeps a sheet of each top-level column (<see cref="Indexes.ColumnSheet"/>), which a

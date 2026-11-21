@@ -8,8 +8,8 @@ namespace Vorticity;
 /// The room one part of a job reserved in its share of the job's budget before it takes it: an input of a merge before it
 /// reads a chunk's segments, decodes what a read of the chunk decodes whole, or decodes a batch. The bytes are counted
 /// under the budget from the moment they are reserved, and the blocks the part rents then take them first
-/// (<see cref="Take"/>), so that what it was told it may hold is there when it takes it. A job's writer reserves nothing
-/// yet.
+/// (<see cref="Take"/>), so that what it was told it may hold is there when it takes it. A job's writer reserves the same
+/// way, on the job's flow, a block's rows before it copies them and a chunk's before it lays them out.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -52,6 +52,13 @@ internal sealed class MemoryReserve
     /// </summary>
     internal Func<int, ValueTask<bool>>? MakeRoom { get; set; }
 
+    /// <summary>
+    /// Whether the work the part belongs to admits the bytes it is given more of the part's, the budget holding them or
+    /// not: what a job asks of its inputs, so that they leave its writer what it has yet to take. A reservation it does
+    /// not admit is not granted, as one the budget does not hold. Null for a part its budget alone bounds.
+    /// </summary>
+    internal Func<long, bool>? Admits { get; set; }
+
     /// <summary>The bytes reserved and taken by no block yet.</summary>
     internal long Spare => Math.Max(0, Volatile.Read(ref _spare));
 
@@ -76,7 +83,7 @@ internal sealed class MemoryReserve
             return true;
         }
 
-        if (!_budget.CanReserve(bytes) || !_budget.TryReserve(bytes))
+        if (Admits?.Invoke(bytes) == false || !_budget.CanReserve(bytes) || !_budget.TryReserve(bytes))
         {
             Interlocked.Increment(ref _heldBack);
             return false;
@@ -85,6 +92,9 @@ internal sealed class MemoryReserve
         Reserved(bytes);
         return true;
     }
+
+    /// <summary>Reserves <paramref name="bytes"/> when the work admits them (<see cref="Admits"/>) and the budget holds them.</summary>
+    private bool TryGrant(long bytes) => Admits?.Invoke(bytes) != false && _budget.TryReserve(bytes);
 
     /// <summary>
     /// Reserves <paramref name="bytes"/> more, having the job give back what it started ahead while the budget does not
@@ -98,7 +108,7 @@ internal sealed class MemoryReserve
             return true;
         }
 
-        if (_budget.TryReserve(bytes))
+        if (TryGrant(bytes))
         {
             Reserved(bytes);
             return true;
@@ -118,7 +128,7 @@ internal sealed class MemoryReserve
             }
 
             Interlocked.Increment(ref _madeRoom);
-            if (_budget.TryReserve(bytes))
+            if (TryGrant(bytes))
             {
                 Reserved(bytes);
                 return true;
@@ -205,7 +215,7 @@ internal sealed class MemoryReserve
     /// Whether the budget holds <paramref name="bytes"/> more now, nothing reserved: what a block takes past what its part
     /// reserved for it, a size no file said, when the room is there.
     /// </summary>
-    internal bool Holds(long bytes) => _budget.CanReserve(bytes);
+    internal bool Holds(long bytes) => Admits?.Invoke(bytes) != false && _budget.CanReserve(bytes);
 
     /// <summary>Puts back <paramref name="bytes"/> taken for a block its account then refused.</summary>
     internal void PutBack(long bytes)

@@ -550,8 +550,22 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     // (VortexWriteOptions.StagedRows); 0 for the writer's own bounds.
     private int _stagedRows;
 
-    // Whether the work the writer is part of admits a block in flight past the one that must go (VortexWriteOptions.AdmitsAhead).
-    private Func<long, bool>? _admitsAhead;
+    // What the work the writer is part of tells it of its memory (VortexWriteOptions.Room); null for a writer on its own.
+    private Writing.WriteRoom? _room;
+
+    /// <summary>
+    /// Whether the writer's arenas keep their blocks from one use to the next: always for a writer on its own, and for a
+    /// job's writer while the job holds what the writer holds (<see cref="Writing.WriteRoom.Holds"/>). Read by each
+    /// arena's owner where it resets it, a lane's workspace, a staging, an index's keys, which then keeps its blocks or
+    /// gives them back.
+    /// </summary>
+    /// <remarks>
+    /// Kept, the blocks spare their owner the pool and the budget at each use: given back each time, those of the leaves
+    /// and of the indexes' keys took a consolidation of log records from 4.6 to 5.4 s to 7.3 to 8.1 s. But they are what a
+    /// writer holds past its share when the room is short: 70 to 100 MiB of the 339 to 358 a consolidation's writer held
+    /// under 2 GiB at degree 14, for a share of 269 (2026-11-21).
+    /// </remarks>
+    internal bool KeepsBlocks => _room is not { } room || room.Holds;
 
     /// <summary>The blocks the line sent through only once the blocks before them landed, the memory of the work not admitting more in flight.</summary>
     internal int FlightsHeldBack { get; private set; }
@@ -1126,7 +1140,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         writer._groupRows = writer._gathering is null ? 0 : options.GatheredGroupRows;
         writer._stagedRows = options.StagedRows;
-        writer._admitsAhead = options.AdmitsAhead;
+        writer._room = options.Room;
 
         // A table of several columns cut into chunks by their bytes takes its caller's rows a block at a time, whatever its
         // degree, and sends them through its line, four at once: its blocks go as a merge's do, a merge saying itself how
@@ -3212,7 +3226,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // and the chunks in emission end before the block is assembled, its rows copied out of the merge's inputs, and it
         // goes through alone: the file is the same either way. The wait came after the copy, which the writer then held
         // beside everything in the air.
-        bool alone = _admitsAhead is { } admits && !admits(BlockCopied(staging));
+        bool alone = _room is { } room && !room.Admits(BlockCopied(staging));
         if (alone)
         {
             FlightsHeldBack++;
@@ -3244,6 +3258,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// </summary>
     private static long BlockCopied(Staging staging) =>
         Math.Max(0, staging.Bytes - staging.Context.Canonical.HeldBytes(out _));
+
 
     /// <summary>The assembly of a staging's block, a unit of the core (<see cref="Assemble"/>).</summary>
     private sealed class AssemblyUnit(VortexFileWriter writer, Staging staging) : CoreUnit
@@ -3377,8 +3392,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         finally
         {
             // Its blocks kept for the rows staged next, which take the same sizes: each block back to the pool and rented
-            // again, through the budget each way, took 8 % of a merge's writer at degree 14.
-            context.Canonical.ResetKeepingBlocks();
+            // again, through the budget each way, took 8 % of a merge's writer at degree 14. Given back all the same while
+            // the work the writer is part of does not hold what the writer holds (KeepsBlocks).
+            if (KeepsBlocks)
+            {
+                context.Canonical.ResetKeepingBlocks();
+            }
+            else
+            {
+                context.Canonical.Reset();
+            }
         }
     }
 
@@ -3731,7 +3754,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
             else
             {
-                indexes.FeedKeys(field, part - 1, pass, rows, flight.Filled, _blockRows);
+                indexes.FeedKeys(field, part - 1, pass, rows, flight.Filled, _blockRows, KeepsBlocks);
             }
 
             return;

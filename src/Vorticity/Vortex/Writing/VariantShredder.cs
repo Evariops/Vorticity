@@ -774,9 +774,11 @@ internal static class VariantShredder
         /// Writes leaf <paramref name="index"/> of those <see cref="PrepareLeaves"/> listed, apart, in <paramref name="work"/>
         /// and against <paramref name="encodings"/>, emptied first, as <see cref="Write"/> would write it in the blob: on any
         /// thread, beside the other leaves, each reading only what its node took of the chunk. What it wrote is kept, its
-        /// buffers its own, for <see cref="WriteGrafted"/> to graft.
+        /// buffers its own, for <see cref="WriteGrafted"/> to graft. The workspace's arena of leaves keeps its blocks for the
+        /// leaf it writes next when <paramref name="keepsBlocks"/>, and gives them back otherwise: kept by each lane that
+        /// wrote a leaf, they stayed held between two chunks.
         /// </summary>
-        internal void WriteLeafApart(int index, ArrayBlobWriter.Workspace work, EncodingDictionary encodings, bool compress)
+        internal void WriteLeafApart(int index, ArrayBlobWriter.Workspace work, EncodingDictionary encodings, bool compress, bool keepsBlocks = true)
         {
             LeafJob job = _jobs[index];
             if (job.Same is not null)
@@ -815,8 +817,35 @@ internal static class VariantShredder
             {
                 work.EncodesValidity = encodes;
                 work.Discard();
-                leaves.ResetKeepingBlocks();
+                if (keepsBlocks)
+                {
+                    leaves.ResetKeepingBlocks();
+                }
+                else
+                {
+                    leaves.Reset();
+                }
             }
+        }
+
+        /// <summary>
+        /// The most a leaf of those <see cref="PrepareLeaves"/> listed lays out before it is compressed
+        /// (<see cref="WriteLeafApart"/>): the values its node took of the chunk, as a column. The rows' metadata is
+        /// read where it lies, and lays out nothing. What a writer reserves for each leaf it writes at once.
+        /// </summary>
+        internal long LargestLeaf()
+        {
+            long largest = 0;
+            for (int i = 0; i < _jobCount; i++)
+            {
+                LeafJob job = _jobs[i];
+                long bytes = job.Same is not null || job.Kind == LeafKind.Metadata ? 0
+                    : job.Kind == LeafKind.Values ? job.Group!.Values.LaidOut(_rows)
+                    : ((Leaf)job.Group!).LaidOut(_rows);
+                largest = Math.Max(largest, bytes);
+            }
+
+            return largest;
         }
 
         /// <summary>
@@ -1386,6 +1415,9 @@ internal static class VariantShredder
     {
         /// <summary>The node's typed column over <paramref name="rows"/> rows, laid out in <paramref name="arena"/>.</summary>
         internal abstract int Typed(CanonicalArena arena, DTypeArena types, int rows);
+
+        /// <summary>The bytes <see cref="Typed"/> lays the node's typed column out in over <paramref name="rows"/> rows, about.</summary>
+        internal abstract long LaidOut(int rows);
     }
 
     /// <summary>The values of one class in a typed column, any other kept whole.</summary>
@@ -1652,6 +1684,8 @@ internal static class VariantShredder
             RowsValidity(arena, types, rows, _typed.Rows!, Values.Rows);
 
         internal override int Typed(CanonicalArena arena, DTypeArena types, int rows) => _typed.Build(arena, types, rows);
+
+        internal override long LaidOut(int rows) => _typed.LaidOut(rows);
     }
 
     /// <summary>Some keys of an object, each a node of its own; the other keys kept in an object of their own.</summary>
@@ -2562,6 +2596,9 @@ internal static class VariantShredder
         internal override Validity HeldValidity(CanonicalArena arena, DTypeArena types, int rows) =>
             RowsValidity(arena, types, rows, _lists, Values.Rows);
 
+        /// <summary>The elements' column, and an offset and a size a row.</summary>
+        internal override long LaidOut(int rows) => _elements.LaidOut(_elements.Count) + (9L * rows) + 8;
+
         internal override int Typed(CanonicalArena arena, DTypeArena types, int rows)
         {
             int elements = _elements.Build(arena, types, _elements.Count);
@@ -2821,6 +2858,12 @@ internal static class VariantShredder
         /// <summary>The column over <paramref name="rows"/> rows, laid out in <paramref name="arena"/>, its dtypes made in <paramref name="types"/>.</summary>
         internal int Build(CanonicalArena arena, DTypeArena types, int rows) =>
             Lay(arena, Type(types), rows, Rows is null ? Validity.AllValid : RowsValidity(arena, types, rows, Rows));
+
+        /// <summary>
+        /// The bytes <see cref="Build"/> lays the column out in over <paramref name="rows"/> rows, about: eight a row for a
+        /// number or less for a boolean, and a bit a row of validity; a text column says its own.
+        /// </summary>
+        internal virtual long LaidOut(int rows) => (9L * rows) + 8;
 
         /// <summary>Takes the value <paramref name="scalar"/>.</summary>
         protected abstract void Value(in VariantScalar scalar);
@@ -3296,6 +3339,9 @@ internal static class VariantShredder
             _bytes.Clear(arena);
         }
 
+        /// <summary>A view a row, sixteen bytes, and the texts' bytes end to end, with a bit a row of validity.</summary>
+        internal override long LaidOut(int rows) => (17L * rows) + _bytes.Count + 8;
+
         internal override DType Type(DTypeArena types) => types.Utf8(Nullability.Nullable);
 
         protected override void Value(in VariantScalar scalar)
@@ -3685,6 +3731,9 @@ internal static class VariantShredder
         /// <summary>The column of <paramref name="rows"/> rows as a node wearing <paramref name="dtype"/>, its validity's dtype made in <paramref name="types"/>.</summary>
         internal int Build(CanonicalArena arena, DTypeArena types, DType dtype, int rows) =>
             Binary(arena, dtype, rows, RowsValidity(arena, types, rows, _rows), _rows, _lengths, _bytes);
+
+        /// <summary>The bytes <see cref="Build"/> lays the column out in over <paramref name="rows"/> rows: a view a row, the values' bytes end to end, a bit a row of validity.</summary>
+        internal long LaidOut(int rows) => (17L * rows) + _bytes.Count + 8;
     }
 
     /// <summary>

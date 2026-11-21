@@ -214,6 +214,192 @@ public sealed partial class JobReserveTests
     }
 
     /// <summary>
+    /// A consolidation of three objects that all start at the first key, the third holding, past its first 8 192 rows, a
+    /// dictionary a reader decodes whole, run under a budget that dictionary does not fit. Its merge opens the three, goes
+    /// through the third's first rows, and ends where the third's next batch finds no room: no input is being opened, and
+    /// nothing in the merge says what key that batch starts at. The key is read in the third's file, through the key's
+    /// columns alone; it lies past the last key written, so the object being written is sealed and the job commits what it
+    /// merged, where it gave up everything before its first sealed object. Consolidated to the end under a budget that
+    /// holds it, the dataset holds every row once.
+    /// </summary>
+    [Fact]
+    public async Task AMergeStoppedByAnInputsNextBatchReadsItsNextKeyAndCommits()
+    {
+        const long Small = 32L << 20;
+        (VortexSession session, VortexSession large, MemoryObjectStore store, VortexDataset dataset, List<Line> all) = await HeavyPastItsFirstRowsAsync(Small, sharedKey: false);
+        await using (session)
+        await using (large)
+        await using (store)
+        await using (dataset)
+        {
+            await using VortexDataset wide = await VortexDataset.OpenAsync(store, Grouped(large), Ct);
+            CompactionJob whole = Assert.Single((await CompactionPolicy.PlanConsolidationsAsync(wide, Ct)).Jobs);
+            Assert.Equal((CompactionTrigger.Consolidation, 3), (whole.Trigger, whole.Inputs.Count));
+
+            CompactionResult? stopped = await dataset.RunWithinBudgetAsync(whole, static _ => new ValueTask<CompactionJob?>((CompactionJob?)null), Ct);
+
+            Assert.NotNull(stopped);
+            TestContext.Current.TestOutputHelper?.WriteLine(
+                $"STOPPED: {stopped.ObjectsIn} -> {stopped.ObjectsOut} objects, {stopped.Rows:N0} rows of {all.Count:N0}, {stopped.StoppedHow}; by {stopped.StoppedBy}");
+            Assert.True(stopped.StoppedShort, "the consolidation ran to its end under a budget its third input does not fit");
+            Assert.Equal(OperationOutcome.Applied, stopped.Outcome);
+            Assert.Contains("its next key read past the last one written", stopped.StoppedHow, StringComparison.Ordinal);
+            Assert.InRange(stopped.Rows, 1, all.Count - 1);
+            Assert.Equal(3, stopped.ObjectsIn);
+
+            // Every input gave its first rows and keeps the rest, marked: none is gone, none is as it was.
+            await dataset.RefreshAsync(Ct);
+            List<ObjectEntry> left = await EntriesAsync(dataset, 0);
+            Assert.Equal(3, left.Count);
+            Assert.Equal(all.Count - stopped.Rows, left.Sum(static entry => entry.Rows));
+            Assert.All(left, static entry => Assert.True(entry.Deletions.LeadingRun > 0, "an input gave none of its rows"));
+            Assert.Equal(all.OrderBy(static row => row.Sequence), (await dataset.Scan<Line>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(static row => row.Sequence));
+
+            await wide.RefreshAsync(Ct);
+            IReadOnlyList<CompactionResult> rest = await wide.ConsolidateAsync(Ct);
+            Assert.NotEmpty(rest);
+            Assert.Empty(await EntriesAsync(wide, 0));
+            Assert.Equal(all.OrderBy(static row => row.Sequence), (await wide.Scan<Line>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(static row => row.Sequence));
+        }
+    }
+
+    /// <summary>
+    /// The same three objects under a key several rows share, the third's heavy rows starting inside the rows of one
+    /// service: the next row of the input whose batch found no room holds the key the last run ended on. Sealed there, the
+    /// object would end in the middle of a key. The merge's end is judged not to be on a whole key, the job commits
+    /// nothing, and the dataset is as it was.
+    /// </summary>
+    [Fact]
+    public async Task AMergeStoppedInTheMiddleOfAKeyCommitsNothing()
+    {
+        const long Small = 32L << 20;
+        (VortexSession session, VortexSession large, MemoryObjectStore store, VortexDataset dataset, List<Line> all) = await HeavyPastItsFirstRowsAsync(Small, sharedKey: true);
+        await using (session)
+        await using (large)
+        await using (store)
+        await using (dataset)
+        {
+            await using VortexDataset wide = await VortexDataset.OpenAsync(store, Grouped(large, sharedKey: true), Ct);
+            CompactionJob whole = Assert.Single((await CompactionPolicy.PlanConsolidationsAsync(wide, Ct)).Jobs);
+
+            JobStoppedException? given = null;
+            CompactionResult? stopped = null;
+            try
+            {
+                stopped = await DatasetCompactor.RunAsync(dataset, whole, Ct);
+            }
+            catch (JobStoppedException up)
+            {
+                given = up;
+            }
+
+            TestContext.Current.TestOutputHelper?.WriteLine($"GIVEN UP: {given?.Reason}; stopped {stopped?.StoppedHow}");
+            Assert.True(stopped is null, $"the merge committed {stopped?.Rows} rows, its end judged: {stopped?.StoppedHow}");
+            Assert.NotNull(given);
+
+            await dataset.RefreshAsync(Ct);
+            Assert.Empty(await EntriesAsync(dataset, 1));
+            List<ObjectEntry> left = await EntriesAsync(dataset, 0);
+            Assert.Equal(3, left.Count);
+            Assert.All(left, static entry => Assert.False(entry.HasDeletions));
+            Assert.Equal(all.Count, await dataset.ScanBuilder().CountAsync(Ct));
+        }
+    }
+
+    /// <summary>
+    /// The same objects under the shared key, the heavy one appended first and its heavy rows starting where a service
+    /// does: the input whose batch found no room goes on at another key, but the two others, which come after it in the
+    /// rows of one key, still hold the service the last run ended on. The merge's end is not on a whole key, whatever the
+    /// next key of the input that stopped it: the job commits nothing, and the dataset is as it was.
+    /// </summary>
+    [Fact]
+    public async Task AMergeStoppedWhileAnotherInputHoldsItsLastKeyCommitsNothing()
+    {
+        const long Small = 32L << 20;
+        (VortexSession session, VortexSession large, MemoryObjectStore store, VortexDataset dataset, List<Line> all) =
+            await HeavyPastItsFirstRowsAsync(Small, sharedKey: true, heavyFirst: true, each: 32);
+        await using (session)
+        await using (large)
+        await using (store)
+        await using (dataset)
+        {
+            await using VortexDataset wide = await VortexDataset.OpenAsync(store, Grouped(large, sharedKey: true), Ct);
+            CompactionJob whole = Assert.Single((await CompactionPolicy.PlanConsolidationsAsync(wide, Ct)).Jobs);
+
+            CompactionResult? stopped = null;
+            JobStoppedException given = await Assert.ThrowsAsync<JobStoppedException>(async () => stopped = await DatasetCompactor.RunAsync(dataset, whole, Ct));
+
+            TestContext.Current.TestOutputHelper?.WriteLine($"GIVEN UP: {given.Reason}");
+            Assert.Null(stopped);
+            await dataset.RefreshAsync(Ct);
+            Assert.Empty(await EntriesAsync(dataset, 1));
+            List<ObjectEntry> left = await EntriesAsync(dataset, 0);
+            Assert.Equal(3, left.Count);
+            Assert.All(left, static entry => Assert.False(entry.HasDeletions));
+            Assert.Equal(all.Count, await dataset.ScanBuilder().CountAsync(Ct));
+        }
+    }
+
+    /// <summary>
+    /// Three objects of one day that all start at the first service: two of light rows over every service, and one
+    /// whose first 8 192 rows are light and whose rows past them name the long messages, in the chunk a group's end
+    /// starts there (<see cref="DatasetOptions.GroupRows"/>); the last appended, or the first with
+    /// <paramref name="heavyFirst"/>. Under <paramref name="small"/>, its first rows are read as the others are, and its
+    /// dictionary does not fit beside them. With <paramref name="sharedKey"/>, the key is the service alone,
+    /// <paramref name="each"/> rows a service: at thirty, the heavy rows start inside a service's; at thirty-two, where
+    /// one starts.
+    /// </summary>
+    private static async Task<(VortexSession Session, VortexSession Large, MemoryObjectStore Store, VortexDataset Dataset, List<Line> All)> HeavyPastItsFirstRowsAsync(
+        long small, bool sharedKey, bool heavyFirst = false, int each = 30)
+    {
+        const int Light = 8_192;
+        const int Heavy = 2_000;
+        VortexSession session = VortexSession.Create(o => o.JobMemoryBudget = new QueryMemoryBudget(small));
+        VortexSession large = VortexSession.Create(static o => o.JobMemoryBudget = new QueryMemoryBudget(4L << 30));
+        MemoryObjectStore store = new MemoryObjectStore();
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, Line.Schema, Grouped(session, sharedKey), Ct);
+        List<Line> all = [];
+        int services = (Light + Heavy + each - 1) / each;
+        Random random = new Random(31);
+        string[] texts = Long.Value;
+        // The heavy object first in the tree's order, which is the order of a key's rows in the merge: the light ones then
+        // start a service later, the objects' first keys telling them apart where their identifiers would.
+        int from = heavyFirst ? 1 : 0;
+        Line[] Over(long first) => [.. Enumerable.Range(0, services * each).Select(i => new Line(0, $"svc-{(i / each) + from:D3}", first + i, "m"))];
+        Line[] HeavyPast(long first) => [.. Enumerable.Range(0, Light + Heavy).Select(i =>
+            new Line(0, $"svc-{i / each:D3}", first + i, i < Light ? "m" : texts[random.Next(texts.Length)]))];
+        if (heavyFirst)
+        {
+            await AppendAsync(dataset, all, HeavyPast(all.Count));
+        }
+
+        await AppendAsync(dataset, all, Over(all.Count));
+        await AppendAsync(dataset, all, Over(all.Count));
+        if (!heavyFirst)
+        {
+            await AppendAsync(dataset, all, HeavyPast(all.Count));
+        }
+
+        return (session, large, store, dataset, all);
+    }
+
+    /// <summary>
+    /// <see cref="Options"/> with the chunks of every column ending together every 8 192 rows, so that an object's rows
+    /// past them lie in chunks of their own; with <paramref name="sharedKey"/>, sorted by the service alone.
+    /// </summary>
+    private static DatasetOptions Grouped(VortexSession session, bool sharedKey = false)
+    {
+        DatasetOptions options = Options(session);
+        return options with
+        {
+            GroupRows = 8_192,
+            Layout = sharedKey
+                ? options.Layout! with { SortKey = [LayoutValue.Column(nameof(Line.Service))] }
+                : options.Layout,
+        };
+    }
+
+    /// <summary>
     /// A job's writer rents under an account that takes first from what the writer reserved before a copy it counted: the
     /// bytes reserved are counted once, a block past them asks the budget for the rest alone, and what was reserved and
     /// no block took goes back once the copy is done.

@@ -119,6 +119,19 @@ public sealed record CompactionResult
     internal string? StoppedBy { get; init; }
 
     /// <summary>
+    /// How the end of the object its merge was writing was judged when it ended short of room: on a whole key, by the
+    /// bound of the input being opened or by the next key of the input whose batch found no room, read in its file, and
+    /// the object sealed; or not, and why, the object dropped. Null for a job that ran to its end.
+    /// </summary>
+    internal string? StoppedHow { get; init; }
+
+    /// <summary>
+    /// The times an arena of its writers gave back the blocks it keeps from one use to the next, the job not holding what
+    /// its writer held then (<see cref="JobMemory.HoldsWriter"/>); 0 for a job whose writer stayed within its share.
+    /// </summary>
+    internal long WriterArenasGivenBack { get; init; }
+
+    /// <summary>
     /// What its writer was counted to hold, which its inputs left it as they reserved (<see cref="JobMemory.WriterPrice"/>):
     /// what its blocks held may pass the jobs' budget by what its writer held past it, and by no more.
     /// </summary>
@@ -489,7 +502,7 @@ internal static partial class DatasetCompactor
             Lane = lane,
             FirstBytesPerRow = (double)ran.Bytes / Math.Max(ran.Rows, 1),
             RowsByValue = merge ? RowsByValueOf(schema.Cut, ran) : null,
-            AdmitsAhead = memory.AdmitsWrite,
+            Room = memory.WriterRoom,
             Budget = memory.Writer,
             Reserve = memory.WriterReserve,
             Keys = indexed ? schema.Tree : null,
@@ -572,7 +585,7 @@ internal static partial class DatasetCompactor
                     Budget = memory.Writer,
                     Reserve = memory.WriterReserve,
                     Lane = memory.Lane,
-                    AdmitsAhead = memory.AdmitsWrite,
+                    Room = memory.WriterRoom,
                 };
                 ObjectStream outputs = OutputsOf(ran, doublings, memory.Lane);
                 try
@@ -969,6 +982,8 @@ internal static partial class DatasetCompactor
             Piece = piece is { ToTheEnd: false },
             StoppedShort = stopped,
             StoppedBy = handed?.Stop?.Message,
+            StoppedHow = handed?.Stop is null ? null : handed.Why,
+            WriterArenasGivenBack = memory.ArenasGivenBack,
             WriterCounted = memory.WriterPrice,
             Reserves = memory.Reserves,
             WriterBatches = batches,
@@ -1669,6 +1684,10 @@ internal static partial class DatasetCompactor
             return true;
         };
 
+        // What the inputs give back ahead of the writer when a start of the writer's asks, on this flow, between two runs:
+        // the slices merged ahead and the batches decoded ahead.
+        memory.GiveBackAhead = () => merge.GiveBackAsync(2);
+
         // What the work started ahead holds, which the inputs still to open are not counted to have taken yet.
         memory.AheadHeld = () => (ahead?.Bytes ?? 0) + (sliced?.AheadHeld ?? 0);
         ValueCut? values = schema.Cut;
@@ -1698,9 +1717,14 @@ internal static partial class DatasetCompactor
                 {
                     // Short of room it cannot go on without, everything started ahead given back: the merge ends at the
                     // key it reached, every run it gave handed to the writers. Whether the object being written ends on a
-                    // whole key is read while the merge still holds its inputs; the writers then copy what they keep of
-                    // them, which go with the merge, and stay whole for the job to seal or drop the object.
-                    handed.Clean = !outputs.HoldsRows || merge.StoppedPast(stop, outputs.EndsBelow);
+                    // whole key is read while the merge still holds its inputs, but for the next key of the one input
+                    // whose next batch found no room, read in its file once they are gone (NextKeyAsync). The writers
+                    // then copy what they keep of the inputs, which go with the merge, and stay whole for the job to
+                    // seal or drop the object.
+                    StopVerdict verdict = outputs.HoldsRows ? merge.Stopped(stop, outputs.EndsBelow) : StopVerdict.Whole("no object was being written");
+                    handed.Clean = verdict.Clean;
+                    handed.Why = verdict.Why;
+                    handed.ToRead = verdict.NextOf is null ? null : verdict;
                     handed.Stop = stop;
                     await outputs.LetGoOfInputsAsync(cancellationToken).ConfigureAwait(false);
                     rows = 0;
@@ -1717,6 +1741,8 @@ internal static partial class DatasetCompactor
                     // had sealed, each ended where its key did.
                     await outputs.SettleAsync().ConfigureAwait(false);
                     handed.Clean = false;
+                    handed.Why = "a block no reservation covers was refused";
+                    handed.ToRead = null;
                     handed.Stop = new ReserveExhaustedException(refused.ShortOfRoom, refused);
                     rows = 0;
                 }
@@ -1732,10 +1758,24 @@ internal static partial class DatasetCompactor
                     throw;
                 }
             }
+
+            // The merge gave its inputs back. One key was left to read: the next row's of the input whose next batch
+            // found no room, every other row left lying past the last key written. Past it too, the object being
+            // written ends on a whole key, and is sealed; at it, or unread, it is dropped as before.
+            if (handed is { Stop: not null, ToRead: { NextOf: { } entry } pending })
+            {
+                (bool read, byte[]? next) = await NextKeyAsync(dataset, schema, memory, entry, pending.NextRow, cancellationToken).ConfigureAwait(false);
+                handed.ToRead = null;
+                handed.Clean = read && (next is null || outputs.EndsBelow(next));
+                handed.Why = handed.Clean ? $"{pending.Why}, its next key read past the last one written"
+                    : read ? $"{pending.Why}, its next row holding the key the last run ended on"
+                    : $"{pending.Why}, its next key not read";
+            }
         }
         finally
         {
             memory.GiveBack = null;
+            memory.GiveBackAhead = null;
             outputs.Ledger = null;
             lock (made)
             {
@@ -2076,8 +2116,14 @@ internal static partial class DatasetCompactor
         /// <summary>What ended the merge short of room; null for a merge that ran to its end.</summary>
         internal ReserveExhaustedException? Stop { get; set; }
 
-        /// <summary>Whether, ended short of room, the merge's outputs end on a whole key (<see cref="IMergedRuns.StoppedPast"/>).</summary>
+        /// <summary>Whether, ended short of room, the merge's outputs end on a whole key (<see cref="IMergedRuns.Stopped"/>, <see cref="NextKeyAsync"/>).</summary>
         internal bool Clean { get; set; }
+
+        /// <summary>What ended the merge and how its outputs' end was judged, for the job's result.</summary>
+        internal string? Why { get; set; }
+
+        /// <summary>The input whose next key is still to read once the merge gave its inputs back, every other row left lying past the last key written; null for none.</summary>
+        internal StopVerdict? ToRead { get; set; }
 
         /// <summary>The outputs seal the object they write: what was handed over so far is in sealed objects.</summary>
         internal void Rolled() => Array.Copy(Rows, AtRoll ??= new long[Rows.Length], Rows.Length);
@@ -2089,6 +2135,61 @@ internal static partial class DatasetCompactor
             AtRoll = null;
             Stop = null;
             Clean = false;
+            Why = null;
+            ToRead = null;
+        }
+    }
+
+    /// <summary>
+    /// The key of the first row left of <paramref name="entry"/>'s object from row <paramref name="row"/> of its file
+    /// on, deleted rows passed over: what tells a merge ended short of room, the next batch of that input not read,
+    /// whether the object it was writing ends on a whole key. Read through the columns of the key alone
+    /// (<see cref="SortKey.ColumnsOf"/>), once the merge gave its inputs back: the batch that found no room held every
+    /// column, a variant's dictionary decoded whole among them, where the key's hold a chunk of each of theirs.
+    /// </summary>
+    /// <returns>
+    /// Whether the key could be read, and the key, null when no row is left. Not read when a value of the key is a key of
+    /// a variant column, whose read takes the column's chunk, or when the read itself found no room.
+    /// </returns>
+    private static async ValueTask<(bool Read, byte[]? Key)> NextKeyAsync(
+        VortexDataset dataset, DatasetSchema schema, JobMemory memory, ObjectEntry entry, long row, CancellationToken cancellationToken)
+    {
+        if (schema.Tree is not { } key || key.ColumnsOf(schema.DType) is not { } columns)
+        {
+            return (false, null);
+        }
+
+        if (row >= entry.PhysicalRows)
+        {
+            return (true, null);
+        }
+
+        try
+        {
+            ObjectLease lease = await memory.RentAsync(entry, cancellationToken).ConfigureAwait(false);
+            await using (lease.ConfigureAwait(false))
+            {
+                IAsyncEnumerable<RecordBatch> left = RowsOfAsync(
+                    lease, entry, schema, cancellationToken, columns, RowRange.FromLength(row, entry.PhysicalRows - row), LeastBatchRows,
+                    memory.InputsAccount);
+                await foreach (RecordBatch batch in left.WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    if (batch.RowCount == 0)
+                    {
+                        continue;
+                    }
+
+                    using RowKeys keys = key.Encode(batch);
+                    return (true, keys.Row(0).ToArray());
+                }
+            }
+
+            return (true, null);
+        }
+        catch (VortexMemoryException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // The read found no room either: nothing says where the next row's key lies.
+            return (false, null);
         }
     }
 
@@ -3351,15 +3452,16 @@ internal static partial class DatasetCompactor
         internal Execution.HeldLane? Lane { get; init; }
 
         /// <summary>
-        /// Whether the job's memory admits one more block in flight on an object's writer's line past the one that must go
-        /// (<see cref="JobMemory.AdmitsWrite"/>); null for always.
+        /// What the job tells each object's writer of its memory (<see cref="JobMemory.WriterRoom"/>): whether it admits a
+        /// block more in flight, a chunk more in emission, a leaf more laid out, and whether it holds what the writer
+        /// holds; null for a writer on its own.
         /// </summary>
-        internal Func<long, bool>? AdmitsAhead { get; init; }
+        internal Writing.WriteRoom? Room { get; init; }
 
         /// <summary>
         /// Whether the last row written lies strictly below <paramref name="key"/>: what tells a merge ended short of room
         /// that the rows it has yet to give start at another key than the one the object ends on
-        /// (<see cref="IMergedRuns.StoppedPast"/>). True for an object that holds no row.
+        /// (<see cref="IMergedRuns.Stopped"/>). True for an object that holds no row.
         /// </summary>
         internal bool EndsBelow(ReadOnlySpan<byte> key) =>
             _lastKeyLength < 0 || _lastKey.AsSpan(0, _lastKeyLength).SequenceCompareTo(key) < 0;
@@ -3566,7 +3668,7 @@ internal static partial class DatasetCompactor
             output = _dataset.StartObjectUnder(
                 _schema, _inKeyOrder, _rowBound, contents: Keys is not null, synopses: Keys is not null, shredded: shredding?.Shredded,
                 variantChunks: shredding?.VariantChunks, byteBound: _byteBound, countsPaths: shredding is not null, postings: Postings, budget: Budget,
-                lane: Lane, admitsAhead: AdmitsAhead, reserve: Reserve);
+                lane: Lane, room: Room, reserve: Reserve);
             _output = output;
             output.Writer.Ledger = Ledger;
             output.Writer.FlightDepth = FlightDepthOf(output.Writer.BlockRows);

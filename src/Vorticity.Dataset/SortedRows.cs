@@ -35,6 +35,27 @@ internal interface IMergedRun : IOrderedKeys
 /// <summary>Whether a key, row-encoded, lies where its caller asks: past the last key an output holds, for a merge's stop.</summary>
 internal delegate bool KeyTest(ReadOnlySpan<byte> key);
 
+/// <summary>
+/// How a merge ended short of room stands toward the last key it gave (<see cref="IMergedRuns.Stopped"/>): whether every
+/// row it has yet to give lies past it, so that its outputs end on a whole key; and, when all that is left to know is the
+/// next key of one input, the object and the row of its file that key is read at.
+/// </summary>
+/// <param name="Clean">Whether the outputs end on a whole key, by what the merge holds: false while a key is still to read.</param>
+/// <param name="Why">What ended the merge and, when not clean, what may share the key.</param>
+/// <param name="NextOf">The input whose next key alone is unknown, its next batch not read; null when nothing is left to read.</param>
+/// <param name="NextRow">The row of <paramref name="NextOf"/>'s file its next row is at or past, deleted rows counted.</param>
+internal readonly record struct StopVerdict(bool Clean, string Why, ObjectEntry? NextOf, long NextRow)
+{
+    /// <summary>The outputs end on a whole key.</summary>
+    internal static StopVerdict Whole(string why) => new StopVerdict(true, why, null, 0);
+
+    /// <summary>A row left may share the last key given, or nothing says.</summary>
+    internal static StopVerdict Not(string why) => new StopVerdict(false, why, null, 0);
+
+    /// <summary>Every row left lies past the last key given but, maybe, the next row of <paramref name="entry"/>'s object, read at <paramref name="row"/>.</summary>
+    internal static StopVerdict Read(ObjectEntry entry, long row, string why) => new StopVerdict(false, why, entry, row);
+}
+
 /// <summary>The runs of a merge in the key's order, one at a time, as a job's output takes them.</summary>
 internal interface IMergedRuns : IMergedRun, IAsyncDisposable
 {
@@ -49,12 +70,13 @@ internal interface IMergedRuns : IMergedRun, IAsyncDisposable
     long CurrentInput { get; }
 
     /// <summary>
-    /// Whether, the merge ended by <paramref name="stop"/>, every row it has yet to give lies past the last one it gave,
-    /// <paramref name="below"/> telling a key that last one lies strictly below: its outputs then end on a whole key, and
-    /// the rows left in its inputs start at another. False when a row left may share that key, or when nothing says: the
-    /// next batch of an input was being taken.
+    /// How the merge, ended by <paramref name="stop"/>, stands toward the last key it gave, <paramref name="below"/>
+    /// telling a key that last one lies strictly below: whether every row it has yet to give lies past it, its outputs
+    /// then ending on a whole key and the rows left in its inputs starting at another. A stop as an input is opened is
+    /// judged by the input's bound; one as an input takes its next batch, by what every other input holds next, the one
+    /// key left unknown being read in the input's file (<see cref="StopVerdict.NextOf"/>).
     /// </summary>
-    bool StoppedPast(ReserveExhaustedException stop, KeyTest below);
+    StopVerdict Stopped(ReserveExhaustedException stop, KeyTest below);
 
     /// <summary>
     /// Gives back what the merge keeps past what it needs to go on, at <paramref name="level"/> of what a job short of

@@ -253,7 +253,7 @@ internal sealed class KeyOrderedMerge : IMergedRuns
             catch (ReserveExhaustedException stop)
             {
                 // The object that would not hold beside the inputs open: its rows lie at or past its bound, which says
-                // whether the merge ends on a whole key (StoppedPast).
+                // whether the merge ends on a whole key (Stopped).
                 stop.Opening = next.Bound;
                 throw;
             }
@@ -282,28 +282,58 @@ internal sealed class KeyOrderedMerge : IMergedRuns
     /// <inheritdoc/>
     public long CurrentInput => Emitting().Rank;
 
+    // The input that is taking its next batch, in a step: null outside one.
+    private MergeInput? _advancing;
+
     /// <inheritdoc/>
-    public bool StoppedPast(ReserveExhaustedException stop, KeyTest below)
+    public StopVerdict Stopped(ReserveExhaustedException stop, KeyTest below)
     {
-        // An input whose next batch was being taken: its next key may be the one its last batch ended on. An object being
-        // opened holds its rows at or past its bound, which may be a leading part of a key: one at or below the last key
-        // given says nothing of its first row.
-        if (stop.Opening is not { } bound || !below(bound.Span))
+        if (_disposed)
         {
-            return false;
+            return StopVerdict.Not("its merge was gone");
         }
 
-        // The inputs open each hold their next row: a run goes through the rows that share the key another input holds,
-        // so one of them may still hold the key the last run ended on.
+        // An object being opened holds its rows at or past its bound, which may be a leading part of a key: one at or
+        // below the last key given says nothing of its first row.
+        if (stop.Opening is { } bound)
+        {
+            return !below(bound.Span)
+                ? StopVerdict.Not("the object being opened may hold the key the last run ended on")
+                : Others(null, below) ?? StopVerdict.Whole("an input could not be opened");
+        }
+
+        // An input that was taking its next batch: every row it gave is written, and its next key is in its file.
+        if (_advancing is { } advancing)
+        {
+            return Others(advancing, below)
+                ?? (advancing.NextRow < 0
+                    ? StopVerdict.Not("an input had given no batch")
+                    : StopVerdict.Read(advancing.Entry, advancing.NextRow, "an input's next batch found no room"));
+        }
+
+        // Anywhere else, nothing says where the row after the last one given lies.
+        return StopVerdict.Not("the merge was not taking a batch");
+    }
+
+    /// <summary>
+    /// Why the merge's outputs do not end on a whole key, by what the inputs open other than <paramref name="except"/>
+    /// hold next and by the next object not opened; null when each lies past the last key given. A run goes through the
+    /// rows that share the key another input holds, so one of them may still hold the key the last run ended on.
+    /// </summary>
+    private StopVerdict? Others(MergeInput? except, KeyTest below)
+    {
         foreach (MergeInput input in _open)
         {
-            if (input.IsLive && !below(input.Key))
+            if (!ReferenceEquals(input, except) && input.IsLive && !below(input.Key))
             {
-                return false;
+                return StopVerdict.Not("another input holds the key the last run ended on");
             }
         }
 
-        return true;
+        // A bound is a leading part of its object's first key: one at or below the last key given says nothing.
+        return _pending && !below(_objects.Current.Bound.Span)
+            ? StopVerdict.Not("an object not opened yet may hold the key the last run ended on")
+            : null;
     }
 
     /// <inheritdoc/>
@@ -546,9 +576,13 @@ internal sealed class KeyOrderedMerge : IMergedRuns
         _window?.Dispose();
         _windows?.Reset();
 
-        // Over the heap, the run's input is its top: it sinks to its new key, or leaves.
+        // Over the heap, the run's input is its top: it sinks to its new key, or leaves. Kept while it takes its next batch:
+        // a merge ended there, short of room, knows every other input's next key and not this one's (Stopped).
         bool heaped = Heaped;
-        if (await input.AdvanceAsync(count).ConfigureAwait(false))
+        _advancing = input;
+        bool live = await input.AdvanceAsync(count).ConfigureAwait(false);
+        _advancing = null;
+        if (live)
         {
             if (heaped)
             {
@@ -622,7 +656,7 @@ internal sealed class KeyOrderedMerge : IMergedRuns
             ? await rent(next.Entry, _cancellationToken).ConfigureAwait(false)
             : await _version.RentAsync(next.Entry, _cancellationToken).ConfigureAwait(false);
         _opened?.Invoke(lease);
-        MergeInput input = new MergeInput(this, lease, next.Entry.Key, next.Rank, next.FirstRow, _low, _high);
+        MergeInput input = new MergeInput(this, lease, next.Entry, next.Rank, next.FirstRow, _low, _high);
         try
         {
             await input.StartAsync(_batches(lease, next.Entry, input.Handover), _cancellationToken).ConfigureAwait(false);
@@ -876,13 +910,14 @@ internal sealed class KeyOrderedMerge : IMergedRuns
         // may dispose what it was given, and stepping past it must not read it again.
         private int _rows;
 
-        internal MergeInput(KeyOrderedMerge merge, ObjectLease lease, string key, long rank, long firstRow, ReadOnlyMemory<byte> low, ReadOnlyMemory<byte> high)
+        internal MergeInput(KeyOrderedMerge merge, ObjectLease lease, ObjectEntry entry, long rank, long firstRow, ReadOnlyMemory<byte> low, ReadOnlyMemory<byte> high)
         {
             _merge = merge;
             _lease = lease;
             _low = low;
             _high = high;
-            Object = key;
+            Entry = entry;
+            Object = entry.Key;
             Rank = rank;
             FirstRow = firstRow;
             Handover = merge.Ledger is null ? null : new BatchHandover(Prepare) { Ahead = merge.Ahead };
@@ -913,6 +948,15 @@ internal sealed class KeyOrderedMerge : IMergedRuns
 
         /// <summary>The object's key in the store, for a message.</summary>
         internal string Object { get; }
+
+        /// <summary>The object's entry: what a read of the key of its next row is made from, once the merge ended short of room (<see cref="Stopped"/>).</summary>
+        internal ObjectEntry Entry { get; }
+
+        /// <summary>
+        /// The row of the object's file that follows the last batch the input took, deleted rows counted; -1 before it
+        /// took one. Where its next row is read from when its next batch could not be.
+        /// </summary>
+        internal long NextRow { get; private set; } = -1;
 
         /// <summary>Where its ties go.</summary>
         internal long Rank { get; }
@@ -1045,6 +1089,7 @@ internal sealed class KeyOrderedMerge : IMergedRuns
             while (!_ended && await _batches!.MoveNextAsync().ConfigureAwait(false))
             {
                 RecordBatch batch = _batches.Current;
+                NextRow = batch.StartRow + batch.RowCount;
                 if (batch.RowCount == 0)
                 {
                     continue;

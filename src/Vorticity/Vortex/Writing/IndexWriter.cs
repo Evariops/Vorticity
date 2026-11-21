@@ -1209,12 +1209,22 @@ internal sealed class IndexWriter : IDisposable
         /// <summary>What a read of the batch's rows alone took of the column's shredding, which the keys' columns are written from; null when they are read from the rows.</summary>
         internal VariantShredder.Shredding? Taken { get; set; }
 
-        /// <summary>Ends the batch's pass: the read given back, the rows let go, the arena's blocks kept for the next batch.</summary>
-        internal void End()
+        /// <summary>
+        /// Ends the batch's pass: the read given back, the rows let go, the arena's blocks kept for the next batch, or
+        /// given back when not <paramref name="keepsBlocks"/> (<see cref="VortexFileWriter.KeepsBlocks"/>).
+        /// </summary>
+        internal void End(bool keepsBlocks = true)
         {
             Taken = null;
             Reads?.Release();
-            Rows.ResetKeepingBlocks();
+            if (keepsBlocks)
+            {
+                Rows.ResetKeepingBlocks();
+            }
+            else
+            {
+                Rows.Reset();
+            }
         }
 
         public void Dispose()
@@ -1235,7 +1245,11 @@ internal sealed class IndexWriter : IDisposable
     /// <param name="rows">The batch's rows.</param>
     /// <param name="filled">The rows of the open block before the batch's.</param>
     /// <param name="blockRows">The rows of a block.</param>
-    internal void FeedKeys(int field, int group, KeyPass pass, int rows, int filled, int blockRows)
+    /// <param name="keepsBlocks">
+    /// Whether the group's arena keeps its blocks for the next batch, or gives them back: what the writer of a work short
+    /// of room asks (<see cref="VortexFileWriter.KeepsBlocks"/>).
+    /// </param>
+    internal void FeedKeys(int field, int group, KeyPass pass, int rows, int filled, int blockRows, bool keepsBlocks = true)
     {
         VariantFeed feed = _variantFeeds![field]!;
         if (pass.Whole)
@@ -1263,8 +1277,16 @@ internal sealed class IndexWriter : IDisposable
         {
             // Its blocks kept for the group's keys of the next batch, which take the same sizes: given back and rented again,
             // through the jobs' budget each way, from every lane at once, they took a sixth of a merge of log records at
-            // fourteen lanes (2026-11-16).
-            into.ResetKeepingBlocks();
+            // fourteen lanes (2026-11-16). Given back all the same while the work the writer is part of does not hold what
+            // the writer holds: kept, the groups' blocks were 41 MB of a consolidation's writer at its peak (2026-11-21).
+            if (keepsBlocks)
+            {
+                into.ResetKeepingBlocks();
+            }
+            else
+            {
+                into.Reset();
+            }
         }
     }
 

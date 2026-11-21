@@ -356,7 +356,7 @@ public sealed partial class VortexFileWriter
             try
             {
                 lane.Blobs.ColumnLevel = writer.ZstdLevelOf(Field);
-                Shredding!.WriteLeafApart(item, lane.Blobs, lane.Encodings, writer._compress);
+                Shredding!.WriteLeafApart(item, lane.Blobs, lane.Encodings, writer._compress, writer.KeepsBlocks);
             }
             finally
             {
@@ -709,7 +709,7 @@ public sealed partial class VortexFileWriter
             int leaves = shredding.PrepareLeaves(lane.Blobs.EncodesValidity, _compress);
             chunk.Lane = lane;
             chunk.Shredding = shredding;
-            chunk.Batch = CoreBatch.Rent(_core, _lanes);
+            chunk.Batch = CoreBatch.Rent(_core, LeavesAtOnce(chunk, shredding, leaves));
             apart = true;
 
             // The piece is awaited, and the blob grafted, by the writer's flow as the chunk lands (EmittedAsync): its value
@@ -738,6 +738,39 @@ public sealed partial class VortexFileWriter
                 ReturnTaken(chunk);
             }
         }
+    }
+
+    /// <summary>
+    /// How many of the <paramref name="leaves"/> of a shredded chunk are written at once: as many as the writer has lanes,
+    /// for a writer on its own. A job's writer reserves each leaf's layout first, at what the largest of them lays out
+    /// (<see cref="VariantShredder.Shredding.LargestLeaf"/>), without waiting, a lane's way, and writes at once as many as
+    /// the job admitted and the budget held: one at least, which is its least, the others taking their turn in the piece.
+    /// What it reserved goes back as the chunk's emission ends (<see cref="CloseRaised"/>).
+    /// </summary>
+    /// <remarks>
+    /// Offered all at once to fourteen lanes, the leaves of a chunk of a log's attributes laid out 84 MB at the same time,
+    /// in 17 blocks, of the 339 MiB a consolidation's writer held for a share of 269 (2026-11-21). The leaves are grafted
+    /// in the order the blob comes to them, whenever each was written: the chunk's bytes are the same at any width.
+    /// </remarks>
+    private int LeavesAtOnce(ColumnEmission chunk, VariantShredder.Shredding shredding, int leaves)
+    {
+        if (_room is not { } room || Account.Reserve is not { } reserve)
+        {
+            return _lanes;
+        }
+
+        long each = shredding.LargestLeaf();
+        int most = Math.Min(_lanes, Math.Max(leaves, 1));
+        int width = 0;
+        long raised = 0;
+        while (width < most && (each == 0 || (room.Admits(each) && reserve.TryRaise(each))))
+        {
+            raised += each;
+            width++;
+        }
+
+        chunk.Raised += raised;
+        return Math.Max(width, 1);
     }
 
     /// <summary>
@@ -990,7 +1023,7 @@ public sealed partial class VortexFileWriter
     /// <summary>
     /// Makes room for <paramref name="bytes"/> the writer is about to take, a block's copy or a chunk's as it leaves for
     /// its emission, on the flow that drives the writer, the one place where it can wait: while the work the writer is
-    /// part of does not admit them past what the writer holds (<see cref="VortexWriteOptions.AdmitsAhead"/>), the chunks
+    /// part of does not admit them past what the writer holds (<see cref="Writing.WriteRoom.Admits"/>), the chunks
     /// in emission end, the oldest first, each column's in their order. The writer then reserves the bytes
     /// (<see cref="Raise"/>), so that what the work beside it reserves meanwhile leaves them.
     /// </summary>
@@ -1001,7 +1034,7 @@ public sealed partial class VortexFileWriter
     /// an encoder's output, is asked of the budget as it is taken, the next wait here making up for it.
     /// </remarks>
     private ValueTask RoomAsync(long bytes) =>
-        _admitsAhead is { } admits && _emissions is not null && !admits(bytes) ? EmissionsEndAsync(admits, bytes) : ValueTask.CompletedTask;
+        _room is { } room && !room.Admits(bytes) ? EmissionsEndAsync(room, bytes) : ValueTask.CompletedTask;
 
     /// <summary>
     /// Waits for the chunks in emission to end, none written before its place in the file: what a work short of room asks
@@ -1009,22 +1042,31 @@ public sealed partial class VortexFileWriter
     /// compression holds.
     /// </summary>
     internal ValueTask EmissionsEndAsync() =>
-        _emissions is null ? ValueTask.CompletedTask : EmissionsEndAsync(static _ => false, 0);
+        _emissions is null ? ValueTask.CompletedTask : EmissionsEndAsync(null, 0);
 
-    /// <summary><see cref="RoomAsync"/>, once the work does not admit <paramref name="bytes"/>: the chunks in emission end until it does.</summary>
-    private async ValueTask EmissionsEndAsync(Func<long, bool> admits, long bytes)
+    /// <summary>
+    /// <see cref="RoomAsync"/>, once the work does not admit <paramref name="bytes"/>: the chunks in emission end until it
+    /// does, then the work gives back what it started ahead of the writer (<see cref="Writing.WriteRoom.MakeRoomAsync"/>).
+    /// Without a <paramref name="room"/>, every chunk in emission ends.
+    /// </summary>
+    private async ValueTask EmissionsEndAsync(Writing.WriteRoom? room, long bytes)
     {
-        for (int field = 0; field < _emissions!.Length; field++)
+        for (int field = 0; _emissions is not null && field < _emissions.Length; field++)
         {
             // By index: an emission that ends offers its column's next one, and takes none off the list.
             for (int i = 0; _emissions[field] is { } chunks && i < chunks.Count; i++)
             {
                 await EmittedAsync(chunks[i]).ConfigureAwait(false);
-                if (admits(bytes))
+                if (room is not null && room.Admits(bytes))
                 {
                     return;
                 }
             }
+        }
+
+        if (room is not null)
+        {
+            await room.MakeRoomAsync().ConfigureAwait(false);
         }
     }
 

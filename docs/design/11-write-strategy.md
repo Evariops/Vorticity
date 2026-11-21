@@ -250,6 +250,8 @@ why it was abandoned.
 A schema of a thousand columns costs a thousand small states of 1 892 bytes each, not a thousand
 scratch buffers ([allocations](05-benchmarks.md#5-allocations)).
 
+Several of the writer's arenas keep their blocks from one use to the next: a compression lane's workspace of leaves, the arena of each group of an index's keys, a staging. Kept, the blocks spare their owner the pool and the budget at each use. A writer that is part of a work short of room gives them back instead, each arena where it kept them, for as long as the work does not hold what the writer holds (`VortexFileWriter.KeepsBlocks`, `WriteRoom.Holds`); and it lays out at once only as many leaves of a shredded chunk as the work admitted (`LeavesAtOnce`). The file is the same either way ([the memory of a job](15-compaction.md#the-memory-of-a-job)).
+
 At a degree above one (`VortexWriteOptions.DegreeOfParallelism`, or the session's), a batch of a
 block or more is summarized column by column, side by side: each column's statistics, and separately
 a text column's bounds and the distinct values a dictionary is priced from, each into its own state.

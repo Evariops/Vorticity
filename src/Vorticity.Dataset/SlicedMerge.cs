@@ -149,8 +149,12 @@ internal sealed class SlicedMerge : IMergedRuns
     public long CurrentInput => _inline?.CurrentInput ?? _run.Window.Input!.Rank;
 
     /// <inheritdoc/>
-    public bool StoppedPast(ReserveExhaustedException stop, KeyTest below) =>
-        (_inline ?? _taking?.Merge)?.StoppedPast(stop, below) ?? false;
+    /// <remarks>
+    /// The slice the flow merges itself is judged by its merge. One merged ahead, too: the stop is its own, its merge
+    /// ended there, and every run it gave was taken first (<see cref="TakeAsync"/>).
+    /// </remarks>
+    public StopVerdict Stopped(ReserveExhaustedException stop, KeyTest below) =>
+        (_inline ?? _taking?.Merge)?.Stopped(stop, below) ?? StopVerdict.Not("no slice was being merged");
 
     /// <inheritdoc/>
     public async ValueTask GiveBackAsync(int level)

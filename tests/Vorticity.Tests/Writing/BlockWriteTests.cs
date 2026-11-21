@@ -75,10 +75,21 @@ public sealed class BlockWriteTests
         (byte[] alone, _) = await WriteAsync(schema, arena, root, Rows, degree: 1);
         int heldBack = 0;
         (byte[] held, int onLine) = await WriteAsync(
-            schema, arena, root, Rows, degree: 4, Options with { AdmitsAhead = static _ => false }, writer => heldBack = writer.FlightsHeldBack);
+            schema, arena, root, Rows, degree: 4, Options with { Room = new NothingAhead() }, writer => heldBack = writer.FlightsHeldBack);
         Assert.True(onLine > 0, "no block went through the line");
         Assert.True(heldBack > 0, "no block was held back");
         Assert.True(alone.AsSpan().SequenceEqual(held), $"{held.Length} bytes against {alone.Length}");
+    }
+
+    /// <summary>
+    /// A work that admits nothing of its writer past what must go and does not hold what the writer holds: every block
+    /// goes through alone, every chunk in emission ends before the next leaves, and no arena keeps its blocks.
+    /// </summary>
+    private sealed class NothingAhead : Vorticity.Writing.WriteRoom
+    {
+        internal override bool Admits(long bytes) => false;
+
+        internal override bool Holds => false;
     }
 
     /// <summary>The file of <paramref name="root"/>'s rows written in calls of <paramref name="calls"/> rows at <paramref name="degree"/>, and the blocks that went through its line.</summary>

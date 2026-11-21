@@ -27,13 +27,19 @@ namespace Vorticity.Dataset;
 /// they keep of the inputs done, which go; at 1, the blocks in flight on its writers' lines land; at 2, the slices merged
 /// ahead are given up and the batches decoded ahead given back; at 3, its writers end their group of rows, each column
 /// writing what it gathered. Once nothing of that is left, the merge ends at the key it reached and the job commits what
-/// it merged (<see cref="ReserveExhaustedException"/>): nothing it wrote is thrown away.
+/// it merged (<see cref="ReserveExhaustedException"/>): the object it was writing is sealed when every row left lies past
+/// the last key written, which the next key of the input that found no room, read in its file, says
+/// (<see cref="IMergedRuns.Stopped"/>).
 /// </para>
 /// <para>
-/// The inputs' budget is never passed (<see cref="QueryMemoryBudget.Hard"/>). A block of theirs no reserve covers, a
-/// window the merge copies, is refused past it, and ends the merge as a reservation not granted does, where nothing says
-/// it ends on a whole key: the job commits the objects it had sealed, each ended where its key did, and gives up the one
-/// it was writing. A job so ended before it sealed an object commits nothing, and its handle plans again.
+/// The inputs' budget is never passed (<see cref="QueryMemoryBudget.Hard"/>), and an input reserves what it cannot go on
+/// without only in the room that leaves the writer what it has yet to take (<see cref="AdmitsInput"/>): it is then an
+/// input, on the job's flow, that finds no room first, where the merge can end at a key, and not a lane of the writer in
+/// the middle of a chunk. A block of theirs no reserve covers, a window the merge copies, is refused past the budget,
+/// and ends the merge where nothing says it ends on a whole key: the job commits the objects it had sealed, each ended
+/// where its key did, and gives up the one it was writing. A job so ended before it sealed an object commits nothing,
+/// and its handle plans again. Work started ahead is admitted by the process too, whose room the jobs' budget does not
+/// follow (<see cref="ProcessHolds"/>).
 /// </para>
 /// <para>
 /// The job's writer can wait on the job's flow alone, between two blocks or before a chunk leaves for its emission: a
@@ -44,7 +50,8 @@ namespace Vorticity.Dataset;
 /// reserved, a shredding's copies, an encoder's output, is counted past the writer's budget rather than refused, the
 /// process bounding it (<see cref="QueryMemoryBudget.CountsPast"/>): refused one, it gave up the job and all it had
 /// written. The writer makes up for it at its next wait, and with nothing left in the air goes on at what it holds at
-/// least.
+/// least. While the job does not hold what the writer holds (<see cref="HoldsWriter"/>), the writer's arenas give back
+/// the blocks they keep from one use to the next, and it lays out one leaf of a shredded chunk at a time.
 /// </para>
 /// </remarks>
 internal sealed class JobMemory : IAsyncDisposable
@@ -71,8 +78,84 @@ internal sealed class JobMemory : IAsyncDisposable
         Writer = Job.HardChild(countsPast: true);
         _inputs = new WorkAccount(Inputs, "compaction's inputs");
         WriterReserve = new MemoryReserve(Writer);
+        WriterRoom = new JobWriteRoom(this);
         Shares = JobShares.Of(Jobs.CeilingBytes);
     }
+
+    /// <summary>
+    /// What the job tells its writers of its memory (<see cref="Writing.WriteRoom"/>): whether it admits what a writer is
+    /// about to start (<see cref="AdmitsWrite"/>), whether it holds what the writer holds (<see cref="HoldsWriter"/>),
+    /// and what it gives back ahead of the writer when a start asks (<see cref="GiveBackAhead"/>).
+    /// </summary>
+    internal Writing.WriteRoom WriterRoom { get; }
+
+    private sealed class JobWriteRoom(JobMemory memory) : Writing.WriteRoom
+    {
+        internal override bool Admits(long bytes) => memory.AdmitsWrite(bytes);
+
+        internal override bool Holds => memory.HoldsWriter();
+
+        internal override ValueTask MakeRoomAsync() =>
+            memory.GiveBackAhead is { } giveBack ? giveBack() : ValueTask.CompletedTask;
+    }
+
+    /// <summary>
+    /// Whether the job holds what its writer holds now: the writer within its share, the job within the jobs' budget,
+    /// and the process within what it leaves its work (<see cref="ProcessHolds"/>). While it does, the writer's arenas
+    /// keep their blocks idle for their next use; once it does not, each gives them back where it kept them
+    /// (<see cref="VortexFileWriter.KeepsBlocks"/>). Counted when it does not.
+    /// </summary>
+    internal bool HoldsWriter()
+    {
+        if (Writer.ReservedBytes <= Shares.Writer && Jobs.ReservedBytes - Job.GrantLeft <= Jobs.CeilingBytes && ProcessHolds(0))
+        {
+            return true;
+        }
+
+        Interlocked.Increment(ref _arenasGivenBack);
+        return false;
+    }
+
+    /// <summary>The times an arena of the job's writers gave its blocks back rather than keep them, the job not holding what its writer held.</summary>
+    internal long ArenasGivenBack => Interlocked.Read(ref _arenasGivenBack);
+
+    private long _arenasGivenBack;
+
+    /// <summary>
+    /// What the job's inputs give back of what they started ahead, for a start of the writer the job does not admit once
+    /// the writer waited for all it had in the air: the slices merged ahead and the batches decoded ahead. Set by the
+    /// merge under way, on whose flow the writer asks; null while none runs.
+    /// </summary>
+    internal Func<ValueTask>? GiveBackAhead { get; set; }
+
+    /// <summary>
+    /// Whether an input of the job may reserve <paramref name="bytes"/> more: the room the jobs' budget leaves the job
+    /// holds them and still what the writer has yet to take (<see cref="WriterKeep"/>), what it was counted to hold, or
+    /// held at most so far, past what it holds now. What an input cannot go on without is asked on the job's flow, where
+    /// a merge that finds no room ends at a key and commits what it merged.
+    /// </summary>
+    /// <remarks>
+    /// Admitted by the budget alone, the inputs of a consolidation of 60 million log records took 484 MiB of its 672
+    /// while its writer held 190: the writer then took the 80 more its chunks need, past the budget, and it was a lane
+    /// of the writer, in the middle of a chunk, that the process refused a block. The job lost the object it was writing,
+    /// 8.5 s of merge, where its merge, an input short of room, would have ended at a key (2026-11-21).
+    /// </remarks>
+    private bool AdmitsInput(long bytes) => Room - bytes >= WriterKeep;
+
+    /// <summary>
+    /// Whether the process holds <paramref name="bytes"/> more now, by what the rest of its memory leaves its work
+    /// (<see cref="QueryMemoryBudget.CanReserve"/>): what the jobs' budget does not say. The budget is a share of the
+    /// process's limit, set once; what the process can still take moves with its heap and with the room its slabs keep
+    /// free.
+    /// </summary>
+    /// <remarks>
+    /// Work started ahead was admitted by the budget alone. Under 2 GiB, a consolidation of 60 million log records held
+    /// 700 MiB of blocks within its budget of 672 while the rest of the process's memory held 1.2 to 1.35 GB: the
+    /// process, past its ceiling by more than the sixteenth it lets a block count past, refused a writer's lane a block
+    /// of 4 KiB to 64 KiB, in the middle of a chunk, and the job lost the object it was writing, 8 to 9 s of merge
+    /// (2026-11-21).
+    /// </remarks>
+    private static bool ProcessHolds(long bytes) => QueryMemoryBudget.Process.CanReserve(Math.Max(bytes, 0));
 
     /// <summary>
     /// What the job's writers reserve in before they take a copy whose size they counted, on the job's flow: a block's rows
@@ -148,7 +231,7 @@ internal sealed class JobMemory : IAsyncDisposable
     /// </summary>
     internal (MemoryAccount Account, MemoryReserve? Reserve) OpenInput(ObjectEntry entry, MemoryAccount under, int batchRows, Func<int, ValueTask<bool>>? makeRoom)
     {
-        MemoryReserve? reserve = makeRoom is null ? null : new MemoryReserve(Inputs) { MakeRoom = makeRoom };
+        MemoryReserve? reserve = makeRoom is null ? null : new MemoryReserve(Inputs) { MakeRoom = makeRoom, Admits = AdmitsInput };
         CountedAccount account = new CountedAccount(under, reserve);
         lock (_opened)
         {
@@ -286,7 +369,8 @@ internal sealed class JobMemory : IAsyncDisposable
     /// </summary>
     private bool Admits(long bytes, QueryMemoryBudget part, long share, long keep, ref int refused)
     {
-        if (part.ReservedBytes + bytes <= share && Room - bytes >= keep)
+        // By the budget, and by the process, whose room the budget does not follow (ProcessHolds).
+        if (part.ReservedBytes + bytes <= share && Room - bytes >= keep && ProcessHolds(bytes))
         {
             return true;
         }
@@ -336,6 +420,7 @@ internal sealed class JobMemory : IAsyncDisposable
         }
 
         GiveBack = null;
+        GiveBackAhead = null;
         lock (_opened)
         {
             foreach ((_, _, MemoryReserve? reserve, _) in _opened)
