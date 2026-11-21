@@ -169,6 +169,41 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     internal long DataBytes => _writtenBytes.Data;
 
     /// <summary>
+    /// What a reader holds of the file while it reads its rows in their order, besides its batches, at most: for each
+    /// column its two heaviest neighbouring chunks, each the chunk's bytes and what a read of a part of it decodes whole
+    /// (<see cref="ColumnWriter.OpenBytes"/>), and each object dictionary, its bytes and its values. What a merge counts
+    /// the file at as one of its inputs, which the entry a dataset keeps of it says.
+    /// </summary>
+    /// <remarks>
+    /// A reader holds a chunk of each column at once, and two of a column while it crosses from one to the next; every
+    /// column crosses at the same row where a group of rows ends, so the sum counts two of each.
+    /// </remarks>
+    internal long OpenBytes
+    {
+        get
+        {
+            long bytes = _sharedOpenBytes;
+            foreach (ColumnWriter column in _columns)
+            {
+                bytes += column.OpenBytes;
+            }
+
+            return bytes;
+        }
+    }
+
+    // What the object dictionaries hold open, their segments and their values decoded.
+    private long _sharedOpenBytes;
+
+    /// <summary>
+    /// The canonical bytes of the rows written, the bytes their texts name counted and not the heaps their batches
+    /// kept: what a reader's batches of them weigh decoded, which a merge sizes its inputs' batches by.
+    /// </summary>
+    internal long DecodedBytes => _decodedBytes;
+
+    private long _decodedBytes;
+
+    /// <summary>
     /// Once a file that carries a table of contents (<see cref="VortexWriteOptions.CarriesContents"/>) is
     /// completed, its table (<see cref="Indexes.ObjectContents"/>), for the entry a dataset keeps of it: what a
     /// reader of a few spans of its rows needs with no open. Null for a file without one.
@@ -1692,6 +1727,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     staging.Parts.Add(new StagedPart(arena, blocks[b], 0, block, -1));
                     staging.Rows = block;
                     staging.Bytes = arena.NamedBytes(blocks[b]);
+                    _decodedBytes += staging.Bytes;
                     await FlyAsync(cancellationToken).ConfigureAwait(false);
                 }
 
@@ -1751,6 +1787,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         await UnstageAsync(cancellationToken).ConfigureAwait(false);
+
+        // Rows that go out without waiting: what they weigh decoded, which the rows staged count as they are staged.
+        _decodedBytes += arena.NamedBytes(root);
         await WriteDecodedAsync(arena, root, rows, seal, cancellationToken).ConfigureAwait(false);
     }
 
@@ -2232,6 +2271,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         staging.Rows += map.Rows;
         staging.Bytes += map.Bytes;
+        _decodedBytes += map.Bytes;
         Ledger?.Transfer(map, ref map.FirstRun, staging, ref staging.FirstRun);
         map.Clear();
         if (staging.Rows >= _stagedRows)
@@ -3055,7 +3095,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         int owned = Owned(into, arena, root, shareRepeats: true);
         staging.Parts.Add(new StagedPart(null, 0, 0, rows, owned));
         staging.Rows += rows;
-        staging.Bytes += into.NamedBytes(owned);
+        long bytes = into.NamedBytes(owned);
+        staging.Bytes += bytes;
+        _decodedBytes += bytes;
         return staging;
     }
 
@@ -4351,6 +4393,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             uint length = Segments[segment].Length;
             _indexes?.AddColumnBytes(field, length);
             _gathering?[field]?.Measured(length);
+
+            // What a reader holds of the chunk open: its bytes, as the block they are read in holds them, and what it decodes
+            // whole of them.
+            _columns[field].Opens(ArrayBlobWriter.Held(length) + blob.Whole);
         }
 
         // The compact summaries stay -- the zone map wants them at completion -- and only the sized

@@ -790,6 +790,7 @@ internal static class VariantShredder
             bool encodes = work.EncodesValidity;
             encodings.Clear();
             work.Builder.Clear();
+            work.Whole = 0;
             work.EncodesValidity = job.Validity;
             try
             {
@@ -867,6 +868,9 @@ internal static class VariantShredder
 
             made.Taken = true;
 
+            // What a read decodes whole of the leaf, each time the blob names it.
+            blob.Whole += made.Whole;
+
             int budget = VortexLimits.MaxFlatBufferTables;
             FlatBufferTable root = FlatBufferTable.Root(made.Tree.AsSpan(0, made.TreeLength), ref budget);
             return Regraft(blob.Builder, encodings, root, made.Ids, shift, depth: 1);
@@ -931,6 +935,7 @@ internal static class VariantShredder
             CanonicalNode variant = _arena.GetNode(_node);
             int frame = _arena.AddStruct(variant.DType, _rows, variant.Validity, []);
             blob.Builder.Clear();
+            blob.Whole = 0;
             try
             {
                 int root = ArrayBlobWriter.WriteShredded(
@@ -1087,6 +1092,9 @@ internal static class VariantShredder
         /// <summary>Whether a blob took its buffers, which are the blob's to give back from then on.</summary>
         internal bool Taken;
 
+        /// <summary>What a read of any part of the leaf decodes whole, as its workspace counted it (<see cref="ArrayBlobWriter.Workspace.Whole"/>).</summary>
+        internal long Whole;
+
         internal List<ArrayBlobWriter.PendingBuffer> Buffers { get; } = [];
 
         /// <summary>Takes what <paramref name="work"/> wrote of the leaf, its tree at <paramref name="written"/>, against <paramref name="encodings"/>.</summary>
@@ -1104,6 +1112,7 @@ internal static class VariantShredder
             Buffers.Clear();
             Buffers.AddRange(work.Buffers);
             work.Buffers.Clear();
+            Whole = work.Whole;
             Ids = [.. encodings.Ids];
             Taken = false;
             Done = true;

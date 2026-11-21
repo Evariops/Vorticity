@@ -510,6 +510,29 @@ internal sealed class ColumnWriter
     internal void NoteWidthsServed() => _widthsServed++;
 
     /// <summary>
+    /// What a reader holds of the column at most while it reads its rows in their order: its two heaviest neighbouring
+    /// chunks, or its only one, each its bytes and what a read of a part of it decodes whole
+    /// (<see cref="ArrayBlobWriter.BlobLease.Whole"/>). 0 before its first chunk.
+    /// </summary>
+    /// <remarks>
+    /// Two, since a reader that crosses from a chunk to the next holds both: the batch before still borrows the first's
+    /// dictionary while the next decodes the second's. A column of 40 000 rows in two chunks, each with a dictionary of
+    /// 1.1 MB decoded in a block of 2 MiB, held 2.2 MB read within its first chunk and 4.3 MB read across them
+    /// (2026-11-21).
+    /// </remarks>
+    internal long OpenBytes { get; private set; }
+
+    // What the chunk written last holds open.
+    private long _lastOpen;
+
+    /// <summary>Notes a chunk of the column written, which holds <paramref name="bytes"/> open.</summary>
+    internal void Opens(long bytes)
+    {
+        OpenBytes = Math.Max(OpenBytes, _lastOpen + bytes);
+        _lastOpen = bytes;
+    }
+
+    /// <summary>
     /// Chunks of this column and its children whose bit-packing was priced from the ingested width
     /// histograms rather than from a walk.
     /// </summary>

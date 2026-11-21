@@ -63,6 +63,7 @@ internal static class ArrayBlobWriter
         bool compress = false, ChunkStats stats = default)
     {
         blob.Builder.Clear();
+        blob.Whole = 0;
         try
         {
             // The compressed forms are chosen and materialized before the builder starts, because both
@@ -154,8 +155,46 @@ internal static class ArrayBlobWriter
         BinaryPrimitives.WriteUInt32LittleEndian(
             bytes.AsSpan((int)(total - sizeof(uint))), (uint)flatBuffer.Length);
 
-        return new BlobLease(bytes);
+        return new BlobLease(bytes, blob.Whole);
     }
+
+    /// <summary>
+    /// Counts node <paramref name="nodeIndex"/>, written as a child every row of its parent shares, in what a read of
+    /// any part of the blob decodes whole (<see cref="Workspace.Whole"/>): the bytes its values name, and for texts a
+    /// view's worth of bytes more a value, since a decode lays the short values out in its bytes as well as in its views.
+    /// </summary>
+    /// <remarks>
+    /// An upper bound, by a few bytes a value: a child written as it is, which a reader borrows from the chunk's segment,
+    /// is counted as decoded all the same. Eighteen open inputs of log records held 243 MB of their variant column's
+    /// dictionary values, decompressed whole, of 404 MB in all, which nothing in their commit told (2026-11-21).
+    /// </remarks>
+    private static void Shares(Workspace blob, CanonicalArena arena, int nodeIndex) =>
+        blob.Whole += DecodedBytes(arena, nodeIndex);
+
+    /// <summary>
+    /// What a reader holds of node <paramref name="nodeIndex"/> once it decoded it whole, at most: the blocks its buffers
+    /// take in the pool (<see cref="Held"/>), a text's views and its bytes apart, the bytes its values name and a view's
+    /// worth more a value (<see cref="Shares"/>).
+    /// </summary>
+    internal static long DecodedBytes(CanonicalArena arena, int nodeIndex)
+    {
+        CanonicalNode node = arena.GetNode(nodeIndex);
+        if (node.Kind != CanonicalKind.VarBinView)
+        {
+            return Held(arena.NamedBytes(nodeIndex));
+        }
+
+        long views = (long)node.Length * ViewSize;
+        long values = arena.NamedDataBytes(nodeIndex) + ((long)node.Length * CanonicalSupport.MaxInlineViewLength);
+        return Held(views) + Held(values) + Held(arena.NamedBytes(nodeIndex) - views - arena.NamedDataBytes(nodeIndex));
+    }
+
+    /// <summary>
+    /// The bytes a reader's pool hands out for a buffer of <paramref name="bytes"/>: its size class, the next power of
+    /// two (<see cref="BlockPool.CapacityFor"/>). A dictionary's values of 1.1 MB, decompressed, held a block of 2 MiB.
+    /// </summary>
+    internal static long Held(long bytes) =>
+        bytes <= 0 ? 0 : bytes > int.MaxValue ? bytes : MemoryAccount.Pool.CapacityFor((int)bytes);
 
     /// <summary>
     /// Writes the column under whichever scheme ColumnCompressor chose.
@@ -498,6 +537,9 @@ internal static class ArrayBlobWriter
                 patches = PatchesMetadata.Create((ulong)exceptions, 0, indicesPType);
                 children[0] = WriteIndexArray(blob, encodings, patchIndices, indicesPType);
                 children[1] = WriteRawPrimitive(blob, encodings, LittleEndian(patchValues, width));
+
+                // The patches, which a read of any rows of the column decodes whole.
+                blob.Whole += Held((long)exceptions * indicesPType.ByteWidth()) + Held((long)exceptions * width);
                 childCount = 2;
             }
         }
@@ -1599,6 +1641,10 @@ internal static class ArrayBlobWriter
         Span<int> children = stackalloc int[2];
         children[0] = WriteIndexBuffer(blob, arena, blob.TypesFor(node.DType), indices, indicesPType, valid, encodings);
         children[1] = WriteCompressed(blob, arena, values, encodings);
+
+        // The positions and the values, which a read of any rows of the column decodes whole.
+        blob.Whole += Held((long)valid * width);
+        Shares(blob, arena, values);
         Span<ushort> fill = stackalloc ushort[1];
         fill[0] = (ushort)ScalarBuffer(blob, blob.Scalars().Null());
         return Node(blob, encodings, "vortex.sparse"u8, SparseBytes(blob, valid, indicesPType), children, fill);
@@ -1762,6 +1808,10 @@ internal static class ArrayBlobWriter
 
         int valuesNode = WriteCompressed(blob, arena, values, encodings, cascade: Cascade.ValuesChild(owner));
 
+        // The runs' ends and their values, which a read of any rows of the column decodes whole.
+        blob.Whole += Held((long)plan.RunCount * endsPType.ByteWidth());
+        Shares(blob, arena, values);
+
         Span<int> children = stackalloc int[2];
         children[0] = ends;
         children[1] = valuesNode;
@@ -1798,6 +1848,9 @@ internal static class ArrayBlobWriter
             Blocks.Return(plan.Codes);
         }
         int valuesNode = WriteCompressed(blob, arena, values, encodings, cascade: Cascade.ValuesChild(owner));
+
+        // The dictionary's values, which a read of any row decodes whole: the row's code may name any of them.
+        Shares(blob, arena, values);
 
         Span<int> children = stackalloc int[2];
         children[0] = codes;
@@ -2990,10 +3043,21 @@ internal static class ArrayBlobWriter
     {
         private readonly Block<byte> _bytes;
 
-        internal BlobLease(Block<byte> bytes) => _bytes = bytes;
+        internal BlobLease(Block<byte> bytes, long whole = 0)
+        {
+            _bytes = bytes;
+            Whole = whole;
+        }
 
         /// <summary>Bytes that belong in the file.</summary>
         internal int Length => _bytes.Length;
+
+        /// <summary>
+        /// The canonical bytes a read of any part of the blob's rows decodes whole and keeps while it reads the chunk: a
+        /// dictionary's values, a run's ends and values, the positions and the values of a sparse column and of patches.
+        /// With <see cref="Length"/>, what a reader holds of the chunk open besides its batch.
+        /// </summary>
+        internal long Whole { get; }
 
         /// <summary>The blob, exactly <see cref="Length"/> bytes of it.</summary>
         internal ReadOnlyMemory<byte> Memory => _bytes.AsMemory();
@@ -3252,6 +3316,13 @@ internal static class ArrayBlobWriter
 
         /// <summary>The buffers the blob being written has queued, in order.</summary>
         internal List<PendingBuffer> Buffers => _buffers;
+
+        /// <summary>
+        /// The canonical bytes of the children of the blob being written that a read of any part of its rows decodes
+        /// whole (<see cref="Shares"/>), counted as they are written and handed on with the blob
+        /// (<see cref="BlobLease.Whole"/>). Emptied by whoever starts a blob.
+        /// </summary>
+        internal long Whole { get; set; }
 
         /// <summary>The metadata writer, emptied for one node.</summary>
         /// <remarks>

@@ -184,6 +184,7 @@ A leaf entry describes one data object:
   its keys from above as its tree key bounds them from below
 - when its rows arrived, in seconds since the Unix epoch (tagged field 6): the commit's clock for an
   append, the latest of its inputs' for a merge, never a column's
+- what a reader holds of the object open, besides its batches, and what its rows weigh decoded (tagged fields 7 and 8), both counted by its writer: what a merge counts the object at as an input, before it opens it ([the memory of a job](15-compaction.md#the-memory-of-a-job)). An entry written before the fields existed says neither, and a library that does not know them carries them as it read them
 - the length of its footer, when it passes the 64 KiB an open reads first: the bytes from the
   object's statistics to its end, which the writer knows when it completes the object. An open then
   asks for that many and reads the footer in one request, where it would take two, which matters

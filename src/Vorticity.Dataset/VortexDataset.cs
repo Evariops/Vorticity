@@ -4750,7 +4750,11 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             .WithFooterBytes(draft.Writer.TailBytes)
             .WithTableOfContents(TableOf(draft.Writer.TableOfContents, bytes, draft.Writer.TableInFile))
             .WithLastKey(last)
-            .WithArrival(draft.Arrival > 0 ? draft.Arrival : Math.Max(_options.TimeProvider.GetUtcNow().ToUnixTimeSeconds(), 1));
+            .WithArrival(draft.Arrival > 0 ? draft.Arrival : Math.Max(_options.TimeProvider.GetUtcNow().ToUnixTimeSeconds(), 1))
+
+            // What a reader holds of it open and what its rows weigh decoded, which only its writer knows: what a merge
+            // counts it at as an input, with no measure of it.
+            .WithWeights(draft.Writer.OpenBytes, draft.Writer.DecodedBytes);
         return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes, draft.StartedAt, draft.KeyGeneration);
     }
 
