@@ -225,10 +225,44 @@ internal static partial class CompactionPolicy
     /// <paramref name="bytes"/> and the merge within the jobs' budget (<see cref="DatasetCompactor.TierWidth"/>). A merge
     /// due when its class reaches the fan-out takes the fan-out; one behind takes what it can.
     /// </summary>
+    /// <remarks>
+    /// A merge its memory holds below the fan-out takes the run of neighbours whose bytes are the fewest (<see cref="Lightest"/>),
+    /// not the first: the first of a class is the object the merge before wrote, and a merge of two at a time took it again
+    /// with the next, object after object, each row written once more a merge. Under 2 GiB, 240 appends of log records went
+    /// through 179 merges of two, objects of 12.3, 21.0, 28.5, 33.5 and 38.9 MB in turn, before the consolidation (2026-11-21).
+    /// </remarks>
     private static CompactionJob Wide(PlannedVersion dataset, List<CompactionInput> inputs, int fanout, long bytes, long top)
     {
         int width = DatasetCompactor.TierWidth(dataset.Handle, inputs, fanout, bytes);
-        return Tier(dataset, width == inputs.Count ? inputs : inputs.GetRange(0, width), top);
+        return Tier(dataset, width == inputs.Count ? inputs : width < fanout ? Lightest(inputs, width) : inputs.GetRange(0, width), top);
+    }
+
+    /// <summary>
+    /// The run of <paramref name="take"/> neighbours of <paramref name="inputs"/>, in their order, whose bytes are the fewest,
+    /// the first such run: a merge of two at a time then pairs objects of about one weight, and a row is written once more a
+    /// level of a tree of merges, a logarithm of the inputs in base the width, rather than once more a merge.
+    /// </summary>
+    private static List<CompactionInput> Lightest(List<CompactionInput> inputs, int take)
+    {
+        int best = 0;
+        long least = long.MaxValue;
+        long sum = 0;
+        for (int i = 0; i < inputs.Count; i++)
+        {
+            sum += inputs[i].Entry.Bytes;
+            if (i >= take)
+            {
+                sum -= inputs[i - take].Entry.Bytes;
+            }
+
+            if (i >= take - 1 && sum < least)
+            {
+                least = sum;
+                best = i - take + 1;
+            }
+        }
+
+        return inputs.GetRange(best, take);
     }
 
     /// <summary>
@@ -262,26 +296,7 @@ internal static partial class CompactionPolicy
             return null;
         }
 
-        int take = Math.Min(width, fresh.Count - width + 1);
-        int best = 0;
-        long least = long.MaxValue;
-        long sum = 0;
-        for (int i = 0; i < fresh.Count; i++)
-        {
-            sum += fresh[i].Entry.Bytes;
-            if (i >= take)
-            {
-                sum -= fresh[i - take].Entry.Bytes;
-            }
-
-            if (i >= take - 1 && sum < least)
-            {
-                least = sum;
-                best = i - take + 1;
-            }
-        }
-
-        return Tier(dataset, fresh.GetRange(best, take), top);
+        return Tier(dataset, Lightest(fresh, Math.Min(width, fresh.Count - width + 1)), top);
     }
 
     /// <summary>The merge that narrows <paramref name="consolidation"/> of <paramref name="dataset"/> (<see cref="Narrowing"/>), what a consolidation asked for runs first.</summary>

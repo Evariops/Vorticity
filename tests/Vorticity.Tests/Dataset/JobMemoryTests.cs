@@ -176,6 +176,45 @@ public sealed partial class JobMemoryTests
     }
 
     /// <summary>
+    /// A size class of 72 small objects of one weight, due under a fan-out of 64, whose merges a budget holds to two inputs
+    /// open at once: each merge takes the lightest neighbours of the class, two objects of one weight, and no merge takes the
+    /// object the merge before wrote. Taking the first of the class, that object, a merge took it again with the next, and
+    /// its rows were written once more each merge: under 2 GiB, 240 appends of log records went through 179 merges of two,
+    /// of 12.3, 21.0, 28.5, 33.5 and 38.9 MB in turn (2026-11-21).
+    /// </summary>
+    [Fact]
+    public async Task AClassMergedTwoAtATimeMergesObjectsOfOneWeight()
+    {
+        const int Objects = 72;
+        const int RowsEach = 20;
+        long budget = (2 * DatasetCompactor.InputFloorBytes) + (256 << 10);
+        await using VortexSession session = VortexSession.Create(o => o.JobMemoryBudget = new QueryMemoryBudget(budget));
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(session, fanout: 64), Ct);
+        Random random = new Random(29);
+        List<Row> all = [];
+        for (int a = 0; a < Objects; a++)
+        {
+            await AppendAsync(dataset, all, Rows(random, RowsEach, all.Count));
+        }
+
+        List<CompactionResult> merges = [];
+        while (merges.Count < 200 && await dataset.CompactAsync(cancellationToken: Ct) is { } result)
+        {
+            merges.Add(result);
+        }
+
+        string ran = string.Join(", ", merges.Select(static r => $"{r.Trigger} {r.ObjectsIn}->{r.ObjectsOut} {r.Rows}"));
+        List<CompactionResult> tiers = [.. merges.Where(static r => r.Trigger == CompactionTrigger.Tier)];
+        Assert.True(tiers.Count >= 4 && tiers.All(static r => r.ObjectsIn <= 3), ran);
+
+        // Objects of one weight a merge, appends each, none an object a merge before wrote.
+        Assert.All(tiers, r => Assert.True(r.Rows == r.ObjectsIn * RowsEach, ran));
+        List<Row> read = (await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(r => r.Sequence).ToList();
+        Assert.Equal(all.OrderBy(r => r.Sequence), read);
+    }
+
+    /// <summary>
     /// A partition of 120 small objects under a budget that holds some 40 of them open at once: its consolidation is
     /// preceded by merges of its size classes, each committed, until what is left fits; the consolidation then takes
     /// what the budget holds, and every row reads back from level 1 alone.
