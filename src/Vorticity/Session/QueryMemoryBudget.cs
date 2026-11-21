@@ -103,7 +103,19 @@ public sealed class QueryMemoryBudget
     // collector ran, which happened since. The heap a collection read, less what is measured when the budget reads it, left
     // the rest out by what the queries took between the two: 145 MiB in the heap, 227 measured by then, a rest read as none,
     // and eight queries under a heap held to 512 MiB were granted what the next collection found taken (2026-11-16).
+    // What a reading falls back on when it cannot tell what was measured when the collector ran: several collections since
+    // the rest was last read, or a background one, whose numbers are its end's (_measuredAtCollection).
     private long _measuredLow;
+
+    // What the work measured when the collector last ran: the measure as the first move after that collection found it,
+    // nothing having moved in between, and the count of collections of any generation it saw then (NoteCollection); -1
+    // before any is noted. The fewest bytes measured since the reading before, taken off the heap instead, counted as
+    // the rest's the blocks a job took back since its low: a low of 210 MiB between two slices of a consolidation, 361 to
+    // 481 MiB measured at the collection, 201 MiB of rest too many, and a process that left its work 127 MiB counted
+    // itself 138 MiB past its ceiling 20 ms later; a lane of the job's writer was refused a block (2026-11-22).
+    private readonly Lock _noteGate = new Lock();
+    private long _measuredAtCollection;
+    private int _notedCollections = -1;
 
     // Taken by every writer of the rest: a give-back that wrote the rest it read before a collection's was read put the
     // collection's number back, and the next reservation read the same collection again, its let go and its reuse lost.
@@ -491,17 +503,17 @@ public sealed class QueryMemoryBudget
     /// The process's own: the parts <see cref="RestBytes"/> is made of, as last read. What its heap held past the measured
     /// work at the last full collection, less what the work took back from the pool since; what a collection of the
     /// youngest generations saw held past that; what the collector kept committed past its heap; what the work let go
-    /// since; what a container uses past what the registry knows; then the bytes the work measures now, and the fewest it
-    /// measured since the rest was last read. For a tool that tells which part of the rest moves
-    /// (<c>vortex-queries --memory-timeline</c>).
+    /// since; what a container uses past what the registry knows; then the bytes the work measures now, the fewest it
+    /// measured since the rest was last read, and what it measured when the collector last ran. For a tool that tells
+    /// which part of the rest moves (<c>vortex-queries --memory-timeline</c>).
     /// </summary>
-    internal (long Live, long Uncertain, long Reclaimable, long Pending, long Container, long Measured, long MeasuredLow) RestParts
+    internal (long Live, long Uncertain, long Reclaimable, long Pending, long Container, long Measured, long MeasuredLow, long MeasuredAtCollection) RestParts
     {
         get
         {
             Rest rest = Volatile.Read(ref _rest);
             return (LiveOf(rest), rest.Uncertain, rest.Reclaimable, Volatile.Read(ref _pending), Volatile.Read(ref _containerRest),
-                Volatile.Read(ref _measured), Volatile.Read(ref _measuredLow));
+                Volatile.Read(ref _measured), Volatile.Read(ref _measuredLow), Volatile.Read(ref _measuredAtCollection));
         }
     }
 
@@ -865,11 +877,40 @@ public sealed class QueryMemoryBudget
     internal void Measure(long delta)
     {
         QueryMemoryBudget process = Root;
+        process.NoteCollection();
         long measured = Interlocked.Add(ref process._measured, delta);
         if (delta < 0)
         {
             Interlocked.Add(ref process._pending, -delta);
             process.Lower(measured);
+        }
+    }
+
+    /// <summary>
+    /// The process's own, before its measure moves: when a collection ran since the measure last moved, what the work
+    /// measures now is what it measured when the collector ran, and is noted with the count of collections
+    /// (<see cref="Observe"/> takes it off the heap that collection read). One read of the collections' count a move; the
+    /// note is written once a collection, by the first move after it.
+    /// </summary>
+    /// <remarks>
+    /// To within one move: a lane the collector stopped between this reading of the count and its move adds, once it runs
+    /// again, bytes the note that another lane then writes counts as measured at the collection.
+    /// </remarks>
+    private void NoteCollection()
+    {
+        int collections = GC.CollectionCount(0);
+        if (collections == Volatile.Read(ref _notedCollections))
+        {
+            return;
+        }
+
+        lock (_noteGate)
+        {
+            if (collections > _notedCollections)
+            {
+                _measuredAtCollection = Volatile.Read(ref _measured);
+                Volatile.Write(ref _notedCollections, collections);
+            }
         }
     }
 
@@ -902,6 +943,7 @@ public sealed class QueryMemoryBudget
     internal void Returned(long bytes)
     {
         QueryMemoryBudget process = Root;
+        process.NoteCollection();
         process.Lower(Interlocked.Add(ref process._measured, -bytes));
     }
 
@@ -1034,11 +1076,34 @@ public sealed class QueryMemoryBudget
                 return;
             }
 
-            // What was measured when the collector ran, at least: the fewest bytes measured since the rest was last read,
-            // before which no collection it reads now ran. The window starts again from what is measured now.
+            // The fewest bytes measured since the rest was last read, before which no collection it reads now ran: what a
+            // reading takes off the heap when it cannot tell what was measured when the collector ran. The window starts
+            // again from what is measured now.
             long measured = Volatile.Read(ref _measured);
             long low = Math.Min(Interlocked.Exchange(ref _measuredLow, measured), measured);
             Lower(Volatile.Read(ref _measured));
+
+            // What was measured when the collector ran, when one collection ran since the rest was last read: the measure
+            // the first move after it noted (NoteCollection), or the measure now when nothing moved since. And never more
+            // than the measure now: a block given back since the collection is the pool's again, and the rest's. The
+            // blocks a job gave back and took again before the collection are the work's, and no longer read as the rest's.
+            long at = low;
+            if (any - rest.Ephemeral == 1)
+            {
+                lock (_noteGate)
+                {
+                    if (any > _notedCollections)
+                    {
+                        _measuredAtCollection = measured;
+                        Volatile.Write(ref _notedCollections, any);
+                    }
+
+                    if (any == _notedCollections)
+                    {
+                        at = Math.Min(_measuredAtCollection, measured);
+                    }
+                }
+            }
 
             // A full collection is read once it is done. A background one is counted from its start, and the collector tells
             // the one before's memory until it ends: read as the new one's, the let go and the reuse since were dropped, the
@@ -1052,8 +1117,11 @@ public sealed class QueryMemoryBudget
             {
                 Interlocked.Exchange(ref _pending, 0);
                 Interlocked.Exchange(ref _reused, 0);
+                // A blocking collection's numbers are those of the moment it ran, the one the measure was noted at. A
+                // background one's are its end's, which no count tells: the fewest measured since the reading before.
                 long inUse = info.HeapSizeBytes - info.FragmentedBytes;
-                rest = new Rest(full, any, info.Index, info.Index, Math.Max(0, inUse - low), 0, Math.Max(0, info.TotalCommittedBytes - inUse));
+                long taken = full != rest.Collections && !info.Concurrent ? at : low;
+                rest = new Rest(full, any, info.Index, info.Index, Math.Max(0, inUse - taken), 0, Math.Max(0, info.TotalCommittedBytes - inUse));
             }
 
             // What the queries let go is in the heap or already taken: never more than the heap holds past what lived at the
@@ -1064,7 +1132,7 @@ public sealed class QueryMemoryBudget
             GCMemoryInfo ephemeral = GC.GetGCMemoryInfo(GCKind.Ephemeral);
             if (ephemeral.Index > rest.Read)
             {
-                long inHeap = ephemeral.HeapSizeBytes - ephemeral.FragmentedBytes - low;
+                long inHeap = ephemeral.HeapSizeBytes - ephemeral.FragmentedBytes - at;
                 long live = LiveOf(rest);
                 long most = Math.Max(0, inHeap - live);
                 long pending = Volatile.Read(ref _pending);

@@ -116,14 +116,18 @@ internal sealed class JobMemory : IAsyncDisposable
     }
 
     /// <summary>
-    /// Whether the job holds what its writer holds now: the writer within its share, the job within the jobs' budget,
-    /// and the process within what it leaves its work (<see cref="ProcessHolds"/>). While it does, the writer's arenas
-    /// keep their blocks idle for their next use; once it does not, each gives them back where it kept them
-    /// (<see cref="VortexFileWriter.KeepsBlocks"/>). Counted when it does not.
+    /// Whether the job holds what its writer holds now: the writer within its share, and the job within the jobs' budget.
+    /// While it does, the writer's arenas keep their blocks idle for their next use; once it does not, each gives them
+    /// back where it kept them (<see cref="VortexFileWriter.KeepsBlocks"/>). Counted when it does not.
     /// </summary>
+    /// <remarks>
+    /// Not by what the process leaves its work: a block an arena gives back goes to the pool, which the process counts
+    /// with the rest of its memory, and leaves the process no more room. Asked the process too, a consolidation's arenas
+    /// gave their blocks back 1 816 to 3 331 times for 444 to 1 187, and nothing came of it (2026-11-22).
+    /// </remarks>
     internal bool HoldsWriter()
     {
-        if (Writer.ReservedBytes <= Shares.Writer && Jobs.ReservedBytes - Job.GrantLeft <= Jobs.CeilingBytes && ProcessHolds(0))
+        if (Writer.ReservedBytes <= Shares.Writer && Jobs.ReservedBytes - Job.GrantLeft <= Jobs.CeilingBytes)
         {
             return true;
         }
