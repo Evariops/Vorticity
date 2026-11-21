@@ -480,6 +480,11 @@ public sealed class BlockPoolTests
     {
         const int megabyte = 1024 * 1024;
         BlockPool pool = BlockPool.KeepingAll(8 * megabyte);
+
+        // Out of the registry, which asks every pool what it did not use after each collection of the oldest generation:
+        // its asking between two of the test's own counted as one of them. The test's first rent makes a slab when the
+        // process has none, 32 MiB, and so a collection, whose asking then came once its three blocks were parked.
+        HeldMemory.Unregister(pool);
         try
         {
             ReturnAll(pool, RentAll(pool, megabyte, 3));
@@ -627,6 +632,10 @@ public sealed class BlockPoolTests
     public void A_pool_that_keeps_all_keeps_one_outsized_block_for_the_next_read_it_fits()
     {
         BlockPool pool = BlockPool.KeepingAll(64 * 1024);
+
+        // Out of the registry, which asks every pool what it did not use after each collection of the oldest generation,
+        // and has it give back what it keeps when memory is short: either between two steps of the test empties the slot.
+        HeldMemory.Unregister(pool);
         try
         {
             // Past the classes, the block a read gets parks in the pool's one slot once given back.
