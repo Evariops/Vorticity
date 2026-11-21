@@ -401,7 +401,11 @@ public sealed partial class DatasetTiersTests
         List<(long Bytes, long Data, long Rows)> objects = await ConsolidatedAsync(
             Top, chunkBytes: 1 << 20, (first, count) => Rows(random, count, first, day: 0), groupRows: 1L << 22, ran: jobs);
         int groupEnds = jobs.Sum(job => job.GroupEnds);
-        string sizes = $"{string.Join(", ", objects)}; {groupEnds} group ends";
+
+        // What each job did not start ahead and what its reserves were not granted at once: what tells a run whose cuts
+        // followed the memory the process left it from one that ran at its width.
+        string held = string.Join(" | ", jobs.Select(job => $"{job.GroupEnds} ends, ahead held back {job.AdvancesHeldBack}, reserves {job.Reserves}, {job.WriterArenasGivenBack} arenas given back"));
+        string sizes = $"{string.Join(", ", objects)}; {groupEnds} group ends; jobs: {held}";
         Console.WriteLine($"STEADY: {sizes}");
         Assert.True(objects.Count >= 8, sizes);
         Assert.InRange(groupEnds, objects.Count - 1, (2 * (objects.Count - 1)) + 4);
