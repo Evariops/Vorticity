@@ -36,12 +36,23 @@ internal sealed class BlockSites : BlockPool.IBlockWatch, IDisposable
     private long _peakBlocks;
     private long _peakParked;
 
-    private BlockSites(string path) => _path = path;
+    // What a site names to be counted, any site when null (--block-sites-of).
+    private readonly string? _of;
 
-    /// <summary>Counts the blocks rented from now on, by site, until the result is disposed, which writes them to <paramref name="path"/>.</summary>
-    internal static BlockSites Watch(string path)
+    private BlockSites(string path, string? of)
     {
-        BlockSites sites = new BlockSites(path);
+        _path = path;
+        _of = of;
+    }
+
+    /// <summary>
+    /// Counts the blocks rented from now on, by site, until the result is disposed, which writes them to
+    /// <paramref name="path"/>; with <paramref name="of"/>, those alone whose site names it in one of its frames, the peak
+    /// kept being theirs: one part of a work, whatever the others hold beside it.
+    /// </summary>
+    internal static BlockSites Watch(string path, string? of = null)
+    {
+        BlockSites sites = new BlockSites(path, of);
         BlockPool.Watch = sites;
         return sites;
     }
@@ -54,6 +65,11 @@ internal sealed class BlockSites : BlockPool.IBlockWatch, IDisposable
         }
 
         string name = SiteOf(new StackTrace(2, fNeedFileInfo: false));
+        if (_of is not null && !name.Contains(_of, StringComparison.Ordinal))
+        {
+            return;
+        }
+
         lock (_gate)
         {
             if (!_sites.TryGetValue(name, out Site? site))

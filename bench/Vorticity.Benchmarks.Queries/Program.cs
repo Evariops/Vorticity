@@ -268,7 +268,9 @@ if (Text(args, "--micro") is { } micro)
     if (micros.TryGetValue(micro, out (string Help, Func<Task<int>> Run) chosen))
     {
         // --block-sites FILE: the blocks the run holds at its peak, by the site that rented them (BlockSites.cs).
-        using BlockSites? sites = Text(args, "--block-sites") is { } path ? BlockSites.Watch(path) : null;
+        // --block-sites-of TEXT: only the blocks whose site names TEXT in one of its frames, the peak theirs alone: a
+        // compaction's writer with VortexFileWriter, whatever its inputs hold beside it.
+        using BlockSites? sites = Text(args, "--block-sites") is { } path ? BlockSites.Watch(path, Text(args, "--block-sites-of")) : null;
 
         // --memory-limit SIZE: the process held to it, as a host sets it, for every micro but the backlog, which sets it itself.
         if (micro != "backlog" && Text(args, "--memory-limit") is { } held)
