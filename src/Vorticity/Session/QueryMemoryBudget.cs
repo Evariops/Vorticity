@@ -488,6 +488,24 @@ public sealed class QueryMemoryBudget
     }
 
     /// <summary>
+    /// The process's own: the parts <see cref="RestBytes"/> is made of, as last read. What its heap held past the measured
+    /// work at the last full collection, less what the work took back from the pool since; what a collection of the
+    /// youngest generations saw held past that; what the collector kept committed past its heap; what the work let go
+    /// since; what a container uses past what the registry knows; then the bytes the work measures now, and the fewest it
+    /// measured since the rest was last read. For a tool that tells which part of the rest moves
+    /// (<c>vortex-queries --memory-timeline</c>).
+    /// </summary>
+    internal (long Live, long Uncertain, long Reclaimable, long Pending, long Container, long Measured, long MeasuredLow) RestParts
+    {
+        get
+        {
+            Rest rest = Volatile.Read(ref _rest);
+            return (LiveOf(rest), rest.Uncertain, rest.Reclaimable, Volatile.Read(ref _pending), Volatile.Read(ref _containerRest),
+                Volatile.Read(ref _measured), Volatile.Read(ref _measuredLow));
+        }
+    }
+
+    /// <summary>
     /// The rest of the process's memory: what its heap held past the queries' tables at the last full
     /// collection, what the collector kept committed past its heap, and what the queries let go since; in
     /// a container, what the container uses past what the registry knows, when that is more, which the
@@ -547,10 +565,21 @@ public sealed class QueryMemoryBudget
     /// floors, in the registry's order (<see cref="HeldMemory.GiveBack"/>), for the collection that follows to
     /// take it; and the reservations nearing the ceiling have it let go of a share before they get there.
     /// </summary>
-    internal bool TryReserve(long bytes)
+    /// <remarks>
+    /// With <paramref name="kept"/>, the bytes are those of a block the pool kept, parked or free in a slab alive
+    /// (<see cref="BlockPool.Rent"/>): each budget counts them under its own ceiling as any others, and the process's
+    /// counts them without weighing them against the rest of its memory (<see cref="TakeKept"/>).
+    /// </remarks>
+    internal bool TryReserve(long bytes, bool kept = false)
     {
         if (_process is null)
         {
+            if (kept)
+            {
+                TakeKept(bytes);
+                return true;
+            }
+
             Observe();
             long available = Available();
             if (TryAdd(ref _reserved, bytes, available))
@@ -590,7 +619,7 @@ public sealed class QueryMemoryBudget
         // found no room in a heap held to 1.5 GiB, at a new site each run (2026-11-16). A budget a grant funds takes the
         // grant's bytes first, which the parent counts already, and asks it for the rest alone.
         long funded = _granted > 0 ? TakeGrant(bytes) : 0;
-        if (bytes > funded && !_process.TryReserve(bytes - funded))
+        if (bytes > funded && !_process.TryReserve(bytes - funded, kept))
         {
             if (funded > 0)
             {
@@ -678,10 +707,20 @@ public sealed class QueryMemoryBudget
     /// heap itself would run out, and nothing is reserved.
     /// </summary>
     /// <returns>Whether it was reserved.</returns>
-    internal bool Force(long bytes)
+    /// <remarks>
+    /// With <paramref name="kept"/>, the bytes of a block the pool kept: the process's budget counts them whatever it
+    /// holds (<see cref="TakeKept"/>), and only a hard budget that is never passed refuses them.
+    /// </remarks>
+    internal bool Force(long bytes, bool kept = false)
     {
         if (_process is null)
         {
+            if (kept)
+            {
+                TakeKept(bytes);
+                return true;
+            }
+
             Observe();
             if (!TryAdd(ref _reserved, bytes, Available() + (Ceiling / 16)))
             {
@@ -701,7 +740,7 @@ public sealed class QueryMemoryBudget
         // The jobs' share passed as any budget is, the process bounding it: carved out of the process with no refusal, an append
         // of 324 000 rows under a limit of 1 GiB held 524 MiB of the share's 336, and a block of 64 MiB more failed the heap
         // (2026-11-16).
-        if (!_process.Force(bytes))
+        if (!_process.Force(bytes, kept))
         {
             return false;
         }
@@ -709,6 +748,43 @@ public sealed class QueryMemoryBudget
         Raise(Interlocked.Add(ref _reserved, bytes));
         return true;
     }
+
+    /// <summary>
+    /// The process's own: counts <paramref name="bytes"/> of a block the pool kept, parked or free in a slab alive, without
+    /// weighing them against the rest of the process's memory. The rest holds them already: the block's account takes them
+    /// out of it once the block is its work's (<see cref="Reuse"/>), and the heap holds what it held. Refused there, a
+    /// block of a few kilobytes failed a compaction's writer in the middle of a chunk under a pool that kept 505 MiB,
+    /// 464 of them free in its slabs (2026-11-21).
+    /// </summary>
+    /// <remarks>
+    /// Counted when the limit left the work no room for them, and when it left none within the sixteenth a block may count
+    /// past (<see cref="Force"/>): the blocks that, asked as new memory, had the memory kept let go and the collector run,
+    /// and those refused (<see cref="KeptPastRoom"/>, <see cref="KeptPastMargin"/>).
+    /// </remarks>
+    private void TakeKept(long bytes)
+    {
+        Observe();
+        long held = Interlocked.Add(ref _reserved, bytes);
+        Raise(held);
+        long available = Available();
+        if (held > available)
+        {
+            Interlocked.Increment(ref _keptPastRoom);
+            if (held > available + (Ceiling / 16))
+            {
+                Interlocked.Increment(ref _keptPastMargin);
+            }
+        }
+    }
+
+    private long _keptPastRoom;
+    private long _keptPastMargin;
+
+    /// <summary>The process's own: the blocks the pool kept that work took while the limit left it no room for them (<see cref="TakeKept"/>).</summary>
+    internal long KeptPastRoom => Interlocked.Read(ref _keptPastRoom);
+
+    /// <summary>The process's own: those of <see cref="KeptPastRoom"/> taken while the limit left none within the sixteenth a block may count past: refused, when asked as new memory.</summary>
+    internal long KeptPastMargin => Interlocked.Read(ref _keptPastMargin);
 
     /// <summary>Whether this budget and the process's would grant <paramref name="bytes"/> more now to a query that holds <paramref name="held"/>, without reserving them.</summary>
     internal bool CanReserve(long bytes, long held = 0)

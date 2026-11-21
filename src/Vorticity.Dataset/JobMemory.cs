@@ -80,7 +80,23 @@ internal sealed class JobMemory : IAsyncDisposable
         WriterReserve = new MemoryReserve(Writer);
         WriterRoom = new JobWriteRoom(this);
         Shares = JobShares.Of(Jobs.CeilingBytes);
+        _keptPastRoom = QueryMemoryBudget.Process.KeptPastRoom;
+        _keptPastMargin = QueryMemoryBudget.Process.KeptPastMargin;
     }
+
+    // What the process had counted of the pool's blocks taken past its room when the job started.
+    private readonly long _keptPastRoom;
+    private readonly long _keptPastMargin;
+
+    /// <summary>
+    /// The blocks the pool kept that the process's work took, since the job started, while the process's limit left its
+    /// work no room for them, and those of them taken while it left none within the sixteenth a block may count past
+    /// (<see cref="QueryMemoryBudget.KeptPastRoom"/>): blocks the heap held already, which a lane of the job was refused
+    /// when they were asked as new memory. The process's count: another job's or a question's are in it when they run
+    /// beside this one.
+    /// </summary>
+    internal (long PastRoom, long PastMargin) PoolBlocksPastRoom =>
+        (QueryMemoryBudget.Process.KeptPastRoom - _keptPastRoom, QueryMemoryBudget.Process.KeptPastMargin - _keptPastMargin);
 
     /// <summary>
     /// What the job tells its writers of its memory (<see cref="Writing.WriteRoom"/>): whether it admits what a writer is
@@ -153,7 +169,8 @@ internal sealed class JobMemory : IAsyncDisposable
     /// 700 MiB of blocks within its budget of 672 while the rest of the process's memory held 1.2 to 1.35 GB: the
     /// process, past its ceiling by more than the sixteenth it lets a block count past, refused a writer's lane a block
     /// of 4 KiB to 64 KiB, in the middle of a chunk, and the job lost the object it was writing, 8 to 9 s of merge
-    /// (2026-11-21).
+    /// (2026-11-21). That block was one the pool kept, which the process no longer weighs against the rest of its
+    /// memory (<see cref="Buffers.BlockPool.Rent"/>): what this rule spares since is not shown.
     /// </remarks>
     private static bool ProcessHolds(long bytes) => QueryMemoryBudget.Process.CanReserve(Math.Max(bytes, 0));
 

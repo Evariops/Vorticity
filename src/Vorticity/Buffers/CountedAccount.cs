@@ -35,10 +35,10 @@ internal sealed class CountedAccount(MemoryAccount work, MemoryReserve? reserve 
     /// <summary>What the piece reserves in before it rents; null for a piece that reserves nothing.</summary>
     internal MemoryReserve? Reserve => reserve;
 
-    internal override bool TryTake(long bytes) => TryTake(bytes, 0);
+    internal override bool TryTake(long bytes) => TryTake(bytes, 0, kept: false);
 
     /// <inheritdoc/>
-    internal override bool TryTake(long bytes, long reserved)
+    internal override bool TryTake(long bytes, long reserved, bool kept)
     {
         // What the piece reserved first; past it, what the budget holds now, and no more: a piece that reserves is one that
         // can stop and run its step again, where the work's own account would count the block past its budget.
@@ -54,7 +54,7 @@ internal sealed class CountedAccount(MemoryAccount work, MemoryReserve? reserve 
             }
         }
 
-        if (!work.TryTake(bytes, reserved + spare))
+        if (!work.TryTake(bytes, reserved + spare, kept))
         {
             reserve?.PutBack(spare);
             return false;

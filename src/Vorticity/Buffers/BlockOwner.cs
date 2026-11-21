@@ -310,6 +310,20 @@ internal sealed class BlockOwner : SegmentOwner
         return new BlockOwner(array, offset, capacity, length, VortexLimits.MaxAlignmentExponent, pool, bucketIndex);
     }
 
+    /// <summary>
+    /// A block of <paramref name="capacity"/> bytes cut from a slab alive, for the class <paramref name="bucketIndex"/> of
+    /// <paramref name="pool"/>: bytes the heap holds already. Null when the class is not one a slab cuts, or no slab alive
+    /// holds such a piece: nothing is allocated, neither a slab nor an array.
+    /// </summary>
+    /// <param name="pool">The pool the block returns to.</param>
+    /// <param name="bucketIndex">Its size class there.</param>
+    /// <param name="capacity">Its bytes.</param>
+    /// <param name="length">The bytes asked.</param>
+    internal static BlockOwner? TryCutHeld(BlockPool pool, int bucketIndex, int capacity, int length) =>
+        Slabs.Cuts(capacity) && Slabs.TryTakeHeld(capacity) is (Slabs.Slab slab, byte[] slabArray, int start)
+            ? new BlockOwner(slabArray, start, capacity, length, VortexLimits.MaxAlignmentExponent, pool, bucketIndex, slab)
+            : null;
+
     internal static int CheckLengthAndAlignment(int length, int alignment)
     {
         if (length < 0)

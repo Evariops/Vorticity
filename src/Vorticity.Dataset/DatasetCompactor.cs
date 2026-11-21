@@ -132,6 +132,13 @@ public sealed record CompactionResult
     internal long WriterArenasGivenBack { get; init; }
 
     /// <summary>
+    /// The blocks the pool kept that the process's work took while the job ran and the process's limit left its work no
+    /// room for them, and those of them taken past the sixteenth a block may count past
+    /// (<see cref="JobMemory.PoolBlocksPastRoom"/>): refused, when a block the heap held already was asked as new memory.
+    /// </summary>
+    internal (long PastRoom, long PastMargin) PoolBlocksPastRoom { get; init; }
+
+    /// <summary>
     /// What its writer was counted to hold, which its inputs left it as they reserved (<see cref="JobMemory.WriterPrice"/>):
     /// what its blocks held may pass the jobs' budget by what its writer held past it, and by no more.
     /// </summary>
@@ -341,12 +348,16 @@ internal static partial class DatasetCompactor
             dataset.LearnWriterBytes(memory.WriterPeak, committed: false);
             bool learned = KeepOpen(dataset, memory, stop) || dataset.WriterJobBytes > writerKnown;
             (long heldBack, long madeRoom, _) = memory.Reserves;
+
+            // A refusal says itself what its budget, the process and the process's pool held then.
+            string refusal = (stop?.InnerException ?? failure).Message;
+            (long pastRoom, long pastMargin) = memory.PoolBlocksPastRoom;
             throw new JobStoppedException(job, memory.Peak, memory.Jobs.CeilingBytes, failure)
             {
                 Learned = learned,
                 Reason = string.Create(
                     System.Globalization.CultureInfo.InvariantCulture,
-                    $"{(stop is { InnerException: null } ? $"a reservation of {stop.Bytes >> 10} KiB not granted" : "a block no reservation covers refused")}, inputs {memory.InputsPeak >> 20} MiB, writer {memory.WriterPeak >> 20} MiB, {heldBack} reservations held back, room made {madeRoom} times{(memory.Slices?.Invoke() is { } slices ? ", " + slices : "")}"),
+                    $"{(stop is { InnerException: null } ? $"a reservation of {stop.Bytes >> 10} KiB not granted" : $"a block no reservation covers refused [{refusal}]")}, inputs {memory.InputsPeak >> 20} MiB, writer {memory.WriterPeak >> 20} MiB, {heldBack} reservations held back, room made {madeRoom} times, {pastRoom} blocks of the pool taken past the process's room and {pastMargin} past its margin{(memory.Slices?.Invoke() is { } slices ? ", " + slices : "")}"),
             };
         }
         finally
@@ -984,6 +995,7 @@ internal static partial class DatasetCompactor
             StoppedBy = handed?.Stop?.Message,
             StoppedHow = handed?.Stop is null ? null : handed.Why,
             WriterArenasGivenBack = memory.ArenasGivenBack,
+            PoolBlocksPastRoom = memory.PoolBlocksPastRoom,
             WriterCounted = memory.WriterPrice,
             Reserves = memory.Reserves,
             WriterBatches = batches,

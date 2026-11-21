@@ -199,10 +199,32 @@ internal sealed class BlockPool : IHeldMemory
     /// <exception cref="VortexMemoryException">The account refuses the block's capacity: the block goes back to the pool.</exception>
     public BlockOwner Rent(MemoryAccount account, int length, int alignment)
     {
-        // The account first: a block it refuses is never allocated. Allocated first, a block of 64 MiB a writer's budget would
-        // have refused failed the heap held to its limit (2026-11-16).
         BlockOwner.CheckLengthAndAlignment(length, alignment);
         int capacity = length > MaxPooledLength ? length : RoundedSize(length);
+
+        // The pool first: a block it keeps, parked or free in a slab alive, is memory the heap holds already, and its account
+        // takes it as such: the budgets of its work count it, the process's does not weigh it against the rest of its
+        // memory, which holds it. Asked first as for new memory, a lane of a compaction's writer was refused a block by a
+        // process that counted 287 MiB of work under a ceiling of 1 344, while its pool kept 505 MiB, 464 of them free in
+        // its slabs, and the job lost the object it was writing (2026-11-21).
+        if (length <= MaxPooledLength && RentKept(length, capacity) is { } kept)
+        {
+            if (!account.TryTake(capacity, reserved: 0, kept: true))
+            {
+                // Told as rented and given back, for what watches the blocks; counted nowhere, the release parks it again.
+                Watch?.Rented(kept);
+                kept.Release();
+                throw account.Refused(capacity);
+            }
+
+            account.Reused(capacity);
+            kept.Charge(account);
+            Watch?.Rented(kept);
+            return kept;
+        }
+
+        // New memory: the account first, and a block it refuses is never allocated. Allocated first, a block of 64 MiB a
+        // writer's budget would have refused failed the heap held to its limit (2026-11-16).
         if (!account.TryTake(capacity))
         {
             throw account.Refused(capacity);
@@ -255,6 +277,23 @@ internal sealed class BlockPool : IHeldMemory
 
         /// <summary>Block <paramref name="owner"/> given back by its last holder, before the pool parks or frees it.</summary>
         void Released(BlockOwner owner);
+    }
+
+    /// <summary>
+    /// A block of <paramref name="capacity"/> bytes, a class of the pool's, that the pool keeps: one parked, or a piece of
+    /// a slab alive, re-armed for <paramref name="length"/> bytes. Null when it keeps none: nothing is allocated.
+    /// </summary>
+    private BlockOwner? RentKept(int length, int capacity)
+    {
+        int index = BucketIndexOf(capacity);
+        if (_buckets[index].TryPop() is { } parked)
+        {
+            Interlocked.Add(ref _parkedBytes, -capacity);
+            parked.ResetForRent(length);
+            return parked;
+        }
+
+        return BlockOwner.TryCutHeld(this, index, capacity, length);
     }
 
     /// <param name="length">The bytes asked.</param>

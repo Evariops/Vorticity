@@ -132,7 +132,10 @@ internal sealed class QueryMemory : IDisposable
         private long _held;
         private long _reserved;
 
-        internal override bool TryTake(long bytes)
+        internal override bool TryTake(long bytes) => TryTake(bytes, 0, kept: false);
+
+        /// <inheritdoc/>
+        internal override bool TryTake(long bytes, long reserved, bool kept)
         {
             long held = Interlocked.Add(ref _held, bytes);
             if (held < bytes)
@@ -147,8 +150,10 @@ internal sealed class QueryMemory : IDisposable
                 return true;
             }
 
+            // What a block the pool kept holds past the question's own is in the heap already, and is not weighed against
+            // the rest of the process's memory.
             QueryMemoryBudget budget = memory._budget.Root;
-            if (!budget.TryReserve(extra) && !budget.Force(extra))
+            if (!budget.TryReserve(extra, kept) && !budget.Force(extra, kept))
             {
                 Interlocked.Add(ref _held, -bytes);
                 return false;

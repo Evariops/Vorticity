@@ -188,7 +188,7 @@ internal sealed class MemoryReserve
     /// <summary>
     /// Takes up to <paramref name="bytes"/> of the spare for a block being rented, and returns what it took: bytes the
     /// budget counts already, which the block's account does not reserve again
-    /// (<see cref="Buffers.MemoryAccount.TryTake(long, long)"/>).
+    /// (<see cref="Buffers.MemoryAccount.TryTake(long, long, bool)"/>).
     /// </summary>
     internal long Take(long bytes)
     {
