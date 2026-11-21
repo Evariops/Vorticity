@@ -2588,6 +2588,14 @@ internal static partial class DatasetCompactor
         /// and another when the rows weighed less than that. Readings aimed short of the size by a quarter of the gap left,
         /// to be sure of landing under it, left every column two chunks more an object, which a question on one value read
         /// 1.7 times the bytes of (2026-11-21).
+        /// <para>
+        /// Where what a row weighs moves along the keys, no aim follows it: log records sorted by service went from 3.7 to
+        /// 33.8 bytes a row, and objects aimed at 64 MiB ended at 125 and 211 % of it, the second read by the writer's grid
+        /// alone, four million rows past its start; on appends of the same records, four million rows of 6.4 to 7.2 bytes,
+        /// as steady as any, came before rows of 31.6, and an object ended at 241 %. Readings come a quarter of an object's
+        /// rows apart at the latest (<see cref="NextReading"/>), and those objects ended at 97 to 106 %, those of metric
+        /// records at 100 % for a reading more an object and 0.1 % more bytes (2026-11-21).
+        /// </para>
         /// </remarks>
         internal bool AsksReading => _rows >= NextReading;
 
@@ -2605,9 +2613,10 @@ internal static partial class DatasetCompactor
 
         /// <summary>
         /// The rows of the object being written its next reading is asked at: where its writer's grid ends a group
-        /// (<see cref="VortexFileWriter.GroupRows"/>), or before, where the rows at what a row weighed since the last reading
-        /// reach where the reading is aimed; on a block's boundary and a block past the last reading at the soonest.
-        /// <see cref="long.MaxValue"/> for an object that does not end by its size or is full.
+        /// (<see cref="VortexFileWriter.GroupRows"/>), or before, where the rows at what a row weighs reach the object's size,
+        /// and in an object of a line's blocks, a quarter of the rows an object holds at what its inputs' rows weigh past the
+        /// last reading at the latest; on a block's boundary. <see cref="long.MaxValue"/> for an object that does not end by
+        /// its size or is full.
         /// </summary>
         /// <remarks>
         /// Asked as the merge's runs came, a reading fell at rows that hung on where an input's batch ended, which the job's
@@ -2627,6 +2636,23 @@ internal static partial class DatasetCompactor
                 long grid = output.Writer.GroupRows;
                 long next = grid > 0 ? ((_rowsRead / grid) + 1) * grid : long.MaxValue;
 
+                // In an object of a line's blocks at least (VortexFileWriter.LineObjectBlocks), a reading a quarter of the rows
+                // an object holds at what its inputs' rows weigh at the latest, whose quarter spans eight blocks: no aim follows
+                // a weight that moves along the keys, and the rows past one placed by lighter rows overshoot by that much at
+                // most. One that falls within a drift short of the writer's next end of a group waits for it, which writes
+                // nothing more: metric records, whose rows weigh the same along the keys, read on the grid alone.
+                double blockBytes = _inputBytesPerRow * block;
+                bool lined = blockBytes > 0 && _target / blockBytes >= VortexFileWriter.LineObjectBlocks;
+                if (lined)
+                {
+                    long stepped = _rowsRead + (long)(_target / _inputBytesPerRow / 4);
+                    stepped = (stepped + block - 1) / block * block;
+                    if (next > stepped * (1 + _drift))
+                    {
+                        next = stepped;
+                    }
+                }
+
                 // None by the weight of the rows when those the object can take at most, the job's left or its partition
                 // value's, a drift heavier than the last reading says, leave it short of its size: it closes before it fills.
                 if (_bytesPerRow <= 0 || (_dataRead + ((_rows - _rowsRead + RowsLeft) * _bytesPerRow * (1 + _drift))) < _target - _slack)
@@ -2635,8 +2661,11 @@ internal static partial class DatasetCompactor
                 }
 
                 // On a block's boundary, where every row handed over is in the file; within an object's first block for a size a
-                // block outweighs, where the rows past the file's whole blocks count at what a row weighs.
-                double rows = (_target - _dataRead) / _bytesPerRow;
+                // block outweighs, where the rows past the file's whole blocks count at what a row weighs. In an object of a
+                // line's blocks, at the heavier of the object's mean and its last stretch's, which says best what the rows ahead
+                // weigh when they grow; in a smaller one at its mean, a stretch of a few blocks weighing its chunks' fixed cost,
+                // which read objects short of their size again and again.
+                double rows = (_target - _dataRead) / (lined ? Math.Max(_bytesPerRow, _stretchRate) : _bytesPerRow);
                 if (rows < (long.MaxValue >> 2))
                 {
                     long byWeight = _rowsRead + Math.Max((long)Math.Ceiling(rows), 1);
@@ -2678,6 +2707,12 @@ internal static partial class DatasetCompactor
             // The rows past the file's whole blocks, which wait for the chunks after, at what a row weighs.
             long data = end.DataBytes + (long)((_rows - end.Rows) * _bytesPerRow);
 
+            // What a row weighed over the stretch since the last reading, the last object's for an object's first.
+            if (_rows > _rowsRead)
+            {
+                _stretchRate = Math.Max(0, (double)(data - _dataRead) / (_rows - _rowsRead));
+            }
+
             _rowsRead = _rows;
             _dataRead = data;
             _full = data >= _target - _slack;
@@ -2696,8 +2731,13 @@ internal static partial class DatasetCompactor
         private bool _full;
 
         // What a row weighs in the object last read, its data over its rows at that reading, the stream's next object going
-        // by it until its own first reading; before any, what a row of the job's inputs weighs (FirstBytesPerRow).
+        // by it until its own first reading; before any, what a row of the job's inputs weighs (FirstBytesPerRow), which stays
+        // what places readings while the weight of the rows moves.
         private double _bytesPerRow;
+        private double _inputBytesPerRow;
+
+        // What a row weighed over the stretch between the last two readings, 0 before one.
+        private double _stretchRate;
 
         // The stream's first row, which the rows it handed over count from.
         private readonly long _startRow;
@@ -2747,7 +2787,7 @@ internal static partial class DatasetCompactor
         /// <summary>What a row of the job's inputs weighs: what places a stream's first reading.</summary>
         internal double FirstBytesPerRow
         {
-            init => _bytesPerRow = value;
+            init => _bytesPerRow = _inputBytesPerRow = value;
         }
 
         /// <summary>The ends of groups of rows the job asked its objects' writers for, each to read what an object held (<see cref="ReadSizeAsync"/>).</summary>

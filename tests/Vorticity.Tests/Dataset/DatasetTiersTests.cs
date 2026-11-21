@@ -362,6 +362,30 @@ public sealed partial class DatasetTiersTests
     }
 
     /// <summary>
+    /// Light rows first, then rows under services of their own that encode to some ten times what they do, in objects of
+    /// hundreds of blocks whose writer ends a group every four million rows: no reading in between but the job's. An end
+    /// aimed at what the light rows weighed falls deep in the heavy ones, and one a quarter of an object's rows apart at
+    /// the latest (<see cref="DatasetOptions.RowWeightDrift"/>) keeps every object but the last within a quarter of its
+    /// size past it: 97 to 101 % of it, where an object without them held 371 % (2026-11-21).
+    /// </summary>
+    [Fact]
+    public async Task HeavierRowsPastLightOnesEndTheirObjectNearItsSize()
+    {
+        const long Top = 256 << 10;
+        List<(long Bytes, long Data, long Rows)> objects = await ConsolidatedAsync(
+            Top,
+            chunkBytes: 1 << 20,
+            static (first, count) => [.. Enumerable.Range(0, count).Select(i => (first + i) % 4 == 0
+                ? new Row(0, $"b-{(uint)((first + i) * 2_654_435_761L):x8}{(uint)((first + i) * 40_503L):x8}{first + i:x8}", first + i, 0, 0)
+                : new Row(0, $"a-{(first + i) % 3}", first + i, (int)((first + i) / 48), 0))],
+            groupRows: 1L << 22);
+        string sizes = string.Join(", ", objects);
+        Console.WriteLine($"HEAVIER PAST LIGHT: {sizes}");
+        Assert.True(objects.Count >= 3, sizes);
+        Assert.All(objects.SkipLast(1), held => Assert.InRange(held.Data, Top * (1 - DatasetOptions.DefaultObjectEndSlack), Top * 5 / 4));
+    }
+
+    /// <summary>
     /// The same over rows of some thousand keys whose day, status and measure encode to a hundredth of their bytes, in
     /// chunks of 4 KiB, so that every column writes chunks within an object: the data of every object but the last holds
     /// its size within a group of rows. A column counted at a sixteenth of its bytes at least, the rate its chunk is due by,
@@ -384,7 +408,7 @@ public sealed partial class DatasetTiersTests
     /// in the order of their rows, into objects aimed at <paramref name="top"/> bytes of data, in blocks of 256 rows and
     /// column chunks aimed at <paramref name="chunkBytes"/>; every row read back.
     /// </summary>
-    private static async Task<List<(long Bytes, long Data, long Rows)>> ConsolidatedAsync(long top, int chunkBytes, Func<long, int, Row[]> rows)
+    private static async Task<List<(long Bytes, long Data, long Rows)>> ConsolidatedAsync(long top, int chunkBytes, Func<long, int, Row[]> rows, long groupRows = GroupRows)
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
@@ -400,7 +424,7 @@ public sealed partial class DatasetTiersTests
             Write = new VortexWriteOptions { BlockRows = 256 },
             ChunkBytes = chunkBytes,
             ContentsObjectBytes = 0,
-            GroupRows = GroupRows,
+            GroupRows = groupRows,
         }, Ct);
         List<Row> all = [];
         for (int a = 0; a < 16; a++)

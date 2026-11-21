@@ -108,6 +108,12 @@ public sealed record DatasetOptions
     /// (<see cref="VortexFileWriter.EndGroupAsync"/>): an object that holds the size less this share is sealed at its next
     /// key, and one that holds less asks for another end.
     /// </summary>
+    /// <remarks>
+    /// Measured on consolidations aimed at 64 MiB at degree 14 (2026-11-21): the readings that sealed an object found 97.4
+    /// to 102.1 % of its size on log records, 99.9 to 100 % on metric records, and none fell between 90 % and the slack's
+    /// edge. A sixty-fourth would have asked two more ends on the logs, each a short chunk of every column, and a wider
+    /// slack would have sealed no object sooner.
+    /// </remarks>
     internal double ObjectEndSlack { get; init; } = DefaultObjectEndSlack;
 
     /// <summary>The default of <see cref="ObjectEndSlack"/>.</summary>
@@ -116,8 +122,9 @@ public sealed record DatasetOptions
     /// <summary>
     /// The share by which what a row weighs may grow over the rows a job's object can still take, the job's left and those
     /// of its partition value: a job asks for no end of a group by the weight of the rows while those rows, at what a row
-    /// weighed at the object's last end and this share more, leave the object short of its size, which it then closes
-    /// before it fills.
+    /// weighed and this share more, leave the object short of its size, which it then closes before it fills. And a reading
+    /// a job places every quarter of an object's rows waits for the writer's next end of a group when that end falls
+    /// within this share past it.
     /// </summary>
     internal double RowWeightDrift { get; init; } = DefaultRowWeightDrift;
 
