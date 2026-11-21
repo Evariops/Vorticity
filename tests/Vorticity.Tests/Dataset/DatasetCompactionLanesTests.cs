@@ -101,13 +101,11 @@ public sealed partial class DatasetCompactionLanesTests
     /// inputs whatever the batches its inputs are read in, which the memory the job measures decides; an input that ran
     /// through the keys equal to another's wrote them first or not depending on where its batch ended. Cut in slices of
     /// 2 048 rows, the merge is the same at any degree too, its slices merged ahead on the lanes free or by the job's flow.
-    /// Cut in ranges of 12 000 rows, each range writing objects of its own, side by side past one lane, it is too.
     /// </summary>
     [Theory]
-    [InlineData(0, 0)]
-    [InlineData(2_048, 0)]
-    [InlineData(0, 12_000)]
-    public async Task AConsolidationWritesTheSameSegmentsAtAnyDegreeAndOnAnyRun(int sliceRows, int rangeRows)
+    [InlineData(0)]
+    [InlineData(2_048)]
+    public async Task AConsolidationWritesTheSameSegmentsAtAnyDegreeAndOnAnyRun(int sliceRows)
     {
         // Blocks of 256 rows, so that an object is aimed at dozens of them and its writer sends several through at once.
         List<CompactionResult> sliced = await SameSegmentsAtDegreesAsync(
@@ -118,19 +116,12 @@ public sealed partial class DatasetCompactionLanesTests
                 // Slices of a few thousand rows over inputs of chunks of 4 KiB, which they cut a column's chunks of: a merge
                 // takes no more slices than half the chunks an input holds of a column.
                 DatasetOptions options = OptionsOf(session) with { Write = new VortexWriteOptions { BlockRows = 256 } };
-                options = rangeRows > 0 ? options with { RangeRows = rangeRows } : options;
                 return sliceRows > 0 ? options with { SliceRows = sliceRows, ChunkBytes = 4 << 10 } : options;
             });
 
         // At four lanes and fourteen, the writers sent blocks through their line, several at once, and the bytes are those of
         // one; with chunks of 4 KiB, a block is a chunk of its own, which goes through alone.
-        if (rangeRows > 0)
-        {
-            // A day of some 24 000 rows in two ranges, their objects apart, merged side by side past one lane.
-            Assert.True(sliced.Max(static job => job.ObjectsOut) >= 2, "no job wrote its ranges' objects apart");
-            Assert.True(sliced.Max(static job => job.RangesAtOnce) >= 2, "no ranges merged side by side");
-        }
-        else if (sliceRows == 0)
+        if (sliceRows == 0)
         {
             Assert.True(sliced.Sum(static job => job.WriterBlocksOnLine) > 0, "no block went through a writer's line");
         }
@@ -142,34 +133,6 @@ public sealed partial class DatasetCompactionLanesTests
             // Each block a chunk of 4 KiB alone, cut column by column past one lane, the blocks after it going through.
             Assert.True(sliced.Sum(static job => job.WriterChunksCutOnLine) > 0, "no chunk was cut column by column on a writer's line");
         }
-    }
-
-    /// <summary>
-    /// Six appends of two days into objects aimed at a gibibyte, consolidated with a range each 12 000 rows: a day, some
-    /// 24 000 rows that weigh far less than an object, is merged as one range into one object. Cut by its rows alone, in
-    /// two ranges, a day wrote two objects, one a range, whatever the size its objects aim at.
-    /// </summary>
-    [Fact]
-    public async Task AMergeOfAnObjectsWorthAtMostRunsAsOneRange()
-    {
-        Random random = new Random(29);
-        await using MemoryObjectStore store = new MemoryObjectStore();
-        DatasetOptions options = OptionsOf(VortexSession.Default);
-        options = options with { Layout = options.Layout! with { ObjectBytes = 1L << 30 }, RangeRows = 12_000 };
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Doc.Schema, options, Ct);
-        for (int a = 0; a < 6; a++)
-        {
-            Doc[] rows = [.. Enumerable.Range(a * 8_000, 8_000).Select(i => new Doc(random.Next(0, 2), $"svc-{random.Next(0, 60):D2}", i, Attributes(random)))];
-            await using ObjectDraft draft = dataset.StartObject();
-            await draft.Writer.WriteAsync<Doc>(rows, Ct);
-            await dataset.AppendAsync(draft, Ct);
-        }
-
-        IReadOnlyList<CompactionResult> results = await dataset.ConsolidateAsync(Ct);
-        string ran = string.Join(", ", results.Select(static job => $"{job.Trigger} {job.ObjectsIn}->{job.ObjectsOut}, {job.Rows} rows, {job.RangesAtOnce} ranges at once"));
-        Assert.True(results.Count == 2, ran);
-        Assert.All(results, job => Assert.True(job.Rows > 12_000 * 3 / 2 && job.ObjectsOut == 1 && job.RangesAtOnce == 1, ran));
-        Assert.Equal(48_000, await dataset.ScanBuilder().CountAsync(Ct));
     }
 
     /// <summary>

@@ -74,9 +74,9 @@ public sealed record CompactionResult
     internal int BoundRestarts { get; init; }
 
     /// <summary>
-    /// The most ranges of the key the job merged at once, as many as the budget admitted and the lanes free let run: a merge
-    /// of several ranges' worth, each range writing objects of its own, or a piece of a consolidation, the ranges below its cut
-    /// the slices of its stream; 1 for any other job.
+    /// The most ranges of the key the job merged at once, as many as the budget admitted and the lanes free let run: a piece
+    /// of a consolidation, the ranges below its cut the slices of its one stream; 1 for any other job, which writes one
+    /// stream of objects.
     /// </summary>
     public int RangesAtOnce { get; init; } = 1;
 
@@ -423,12 +423,11 @@ internal static partial class DatasetCompactor
         // Each object it streams is announced to the store as at most what the job reads, times what a job
         // writes a byte at worst; one that runs past it starts the job again under a bound twice as large. The objects the
         // job's own flow writes give its lane back while they wait for the store.
-        ObjectStream OutputsOf(CompactionJob ran, int doublings, Execution.HeldLane? lane, int ranges = 1) => new ObjectStream(
+        ObjectStream OutputsOf(CompactionJob ran, int doublings, Execution.HeldLane? lane) => new ObjectStream(
             dataset, schema, ran.TargetBytes, ran.FirstRow, inKeyOrder: merge, rowBound: ran.Rows,
             ran.ToLevel, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn), endsBySize: !ran.OneObject || doublings > 0)
         {
             Lane = lane,
-            Ranges = ranges,
             FirstBytesPerRow = (double)ran.Bytes / Math.Max(ran.Rows, 1),
             RowsByValue = merge ? RowsByValueOf(schema.Cut, ran) : null,
             AdmitsAhead = memory.AdmitsWrite,
@@ -447,9 +446,8 @@ internal static partial class DatasetCompactor
         // A merge of several objects' worth, a consolidation's or a level's, runs as one stream of objects cut in slices of the
         // key, merged ahead on the lanes free (SlicedMerge), its writer sending several blocks through at once: the same
         // objects at any degree. It ran in ranges of the key side by side, as many as the session's lanes, each writing
-        // objects of its own, so that one consolidation wrote 12 objects on one lane and 14 on four (2026-11-17). A merge of
-        // several ranges' worth by its rows, never the degree, runs in ranges again (RangesAsync), each range's objects its own.
-        // The destination's objects, in the key's order: those of one stream, or of each range in turn.
+        // objects of its own, so that one consolidation wrote 12 objects on one lane and 14 on four (2026-11-17).
+        // The destination's objects, in the key's order: those of its one stream.
         ObjectStream[] streams;
         ObjectStream? lateOutputs = null;
         long rows;
@@ -463,110 +461,89 @@ internal static partial class DatasetCompactor
         // What the inputs' batches weigh decoded, which the handle keeps for the next job's plan.
         RowMeter meter = new RowMeter();
 
-        // A merge of several ranges' worth (KeyRanges.RangesOf), by its rows and never the degree, writes each range's objects
-        // with a writer of its own, ranges side by side as the job's room holds them: one writer's line was the bound of a
-        // consolidation of 74 appends of metric records, 474 µs a block from 12 lanes as from 14 (2026-11-18). Not a merge of
-        // a value's shreddings, each object of a range shredding the paths of the first, nor one with rows come late, nor a
-        // piece of a consolidation; and only over inputs whose indexes cut it.
-        KeyRanges? ranges = null;
-        if (merge && late is null && piece is null && shreddings is not { Count: > 1 } && KeyRanges.RangesOf(dataset, ran) >= 2)
-        {
-            using Activity? cutting = DatasetTelemetry.StartCompactionPass("ranges");
-            ranges = await KeyRangesAsync(dataset, schema, ran, KeyRanges.RangesOf(dataset, ran), cancellationToken).ConfigureAwait(false);
-            ranges = ranges is { Count: >= 2 } ? ranges : null;
-        }
-
+        // A job writes one stream of objects, each ended where its data reaches the size it aims at. Ranges of the key, each
+        // writing objects of its own side by side, were given up on 2026-11-21: on an M4 Pro at degree 14 they gave no time
+        // back, took up to 15 % more processor, and each range ended its last object where its rows ended, at 61 to 66 % of
+        // the size aimed at.
         Activity? writing = DatasetTelemetry.StartCompactionPass("write");
         try
         {
-            if (ranges is not null)
+            // A job takes what its blocks hold, never past the jobs' budget: a block refused gives the job up, and the handle's
+            // next plan takes fewer inputs. Its inputs' batches take what the budget leaves of it once its writer and its open
+            // inputs are counted.
+            // A merge of slices' worth is cut in slices of the key, merged side by side on lanes free and taken in order into
+            // one stream (SlicedMerge): its batches priced for the slices ahead it may merge, whatever the degree. A piece of
+            // several ranges below its cut takes them as its slices, each counting what it takes of each input.
+            KeyRanges? slices = null;
+            int sliceCount = 0;
+            if (piece is { Merged: > 1 })
             {
-                int restarts;
-                (streams, rows, atOnce, batchRows, restarts) = await RangesAsync(
-                    dataset, schema, ran, ranges, writer, meter, memory, doublings => OutputsOf(ran, doublings, null, ranges.Count), cancellationToken).ConfigureAwait(false);
-                boundRestarts += restarts;
-                openAtOnce = ranges.MostInputs * atOnce;
+                slices = piece.Ranges;
+                sliceCount = piece.Merged;
             }
-            else
+            else if (merge && piece is null && KeyRanges.SlicesOf(dataset, ran) >= 2)
             {
-                // A job takes what its blocks hold, never past the jobs' budget: a block refused gives the job up, and the
-                // handle's next plan takes fewer inputs. Its inputs' batches take what the budget leaves of it once its writer
-                // and its open inputs are counted.
-                // A merge of slices' worth is cut in slices of the key, merged side by side on lanes free and taken in order
-                // into one stream (SlicedMerge): its batches priced for the slices ahead it may merge, whatever the degree. A
-                // piece of several ranges below its cut takes them as its slices, each counting what it takes of each input:
-                // they merged side by side, each writing objects of its own.
-                KeyRanges? slices = null;
-                int sliceCount = 0;
-                if (piece is { Merged: > 1 })
+                using Activity? cutting = DatasetTelemetry.StartCompactionPass("slices");
+                slices = await KeyRangesAsync(dataset, schema, ran, KeyRanges.SlicesOf(dataset, ran), cancellationToken).ConfigureAwait(false);
+            }
+
+            int open = !merge ? 1 : slices is null ? ran.Inputs.Count : slices.MostInputs * (1 + SlicesAheadPriced);
+            batchRows = InputBatchRows(dataset, schema, ran, open, JobBudget(dataset), writer);
+            memory.Sizing = (batchRows, open);
+            for (int doublings = 0; ; doublings++)
+            {
+                lateOutputs = late is null ? null : new ObjectStream(
+                    dataset, schema, ran.Bytes, ran.FirstRow, inKeyOrder: true, rowBound: ran.Rows,
+                    0, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn), endsBySize: false)
                 {
-                    slices = piece.Ranges;
-                    sliceCount = piece.Merged;
+                    Arrival = Latest(ran),
+                    Budget = memory.Writer,
+                    Lane = memory.Lane,
+                    AdmitsAhead = memory.AdmitsWrite,
+                };
+                ObjectStream outputs = OutputsOf(ran, doublings, memory.Lane);
+                try
+                {
+                    // A piece reads its first range alone, below its cut, and counts what it takes of each input.
+                    if (piece is not null)
+                    {
+                        Array.Clear(piece.Emitted);
+                    }
+
+                    rows = merge
+                        ? await MergeAsync(
+                            dataset, schema, ran, outputs, late, lateOutputs, batchRows, meter, memory, cancellationToken,
+                            slices is null ? piece?.Ranges : null, 0, piece?.Emitted, writer, slices, sliceCount).ConfigureAwait(false)
+                        : await ConcatenateAsync(dataset, schema, ran, outputs, memory, cancellationToken).ConfigureAwait(false);
+                    await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
+                    if (lateOutputs is not null)
+                    {
+                        await lateOutputs.FinishAsync(cancellationToken).ConfigureAwait(false);
+                    }
+
+                    streams = [outputs];
+                    atOnce = piece is not null ? outputs.SlicesAtOnce : 1;
+                    openAtOnce = slices is null ? 0 : slices.MostInputs * outputs.SlicesAtOnce;
+                    break;
                 }
-                else if (merge && piece is null && KeyRanges.SlicesOf(dataset, ran) >= 2)
+                catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
                 {
-                    using Activity? cutting = DatasetTelemetry.StartCompactionPass("slices");
-                    slices = await KeyRangesAsync(dataset, schema, ran, KeyRanges.SlicesOf(dataset, ran), cancellationToken).ConfigureAwait(false);
+                    await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
+                    boundRestarts++;
                 }
-
-                int open = !merge ? 1 : slices is null ? ran.Inputs.Count : slices.MostInputs * (1 + SlicesAheadPriced);
-                batchRows = InputBatchRows(dataset, schema, ran, open, JobBudget(dataset), writer);
-                memory.Sizing = (batchRows, open);
-                for (int doublings = 0; ; doublings++)
+                catch (LateRows.Overflow)
                 {
-                    lateOutputs = late is null ? null : new ObjectStream(
-                        dataset, schema, ran.Bytes, ran.FirstRow, inKeyOrder: true, rowBound: ran.Rows,
-                        0, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn), endsBySize: false)
-                    {
-                        Arrival = Latest(ran),
-                        Budget = memory.Writer,
-                        Lane = memory.Lane,
-                        AdmitsAhead = memory.AdmitsWrite,
-                    };
-                    ObjectStream outputs = OutputsOf(ran, doublings, memory.Lane);
-                    try
-                    {
-                        // A piece reads its first range alone, below its cut, and counts what it takes of each input.
-                        if (piece is not null)
-                        {
-                            Array.Clear(piece.Emitted);
-                        }
-
-                        rows = merge
-                            ? await MergeAsync(
-                                dataset, schema, ran, outputs, late, lateOutputs, batchRows, meter, memory, cancellationToken,
-                                slices is null ? piece?.Ranges : null, 0, piece?.Emitted, writer, slices, sliceCount).ConfigureAwait(false)
-                            : await ConcatenateAsync(dataset, schema, ran, outputs, memory, cancellationToken).ConfigureAwait(false);
-                        await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
-                        if (lateOutputs is not null)
-                        {
-                            await lateOutputs.FinishAsync(cancellationToken).ConfigureAwait(false);
-                        }
-
-                        streams = [outputs];
-                        atOnce = piece is not null ? outputs.SlicesAtOnce : 1;
-                        openAtOnce = slices is null ? 0 : slices.MostInputs * outputs.SlicesAtOnce;
-                        break;
-                    }
-                    catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
-                    {
-                        await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
-                        boundRestarts++;
-                    }
-                    catch (LateRows.Overflow)
-                    {
-                        // The late rows weigh too much to stand apart: the exit as planned, merged with the objects they meet.
-                        await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
-                        late = null;
-                        lateOutputs = null;
-                        ran = job;
-                        doublings = -1;
-                    }
-                    catch
-                    {
-                        await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
-                        throw;
-                    }
+                    // The late rows weigh too much to stand apart: the exit as planned, merged with the objects they meet.
+                    await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
+                    late = null;
+                    lateOutputs = null;
+                    ran = job;
+                    doublings = -1;
+                }
+                catch
+                {
+                    await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
+                    throw;
                 }
             }
         }
@@ -2860,12 +2837,6 @@ internal static partial class DatasetCompactor
         internal Execution.HeldLane? Lane { get; init; }
 
         /// <summary>
-        /// The ranges of its job, each a stream of its own (<see cref="RangesAsync"/>), whose writers gather their columns within
-        /// the job's gathering ceiling over them; 1 for a job of one stream.
-        /// </summary>
-        internal int Ranges { get; init; } = 1;
-
-        /// <summary>
         /// Whether the job's memory admits one more block in flight on an object's writer's line past the one that must go
         /// (<see cref="JobMemory.AdmitsWrite"/>); null for always.
         /// </summary>
@@ -3042,7 +3013,7 @@ internal static partial class DatasetCompactor
             output = _dataset.StartObjectUnder(
                 _schema, _inKeyOrder, _rowBound, contents: Keys is not null, synopses: Keys is not null, shredded: shredding?.Shredded,
                 variantChunks: shredding?.VariantChunks, byteBound: _byteBound, countsPaths: shredding is not null, postings: Postings, budget: Budget,
-                lane: Lane, admitsAhead: AdmitsAhead, gatherShare: Ranges);
+                lane: Lane, admitsAhead: AdmitsAhead);
             _output = output;
             output.Writer.Ledger = Ledger;
             output.Writer.FlightDepth = FlightDepthOf(output.Writer.BlockRows);

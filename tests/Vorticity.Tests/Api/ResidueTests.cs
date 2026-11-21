@@ -69,6 +69,14 @@ public sealed class ResidueTests
         (Compactor, @"\bMeasuredRollAsync\b", 0),
         (Compactor, @"\bRestarted\b", 0),
         (Compactor, @"\b_measured\b", 0),
+
+        // The ranges of a job's merge, each written by a writer of its own into objects of its own, side by side, and the rule
+        // that cut a merge in as many as divided its objects evenly: given up on 2026-11-21, a job writing one stream.
+        (Dataset, @"\bRangesOf\b", 0),
+        (Dataset, @"\bRangeRows\b", 0),
+        (Dataset, @"\bMostRanges\b", 0),
+        (Dataset, @"\bRangesAsync\b", 0),
+        (Dataset, @"\bgatherShare\b", 0),
     ];
 
     [Fact]

@@ -19,9 +19,6 @@ internal static partial class DatasetCompactor
     /// <summary>The most slices a merge is cut in.</summary>
     private const int MostSlices = 64;
 
-    /// <summary>The most ranges a merge is cut in, each writing objects of its own (<see cref="KeyRanges.RangesOf"/>).</summary>
-    private const int MostRanges = 8;
-
     /// <summary>
     /// The slices ahead of the one being taken a sliced merge prices its inputs' batches for, whatever the degree, so that
     /// the batches, and the runs they cut, are the same at any degree: the slices that merge ahead are as many as lanes free
@@ -545,8 +542,9 @@ internal static partial class DatasetCompactor
     }
 
     /// <summary>
-    /// The ranges of the key a consolidation runs side by side: the cuts between them, keys of the tree's order that lead
-    /// keys rather than hold whole ones, and the rows of each input each range reads.
+    /// Ranges of the key, which a merge cuts its rows in: the slices of one stream (<see cref="SlicedMerge"/>), or the parts
+    /// below a piece's cut. The cuts between them are keys of the tree's order that lead keys rather than hold whole ones,
+    /// with the rows of each input each range reads.
     /// </summary>
     private sealed class KeyRanges(byte[][] cuts, RowRange[][] rows)
     {
@@ -571,50 +569,6 @@ internal static partial class DatasetCompactor
             long perInput = job.Bytes / Math.Max(1, job.Inputs.Count);
             long chunks = perInput / ((long)columns * Math.Max(1, dataset.Options.ChunkBytes));
             return (int)Math.Clamp(Math.Min(byRows, chunks / 2), 0, MostSlices);
-        }
-
-        /// <summary>
-        /// The ranges a merge of <paramref name="job"/> is cut in, each writing objects of its own: the most that the objects
-        /// its inputs weigh divide into evenly, one a <see cref="DatasetOptions.RangeRows"/> of its rows at most, rounded,
-        /// and <see cref="MostRanges"/> at most; never the degree, so that its objects are the same at any degree. Fewer than
-        /// two for none.
-        /// </summary>
-        /// <remarks>
-        /// <para>
-        /// A range ends its last object where its rows end, whatever the size its objects aim at. Cut by its rows alone, a
-        /// consolidation of 200 million metric records aimed at 256 MiB wrote eight objects of 107 MiB, one a range, and
-        /// one of 51.8 million aimed at 1 GiB three objects for 248 MB. A whole number of objects a range, by what the
-        /// inputs weigh: a job of an object at most runs as one range and writes one object, and one of three objects as
-        /// three ranges of an object each.
-        /// </para>
-        /// <para>
-        /// What the ranges are worth, measured on those jobs at degree 14 once a writer's line cut its chunks column by
-        /// column (2026-11-20): 2.1 s in three ranges for 2.2 to 2.3 s in one under 16 GiB on metric records, 2.9 s for
-        /// 2.7 to 2.8 s under 2 GiB, where the ranges go one after another, and 6.3 to 6.5 s in two ranges for 6.1 to
-        /// 6.2 s in one on log records.
-        /// </para>
-        /// </remarks>
-        internal static int RangesOf(VortexDataset dataset, CompactionJob job)
-        {
-            long rows = Math.Max(1, dataset.Options.RangeRows);
-            long byRows = Math.Clamp((job.Rows + (rows / 2)) / rows, 0, MostRanges);
-            long objects = ObjectsOf(job);
-            for (long ranges = Math.Min(byRows, objects); ranges >= 2; ranges--)
-            {
-                if (objects % ranges == 0)
-                {
-                    return (int)ranges;
-                }
-            }
-
-            return 1;
-        }
-
-        /// <summary>The objects the inputs of <paramref name="job"/> weigh, at the size its objects aim at, rounded up.</summary>
-        internal static long ObjectsOf(CompactionJob job)
-        {
-            long target = Math.Max(1, job.TargetBytes);
-            return Math.Max(1, (job.Bytes + target - 1) / target);
         }
 
         /// <summary>The ranges.</summary>
@@ -883,139 +837,6 @@ internal static partial class DatasetCompactor
         {
             int order = indexes[(int)(left >> 32)]![(int)left].SequenceCompareTo(indexes[(int)(right >> 32)]![(int)right]);
             return order != 0 ? order : left.CompareTo(right);
-        }
-    }
-
-    /// <summary>
-    /// The ranges of a merge, each into objects of its own (<see cref="KeyRanges.RangesOf"/>), side by side on the caller
-    /// and on lanes free, as many at once as the room the jobs' budget leaves the job holds what a range costs, its writer
-    /// and its inputs open, one at least: each range's objects, in the ranges' order; the rows they hold together; the ranges
-    /// at once; the rows of an input's batch; and the ranges begun again under a doubled bound. A range whose object runs
-    /// past its bound begins again under a bound twice as large, alone; a failure stops the others, and every object written
-    /// is given up.
-    /// </summary>
-    /// <remarks>
-    /// The objects are the same at any degree: the ranges, their cuts and the batches their inputs read are the job's, and
-    /// each range's objects are its own stream's. A range's stream holds no lane of the job's own (<see cref="ObjectStream.Lane"/>),
-    /// which two writers waiting for the store would each give back.
-    /// </remarks>
-    private static async ValueTask<(ObjectStream[] Streams, long Rows, int AtOnce, int BatchRows, int Restarts)> RangesAsync(
-        VortexDataset dataset,
-        DatasetSchema schema,
-        CompactionJob job,
-        KeyRanges ranges,
-        long writer,
-        RowMeter meter,
-        JobMemory memory,
-        Func<int, ObjectStream> outputsOf,
-        CancellationToken cancellationToken)
-    {
-        int count = ranges.Count;
-        ObjectStream?[] streams = new ObjectStream?[count];
-        long[] rows = new long[count];
-        int restarts = 0;
-
-        // Each range's writer gathers within the job's ceiling over the ranges (ObjectStream.Ranges), and is priced at the job's
-        // writer over them: the writers of every range together take what one writer of the job would. The batches take what
-        // the budget leaves once the writers and every range's inputs open are counted, so that the ranges fit side by side,
-        // whatever the degree; as many ranges at once as the room holds at that price. Priced at a whole writer each, five
-        // times the gathering ceiling before a job measured it, a range took 7.2 GiB of a jobs' budget of 10.5, and the
-        // ranges of a consolidation of metric records went one after another; their batches sized for one range alone, the
-        // two ranges of a consolidation of log records did too (2026-11-18).
-        long perWriter = Math.Max(1, writer / count);
-        int batchRows = InputBatchRows(dataset, schema, job, ranges.MostInputs * count, JobBudget(dataset), writer);
-        long perRange = perWriter + InputsBytes(dataset, schema, job, ranges.MostInputs, batchRows);
-
-        // A quarter of a range's price left over: two ranges of a consolidation of metric records under 2 GiB, priced at the
-        // jobs' budget of 672 MiB together, held 684, their inputs a third past their price and their writers below it, and
-        // the job was refused; with that room kept, it runs its ranges one after another, and three at once under 16 GiB.
-        int atOnce = (int)Math.Clamp((memory.Room - (perRange / 4)) / perRange, 1, count);
-
-        // After a refusal, no more inputs open at once than the refused job held.
-        if (dataset.JobSizingCap.Open is > 0 and int open)
-        {
-            atOnce = Math.Clamp(open / Math.Max(1, ranges.MostInputs), 1, atOnce);
-        }
-
-        memory.Sizing = (batchRows, ranges.MostInputs * atOnce);
-        memory.WriterPrice = perWriter * atOnce;
-
-        // The ranges that merged at once, as the lanes free let them, which the job reports.
-        int running = 0;
-        int peak = 0;
-        try
-        {
-            await Execution.LaneWorkers.ForAsync(
-                dataset.Session.Lanes,
-                count,
-                atOnce,
-                async (range, token) =>
-                {
-                    int now = Interlocked.Increment(ref running);
-                    for (int seen = Volatile.Read(ref peak); now > seen && Interlocked.CompareExchange(ref peak, now, seen) != seen; seen = Volatile.Read(ref peak))
-                    {
-                    }
-
-                    try
-                    {
-                        await MergeRangeAsync(range, token).ConfigureAwait(false);
-                    }
-                    finally
-                    {
-                        Interlocked.Decrement(ref running);
-                    }
-                },
-                cancellationToken).ConfigureAwait(false);
-        }
-        catch
-        {
-            // The ranges written before the failure are given up with it.
-            foreach (ObjectStream? finished in streams)
-            {
-                if (finished is not null)
-                {
-                    await finished.AbandonAsync().ConfigureAwait(false);
-                }
-            }
-
-            throw;
-        }
-
-        long total = 0;
-        ObjectStream[] written = new ObjectStream[count];
-        for (int range = 0; range < count; range++)
-        {
-            total += rows[range];
-            written[range] = streams[range]!;
-        }
-
-        return (written, total, Math.Max(peak, 1), batchRows, restarts);
-
-        // A range into objects of its own, begun again alone under a doubled bound when an object passes it.
-        async ValueTask MergeRangeAsync(int range, CancellationToken token)
-        {
-            for (int doublings = 0; ; doublings++)
-            {
-                ObjectStream outputs = outputsOf(doublings);
-                try
-                {
-                    rows[range] = await MergeAsync(
-                        dataset, schema, job, outputs, null, null, batchRows, meter, memory, token, ranges, range, null, perWriter * atOnce).ConfigureAwait(false);
-                    await outputs.FinishAsync(token).ConfigureAwait(false);
-                    streams[range] = outputs;
-                    return;
-                }
-                catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
-                {
-                    await outputs.AbandonAsync().ConfigureAwait(false);
-                    Interlocked.Increment(ref restarts);
-                }
-                catch
-                {
-                    await outputs.AbandonAsync().ConfigureAwait(false);
-                    throw;
-                }
-            }
         }
     }
 }

@@ -178,7 +178,7 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
             (int)Option(args, "--repeat", 1), args.Contains("--quick-exit"), args.Contains("--bytes-digest"), Text(args, "--memory-timeline"), Text(args, "--segments"),
             args.Contains("--takes-variants"),
             Text(args, "--object-bytes") is { } aim ? VortexMemory.ParseBytes(aim) ?? throw new ArgumentException($"--object-bytes {aim} is not a size: 64m, 1g.") : 0,
-            args.Contains("--calm"), args.Contains("--object-sizes"), Option(args, "--range-rows", 0))),
+            args.Contains("--calm"), args.Contains("--object-sizes"))),
     ["inputs"] = ("--store DIR: what the inputs of a merge hold while it reads them, 1 to 8 of a dataset's largest objects in lockstep (InputMemoryMicro.cs)", () =>
         InputMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro inputs needs --store DIR, a dataset's directory."), (int)Option(args, "--objects", 8))),
     ["consolidation"] = ("--store DIR: what a consolidation holds apart from any other work, hours of log records left in level 0 consolidated on 1 lane and on 8 (ConsolidationMemoryMicro.cs)", () =>
