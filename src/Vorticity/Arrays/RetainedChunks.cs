@@ -98,8 +98,9 @@ internal class RetainedChunks : IDisposable
     /// <summary>A table for a scan of <paramref name="lanes"/> contexts, which borrows the process's monitor when they are several.</summary>
     /// <param name="columns">How many columns the scan reads (see the constructor).</param>
     /// <param name="lanes">How many contexts decode at once.</param>
-    internal static RetainedChunks Create(int columns, int lanes) =>
-        lanes > 1 ? new SideBySide(columns, lanes) : new RetainedChunks(columns, lanes);
+    /// <param name="waits">Whether a context that meets a chunk another is decoding waits for it rather than decode it too (<see cref="Waits"/>).</param>
+    internal static RetainedChunks Create(int columns, int lanes, bool waits = false) =>
+        lanes <= 1 ? new RetainedChunks(columns, lanes) : waits ? new Awaited(columns, lanes) : new SideBySide(columns, lanes);
 
     /// <summary>
     /// A table that contexts decoding one after another each hold a share of, and the last of them to be disposed disposes:
@@ -116,6 +117,66 @@ internal class RetainedChunks : IDisposable
         internal bool Leave() => Interlocked.Decrement(ref _holders) == 0;
     }
 
+    /// <summary>
+    /// Whether a context that meets a chunk another context is decoding has its split run again once that decode is
+    /// published (<see cref="ChunkBusyException"/>), rather than decode the chunk too into an entry of its own: what a scan
+    /// whose consumer reserves its memory asks, a compaction's input (<see cref="Awaited"/>). Lanes that reached a chunk at
+    /// once each held what a read of it decodes whole: of six inputs of 18 MiB open, the two a merge drained on thirteen
+    /// lanes held 72 and 60 MiB (2026-11-21).
+    /// </summary>
+    internal virtual bool Waits => false;
+
+    /// <summary>
+    /// Ends once the claim on <paramref name="key"/> a context met is published or given up, at once when it already is:
+    /// what the flow that runs the context's split again awaits, no thread held. A table that does not wait has none.
+    /// </summary>
+    internal virtual System.Threading.Tasks.Task WhenFreeAsync(long key) => System.Threading.Tasks.Task.CompletedTask;
+
+    /// <summary>A claim was published or given up, under the table's lock: the flows waiting for one look again.</summary>
+    private protected virtual void Freed()
+    {
+    }
+
+    /// <summary>
+    /// A table several contexts decode into in which a context that meets a chunk another is decoding waits for it
+    /// (<see cref="Waits"/>): what holds the wait, a signal the flows waiting take a turn of each time a claim is published
+    /// or given up. Apart from the table of any other scan, which pays nothing for it.
+    /// </summary>
+    private sealed class Awaited(int columns, int lanes) : SideBySide(columns, lanes)
+    {
+        // Made at the first wait; and the flows waiting on it now.
+        private SemaphoreSlim? _freed;
+        private int _waiting;
+
+        internal override bool Waits => true;
+
+        internal override System.Threading.Tasks.Task WhenFreeAsync(long key)
+        {
+            lock (Gate)
+            {
+                // Published or given up since it was met: nothing to wait for.
+                if (_disposed || Find(key) is not { NodeIndex: < 0 })
+                {
+                    return System.Threading.Tasks.Task.CompletedTask;
+                }
+
+                _waiting++;
+                _freed ??= new SemaphoreSlim(0);
+            }
+
+            return _freed.WaitAsync();
+        }
+
+        private protected override void Freed()
+        {
+            if (_waiting > 0)
+            {
+                _freed!.Release(_waiting);
+                _waiting = 0;
+            }
+        }
+    }
+
     /// <summary>The lock the claims are taken under: the table itself, or the monitor a table of several contexts borrows.</summary>
     internal virtual object Gate => this;
 
@@ -125,7 +186,7 @@ internal class RetainedChunks : IDisposable
     }
 
     /// <summary>A table several contexts decode into, side by side: it locks on a monitor the process lends it.</summary>
-    private sealed class SideBySide(int columns, int lanes) : RetainedChunks(columns, lanes)
+    private class SideBySide(int columns, int lanes) : RetainedChunks(columns, lanes)
     {
         private readonly object _gate = Scanning.LaneGates.RentMonitor();
         private bool _lent = true;
@@ -223,7 +284,14 @@ internal class RetainedChunks : IDisposable
                     return false;
                 }
 
-                // Another context is decoding the chunk: this one decodes it too, into an entry of its own.
+                // Another context is decoding the chunk. A scan that waits runs this context's split again once that decode
+                // is published, no thread held meanwhile: the wait is at the split's loop, never here.
+                if (Waits)
+                {
+                    throw new ChunkBusyException(key);
+                }
+
+                // Otherwise this one decodes it too, into an entry of its own.
                 owned = claimant;
             }
 
@@ -327,6 +395,7 @@ internal class RetainedChunks : IDisposable
 
             claim.RetainSegments();
             borrower?.Borrow(claim);
+            Freed();
         }
     }
 
@@ -342,6 +411,7 @@ internal class RetainedChunks : IDisposable
             claim.Forget();
             ReturnLoans(claim);
             Recycle(claim);
+            Freed();
         }
     }
 
@@ -463,6 +533,9 @@ internal class RetainedChunks : IDisposable
                 spare.NextSpare = null;
                 RetainedChunkPool.Shared.Return(spare);
             }
+
+            // A flow waiting for a claim finds the table gone, and none.
+            Freed();
         }
 
         GiveBackGate();
@@ -787,6 +860,7 @@ internal sealed class RetainedChunk
 
     /// <summary>The next evicted entry, while this one waits to be refilled.</summary>
     internal RetainedChunk? NextSpare;
+
 
     /// <summary>
     /// The segment its records view. A decode can hand back views onto the segment it read, a

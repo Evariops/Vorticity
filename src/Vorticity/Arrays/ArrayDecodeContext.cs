@@ -476,6 +476,8 @@ internal sealed class ArrayDecodeContext
 
             if (!_scan.TryGetRetainedChild(key, out CanonicalArena lent, out int lentNode))
             {
+                // Reserved before a byte of it is decoded, at what its header says: a scan that reserves nothing asks nothing.
+                _scan.RaiseFor(StatedBytes(in child, childDType, childLength));
                 lent = _scan.BeginRetainedChildDecode();
                 lentNode = -1;
                 try
@@ -493,6 +495,7 @@ internal sealed class ArrayDecodeContext
 
         if (!_scan.TryGetRetained(key, out CanonicalArena held, out int retained))
         {
+            _scan.RaiseFor(StatedBytes(in child, childDType, childLength));
             held = _scan.BeginRetainedDecode();
             retained = -1;
             try
@@ -507,6 +510,38 @@ internal sealed class ArrayDecodeContext
 
         return Layouts.CanonicalSlice.LendAcross(held, Canonical, retained, 0, childLength);
     }
+
+    /// <summary>
+    /// What a decode of every row of <paramref name="child"/> holds, as far as its header says it before a byte is
+    /// decoded: its values at their width, a text's view, 16 bytes, and its bytes when a zstd node says what its frames
+    /// hold decompressed, each buffer at the block the pool gives it. What a scan that reserves its memory reserves
+    /// before it decodes a child whole (<see cref="ScanContext.RaiseFor"/>); 0 for a shape no header says, whose decode
+    /// takes what the budget holds and, refused a block, is run again once that is reserved.
+    /// </summary>
+    internal static long StatedBytes(in ArrayNode child, DType dtype, int length)
+    {
+        if (length <= 0)
+        {
+            return 0;
+        }
+
+        switch (dtype.Kind)
+        {
+            case DTypeKind.Bool:
+                return InBlocks((length + 7L) >> 3);
+            case DTypeKind.Primitive:
+                return InBlocks((long)length * dtype.PType.ByteWidth());
+            case DTypeKind.Utf8 or DTypeKind.Binary:
+                long texts = child.Encoding == ArrayEncodingId.Zstd ? Decoders.Compressed.ZstdDecoder.StatedBytes(in child) : 0;
+                return InBlocks(16L * length) + InBlocks(texts);
+            default:
+                return 0;
+        }
+    }
+
+    /// <summary><paramref name="bytes"/> at the block the pool rents for them: its size class, a power of two.</summary>
+    private static long InBlocks(long bytes) =>
+        bytes <= 0 ? 0 : bytes > int.MaxValue ? bytes : MemoryAccount.Pool.CapacityFor((int)bytes);
 
     /// <summary>
     /// Decodes a child every range of its parent reads whole, a patch set or run ends: once for all

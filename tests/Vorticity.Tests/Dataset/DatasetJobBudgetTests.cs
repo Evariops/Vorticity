@@ -84,7 +84,7 @@ public sealed partial class DatasetJobBudgetTests
         IReadOnlyList<CompactionResult> results = await consolidating.WaitAsync(TimeSpan.FromSeconds(60), Ct);
         Assert.Single(results);
         Assert.Equal(4, results[0].ObjectsIn);
-        Assert.Equal(0, dataset.JobWidthCap);
+        Assert.False(results[0].StoppedShort);
         Assert.Equal(16_000, await dataset.Scan<Doc>().ToRecordsAsync(Ct).CountAsync(Ct));
         Assert.Equal(0, jobs.ReservedBytes);
     }

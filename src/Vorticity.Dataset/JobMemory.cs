@@ -8,16 +8,44 @@ namespace Vorticity.Dataset;
 
 /// <summary>
 /// The memory of one compaction job: the blocks its inputs hold, their reads, their batches and the merge's keys, and those
-/// its writer holds, its arenas, its builders and the sinks of its objects. Each under a hard budget of its own, both under
-/// the job's, under the jobs' budget of the session: a block none of them can take past the jobs' ceiling is refused, and
-/// the job gives way rather than count it past, as a lane's growth would be (<see cref="QueryMemoryBudget.Hard"/>). And
-/// the copies of its inputs in the local scratch, which it reads them from once they are large enough
-/// (<see cref="JobInputs"/>).
+/// its writer holds, its arenas, its builders and the sinks of its objects. Each under a budget of its own, both under the
+/// job's, under the jobs' budget of the session. And the copies of its inputs in the local scratch, which it reads them from
+/// once they are large enough (<see cref="JobInputs"/>).
 /// </summary>
 /// <remarks>
-/// The job learns from it what an input and its writer held at most, which the next plan of the handle sizes a job by
-/// (<see cref="VortexDataset.LearnJobCosts"/>): a measure, where a model of four constants was 1.4 to 3.1 times off on
-/// three jobs of real metric records.
+/// <para>
+/// Nothing of a job is priced before it runs, and no block is refused it to give it up. Each part that takes memory by the
+/// data reserves it just before it takes it, at a size it reads (<see cref="MemoryReserve"/>): an input, a chunk's segments
+/// in its file's footer, what a read of the chunk decodes whole in the chunk's header, a batch at what the heaviest before
+/// it held (<see cref="OpenInput"/>). Work started ahead, a window decoded ahead, a slice merged ahead, a block in flight,
+/// asks without waiting and is not started where its room is not (<see cref="AdmitsRead"/>, <see cref="AdmitsMerge"/>,
+/// <see cref="AdmitsWrite"/>).
+/// </para>
+/// <para>
+/// A reservation the job cannot go on without is asked on the flow that drives the job, which first gives back what it
+/// holds past what it needs to go on, a level at a time (<see cref="MakeRoomAsync"/>): at 0, its writers copy the runs
+/// they keep of the inputs done, which go; at 1, the blocks in flight on its writers' lines land; at 2, the slices merged
+/// ahead are given up and the batches decoded ahead given back; at 3, its writers end their group of rows, each column
+/// writing what it gathered. Once nothing of that is left, the merge ends at the key it reached and the job commits what
+/// it merged (<see cref="ReserveExhaustedException"/>): nothing it wrote is thrown away.
+/// </para>
+/// <para>
+/// The inputs' budget is never passed (<see cref="QueryMemoryBudget.Hard"/>). A block of theirs no reserve covers, a
+/// window the merge copies, is refused past it, and ends the merge as a reservation not granted does, where nothing says
+/// it ends on a whole key: the job commits the objects it had sealed, each ended where its key did, and gives up the one
+/// it was writing. A job so ended before it sealed an object commits nothing, and its handle plans again.
+/// </para>
+/// <para>
+/// The job's writer can wait on the job's flow alone, between two blocks or before a chunk leaves for its emission: a
+/// lane of it is in the middle of a chunk it cannot leave half encoded. There it reserves the copies whose size it
+/// counted, a block's rows as it is assembled and a chunk's as it leaves (<see cref="WriterReserve"/>), and, while its
+/// share does not hold them past what it holds (<see cref="AdmitsWrite"/>), waits for what it has in the air: its blocks
+/// in flight land, its chunks in emission end. A wait changes nothing of what it writes. What a lane takes past what was
+/// reserved, a shredding's copies, an encoder's output, is counted past the writer's budget rather than refused, the
+/// process bounding it (<see cref="QueryMemoryBudget.CountsPast"/>): refused one, it gave up the job and all it had
+/// written. The writer makes up for it at its next wait, and with nothing left in the air goes on at what it holds at
+/// least.
+/// </para>
 /// </remarks>
 internal sealed class JobMemory : IAsyncDisposable
 {
@@ -36,12 +64,22 @@ internal sealed class JobMemory : IAsyncDisposable
     {
         _dataset = dataset;
         Jobs = QueryMemoryBudget.JobsOf(dataset.Session);
-        Job = grant is null ? Jobs.HardChild() : Jobs.HardChild(grant);
+        // The inputs' budget is never passed. The writer's, and the job's for it, count past their ceiling what the writer
+        // could not reserve (QueryMemoryBudget.CountsPast): a writer cannot wait in the middle of a chunk.
+        Job = grant is null ? Jobs.HardChild(countsPast: true) : Jobs.HardChild(grant, countsPast: true);
         Inputs = Job.HardChild();
-        Writer = Job.HardChild();
+        Writer = Job.HardChild(countsPast: true);
         _inputs = new WorkAccount(Inputs, "compaction's inputs");
+        WriterReserve = new MemoryReserve(Writer);
         Shares = JobShares.Of(Jobs.CeilingBytes);
     }
+
+    /// <summary>
+    /// What the job's writers reserve in before they take a copy whose size they counted, on the job's flow: a block's rows
+    /// as it is assembled, a chunk's as it leaves for its emission (<see cref="ReservingAccount"/>). One for the job: its
+    /// objects are written one after the other.
+    /// </summary>
+    internal MemoryReserve WriterReserve { get; }
 
     /// <summary>The jobs' budget the job reserves in.</summary>
     internal QueryMemoryBudget Jobs { get; }
@@ -72,9 +110,6 @@ internal sealed class JobMemory : IAsyncDisposable
     /// <summary>The account its inputs' scans and the merge rent under, which the job closes at its end.</summary>
     internal MemoryAccount InputsAccount => _inputs;
 
-    /// <summary>Whether a block was refused to the job: its budget did not hold it.</summary>
-    internal bool Refused => Job.WasRefused || Inputs.WasRefused || Writer.WasRefused;
-
     /// <summary>
     /// What the inputs a merge of the job holds open at once were counted to hold at most, their windows along the keys
     /// (<see cref="DatasetCompactor.Peak"/>): what the work started ahead leaves the inputs the merge has yet to open
@@ -91,60 +126,97 @@ internal sealed class JobMemory : IAsyncDisposable
     /// <summary>
     /// What the inputs the merge has yet to open may still take: what they were counted to hold at once
     /// (<see cref="InputsPlanned"/>), less what the inputs hold now that no work ahead holds. A unit ahead is admitted in
-    /// what the inputs' share holds past it, so that an input the merge reaches finds the room its window was counted at.
+    /// what the inputs' share holds past it, so that an input the merge reaches is not kept waiting by work that could
+    /// wait: what it was counted at chooses what is started ahead, and no longer what the job may hold.
     /// </summary>
-    /// <remarks>
-    /// A merge opens an input when it reaches its first key, and cannot go on without it. Admitted by what the inputs
-    /// held alone, the windows decoded ahead of the inputs open took the room of those still to open.
-    /// </remarks>
     private long StillToOpen =>
         Math.Max(0, InputsPlanned - Math.Max(0, Inputs.ReservedBytes - (AheadHeld?.Invoke() ?? 0)));
 
-    // The inputs the job's merges opened, each with the account its scan rents under and the rows of its batches: what each
-    // held at most, measured.
-    private readonly List<(ObjectEntry Entry, CountedAccount Account, int BatchRows)> _opened = [];
+    // The inputs the job's merges opened, each with the account its scan rents under, what it reserves in, when it
+    // reserves, and the rows of its batches.
+    private readonly List<(ObjectEntry Entry, CountedAccount Account, MemoryReserve? Reserve, int BatchRows)> _opened = [];
 
     /// <summary>
     /// The account the scan of the job's input <paramref name="entry"/> rents under, read in batches of
-    /// <paramref name="batchRows"/> rows: it counts in <paramref name="under"/>, the merge's or a slice's, and tells what
-    /// the input holds (<see cref="OpenedInputs"/>).
+    /// <paramref name="batchRows"/> rows, and what it reserves in before it takes (<see cref="MemoryReserve"/>): the
+    /// account counts in <paramref name="under"/>, the merge's or a slice's, and tells what the input holds
+    /// (<see cref="OpenedInputs"/>). A reservation the input cannot go on without has the job give back what it started
+    /// ahead through <paramref name="makeRoom"/>, the way of the merge that reads it: on the flow that drives the job for
+    /// the merge that flow runs, through the runs of a slice merged ahead for that slice's
+    /// (<see cref="SlicedMerge.AskRoomAsync"/>). Without one, a scan that hands no batch over and cannot run a step
+    /// again, a first pass's, the account counts what the input holds and reserves nothing.
     /// </summary>
-    internal MemoryAccount OpenInput(ObjectEntry entry, MemoryAccount under, int batchRows)
+    internal (MemoryAccount Account, MemoryReserve? Reserve) OpenInput(ObjectEntry entry, MemoryAccount under, int batchRows, Func<int, ValueTask<bool>>? makeRoom)
     {
-        CountedAccount account = new CountedAccount(under);
+        MemoryReserve? reserve = makeRoom is null ? null : new MemoryReserve(Inputs) { MakeRoom = makeRoom };
+        CountedAccount account = new CountedAccount(under, reserve);
         lock (_opened)
         {
-            _opened.Add((entry, account, batchRows));
+            _opened.Add((entry, account, reserve, batchRows));
         }
 
-        return account;
+        return (account, reserve);
     }
 
     /// <summary>
     /// The inputs the job's merges opened so far, each with what its scan held at most and the rows of its batches: a
     /// slice that reads an input opens it again, and it is listed once a scan.
     /// </summary>
-    internal (ObjectEntry Entry, long Peak, int BatchRows)[] OpenedInputs()
+    internal (ObjectEntry Entry, long Peak, int BatchRows, MemoryReserve? Reserve)[] OpenedInputs()
     {
         lock (_opened)
         {
-            (ObjectEntry, long, int)[] inputs = new (ObjectEntry, long, int)[_opened.Count];
+            (ObjectEntry, long, int, MemoryReserve?)[] inputs = new (ObjectEntry, long, int, MemoryReserve?)[_opened.Count];
             for (int i = 0; i < inputs.Length; i++)
             {
-                inputs[i] = (_opened[i].Entry, _opened[i].Account.Peak, _opened[i].BatchRows);
+                inputs[i] = (_opened[i].Entry, _opened[i].Account.Peak, _opened[i].BatchRows, _opened[i].Reserve);
             }
 
             return inputs;
         }
     }
 
-    /// <summary>Which budget refused the job a block, and what its inputs and its writer held at most, in MiB: for its activity.</summary>
-    internal string RefusalReason =>
-        string.Create(
-            System.Globalization.CultureInfo.InvariantCulture,
-            $"refused by the {(Inputs.WasRefused ? "inputs" : Writer.WasRefused ? "writer" : "job")}, inputs {Inputs.PeakBytes >> 20} MiB, writer {Writer.PeakBytes >> 20} MiB, batches of {Sizing.BatchRows} rows, {Sizing.Open} open{(Slices?.Invoke() is { } slices ? ", " + slices : "")}");
+    /// <summary>
+    /// What the reserves of the job's inputs did together: the reservations not granted at once, the times one had the
+    /// job give back what it started ahead, and the bytes reserved.
+    /// </summary>
+    internal (long HeldBack, long MadeRoom, long Raised) Reserves
+    {
+        get
+        {
+            long heldBack = 0;
+            long madeRoom = 0;
+            long raised = 0;
+            lock (_opened)
+            {
+                foreach ((_, _, MemoryReserve? reserve, _) in _opened)
+                {
+                    heldBack += reserve?.HeldBack ?? 0;
+                    madeRoom += reserve?.MadeRoom ?? 0;
+                    raised += reserve?.Raised ?? 0;
+                }
+            }
 
-    /// <summary>What the slices of the job's merge hold and were priced at, for its activity; null for a merge in one piece.</summary>
+            return (heldBack, madeRoom, raised);
+        }
+    }
+
+    /// <summary>
+    /// What the job's flow gives back of what it started ahead at a level, set by the merge under way: its writers' part,
+    /// then the merge's own (<see cref="IMergedRuns.GiveBackAsync"/>); false for a level that gives nothing back. Null
+    /// while no merge runs.
+    /// </summary>
+    internal Func<int, ValueTask<bool>>? GiveBack { get; set; }
+
+    /// <summary>
+    /// Has the job give back what it started ahead at <paramref name="level"/>, from 0: what a reservation it cannot go on
+    /// without asks, level after level, until it is granted. On the flow that drives the job.
+    /// </summary>
+    /// <returns>False once no such level is left: the job holds what it needs to go on and nothing else.</returns>
+    internal ValueTask<bool> MakeRoomAsync(int level) =>
+        GiveBack is { } giveBack ? giveBack(level) : new ValueTask<bool>(false);
+
+    /// <summary>What the slices of the job's merge hold and were counted at, for its activity; null for a merge in one piece.</summary>
     internal Func<string>? Slices { get; set; }
 
     /// <summary>The most bytes its blocks held at once.</summary>
@@ -156,12 +228,6 @@ internal sealed class JobMemory : IAsyncDisposable
     /// <summary>The most bytes its writer's blocks held at once.</summary>
     internal long WriterPeak => Writer.PeakBytes;
 
-    /// <summary>
-    /// The rows of an input's batch and the inputs open at once, once the job sized them; 0 before: what a job refused a
-    /// block tells the next plan of what an input holds (<see cref="VortexDataset.NarrowJobs"/>).
-    /// </summary>
-    internal (int BatchRows, int Open) Sizing { get; set; }
-
     /// <summary>The bytes of its inputs it copied to the scratch; none for a job that reads them from the store.</summary>
     internal long CopiedBytes => _copies?.CopiedBytes ?? 0;
 
@@ -172,14 +238,15 @@ internal sealed class JobMemory : IAsyncDisposable
     internal long Room => Math.Max(0, Jobs.CeilingBytes - Jobs.ReservedBytes + Job.GrantLeft);
 
     /// <summary>
-    /// The bytes the writer of the job was priced at (<see cref="DatasetCompactor.WriterCost"/>), which the flows upstream of
-    /// it leave it before they take room ahead: what it does not hold yet of them is kept for it.
+    /// The bytes the writer of the job was counted to hold (<see cref="DatasetCompactor.WriterCost"/>), which the flows
+    /// upstream of it leave it before they take room ahead: what it does not hold yet of them is kept for it.
     /// </summary>
     internal long WriterPrice { get; set; }
 
     /// <summary>
-    /// What the writer was priced at, or held at most so far when that is more, past what it holds now: which the reads and
-    /// the merge ahead leave it. A writer's chunks come and go, and what it held once it takes again with the next.
+    /// What the writer was counted to hold, or held at most so far when that is more, past what it holds now: which the
+    /// reads and the merge ahead leave it. A writer's chunks come and go, and what it held once it takes again with the
+    /// next.
     /// </summary>
     private long WriterKeep => Math.Max(0, Math.Max(WriterPrice, Writer.PeakBytes) - Writer.ReservedBytes);
 
@@ -187,7 +254,7 @@ internal sealed class JobMemory : IAsyncDisposable
     /// Whether the job admits a window of <paramref name="bytes"/> decoded ahead by an input of its merge, past those its
     /// window counts: the inputs' share holds it past what they hold and what the inputs still to open may take
     /// (<see cref="JobShares.MergeAhead"/>, <see cref="StillToOpen"/>), and the room left holds it and still what the writer
-    /// may take. Counted when refused.
+    /// may take. The input then reserves it, or does not start it. Counted when refused.
     /// </summary>
     internal bool AdmitsRead(long bytes) => Admits(bytes, Inputs, Shares.MergeAhead - StillToOpen, WriterKeep, ref _readsHeldBack);
 
@@ -256,8 +323,9 @@ internal sealed class JobMemory : IAsyncDisposable
             : _dataset.RentAsync(entry, cancellationToken);
 
     /// <summary>
-    /// Closes the copies and removes them, gives back what the inputs' blocks still hold, and has the pool let go of what it
-    /// keeps past what the jobs' budget leaves now: the job's blocks went back to it, of every size the job asked for.
+    /// Closes the copies and removes them, gives back what the inputs' blocks still hold and what its parts reserved and
+    /// never took, and has the pool let go of what it keeps past what the jobs' budget leaves now: the job's blocks went
+    /// back to it, of every size the job asked for.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
@@ -267,6 +335,16 @@ internal sealed class JobMemory : IAsyncDisposable
             await copies.DisposeAsync().ConfigureAwait(false);
         }
 
+        GiveBack = null;
+        lock (_opened)
+        {
+            foreach ((_, _, MemoryReserve? reserve, _) in _opened)
+            {
+                reserve?.End();
+            }
+        }
+
+        WriterReserve.End();
         _inputs.Dispose();
 
         // What is left of the job's grant goes back now, the waiting jobs served; what its blocks still hold, as they go.

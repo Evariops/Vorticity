@@ -57,19 +57,23 @@ public sealed partial class CompactionBlockBudgetTests
     }
 
     /// <summary>
-    /// A handle under a budget of 18 MiB runs a job planned for the whole class by a handle under a large one: the job is
-    /// refused a block, given up, and a narrower one, planned by the handle itself, runs in its place within the budget;
-    /// once it ends, the budget holds nothing, and the next job has it whole.
+    /// A handle under a budget of 18 MiB runs a job planned for the whole class, sixty-four objects, by a handle under a
+    /// large one, which its own plan would not take. Its inputs reserve what they hold as they read it, within the budget;
+    /// the job runs to its end when the budget holds it, and otherwise ends short of room and commits what it merged, or
+    /// commits nothing and gives way to the job the handle plans itself. Whichever, its inputs hold within the budget,
+    /// the budget holds nothing once it ends, and the backlog compacts to its end, every row read back.
     /// </summary>
     /// <remarks>
-    /// The last job of the backlog, two objects of 60 000 rows, held 16.22 MB of a budget of 16 MiB, then 16.74 MB once an
-    /// input's batch stays until the writers copied the runs they keep of it (2026-11-17): refused under a busy test run, it
-    /// narrowed nothing. 18 MiB holds it, and still refuses the first job, planned at the whole class. The handle planned
-    /// that job itself, having learned that an input and a writer cost a byte each: it now counts its inputs by what their
-    /// entries say they hold, and takes of the class what its budget holds, so the job too wide for it is another handle's.
+    /// The job was refused a block and given up every time, and a narrower one ran in its place: its inputs and its writer
+    /// were counted before it ran, and a block past the count gave it up. What a job holds in all is no longer within the
+    /// budget whatever its writer holds: a writer cannot wait in the middle of a chunk, reserves nothing yet, and is
+    /// counted past its share rather than refused. The sixty-four inputs of the first job take 13 MiB as they open and
+    /// its writer 13 after them, 25 MiB under 18; the last job of the backlog, four objects of the whole class into one,
+    /// holds 18.2, its writer 13 of a share of 7.2 (2026-11-21). A plan of the handle's own counts its writer at what
+    /// the job before it held, and takes fewer inputs for it.
     /// </remarks>
     [Fact]
-    public async Task AJobTheBudgetRefusesGivesWayToANarrowerOneAndLeavesTheBudgetWhole()
+    public async Task AJobPlannedTooWideForItsBudgetRunsOrGivesWayAndLeavesTheBudgetWhole()
     {
         const long Small = 18L << 20;
         QueryMemoryBudget budget = new QueryMemoryBudget(Small);
@@ -87,13 +91,19 @@ public sealed partial class CompactionBlockBudgetTests
         CompactionResult? first = await dataset.RunWithinBudgetAsync(
             whole, async token => (await dataset.PlanCompactionAsync(cancellationToken: token)).Job, Ct);
 
+        // Its inputs within the budget, which is never passed for them; and what it held in all, within the budget but for
+        // what its writer held, counted past rather than refused.
+        static void HoldsWithin(CompactionResult job) => Assert.True(
+            job.MemoryReservedBy.Inputs <= Small && job.MemoryReserved - Small <= job.MemoryReservedBy.Writer,
+            $"a job held {job.MemoryReserved} bytes under {Small}, its inputs {job.MemoryReservedBy.Inputs} and its writer {job.MemoryReservedBy.Writer}");
+
         Assert.NotNull(first);
-        Assert.True(first.ObjectsIn < planned, $"the job took {first.ObjectsIn} objects of the {planned} first planned");
-        Assert.InRange(first.MemoryReserved, 1, Small);
+        Assert.InRange(first.ObjectsIn, 2, planned);
+        HoldsWithin(first);
         Assert.Equal(0, budget.ReservedBytes);
 
         List<CompactionResult> rest = await CompactToTheEndAsync(dataset);
-        Assert.All(rest, job => Assert.InRange(job.MemoryReserved, 0, Small));
+        Assert.All(rest, HoldsWithin);
         Assert.Equal(0, budget.ReservedBytes);
         Assert.Equal(all.OrderBy(r => r.Sequence), (await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(r => r.Sequence));
     }

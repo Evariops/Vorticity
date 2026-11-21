@@ -39,29 +39,30 @@ internal static partial class DatasetCompactor
     internal const int BatchesHeld = 3;
 
     /// <summary>
-    /// What an object written before entries said what a reader holds of it open is counted to hold for each byte of its
-    /// open chunks encoded: the chunks read, and what a read of them decodes whole. Eighteen open inputs of log records
-    /// held 22.5 MB each of blocks, 8.5 of them their chunks as read, 2.65 times as much (2026-11-21). A job such an
-    /// object's scan passes its count in keeps what it held (<see cref="VortexDataset.MeasuredOpenBytes"/>).
-    /// </summary>
-    private const long UnsaidHeldPerEncoded = 3;
-
-    /// <summary>
-    /// What a reader holds of the object of <paramref name="entry"/> open besides its batches: its reader and its footer
-    /// (<see cref="InputFloorBytes"/>), and of its chunks what its entry says (<see cref="ObjectEntry.OpenBytes"/>), counted
-    /// by its writer, or what a job measured its scan to hold when that is more
-    /// (<see cref="VortexDataset.MeasuredOpenBytes"/>); for an object that says nothing, its open chunks at
-    /// <see cref="UnsaidHeldPerEncoded"/> times their bytes.
+    /// What a reader holds of the object of <paramref name="entry"/> open besides its batches, as a plan counts it: its
+    /// reader and its footer (<see cref="InputFloorBytes"/>), and of its chunks what its entry says
+    /// (<see cref="ObjectEntry.OpenBytes"/>), counted by its writer, or what a job that read it held of it when that is
+    /// more (<see cref="VortexDataset.MeasuredOpenBytes"/>); for an object that says nothing, written before entries said
+    /// it, its open chunks as its commit says them, encoded: the least it holds, read and guessed at nothing.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// The count chooses a job; it does not keep one within its memory. Each input reserves what it holds as it reads it
+    /// in its file (<see cref="JobMemory.OpenInput"/>), and a job whose inputs hold more than they were counted at waits,
+    /// gives back what it started ahead, and at worst ends at a key and commits what it merged. An object that says
+    /// nothing was counted at three times its open chunks, a guess the first job of a handle was given up for: 14 MiB
+    /// counted an input of log records that held 90 to 150 (2026-11-21).
+    /// </para>
+    /// <para>
     /// The reader's own is added to what the entry says, which counts the chunks alone: an object that says 4.61 MB open
     /// held 4.76 MB at its first scan, its batches 0.14 of them, and 4.37 MB at the same batches once read before
     /// (2026-11-21).
+    /// </para>
     /// </remarks>
     internal static long OpenBytes(VortexDataset dataset, DatasetSchema schema, ObjectEntry entry)
     {
         long known = Math.Max(entry.OpenBytes, dataset.MeasuredOpenBytes(entry.Key));
-        return InputFloorBytes + (known > 0 ? known : UnsaidHeldPerEncoded * OpenChunkBytes(dataset, schema, entry));
+        return InputFloorBytes + (known > 0 ? known : OpenChunkBytes(dataset, schema, entry));
     }
 
     /// <summary>
@@ -259,10 +260,13 @@ internal static partial class DatasetCompactor
     /// (<see cref="VortexDataset.WriterJobBytes"/>).
     /// </summary>
     /// <remarks>
-    /// A writer's share bounds what its columns gather, not what it holds: under 2 GiB at degree 14, a writer gathering to
-    /// 60 MiB held 320 to 357 MiB of a share of 269, its flights and its lanes' workspaces past its columns. Counted at
-    /// its share, it left the inputs 403 MiB, which they took, and the job was refused a block for the writer
-    /// (2026-11-21). Counted at what it held, it leaves the inputs what is left.
+    /// A writer's share bounds what its columns gather, not what it holds. It reserves the copies whose size it counted
+    /// and waits for what it has in the air before it starts more (<see cref="JobMemory"/>), which brought a
+    /// consolidation's writer under 2 GiB at degree 14 from 357 MiB to 331 of a share of 269: what one chunk of a shredded
+    /// variant takes as it is compressed, its typed columns laid out, no wait lowers. Counted at its share, the writer
+    /// left the inputs 403 MiB, which they took, and the job ended short of room. Counted at what the last job's writer
+    /// held, it leaves the inputs what is left: a measure of one job counted for the next, the last of them, which goes
+    /// once a chunk's columns reserve what they lay out (2026-11-21).
     /// </remarks>
     private static long WriterHeld(VortexDataset dataset, long gathered)
     {
@@ -369,8 +373,7 @@ internal static partial class DatasetCompactor
             rows >>= 1;
         }
 
-        // After a refusal, half the batch the refused job read at most (VortexDataset.JobSizingCap).
-        return dataset.JobSizingCap.BatchRows is > 0 and int cap ? Math.Min(rows, cap) : rows;
+        return rows;
     }
 
     /// <summary>
@@ -387,30 +390,13 @@ internal static partial class DatasetCompactor
     }
 
     /// <summary>
-    /// Whether the job holds within the jobs' budget at its least (<see cref="LeastBytes"/>), and opens no more inputs of
-    /// level 0 at once than a job refused since lets the next take (<see cref="VortexDataset.JobWidthCap"/>). Priced alone, a
-    /// consolidation of eight inputs refused at 8.45 MB under 8 MiB fitted again: its inputs' cost was a chunk each, 566 KB
-    /// at batches of 8 192 rows as of 16 384, where the price scaled it by the rows, and it was refused twice.
+    /// Whether the job is counted to hold within the jobs' budget at its least (<see cref="LeastBytes"/>): what a plan asks
+    /// before it chooses it. Its inputs counted at what their entries say, and at what a job that read them held of them
+    /// when that is more (<see cref="OpenBytes"/>): a job ended short of room is counted wider the next time, by what its
+    /// inputs' files said, where a job refused a block had the next take half as many inputs whatever they held.
     /// </summary>
-    internal static bool Fits(VortexDataset dataset, CompactionJob job)
-    {
-        int cap = dataset.JobWidthCap;
-        if (cap > 0)
-        {
-            int open = 0;
-            foreach (CompactionInput input in job.Inputs)
-            {
-                open += input.Level == 0 ? 1 : 0;
-            }
-
-            if (open > cap)
-            {
-                return false;
-            }
-        }
-
-        return LeastBytes(dataset, job) <= JobBudget(dataset);
-    }
+    internal static bool Fits(VortexDataset dataset, CompactionJob job) =>
+        LeastBytes(dataset, job) <= JobBudget(dataset);
 
     /// <summary>
     /// The rows of an input's batch in the first pass of a job, which counts its inputs one a lane: what a lane's share of the
@@ -481,8 +467,8 @@ internal static partial class DatasetCompactor
     /// <summary>
     /// What a job's writer gathers its columns in together at most, past which a column writes its chunk early
     /// (<see cref="VortexWriteOptions.GatheredBytesCeiling"/>): what the writer's share of the jobs' budget leaves its columns
-    /// (<see cref="JobShares.Gathered"/>), halved each time the job before it was refused with nothing else left to narrow
-    /// (<see cref="VortexDataset.JobGatherHalvings"/>), a mebibyte at least.
+    /// (<see cref="JobShares.Gathered"/>), halved each time a job of the handle ended short of room with nothing it could
+    /// commit and nothing learned of its inputs (<see cref="VortexDataset.JobGatherHalvings"/>), a mebibyte at least.
     /// </summary>
     /// <remarks>
     /// It was an eighth of the jobs' budget, set by the backlog bench under 2 GiB, where a half, a quarter, an eighth and a
@@ -566,20 +552,17 @@ internal static partial class DatasetCompactor
     /// two at least, then as many more as keep their bytes within
     /// <paramref name="bytes"/>, the layout's object size or a caller's bound, and what the merge holds within the jobs'
     /// budget, the inputs open at once at their windows (<see cref="Window"/>, <see cref="OpenSweep"/>), the writer
-    /// at what it holds at most (<see cref="PlannedWriterCost"/>); and no more than half a job
-    /// the budget refused (<see cref="VortexDataset.JobWidthCap"/>). The whole class when it fits: one job where a merge of
-    /// the fan-out at a time took 469 of them to empty a class of 3 283 small objects.
+    /// at what it is counted to hold (<see cref="PlannedWriterCost"/>). The whole class when it fits: one job where a
+    /// merge of the fan-out at a time took 469 of them to empty a class of 3 283 small objects.
     /// </summary>
     internal static int TierWidth(VortexDataset dataset, IReadOnlyList<CompactionInput> inputs, int least, long bytes)
     {
         DatasetSchema schema = dataset.Snapshot.Schema;
         long budget = JobBudget(dataset);
         bytes = Math.Min(bytes, JobBytesBound(dataset));
-        int cap = dataset.JobWidthCap;
-        least = cap > 0 ? Math.Min(least, Math.Max(2, cap)) : least;
 
-        // The fan-out at least, but no more than a merge's memory holds: a merge due when its class reached the fan-out
-        // took it whatever its bounds, and was refused when its memory did not hold it, then narrowed.
+        // The fan-out at least, but no more than a merge's memory is counted to hold: a merge due when its class reached
+        // the fan-out took it whatever its bounds.
         least = Math.Min(least, Math.Max(2, MemoryWidth(dataset, inputs)));
         OpenSweep open = new OpenSweep(schema.Keyed);
         long rows = 0;
@@ -591,7 +574,7 @@ internal static partial class DatasetCompactor
             // shortest batches a job reads them in, which it lengthens as far as its room holds once it has its inputs.
             ObjectEntry entry = input.Entry;
             long held = open.Add(input, Window(dataset, schema, entry, LeastBatchRows));
-            if (taken >= least && (sum + entry.Bytes > bytes || held + PlannedWriterCost(dataset, schema, rows + entry.Rows) > budget || (cap > 0 && taken >= cap)))
+            if (taken >= least && (sum + entry.Bytes > bytes || held + PlannedWriterCost(dataset, schema, rows + entry.Rows) > budget))
             {
                 break;
             }

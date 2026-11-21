@@ -117,7 +117,9 @@ public sealed partial class VortexFileWriter
 
                     if (detached is not null)
                     {
+                        // One more chunk compressing only once the writer's share holds it: those before end first.
                         await LandEmissionsAsync(field, cancellationToken, keep: EmissionDepth - 1).ConfigureAwait(false);
+                        await RoomAsync(0).ConfigureAwait(false);
                         StartEmission(detached);
                     }
 
@@ -126,6 +128,7 @@ public sealed partial class VortexFileWriter
 
                 // A column chunked with the file: its chunk before lands, and this one leaves.
                 await LandEmissionsAsync(field, cancellationToken).ConfigureAwait(false);
+                await RoomAsync(0).ConfigureAwait(false);
                 StartEmission(DetachChunk(field, arena, node, checked((int)rows), firstBlock, blocks));
             }
 

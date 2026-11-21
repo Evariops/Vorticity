@@ -274,6 +274,9 @@ public sealed partial class VortexFileWriter
         internal int Blocks;
         internal long Cut;
         internal long Held;
+
+        /// <summary>What the writer reserved for the copy it took as it left (<see cref="RoomAsync"/>), until it is emitted.</summary>
+        internal long Raised;
         internal string[] Known = [];
         internal int KnownCount;
         internal string[] Fresh = [];
@@ -426,7 +429,7 @@ public sealed partial class VortexFileWriter
     /// Touches the column's gathering and ingest state alone, so that the column's item of a chunk across the writer's
     /// threads takes it.
     /// </summary>
-    private ColumnEmission Detach(int field, Gathering gathering, bool due = true)
+    private ColumnEmission Detach(int field, Gathering gathering, bool due = true, long raised = 0)
     {
         ScanContext context = gathering.Context!;
         int rows = checked((int)gathering.Rows);
@@ -472,6 +475,7 @@ public sealed partial class VortexFileWriter
         // the writer past its price, and a consolidation was refused twice and narrowed to 8 inputs; written at a fixed
         // block half a chunk after this one, once (2026-11-17).
         chunk.Held = gathering.Held;
+        chunk.Raised = raised;
 
         if (taken is not null)
         {
@@ -581,6 +585,7 @@ public sealed partial class VortexFileWriter
         {
             chunk.Inline = true;
             Compress(chunk);
+            CloseRaised(chunk);
             return;
         }
 
@@ -933,36 +938,110 @@ public sealed partial class VortexFileWriter
     /// </summary>
     private async ValueTask EmittedAsync(ColumnEmission chunk)
     {
-        if (chunk.Offered)
-        {
-            chunk.Offered = false;
-            await chunk.RunOrWaitAsync(_core).ConfigureAwait(false);
-        }
-
-        if (chunk.Piece is not { } piece)
-        {
-            return;
-        }
-
         try
         {
-            await piece.ConfigureAwait(false);
-        }
-        catch
-        {
-            DropPiece(chunk);
-            throw;
-        }
+            if (chunk.Offered)
+            {
+                chunk.Offered = false;
+                await chunk.RunOrWaitAsync(_core).ConfigureAwait(false);
+            }
 
-        if (chunk.Shredding is not null)
-        {
-            Graft(chunk);
+            if (chunk.Piece is not { } piece)
+            {
+                return;
+            }
+
+            try
+            {
+                await piece.ConfigureAwait(false);
+            }
+            catch
+            {
+                DropPiece(chunk);
+                throw;
+            }
+
+            if (chunk.Shredding is not null)
+            {
+                Graft(chunk);
+            }
+            else
+            {
+                DropPiece(chunk);
+            }
         }
-        else
+        finally
         {
-            DropPiece(chunk);
+            // Its copy is taken, or it never will be: what was reserved for it and no block took goes back.
+            CloseRaised(chunk);
         }
     }
+
+    /// <summary>Gives back what was reserved for <paramref name="chunk"/>'s copy and no block took, once.</summary>
+    private void CloseRaised(ColumnEmission chunk)
+    {
+        if (chunk.Raised > 0)
+        {
+            Account.Reserve?.Close(chunk.Raised);
+            chunk.Raised = 0;
+        }
+    }
+
+    /// <summary>
+    /// Makes room for <paramref name="bytes"/> the writer is about to take, a block's copy or a chunk's as it leaves for
+    /// its emission, on the flow that drives the writer, the one place where it can wait: while the work the writer is
+    /// part of does not admit them past what the writer holds (<see cref="VortexWriteOptions.AdmitsAhead"/>), the chunks
+    /// in emission end, the oldest first, each column's in their order. The writer then reserves the bytes
+    /// (<see cref="Raise"/>), so that what the work beside it reserves meanwhile leaves them.
+    /// </summary>
+    /// <remarks>
+    /// A wait changes nothing of the file: a chunk's blob is written at a point of the rows' own order
+    /// (<see cref="LandEmissionAsync"/>), whenever its emission ended. Once nothing is left in emission the writer goes on
+    /// all the same, on what it holds at least; and what a lane of it takes past what was reserved, a shredding's copies,
+    /// an encoder's output, is asked of the budget as it is taken, the next wait here making up for it.
+    /// </remarks>
+    private ValueTask RoomAsync(long bytes) =>
+        _admitsAhead is { } admits && _emissions is not null && !admits(bytes) ? EmissionsEndAsync(admits, bytes) : ValueTask.CompletedTask;
+
+    /// <summary>
+    /// Waits for the chunks in emission to end, none written before its place in the file: what a work short of room asks
+    /// of its writer once its blocks in flight landed (<see cref="LandAsync"/>), for the rows and the workspaces their
+    /// compression holds.
+    /// </summary>
+    internal ValueTask EmissionsEndAsync() =>
+        _emissions is null ? ValueTask.CompletedTask : EmissionsEndAsync(static _ => false, 0);
+
+    /// <summary><see cref="RoomAsync"/>, once the work does not admit <paramref name="bytes"/>: the chunks in emission end until it does.</summary>
+    private async ValueTask EmissionsEndAsync(Func<long, bool> admits, long bytes)
+    {
+        for (int field = 0; field < _emissions!.Length; field++)
+        {
+            // By index: an emission that ends offers its column's next one, and takes none off the list.
+            for (int i = 0; _emissions[field] is { } chunks && i < chunks.Count; i++)
+            {
+                await EmittedAsync(chunks[i]).ConfigureAwait(false);
+                if (admits(bytes))
+                {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// What a column's chunk copies as it leaves for its emission (<see cref="Detach"/>): its nodes into one, what the
+    /// column gathered once more; nothing for a chunk of one node, or for one gathered thin, its rows taken by its chain.
+    /// </summary>
+    private static long CopiedLeaving(Gathering gathering) =>
+        gathering.Nodes.Count > 1 && gathering.ThinNodes == 0 ? gathering.Held : 0;
+
+    /// <summary>
+    /// Reserves <paramref name="bytes"/> the writer is about to take, when its account reserves
+    /// (<see cref="Buffers.WorkAccount.Reserve"/>) and the budget holds them now: what it reserved, to give back once the copy is
+    /// taken (<see cref="MemoryReserve.Close"/>); 0 for none, the copy then asking the budget as it is taken.
+    /// </summary>
+    private long Raise(long bytes) =>
+        bytes > 0 && Account.Reserve is { } reserve && reserve.TryRaise(bytes) ? bytes : 0;
 
     /// <summary>
     /// Lets <paramref name="chunk"/>'s rows go, once: its context back to the process's, its hold on the transit it reads

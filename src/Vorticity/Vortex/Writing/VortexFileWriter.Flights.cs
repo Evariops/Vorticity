@@ -43,6 +43,9 @@ public sealed partial class VortexFileWriter
         /// <summary>The staged block the flight sends through, which its assembly concatenates.</summary>
         internal Staging? Staging;
 
+        /// <summary>What the writer reserved for the block's assembly before it was offered, given back once the block landed.</summary>
+        internal long Raised;
+
         /// <summary>The flight's number among the writer's, from 0.</summary>
         internal long Index;
 

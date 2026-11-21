@@ -1181,6 +1181,13 @@ public sealed partial class VortexFileWriter
         staging.Rows = 0;
         staging.Bytes = 0;
 
+        // Its assembly took its copy, or never will: what was reserved for it and no block took goes back.
+        if (flight.Raised > 0)
+        {
+            Account.Reserve?.Close(flight.Raised);
+            flight.Raised = 0;
+        }
+
         // A block cut gives its blocks back, as the transit that adopts one gives them back at its emission: kept by each of
         // the four to six stagings a writer makes, they held a block's rows each (2026-11-18).
         if (flight.Cuts)

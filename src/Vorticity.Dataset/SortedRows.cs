@@ -32,11 +32,36 @@ internal interface IMergedRun : IOrderedKeys
     (Vorticity.Arrays.CanonicalArena Arena, int Root, int Row, double RowBytes) CurrentRun { get; }
 }
 
+/// <summary>Whether a key, row-encoded, lies where its caller asks: past the last key an output holds, for a merge's stop.</summary>
+internal delegate bool KeyTest(ReadOnlySpan<byte> key);
+
 /// <summary>The runs of a merge in the key's order, one at a time, as a job's output takes them.</summary>
 internal interface IMergedRuns : IMergedRun, IAsyncDisposable
 {
     /// <summary>Moves to the next run.</summary>
+    /// <exception cref="ReserveExhaustedException">
+    /// An input of the merge could not reserve what it needs to go on, the job having given back all it started ahead:
+    /// the merge ends at the key it reached, every run it gave before taken by its caller.
+    /// </exception>
     ValueTask<bool> MoveNextAsync();
+
+    /// <summary>The place among the job's inputs of the input the run the merge is on comes from.</summary>
+    long CurrentInput { get; }
+
+    /// <summary>
+    /// Whether, the merge ended by <paramref name="stop"/>, every row it has yet to give lies past the last one it gave,
+    /// <paramref name="below"/> telling a key that last one lies strictly below: its outputs then end on a whole key, and
+    /// the rows left in its inputs start at another. False when a row left may share that key, or when nothing says: the
+    /// next batch of an input was being taken.
+    /// </summary>
+    bool StoppedPast(ReserveExhaustedException stop, KeyTest below);
+
+    /// <summary>
+    /// Gives back what the merge keeps past what it needs to go on, at <paramref name="level"/> of what a job short of
+    /// room gives back (<see cref="JobMemory"/>): at 0, the windows of its inputs' batches whose runs the writers have all
+    /// copied; at 2, the batches its inputs decoded ahead and it has not taken. On the merge's own flow.
+    /// </summary>
+    ValueTask GiveBackAsync(int level);
 }
 
 /// <summary>

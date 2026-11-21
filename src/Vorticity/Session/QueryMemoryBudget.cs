@@ -271,18 +271,29 @@ public sealed class QueryMemoryBudget
     /// A budget under this one that refuses a block past its own ceiling and past this one's (<see cref="Hard"/>): what a
     /// compaction job's inputs, or its writer, rent under, so that the job learns what each held at most.
     /// </summary>
-    internal QueryMemoryBudget HardChild(long ceilingBytes = long.MaxValue / 4) => new QueryMemoryBudget(ceilingBytes, this) { Hard = true };
+    internal QueryMemoryBudget HardChild(long ceilingBytes = long.MaxValue / 4, bool countsPast = false) =>
+        new QueryMemoryBudget(ceilingBytes, this) { Hard = true, CountsPast = countsPast };
 
     /// <summary>
-    /// <see cref="HardChild(long)"/>, funded by <paramref name="grant"/>, a reservation this budget granted
+    /// Whether a hard budget counts past its ceiling a block its work could not reserve, the process bounding it
+    /// (<see cref="Force"/>), rather than refuse it: what the budget of a compaction job's writer is, and the job's own
+    /// for it. A writer cannot wait in the middle of a chunk it encodes, and does not yet reserve what it takes before it
+    /// takes it: refused a block, it gave up the job and what the job had written. What it takes past its share, the
+    /// job's inputs, which reserve before they take, find taken, and wait or end their merge at the key it reached. A
+    /// reservation under such a budget is still told no at its ceiling.
+    /// </summary>
+    internal bool CountsPast { get; init; }
+
+    /// <summary>
+    /// <see cref="HardChild(long, bool)"/>, funded by <paramref name="grant"/>, a reservation this budget granted
     /// (<see cref="ReserveAsync"/>), which the child takes over: its first reservations take the grant's bytes, which this
     /// budget counts already, and ask this one for what passes them; its releases go back to this one, as any child's do.
     /// What is left of the grant goes back when the child's work closes it (<see cref="CloseGrant"/>).
     /// </summary>
-    internal QueryMemoryBudget HardChild(MemoryGrant grant) =>
-        new QueryMemoryBudget(long.MaxValue / 4, this, share: 0, granted: grant.TakeOver()) { Hard = true };
+    internal QueryMemoryBudget HardChild(MemoryGrant grant, bool countsPast = false) =>
+        new QueryMemoryBudget(long.MaxValue / 4, this, share: 0, granted: grant.TakeOver()) { Hard = true, CountsPast = countsPast };
 
-    /// <summary>What is left of the grant that funds the budget (<see cref="HardChild(MemoryGrant)"/>): 0 for one no grant funds, or once closed.</summary>
+    /// <summary>What is left of the grant that funds the budget (<see cref="HardChild(MemoryGrant, bool)"/>): 0 for one no grant funds, or once closed.</summary>
     internal long GrantLeft => Math.Max(0, Volatile.Read(ref _grantLeft));
 
     /// <summary>
@@ -680,7 +691,7 @@ public sealed class QueryMemoryBudget
             return true;
         }
 
-        if (Hard)
+        if (Hard && !CountsPast)
         {
             // A hard budget is never passed: the work under it gives way.
             Refuse();

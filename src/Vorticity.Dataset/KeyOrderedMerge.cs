@@ -246,7 +246,17 @@ internal sealed class KeyOrderedMerge : IMergedRuns
                 await GiveBackCopiedAsync().ConfigureAwait(false);
             }
 
-            await OpenAsync(next).ConfigureAwait(false);
+            try
+            {
+                await OpenAsync(next).ConfigureAwait(false);
+            }
+            catch (ReserveExhaustedException stop)
+            {
+                // The object that would not hold beside the inputs open: its rows lie at or past its bound, which says
+                // whether the merge ends on a whole key (StoppedPast).
+                stop.Opening = next.Bound;
+                throw;
+            }
         }
 
         if (_open.Count == 0)
@@ -267,6 +277,54 @@ internal sealed class KeyOrderedMerge : IMergedRuns
         // (CurrentRun) needs none.
         _current = null;
         return true;
+    }
+
+    /// <inheritdoc/>
+    public long CurrentInput => Emitting().Rank;
+
+    /// <inheritdoc/>
+    public bool StoppedPast(ReserveExhaustedException stop, KeyTest below)
+    {
+        // An input whose next batch was being taken: its next key may be the one its last batch ended on. An object being
+        // opened holds its rows at or past its bound, which may be a leading part of a key: one at or below the last key
+        // given says nothing of its first row.
+        if (stop.Opening is not { } bound || !below(bound.Span))
+        {
+            return false;
+        }
+
+        // The inputs open each hold their next row: a run goes through the rows that share the key another input holds,
+        // so one of them may still hold the key the last run ended on.
+        foreach (MergeInput input in _open)
+        {
+            if (input.IsLive && !below(input.Key))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <inheritdoc/>
+    public async ValueTask GiveBackAsync(int level)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (level == 0)
+        {
+            await GiveBackCopiedAsync().ConfigureAwait(false);
+        }
+        else if (level == 2)
+        {
+            foreach (MergeInput input in _open)
+            {
+                input.Handover?.Scan?.DropAhead();
+            }
+        }
     }
 
     public async ValueTask DisposeAsync()

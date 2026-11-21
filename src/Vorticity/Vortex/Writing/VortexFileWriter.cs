@@ -3207,23 +3207,43 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private async ValueTask FlyOnLineAsync(Staging staging, CancellationToken cancellationToken)
     {
         FlightLine line = Line;
+
+        // Up to FlightDepth blocks in flight while the work's memory admits them. Otherwise the blocks before this one land
+        // and the chunks in emission end before the block is assembled, its rows copied out of the merge's inputs, and it
+        // goes through alone: the file is the same either way. The wait came after the copy, which the writer then held
+        // beside everything in the air.
+        bool alone = _admitsAhead is { } admits && !admits(BlockCopied(staging));
+        if (alone)
+        {
+            FlightsHeldBack++;
+
+            // A line made now has no flight to wait for: the blocks before it went through one at a time, and count as
+            // landed once it admits its first.
+            if (line.Flying)
+            {
+                await line.SettleAsync(_flown, quietly: false, cancellationToken).ConfigureAwait(false);
+            }
+
+            await RoomAsync(BlockCopied(staging)).ConfigureAwait(false);
+        }
+
+        // What the assembly copies, reserved before it is offered, and given back once the block landed (Epilogue).
+        long raised = Raise(BlockCopied(staging));
         long flight = NextFlight();
         _staging = null;
         BatchesFlown++;
         line.Admit(staging, flight);
+        staging.Flight!.Raised = raised;
         (staging.Assembly ??= new AssemblyUnit(this, staging)).Offer(_core, Flow.Write);
-
-        // Up to FlightDepth blocks in flight while the work's memory admits them, the blocks before this one landed otherwise:
-        // the file is the same either way.
-        long settled = flight - FlightDepth + 1;
-        if (settled < flight && _admitsAhead is { } admits && !admits(staging.Bytes))
-        {
-            settled = flight;
-            FlightsHeldBack++;
-        }
-
-        await line.SettleAsync(settled, quietly: false, cancellationToken).ConfigureAwait(false);
+        await line.SettleAsync(alone ? flight : flight - FlightDepth + 1, quietly: false, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// What the assembly of <paramref name="staging"/>'s block takes: the bytes its rows name, copied out of the merge's
+    /// inputs, less what its arena holds already, the rows staged by copy and the blocks it kept of the block before.
+    /// </summary>
+    private static long BlockCopied(Staging staging) =>
+        Math.Max(0, staging.Bytes - staging.Context.Canonical.HeldBytes(out _));
 
     /// <summary>The assembly of a staging's block, a unit of the core (<see cref="Assemble"/>).</summary>
     private sealed class AssemblyUnit(VortexFileWriter writer, Staging staging) : CoreUnit
@@ -4112,7 +4132,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     if (DueOrOver(gathering) && EmitsApart)
                     {
                         await LandEmissionsAsync(field, cancellationToken, keep: EmissionDepth - 1).ConfigureAwait(false);
-                        StartEmission(Detach(field, gathering));
+
+                        // The chunk's nodes are copied into one as it leaves, what the column gathered once more: reserved
+                        // first, the chunks in emission ending while the writer's share does not hold it.
+                        await RoomAsync(CopiedLeaving(gathering)).ConfigureAwait(false);
+                        StartEmission(Detach(field, gathering, raised: Raise(CopiedLeaving(gathering))));
                     }
                     else if (DueOrOver(gathering))
                     {
@@ -4622,7 +4646,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 if (gathering[field] is { Rows: > 0 } column)
                 {
-                    StartEmission(Detach(field, column, due: false));
+                    // Every column leaves at once only while the writer's share holds them: otherwise those that left
+                    // before end first, and the columns are compressed a few at a time, written in their order all the same.
+                    await RoomAsync(CopiedLeaving(column)).ConfigureAwait(false);
+                    StartEmission(Detach(field, column, due: false, raised: Raise(CopiedLeaving(column))));
                 }
             }
 

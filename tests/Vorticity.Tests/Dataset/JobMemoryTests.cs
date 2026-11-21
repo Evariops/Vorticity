@@ -112,8 +112,7 @@ public sealed partial class JobMemoryTests
 
         Assert.Equal(CompactionTrigger.Tier, merged.Trigger);
         Assert.Equal(4, merged.ObjectsIn);
-        Assert.Equal(0, dataset.JobWidthCap);
-        Assert.Equal(0, dataset.JobGatherHalvings);
+        Assert.False(merged.StoppedShort);
         Assert.InRange(merged.MemoryReserved, 1, Budget);
         Assert.Equal(all.OrderBy(r => r.Sequence), (await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(r => r.Sequence));
     }
@@ -153,7 +152,7 @@ public sealed partial class JobMemoryTests
         Assert.True(results.Count >= 2 && results[0].Trigger == CompactionTrigger.Tier, ran);
         Assert.Equal(CompactionTrigger.Consolidation, results[^1].Trigger);
         Assert.True(results[^1].ObjectsIn < Objects, ran);
-        Assert.Equal(0, dataset.JobWidthCap);
+        Assert.All(results, static r => Assert.False(r.StoppedShort));
         Assert.Equal(0, dataset.Levels[0].Entries);
         List<Row> read = (await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(r => r.Sequence).ToList();
         Assert.Equal(all.OrderBy(r => r.Sequence), read);
@@ -209,7 +208,7 @@ public sealed partial class JobMemoryTests
         Assert.True(consolidation.Trigger == CompactionTrigger.Consolidation && consolidation.ObjectsIn == (2 * Services) - 1, ran);
         Assert.InRange(consolidation.InputsPlanned, 1, budget);
         Assert.InRange(consolidation.MemoryReserved, 1, budget);
-        Assert.Equal(0, dataset.JobWidthCap);
+        Assert.False(consolidation.StoppedShort);
         Assert.Equal(0, dataset.Levels[0].Entries);
         Assert.Equal(all.OrderBy(r => r.Sequence), (await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(r => r.Sequence));
     }
@@ -258,7 +257,6 @@ public sealed partial class JobMemoryTests
         Assert.Contains(results, static r => r.Trigger == CompactionTrigger.Tier);
         Assert.True(results.Count <= 6 * Appends, ran);
         Assert.All(results, r => Assert.InRange(r.MemoryReserved, 1, budget));
-        Assert.Equal(0, dataset.JobWidthCap);
         Assert.Equal(0, dataset.Levels[0].Entries);
         Assert.Equal(all.OrderBy(r => r.Sequence), (await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(r => r.Sequence));
     }
@@ -334,76 +332,48 @@ public sealed partial class JobMemoryTests
     }
 
     /// <summary>
-    /// A job of 300 inputs refused once they held 4 MiB each at batches of 8 192 rows: the handle keeps what an input held at
-    /// the rows of its batch, which prices the next job, and takes half as many inputs; a refusal before the batches were
-    /// sized narrows the jobs and keeps what the handle knew; a refusal that held less a row than the handle knew keeps
-    /// what it knew.
+    /// A job that ends short of room with nothing it may commit is planned again. It is another job the next time when the
+    /// handle kept that an input holds more open than it was counted at, which the next plan counts, when it took fewer
+    /// inputs, or when it is of another kind: nothing of the handle changes for those. The same job, nothing learned of
+    /// its inputs, has its writer gather half as much, time after time down to a mebibyte, then fails, saying what it
+    /// held and what the budget holds; and a job as wide that commits gives the writer its whole share back. No cap is
+    /// set on a job's inputs or its batches.
     /// </summary>
     [Fact]
-    public async Task AJobRefusedKeepsWhatAnInputHeldAtTheRowsOfItsBatch()
+    public async Task AJobThatEndsShortOfRoomWithNothingLearnedHalvesItsWriterThenFails()
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(VortexSession.Default, fanout: 4), Ct);
-
-        dataset.NarrowJobs(300, 300L * (4L << 20), (0, 0), writerBytes: 0);
-        Assert.Equal(150, dataset.JobWidthCap);
-        Assert.Equal(0, dataset.InputJobBytes);
-
-        dataset.NarrowJobs(300, 300L * (4L << 20), (8_192, 300), writerBytes: 0);
-        Assert.Equal(150, dataset.JobWidthCap);
-        Assert.Equal(4L << 20, dataset.InputJobBytes);
-        Assert.Equal(8_192, dataset.JobBatchRows);
-
-        dataset.NarrowJobs(150, 150L * (1L << 20), (8_192, 150), writerBytes: 0);
-        Assert.Equal(75, dataset.JobWidthCap);
-        Assert.Equal(4L << 20, dataset.InputJobBytes);
-    }
-
-    /// <summary>
-    /// A job refused its blocks narrows the next: half its inputs for a merge by size class, and for any job half the rows of
-    /// its batches, as many inputs open at once at most. A refusal that narrowed none of those of the one before it halves
-    /// what the next job's writer gathers, down to a mebibyte, then fails, one that taught the handle what an input holds
-    /// open excepted; and a job that ran to its end lifts the caps, its writer's among them.
-    /// </summary>
-    [Fact]
-    public async Task AJobRefusedNarrowsTheNextUntilNothingIsLeftToNarrow()
-    {
-        await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(VortexSession.Default, fanout: 4), Ct);
-        dataset.NarrowJobs(8, 8L << 20, (16_384, 8), writerBytes: 0);
-        Assert.Equal(4, dataset.JobWidthCap);
-        Assert.Equal((8_192, 8), dataset.JobSizingCap);
-
-        CompactionJob job = new CompactionJob(0, 1, CompactionStyle.Leveled, CompactionTrigger.Consolidation, [], 0, 0);
-        JobTooWideException first = new JobTooWideException(job, 8L << 20, 8L << 20, new VortexMemoryException("refused")) { Sizing = (16_384, 8) };
-        JobTooWideException shorter = new JobTooWideException(job, 8L << 20, 8L << 20, new VortexMemoryException("refused")) { Sizing = (8_192, 8) };
-        JobTooWideException same = new JobTooWideException(job, 8L << 20, 8L << 20, new VortexMemoryException("refused")) { Sizing = (8_192, 8) };
         long whole = DatasetCompactor.GatherCeiling(dataset);
-        dataset.Narrowed(null, first);
-        dataset.Narrowed(first, shorter);
+        CompactionJob job = new CompactionJob(0, 1, CompactionStyle.Tiered, CompactionTrigger.Consolidation, [], 0, 0);
+        JobStoppedException Stopped(CompactionJob of, bool learned) =>
+            new JobStoppedException(of, 8L << 20, 8L << 20, new VortexMemoryException("short of room")) { Learned = learned };
+
+        JobStoppedException first = Stopped(job, learned: false);
+        dataset.StoppedShort(null, first);
+        dataset.StoppedShort(first, Stopped(job, learned: true));
+        dataset.StoppedShort(first, Stopped(new CompactionJob(0, 0, CompactionStyle.Tiered, CompactionTrigger.Tier, [], 0, 0), learned: false));
         Assert.Equal(whole, DatasetCompactor.GatherCeiling(dataset));
 
-        // Nothing narrower of its inputs or its batches: its writer gathers half as much, refusal after refusal, down to a
-        // mebibyte, where a refusal fails.
+        // The same job, nothing learned: its writer gathers half as much, time after time, down to a mebibyte.
         Assert.True(whole > DatasetCompactor.LeastGatherCeiling, $"a writer that gathers {whole} bytes has nothing to halve");
         for (long halved = whole / 2; halved >= DatasetCompactor.LeastGatherCeiling; halved /= 2)
         {
-            dataset.Narrowed(shorter, same);
+            dataset.StoppedShort(first, Stopped(job, learned: false));
             Assert.Equal(Math.Max(halved, DatasetCompactor.LeastGatherCeiling), DatasetCompactor.GatherCeiling(dataset));
         }
 
         if (DatasetCompactor.GatherCeiling(dataset) > DatasetCompactor.LeastGatherCeiling)
         {
-            dataset.Narrowed(shorter, same);
+            dataset.StoppedShort(first, Stopped(job, learned: false));
         }
 
         Assert.Equal(DatasetCompactor.LeastGatherCeiling, DatasetCompactor.GatherCeiling(dataset));
-        Assert.Throws<VortexMemoryException>(() => dataset.Narrowed(shorter, same));
-        dataset.Narrowed(shorter, new JobTooWideException(job, 8L << 20, 8L << 20, new VortexMemoryException("refused")) { Sizing = (8_192, 8), Learned = true });
+        VortexMemoryException failed = Assert.Throws<VortexMemoryException>(() => dataset.StoppedShort(first, Stopped(job, learned: false)));
+        Assert.Contains("needs more than the jobs' budget", failed.Message, StringComparison.Ordinal);
 
-        dataset.LearnJobCosts(1L << 20, 8_192, writerBytes: 0, width: int.MaxValue);
-        Assert.Equal(0, dataset.JobWidthCap);
-        Assert.Equal((0, 0), dataset.JobSizingCap);
+        // A job as wide committed: the writer gathers its whole share again.
+        dataset.JobCommitted(job.Inputs.Count);
         Assert.Equal(whole, DatasetCompactor.GatherCeiling(dataset));
     }
 

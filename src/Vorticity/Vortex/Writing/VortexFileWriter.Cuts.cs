@@ -278,6 +278,7 @@ public sealed partial class VortexFileWriter
             {
                 flight.Detached[field] = null;
                 await LandEmissionsAsync(field, cancellationToken, keep: EmissionDepth - 1).ConfigureAwait(false);
+                await RoomAsync(0).ConfigureAwait(false);
                 StartEmission(detached);
             }
 

@@ -97,6 +97,22 @@ public sealed class ResidueTests
         (Dataset, @"\bOpenAtOnce\b", 0),
         (Dataset, @"\bCapJobWidth\b", 0),
         (Dataset, @"\bLearnInputCost\b", 0),
+
+        // What gave a job up and narrowed the next: a job refused a block, its exception, the caps it set on the next job's
+        // inputs and batches, the costs learned from the job before, a guess of three times its open chunks for an object
+        // whose entry says nothing. Given up on 2026-11-21: each input of a job reserves what it is about to hold as it
+        // reads it in its file, and a merge short of room ends at the key it reached and commits what it merged.
+        (Dataset, @"\bJobTooWideException\b", 0),
+        (Dataset, @"\bNarrowJobs\b", 0),
+        (Dataset, @"\bNarrowed\b", 0),
+        (Dataset, @"\bJobWidthCap\b", 0),
+        (Dataset, @"\bJobSizingCap\b", 0),
+        (Dataset, @"\bLearnJobCosts\b", 0),
+        (Dataset, @"\bInputJobBytes\b", 0),
+        (Dataset, @"\bJobBatchRows\b", 0),
+        (Dataset, @"\bRefusalReason\b", 0),
+        (Dataset, @"\bUnsaidHeldPerEncoded\b", 0),
+        (Dataset, @"\bLearnOpen\b", 0),
     ];
 
     [Fact]

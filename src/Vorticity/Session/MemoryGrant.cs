@@ -4,7 +4,7 @@ namespace Vorticity;
 
 /// <summary>
 /// A reservation a budget granted (<see cref="QueryMemoryBudget.ReserveAsync"/>): its bytes, counted under the budget and the
-/// process's until it is disposed. A budget it funds (<see cref="QueryMemoryBudget.HardChild(MemoryGrant)"/>) rents within
+/// process's until it is disposed. A budget it funds (<see cref="QueryMemoryBudget.HardChild(MemoryGrant, bool)"/>) rents within
 /// its bytes without asking the budget again; the grant goes back whole once that budget holds nothing.
 /// </summary>
 internal sealed class MemoryGrant

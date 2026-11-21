@@ -157,6 +157,49 @@ public sealed class VortexMemoryException : VortexException
         : base(message, innerException)
     {
     }
+
+    /// <summary>
+    /// The bytes a step of a compaction job lacked, when the refusal is of a block the step had not reserved under an
+    /// account that reserves (<see cref="Buffers.CountedAccount"/>): the step reserves them, waiting for the job to make
+    /// room, and runs again. 0 for any other refusal, which fails what asked.
+    /// </summary>
+    internal long ShortOfRoom { get; set; }
+}
+
+/// <summary>
+/// What a decode throws, in a scan whose consumer reserves its memory, when it meets a chunk another lane of the scan is
+/// decoding whole at that moment: its split is run again once that decode is published, and borrows it, rather than
+/// decode the chunk too into blocks of its own.
+/// </summary>
+internal sealed class ChunkBusyException(long key) : Exception("A chunk another lane is decoding was met; the split runs again once it is published.")
+{
+    /// <summary>The key the chunk is retained under, which the scan's table tells once it is published or given up (<c>RetainedChunks.WhenFreeAsync</c>).</summary>
+    internal long Key => key;
+}
+
+/// <summary>
+/// What a scan whose consumer reserves its memory throws, on the consumer's flow, when a reservation the scan cannot go on
+/// without was not granted, the consumer's job having given back all it had started ahead
+/// (<see cref="MemoryReserve.RaiseAsync"/>). A compaction's merge ends then at the key it reached and commits what it
+/// merged: nothing is thrown away, and nothing waits on memory only that merge holds.
+/// </summary>
+internal sealed class ReserveExhaustedException(long bytes, Exception? refusal = null) : Exception(
+    refusal is null
+        ? string.Create(System.Globalization.CultureInfo.InvariantCulture, $"A reservation of {bytes:N0} bytes was not granted, everything started ahead given back.")
+        : "A block no reservation covers was refused: " + refusal.Message,
+    refusal)
+{
+    /// <summary>The bytes asked for.</summary>
+    internal long Bytes => bytes;
+
+    /// <summary>
+    /// The bound of the object a merge was opening when the reservation was not granted, which its rows lie at or past;
+    /// null when it was not opening one: an input it was taking the next batch of, whose next key nothing says.
+    /// </summary>
+    internal ReadOnlyMemory<byte>? Opening { get; set; }
+
+    /// <summary>The reserve that did not grant them: its input needs that much past what it held, which the job's next plan counts it at.</summary>
+    internal MemoryReserve? Reserve { get; init; }
 }
 
 /// <summary>The component kinds the library's own refusals name.</summary>

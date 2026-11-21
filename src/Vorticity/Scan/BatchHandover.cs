@@ -51,11 +51,32 @@ internal sealed class BatchHandover
     internal long BorrowedBytes;
 
     /// <summary>
-    /// What the consumer counts a batch of the scan to weigh decoded, from what it knows of the file's rows; 0 for none.
-    /// The scan takes a window of <see cref="Ahead"/> for that when it is more than its own count of a split, which goes
-    /// by the schema alone: a split of a shredded variant's rows weighed several times what its schema says.
+    /// What a batch of the scan weighs decoded as the consumer reads it of the file's own record, the rows of a batch at
+    /// what the object's entry says a row of it weighs; 0 when it says nothing. What the scan reserves for a batch before
+    /// one of its splits was measured: from then on, what the heaviest measured held.
     /// </summary>
     internal long WindowBytes;
+
+    /// <summary>
+    /// What the consumer reserves its memory in, which the scan reserves in before it takes it (<see cref="MemoryReserve"/>):
+    /// a chunk's segments before it reads them, what a read of a chunk decodes whole before it decodes it, a batch before
+    /// its decode; null for a consumer that reserves nothing. Set before the scan starts.
+    /// </summary>
+    /// <remarks>
+    /// A split decoded ahead on a lane asks without waiting, and when the room is not there is left to the consumer
+    /// (<see cref="BatchAsyncEnumerator"/>), which asks on its own flow, the job giving back what it started ahead, and
+    /// runs it. A split is run again once what it lacked is reserved, or the chunk another lane was decoding is published.
+    /// </remarks>
+    internal MemoryReserve? Reserve { get; set; }
+
+    /// <summary>The splits of the scan run again for room their consumer's reserve did not hold when they first asked.</summary>
+    internal long Reruns;
+
+    /// <summary>The splits of the scan run again once a chunk another lane was decoding was published, rather than decode it too.</summary>
+    internal long ChunkWaits;
+
+    /// <summary>Whether the consumer's flow runs a split of the scan itself now, reserving its room: on the consumer's flow.</summary>
+    internal bool Running;
 
     /// <summary>The scan that hands its batches over, once started.</summary>
     internal BatchAsyncEnumerator? Scan { get; set; }

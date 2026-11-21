@@ -112,8 +112,20 @@ internal sealed class ScanSegments : IDisposable
     /// </returns>
     internal bool Claim(
         SegmentRequestSet requests, long batch, SegmentWaiter? waiter, ReadOnlySpan<SegmentSpec> along = default,
-        ReadOnlySpan<long> alongBatches = default)
+        ReadOnlySpan<long> alongBatches = default) =>
+        Claim(requests, batch, waiter, along, alongBatches, out _);
+
+    /// <summary>
+    /// <see cref="Claim(SegmentRequestSet, long, SegmentWaiter?, ReadOnlySpan{SegmentSpec}, ReadOnlySpan{long})"/>, which
+    /// says in <paramref name="claimed"/> the bytes of the segments this call claimed for the batch, its own and those it
+    /// reads along: what the batch is about to read, as the file's footer says it, for a scan that reserves a read's
+    /// bytes before it makes it.
+    /// </summary>
+    internal bool Claim(
+        SegmentRequestSet requests, long batch, SegmentWaiter? waiter, ReadOnlySpan<SegmentSpec> along,
+        ReadOnlySpan<long> alongBatches, out long claimed)
     {
+        claimed = 0;
         using (Enter())
         {
             // The entries hold their segments' owners, which no block of the pool holds, and are read without the lock
@@ -145,6 +157,7 @@ internal sealed class ScanSegments : IDisposable
                         Add(new Entry { Offset = spec.Offset, Length = spec.Length, Hash = hash, Claimant = batch, LastUse = batch });
                     }
 
+                    claimed += spec.Length;
                     continue;
                 }
 
@@ -175,6 +188,7 @@ internal sealed class ScanSegments : IDisposable
 
                     requests.Add(in spec);
                     Add(new Entry { Offset = spec.Offset, Length = spec.Length, Hash = hash, Claimant = batch, LastUse = alongBatches[a], Along = true });
+                    claimed += spec.Length;
                 }
             }
 
@@ -331,6 +345,32 @@ internal sealed class ScanSegments : IDisposable
         using (Enter())
         {
             _failed = true;
+            int kept = 0;
+            for (int i = 0; i < _count; i++)
+            {
+                if (Entries[i].Dead || (Entries[i].Owner is null && Entries[i].Claimant == batch))
+                {
+                    continue;
+                }
+
+                Keep(i, ref kept);
+            }
+
+            Truncate(kept);
+            WakeUnblocked();
+        }
+    }
+
+    /// <summary>
+    /// Gives up the claims of a batch that reads nothing now and will ask again, its split left to run later: the batches
+    /// waiting for them claim them in their turn, and the scan goes on sharing its reads, which <see cref="Abandon"/>
+    /// ends for good.
+    /// </summary>
+    /// <param name="batch">The batch's number.</param>
+    internal void Withdraw(long batch)
+    {
+        using (Enter())
+        {
             int kept = 0;
             for (int i = 0; i < _count; i++)
             {

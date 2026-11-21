@@ -132,7 +132,106 @@ internal sealed class SlicedMerge : IMergedRuns
     /// </summary>
     internal Func<ValueTask>? OwnRuns { get; init; }
 
+    /// <summary>
+    /// Has the job give back, on the flow that takes the runs, what it started ahead at the level asked
+    /// (<see cref="JobMemory.MakeRoomAsync"/>); false once no such level is left. What a slice merged ahead asks through
+    /// its runs once it is the one taken (<see cref="AskRoomAsync"/>): its own flow drives neither the writers nor the
+    /// slices beside it. Null for a job that reserves nothing.
+    /// </summary>
+    internal Func<int, ValueTask<bool>>? MakeRoom { get; init; }
+
+    /// <summary>The slices merged ahead that were given up, short of room, and merged again in their turn.</summary>
+    internal int SlicesGivenUp { get; private set; }
+
     public int CurrentRows => _inline?.CurrentRows ?? _run.Rows;
+
+    /// <inheritdoc/>
+    public long CurrentInput => _inline?.CurrentInput ?? _run.Window.Input!.Rank;
+
+    /// <inheritdoc/>
+    public bool StoppedPast(ReserveExhaustedException stop, KeyTest below) =>
+        (_inline ?? _taking?.Merge)?.StoppedPast(stop, below) ?? false;
+
+    /// <inheritdoc/>
+    public async ValueTask GiveBackAsync(int level)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (level == 0)
+        {
+            // The slices taken whose runs the writers copied since go, their inputs with them.
+            await DrainAsync().ConfigureAwait(false);
+        }
+        else if (level == 2)
+        {
+            await GiveUpAheadAsync().ConfigureAwait(false);
+        }
+
+        // The slice taken, when this flow merges it: one merged ahead gives back on its own flow (AskRoomAsync).
+        if (_inline is { } inline)
+        {
+            await inline.GiveBackAsync(level).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// What an input of slice <paramref name="slice"/>, merged ahead, asks when its reserve does not hold what it cannot go
+    /// on without: the flow that takes the runs has the job give back what it started ahead at <paramref name="level"/>,
+    /// once it takes this slice and comes to the runs it gave before it asked, and the slice's merge then gives back its
+    /// own (<see cref="KeyOrderedMerge.GiveBackAsync(int)"/>). A slice not taken yet waits there, holding what it holds: it is
+    /// work ahead, which the slice taken has the job give up when it is itself short of room. On the slice's own flow.
+    /// </summary>
+    /// <returns>False once the job has nothing left to give back, or the slice was given up.</returns>
+    internal async ValueTask<bool> AskRoomAsync(int slice, int level)
+    {
+        if (Volatile.Read(ref _ahead[slice]) is not { } ahead)
+        {
+            return false;
+        }
+
+        Task<bool> answer = ahead.AskAsync();
+        ahead.Runs.Writer.TryWrite(Run.Asking(level));
+        if (!await answer.ConfigureAwait(false) || ahead.GivenUp)
+        {
+            return false;
+        }
+
+        if (ahead.Merge is { } merge)
+        {
+            await merge.GiveBackAsync(level).ConfigureAwait(false);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Gives up the slices merged ahead of the one taken: each stops, its merge goes with its inputs and the runs it kept
+    /// waiting, none of which was taken, and it is merged again by the taking flow in its turn. What a job short of room
+    /// gives back last of what it started ahead. On the taking flow.
+    /// </summary>
+    private async ValueTask GiveUpAheadAsync()
+    {
+        for (int slice = Math.Max(_slice, -1) + 1; slice < _started; slice++)
+        {
+            if (_ahead[slice] is not { } ahead || ReferenceEquals(ahead, _taking))
+            {
+                continue;
+            }
+
+            ahead.GiveUp();
+            await ahead.Done.WaitAsync().ConfigureAwait(false);
+            if (ahead.Merge is { } merge)
+            {
+                await merge.DisposeAsync().ConfigureAwait(false);
+            }
+
+            Volatile.Write(ref _ahead[slice], null);
+            SlicesGivenUp++;
+        }
+    }
 
     public (CanonicalArena Arena, int Root, int Row, double RowBytes) CurrentRun
     {
@@ -227,6 +326,14 @@ internal sealed class SlicedMerge : IMergedRuns
         {
             while (reader.TryRead(out Run run))
             {
+                if (run.Asks > 0)
+                {
+                    // The slice's merge is short of room it cannot go on without, every run it gave before taken: the job
+                    // gives back what it started ahead, on this flow, and the slice goes on or ends there.
+                    ahead.Answer(MakeRoom is { } makeRoom && await makeRoom(run.Asks - 1).ConfigureAwait(false));
+                    continue;
+                }
+
                 if (run.Retired)
                 {
                     // Every run of the window is taken, and noted by the writers that keep it: it is cited up to here.
@@ -312,6 +419,11 @@ internal sealed class SlicedMerge : IMergedRuns
             while (await merge.MoveNextAsync().ConfigureAwait(false))
             {
                 _stop.Token.ThrowIfCancellationRequested();
+                if (ahead.GivenUp)
+                {
+                    throw new OperationCanceledException("The slice merged ahead was given up, the job short of room.");
+                }
+
                 (KeyOrderedMerge.Window window, int row) = merge.CurrentWindow;
                 writer.TryWrite(new Run(window, row, merge.CurrentRows, Retired: false));
                 long held = ahead.Account?.Held ?? 0;
@@ -419,8 +531,9 @@ internal sealed class SlicedMerge : IMergedRuns
                 continue;
             }
 
-            // Stopped, or failed: a failure that mattered failed the merge as its runs were taken.
-            ahead.Room();
+            // Stopped, or failed: a failure that mattered failed the merge as its runs were taken. One waiting for room, or
+            // for an answer to what it asked, goes on to its end.
+            ahead.GiveUp();
             await ahead.Done.WaitAsync().ConfigureAwait(false);
             if (ahead.Merge is { } merge && ahead != _taking)
             {
@@ -451,8 +564,15 @@ internal sealed class SlicedMerge : IMergedRuns
         _stop.Dispose();
     }
 
-    /// <summary>A run of a slice merged ahead, or the mark that its merge moved past a window.</summary>
-    private readonly record struct Run(KeyOrderedMerge.Window Window, int Row, int Rows, bool Retired);
+    /// <summary>
+    /// A run of a slice merged ahead, the mark that its merge moved past a window, or, with <paramref name="Asks"/>, the
+    /// mark that it asks the taking flow for room at the level that is one less (<see cref="AskRoomAsync"/>).
+    /// </summary>
+    private readonly record struct Run(KeyOrderedMerge.Window Window, int Row, int Rows, bool Retired, int Asks = 0)
+    {
+        /// <summary>The mark that the slice's merge asks for room at <paramref name="level"/>.</summary>
+        internal static Run Asking(int level) => new Run(null!, 0, 0, Retired: false, Asks: level + 1);
+    }
 
     /// <summary>
     /// A slice merged ahead: the account its blocks count in, <paramref name="account"/>, what it was admitted at,
@@ -488,8 +608,8 @@ internal sealed class SlicedMerge : IMergedRuns
             Volatile.Write(ref _room, room);
             Interlocked.Exchange(ref ResumeAt, resumeAt);
 
-            // Room made since the count was read, or the merge stopped before the stop could let it go: no wait.
-            if (Volatile.Read(ref Waiting) <= resumeAt || stop.IsCancellationRequested)
+            // Room made since the count was read, or the merge stopped or given up before that could let it go: no wait.
+            if (Volatile.Read(ref Waiting) <= resumeAt || stop.IsCancellationRequested || GivenUp)
             {
                 room.TrySetResult();
             }
@@ -499,5 +619,37 @@ internal sealed class SlicedMerge : IMergedRuns
 
         /// <summary>Lets the merge go on.</summary>
         internal void Room() => Interlocked.Exchange(ref _room, null)?.TrySetResult();
+
+        private TaskCompletionSource<bool>? _asked;
+        private int _givenUp;
+
+        /// <summary>Whether the slice was given up, the job short of room, or its merge ended: it merges no more.</summary>
+        internal bool GivenUp => Volatile.Read(ref _givenUp) != 0;
+
+        /// <summary>What ends with the taking flow's answer to the room the slice's merge is about to ask for through its runs.</summary>
+        internal Task<bool> AskAsync()
+        {
+            TaskCompletionSource<bool> asked = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            Volatile.Write(ref _asked, asked);
+
+            // Given up before it asked, or as it did: told no at once.
+            if (GivenUp)
+            {
+                asked.TrySetResult(false);
+            }
+
+            return asked.Task;
+        }
+
+        /// <summary>Tells the slice's merge whether the job made room.</summary>
+        internal void Answer(bool made) => Interlocked.Exchange(ref _asked, null)?.TrySetResult(made);
+
+        /// <summary>Has the slice's merge stop where it waits: for room among its runs, or for an answer.</summary>
+        internal void GiveUp()
+        {
+            Volatile.Write(ref _givenUp, 1);
+            Room();
+            Answer(false);
+        }
     }
 }
