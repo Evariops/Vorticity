@@ -78,6 +78,54 @@ public sealed partial class JobMemoryTests
     }
 
     /// <summary>
+    /// A merge of four appends of rows that name 512 bytes of text each, one of twelve services, 61 MB of them, under a jobs'
+    /// budget of 24 MiB, whose writer's share, two fifths of it (<see cref="JobShares"/>), the rows pass six times and its
+    /// columns' chunks, aimed at 64 MiB, ten times, while the inputs keep the services in a dictionary and hold little, the
+    /// writer's blocks of 1 024 rows, its objects streamed from a mebibyte: its columns write their chunks early, past what
+    /// the share leaves them to gather, and the job runs to its end, refused nothing, the handle narrowed in nothing, and
+    /// every row reads back.
+    /// </summary>
+    [Fact]
+    public async Task AWriterThatWouldGatherTenTimesItsShareWritesEarlyAndIsRefusedNothing()
+    {
+        const long Budget = 24L << 20;
+        await using VortexSession session = VortexSession.Create(o => o.JobMemoryBudget = new QueryMemoryBudget(Budget));
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        DatasetOptions options = Options(session, fanout: 4);
+        options = options with { Layout = options.Layout! with { ObjectBytes = 64 << 20 }, Write = options.Write with { BlockRows = 1_024 }, StreamedObjectBytes = 1 << 20 };
+        Random random = new Random(17);
+        List<Row> all = [];
+        await using (VortexDataset appending = await VortexDataset.CreateAsync(store, Row.Schema, options, Ct))
+        {
+            for (int a = 0; a < 4; a++)
+            {
+                await AppendAsync(appending, all, [.. Enumerable.Range(0, 30_000).Select(i => new Row(0, Services[random.Next(Services.Length)], all.Count + i, random.Next(0, 100), random.NextDouble()))]);
+            }
+        }
+
+        // The job's handle aims its columns' chunks at 64 MiB, which they would gather were the share not there.
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, options with { ChunkBytes = 64 << 20 }, Ct);
+        const int Columns = 5;
+        Assert.True(Columns * (64L << 20) >= 10 * JobShares.Of(Budget).Writer, "the columns' chunks weigh less than ten writer's shares");
+        Assert.True(all.Sum(static r => (long)r.Service.Length) >= 4 * JobShares.Of(Budget).Writer, "the rows weigh less than four writer's shares");
+        CompactionResult merged = Assert.IsType<CompactionResult>(await dataset.CompactAsync(cancellationToken: Ct));
+
+        Assert.Equal(CompactionTrigger.Tier, merged.Trigger);
+        Assert.Equal(4, merged.ObjectsIn);
+        Assert.Equal(0, dataset.JobWidthCap);
+        Assert.Equal(0, dataset.JobGatherHalvings);
+        Assert.InRange(merged.MemoryReserved, 1, Budget);
+        Assert.Equal(all.OrderBy(r => r.Sequence), (await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(r => r.Sequence));
+    }
+
+    /// <summary>
+    /// Twelve services named in 512 bytes each: few values, which the inputs keep in a dictionary. A block of the writer's
+    /// 8 192 rows of a kibibyte weighed 8 MiB, the whole budget of the first try, before any share was dealt; and inputs of
+    /// 140 000 rows, decoded a chunk at a time, held 2 MiB each, which four did not fit.
+    /// </summary>
+    private static readonly string[] Services = [.. Enumerable.Range(0, 12).Select(static k => $"svc-{k:D2}-".PadRight(512, (char)('a' + k)))];
+
+    /// <summary>
     /// A partition of 120 small objects under a budget that holds some 40 of them open at once: its consolidation is
     /// preceded by merges of its size classes, each committed, until what is left fits; the consolidation then takes
     /// what the budget holds, and every row reads back from level 1 alone.

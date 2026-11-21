@@ -62,30 +62,19 @@ internal static partial class DatasetCompactor
         Math.Max(InputFloorBytes, OpenChunkBytes(dataset, schema, entry)) + (Math.Min(entry.PhysicalRows, batchRows) * HeldPerRow(dataset));
 
     /// <summary>
-    /// What the writer of <paramref name="job"/>'s objects holds at most: what its columns gather (<see cref="WriterBytes"/>),
-    /// or what the handle's last job measured its writer to hold when that is more. The measure wins over the bound it
-    /// passes: a writer of metric records, priced 192 MiB by its columns, held 691 MiB, shredding included. Before a job of
-    /// the handle measured it, a writer that shreds variants is priced at <see cref="FirstWriterPerCeiling"/> times its
-    /// gathering ceiling at least.
+    /// What the writer of <paramref name="job"/>'s objects holds at most: what its columns gather (<see cref="WriterBytes"/>)
+    /// times what a writer holds past them (<see cref="JobShares.WriterPerGathered"/>), within the writer's share of the
+    /// jobs' budget (<see cref="JobShares"/>), which a writer that gathers to its ceiling fills.
     /// </summary>
+    /// <remarks>
+    /// It was what the handle's last job measured its writer to hold, and before any, a writer that shreds variants was
+    /// priced at five times its gathering ceiling: the first job of a handle priced at the ceiling alone held four times it
+    /// and was refused twice (2026-11-17), and a measure of one job priced the next, whatever its shape.
+    /// </remarks>
     internal static long WriterCost(VortexDataset dataset, DatasetSchema schema, CompactionJob job, IReadOnlyList<ValueShredding>? shreddings) =>
-        dataset.WriterJobBytes > 0
-            ? Math.Max(dataset.WriterJobBytes, WriterBytes(dataset, schema, job, shreddings))
-            : VariantColumns(schema.DType).Length > 0
-                ? Math.Max(WriterBytes(dataset, schema, job, shreddings), FirstWriterPerCeiling * GatherCeiling(dataset))
-                : WriterBytes(dataset, schema, job, shreddings);
-
-    /// <summary>
-    /// What a job's writer that shreds variants holds over its gathering ceiling, before a job of the handle measured it: its
-    /// gathered columns, and the chunks its variant columns compress ahead, each holding its rows and its leaves as it
-    /// compresses. The first job of a handle priced its writer at the ceiling alone, held 322 MiB in its writer over log
-    /// records and 332 to 368 over metric records, four times the ceiling of 84 MiB under 2 GiB, and was refused, then
-    /// narrowed, twice (2026-11-17). Priced at four times, its writer held 344 to 360 MiB over log records and 350 to 384
-    /// over metric records once every column's chunk was emitted by a task of its own, its gathered chunks' contexts 204 to
-    /// 246 MiB of it and the shredded copies its line took 38 to 74, and a consolidation of 74 appends was given up after
-    /// 8 to 10 s of its 11 four times in ten (2026-11-18).
-    /// </summary>
-    private const int FirstWriterPerCeiling = 5;
+        Math.Min(
+            JobShares.Of(JobBudget(dataset)).Writer,
+            (long)(WriterBytes(dataset, schema, job, shreddings) * JobShares.WriterPerGathered));
 
     /// <summary>
     /// What a decoded row of the job's inputs weighs, about: what the handle's last merge measured, or, before any, the
@@ -369,31 +358,24 @@ internal static partial class DatasetCompactor
     private static long WriterBytes(VortexDataset dataset, DatasetSchema schema, CompactionJob job, IReadOnlyList<ValueShredding>? shreddings) =>
         Math.Min(Math.Min(TargetsBytes(dataset, schema, shreddings), job.Rows * RowBytes(dataset, job)), GatherCeiling(dataset));
 
-    /// <summary>
-    /// The share of the jobs' budget, one in this many, a job's writer gathers its columns in together, past which a column
-    /// writes its chunk early (<see cref="VortexWriteOptions.GatheredBytesCeiling"/>): the rest for its inputs. The backlog
-    /// bench, under 2 GiB: a half, 25 jobs in 60 s; a quarter, 17 in 55 s; an eighth, 11 in 49 s; a sixteenth, 8 in 48 s,
-    /// its object 2.3 % larger, its chunks written early. Under 4 GiB, 47 to 49 s down to an eighth, one job of 34 s at a
-    /// sixteenth (2026-11-16).
-    /// </summary>
-    private const int GatherShare = 8;
-
     /// <summary>The least a job's writer gathers its columns in together: a mebibyte, the chunk a column aims at.</summary>
     internal const long LeastGatherCeiling = 1L << 20;
 
     /// <summary>
-    /// What a job's writer gathers its columns in together at most: its share of the jobs' budget, halved each time the
-    /// job before it was refused with nothing else left to narrow (<see cref="VortexDataset.JobGatherHalvings"/>), a
-    /// mebibyte at least.
+    /// What a job's writer gathers its columns in together at most, past which a column writes its chunk early
+    /// (<see cref="VortexWriteOptions.GatheredBytesCeiling"/>): what the writer's share of the jobs' budget leaves its columns
+    /// (<see cref="JobShares.Gathered"/>), halved each time the job before it was refused with nothing else left to narrow
+    /// (<see cref="VortexDataset.JobGatherHalvings"/>), a mebibyte at least.
     /// </summary>
     /// <remarks>
-    /// A writer holds some 185 MiB past its columns at degree 14, its flights and its lanes' workspaces, and 2.3 times its
-    /// ceiling: 361 to 385 MiB at an eighth of a jobs' budget of 672, 277 to 291 at a sixteenth. A consolidation of ten
-    /// inputs of log records, whose inputs hold 330 MiB at their shortest batches, was refused at its fewest inputs every
-    /// time at an eighth, and runs at a sixteenth (2026-11-20).
+    /// It was an eighth of the jobs' budget, set by the backlog bench under 2 GiB, where a half, a quarter, an eighth and a
+    /// sixteenth ran 25 jobs in 60 s, 17 in 55, 11 in 49 and 8 in 48, the last's object 2.3 % larger, its chunks written
+    /// early (2026-11-16). A writer holds some 185 MiB past its columns at degree 14, its flights and its lanes' workspaces,
+    /// and 2.3 times its ceiling: 361 to 385 MiB at an eighth of a jobs' budget of 672, 277 to 291 at a sixteenth
+    /// (2026-11-20). Its share of two fifths leaves its columns 60 MiB there.
     /// </remarks>
     internal static long GatherCeiling(VortexDataset dataset) =>
-        Math.Max(LeastGatherCeiling, (JobBudget(dataset) / GatherShare) >> dataset.JobGatherHalvings);
+        Math.Max(LeastGatherCeiling, JobShares.Of(JobBudget(dataset)).Gathered >> dataset.JobGatherHalvings);
 
     /// <summary>What the writer of a job's objects holds once each column gathers its chunk's target (<see cref="WriterBytes"/>).</summary>
     private static long TargetsBytes(VortexDataset dataset, DatasetSchema schema, IReadOnlyList<ValueShredding>? shreddings)

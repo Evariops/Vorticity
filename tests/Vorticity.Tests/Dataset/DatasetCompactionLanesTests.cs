@@ -664,9 +664,10 @@ public sealed partial class DatasetCompactionLanesTests
     }
 
     /// <summary>
-    /// A job's advances, its flows' units ahead of what they must do: admitted while the room the jobs' budget leaves it holds
-    /// them, a window decoded ahead and a slice merged ahead past what its writer was priced at and does not hold yet, a block
-    /// in flight past nothing; refused, and counted, once other work holds the room.
+    /// A job's advances, its flows' units ahead of what they must do: admitted while their part's share holds them past what
+    /// the part holds (<see cref="JobShares"/>) and the room the jobs' budget leaves holds them, a window decoded ahead and a
+    /// slice merged ahead past what its writer was priced at and does not hold yet, a block in flight past nothing; refused,
+    /// and counted, past their share or once other work holds the room.
     /// </summary>
     [Fact]
     public async Task AJobAdmitsItsUnitsAheadWhileItsRoomHoldsThemTheWriterFirst()
@@ -679,13 +680,15 @@ public sealed partial class DatasetCompactionLanesTests
         await using (memory.ConfigureAwait(false))
         {
             memory.WriterPrice = 16L << 20;
+            Assert.Equal(new JobShares(Inputs: 40_265_320, MergeAhead: 40_265_320, Writer: 26_843_544, GroupsWaiting: 0), memory.Shares);
 
-            // Room for all: 64 MiB free. A slice is admitted with what the slices ahead may still take: two of 24 MiB leave
-            // the writer its 16, three would not.
+            // Room for all: 64 MiB free. The inputs' share, 38.4 MiB, holds a slice of 32 and not one of 40; the writer's,
+            // 25.6 MiB, a block of 8 and not one of 30.
             Assert.True(memory.AdmitsRead(8L << 20));
             Assert.True(memory.AdmitsWrite(8L << 20));
-            Assert.True(memory.AdmitsMerge(48L << 20));
-            Assert.False(memory.AdmitsMerge(72L << 20));
+            Assert.True(memory.AdmitsMerge(32L << 20));
+            Assert.False(memory.AdmitsMerge(40L << 20));
+            Assert.False(memory.AdmitsWrite(30L << 20));
 
             // Other work holds 44 MiB: 20 left, of which the writer may take 16 more; a window of 8 waits, a block goes.
             Assert.True(jobs.TryReserve(44L << 20));
@@ -695,7 +698,7 @@ public sealed partial class DatasetCompactionLanesTests
                 Assert.False(memory.AdmitsMerge(8L << 20));
                 Assert.True(memory.AdmitsWrite(8L << 20));
                 Assert.True(memory.AdmitsRead(4L << 20));
-                Assert.Equal((1, 2, 0), memory.HeldBack);
+                Assert.Equal((1, 2, 1), memory.HeldBack);
             }
             finally
             {

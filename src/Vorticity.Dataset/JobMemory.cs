@@ -25,6 +25,9 @@ internal sealed class JobMemory : IAsyncDisposable
     private readonly WorkAccount _inputs;
     private JobInputs? _copies;
 
+    /// <summary>What each part of the job may hold, dealt from the jobs' budget as the job starts (<see cref="JobShares.Of"/>).</summary>
+    internal JobShares Shares { get; private set; }
+
     /// <summary>
     /// The memory of a job of <paramref name="dataset"/>, under its session's jobs' budget: funded by <paramref name="grant"/>,
     /// what the job reserved before it started (<see cref="QueryMemoryBudget.ReserveAsync"/>), which its blocks take first.
@@ -37,6 +40,7 @@ internal sealed class JobMemory : IAsyncDisposable
         Inputs = Job.HardChild();
         Writer = Job.HardChild();
         _inputs = new WorkAccount(Inputs, "compaction's inputs");
+        Shares = JobShares.Of(Jobs.CeilingBytes);
     }
 
     /// <summary>The jobs' budget the job reserves in.</summary>
@@ -153,23 +157,24 @@ internal sealed class JobMemory : IAsyncDisposable
 
     /// <summary>
     /// Whether the job admits a window of <paramref name="bytes"/> decoded ahead by an input of its merge, past the two its
-    /// price counts: the room left holds it and still what the writer may take. Counted when refused.
+    /// price counts: the inputs' share holds it past what they hold (<see cref="JobShares.MergeAhead"/>), and the room left
+    /// holds it and still what the writer may take. Counted when refused.
     /// </summary>
-    internal bool AdmitsRead(long bytes) => Admits(bytes, WriterKeep, ref _readsHeldBack);
+    internal bool AdmitsRead(long bytes) => Admits(bytes, Inputs, Shares.MergeAhead, WriterKeep, ref _readsHeldBack);
 
     /// <summary>
     /// Whether the job admits a slice of its merge merged ahead on a lane of its own, which with the slices ahead already
-    /// merging may still take <paramref name="bytes"/>: the room left holds them and still what the writer may take. Counted
-    /// when refused.
+    /// merging may still take <paramref name="bytes"/>: the inputs' share holds them past what they hold, and the room left
+    /// holds them and still what the writer may take. Counted when refused.
     /// </summary>
-    internal bool AdmitsMerge(long bytes) => Admits(bytes, WriterKeep, ref _slicesHeldBack);
+    internal bool AdmitsMerge(long bytes) => Admits(bytes, Inputs, Shares.MergeAhead, WriterKeep, ref _slicesHeldBack);
 
     /// <summary>
     /// Whether the job admits one more block of <paramref name="bytes"/> in flight on its writer's line past the one that must
-    /// go: the room left holds the block its writer stages next. The writer comes first: nothing is kept downstream of it.
-    /// Counted when refused.
+    /// go: the writer's share holds it past what the writer holds (<see cref="JobShares.Writer"/>), and the room left holds
+    /// it. The writer comes first: nothing is kept downstream of it. Counted when refused.
     /// </summary>
-    internal bool AdmitsWrite(long bytes) => Admits(bytes, 0, ref _flightsHeldBack);
+    internal bool AdmitsWrite(long bytes) => Admits(bytes, Writer, Shares.Writer, 0, ref _flightsHeldBack);
 
     /// <summary>The units each flow did not start ahead for want of room: windows decoded, slices merged, blocks in flight.</summary>
     internal (int Reads, int Slices, int Flights) HeldBack =>
@@ -179,10 +184,13 @@ internal sealed class JobMemory : IAsyncDisposable
     private int _slicesHeldBack;
     private int _flightsHeldBack;
 
-    /// <summary>Whether the room left holds <paramref name="bytes"/> past <paramref name="keep"/>; a refusal counted in <paramref name="refused"/>.</summary>
-    private bool Admits(long bytes, long keep, ref int refused)
+    /// <summary>
+    /// Whether <paramref name="part"/>, its share <paramref name="share"/>, holds <paramref name="bytes"/> more, and the room
+    /// left holds them past <paramref name="keep"/>; a refusal counted in <paramref name="refused"/>.
+    /// </summary>
+    private bool Admits(long bytes, QueryMemoryBudget part, long share, long keep, ref int refused)
     {
-        if (Room - bytes >= keep)
+        if (part.ReservedBytes + bytes <= share && Room - bytes >= keep)
         {
             return true;
         }
