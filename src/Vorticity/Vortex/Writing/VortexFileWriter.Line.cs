@@ -41,6 +41,15 @@ public sealed partial class VortexFileWriter
     // The flights flown.
     private long _flown;
 
+    /// <summary>The blocks sent through so far, each a flight, on or off the line: the thread that hands the rows over counts them.</summary>
+    internal long Flown => _flown;
+
+    /// <summary>
+    /// Where the writer counts what each flight's block names, in the order of the flights (<see cref="BlockWeights"/>);
+    /// null for none. Set before the first row.
+    /// </summary>
+    internal BlockWeights? Weights { get; set; }
+
     // The line the flights go through when the writer sends a merge's blocks several at once; null otherwise.
     private FlightLine? _line;
 
@@ -181,8 +190,12 @@ public sealed partial class VortexFileWriter
     /// does: it went through alone, and a consolidation of metric records, each of whose blocks makes a chunk, ingested its
     /// 6 328 blocks one at a time on its flow, 7.45 s of its 9.6 s of writing at degree 14, behind 9.2 s at four lanes and
     /// 11.6 at fourteen; on the line, 9.2 s at fourteen, the same bytes (2026-11-18).
+    /// <para>
+    /// <paramref name="bytes"/> are the block's columns' bytes (<see cref="ColumnBytes"/>) when its prologue sized them
+    /// already, null otherwise.
+    /// </para>
     /// </remarks>
-    private bool LineTakes(CanonicalArena arena, int node, int rows, long pending, out bool endsChunk)
+    private bool LineTakes(CanonicalArena arena, int node, int rows, long pending, (long Widest, long Total)? bytes, out bool endsChunk)
     {
         endsChunk = false;
         if (rows != _blockRows || _blockFilled != 0 || Fan is null || !(_indexes is null or { AsksNothing: true } || _indexes.FeedsAcross))
@@ -191,7 +204,7 @@ public sealed partial class VortexFileWriter
         }
 
         // The chunk the write of the block alone would cut (WriteDecodedAsync), under columns that gather too.
-        (long widest, long total) = ColumnBytes(arena, node);
+        (long widest, long total) = bytes ?? ColumnBytes(arena, node);
         long chunk = AutomaticChunkRows(widest, total, rows);
         if (_gatheredBytes > 0)
         {
@@ -238,7 +251,17 @@ public sealed partial class VortexFileWriter
         flight.Cuts = false;
         flight.AfterCut = false;
         flight.OverField = -1;
-        if (node < 0 || !LineTakes(arena, node, rows, pending, out bool endsChunk))
+
+        // What the block names, counted for the job that writes the object in the order of the flights, whether the line
+        // takes the block or it goes through alone: sized once, for the line too.
+        (long Widest, long Total)? bytes = null;
+        if (Weights is { } weights)
+        {
+            bytes = node < 0 ? (0, 0) : ColumnBytes(arena, node);
+            weights.Weigh(flight.Index, bytes.Value.Total);
+        }
+
+        if (node < 0 || !LineTakes(arena, node, rows, pending, bytes, out bool endsChunk))
         {
             return false;
         }

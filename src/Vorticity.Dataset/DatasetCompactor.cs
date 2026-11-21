@@ -1558,16 +1558,10 @@ internal static partial class DatasetCompactor
                     end = values is null ? count : values.EndOfValue(merge, at, count);
 
                     // An object the rows handed over since its last reading may bring to its size is read: it is full or it goes
-                    // on, the next reading placed by what a row weighed since this one. Its runs are cut where the next reading
-                    // is asked, so that it falls there whatever runs the merge hands.
+                    // on, the next reading placed by what a row weighed since this one.
                     if (outputs.AsksReading)
                     {
                         await outputs.ReadSizeAsync(cancellationToken).ConfigureAwait(false);
-                    }
-
-                    if (outputs.RowsToReading < end - at)
-                    {
-                        end = at + (int)outputs.RowsToReading;
                     }
 
                     // A run that goes on with the key the object ends on, past its size: the rows of that key stay with it,
@@ -1578,13 +1572,21 @@ internal static partial class DatasetCompactor
                     {
                         end = EndOfKey(merge, at, end);
                     }
-
-                    if ((outputs.WantsRoll && !outputs.HoldsKey(merge.KeyAt(at)))
-                        || (values is not null && outputs.HoldsOtherValue(values, merge.KeyAt(at))))
+                    else if (outputs.WantsRoll || (values is not null && outputs.HoldsOtherValue(values, merge.KeyAt(at))))
                     {
                         // Never split a key across two objects: two outputs sharing a boundary value
                         // would overlap, and a level wants key-disjoint objects.
                         await outputs.RollAsync(cancellationToken).ConfigureAwait(false);
+                    }
+
+                    // The runs are cut where the next reading of the object they go to is asked, so that it falls there whatever
+                    // runs the merge hands, that object started first. A run that started an object went in whole, to where the
+                    // merge's run ended, which the inputs' batches decide: an object of a line's blocks was read at 20 blocks
+                    // where its writer had landed what 8 named (2026-11-21).
+                    outputs.Opens(merge.KeyAt(at));
+                    if (outputs.RowsToReading < end - at)
+                    {
+                        end = at + (int)outputs.RowsToReading;
                     }
 
                     await outputs.WriteAsync(merge, at, end, cancellationToken).ConfigureAwait(false);
@@ -2566,12 +2568,13 @@ internal static partial class DatasetCompactor
         /// to be sure of landing under it, left every column two chunks more an object, which a question on one value read
         /// 1.7 times the bytes of (2026-11-21).
         /// <para>
-        /// Where what a row weighs moves along the keys, no aim follows it: log records sorted by service went from 3.7 to
-        /// 33.8 bytes a row, and objects aimed at 64 MiB ended at 125 and 211 % of it, the second read by the writer's grid
-        /// alone, four million rows past its start; on appends of the same records, four million rows of 6.4 to 7.2 bytes,
-        /// as steady as any, came before rows of 31.6, and an object ended at 241 %. Readings come a quarter of an object's
-        /// rows apart at the latest (<see cref="NextReading"/>), and those objects ended at 97 to 106 %, those of metric
-        /// records at 100 % for a reading more an object and 0.1 % more bytes (2026-11-21).
+        /// Where what a row weighs moves along the keys, no aim by the rows follows it: log records sorted by service went
+        /// from 3.7 to 33.8 bytes a row, and objects aimed at 64 MiB ended at 125 and 211 % of it; on appends of the same
+        /// records, four million steady rows came before rows of 31.6 bytes, and an object ended at 241 %. Read a quarter of
+        /// an object's rows apart at the latest, those objects ended at 97 to 106 %, and the questions of a bench read 3 002
+        /// requests cold where they read 2 632. An object of a line's blocks is read by what its blocks name instead
+        /// (<see cref="ReadsNow"/>): those log objects end at 99 to 107 % in 15 ends where the quarters asked 27, and the
+        /// questions read 2 644 requests, every answer the same (2026-11-21).
         /// </para>
         /// </remarks>
         internal bool AsksReading => _rows >= NextReading;
@@ -2590,10 +2593,10 @@ internal static partial class DatasetCompactor
 
         /// <summary>
         /// The rows of the object being written its next reading is asked at: where its writer's grid ends a group
-        /// (<see cref="VortexFileWriter.GroupRows"/>), or before, where the rows at what a row weighs reach the object's size,
-        /// and in an object of a line's blocks, a quarter of the rows an object holds at what its inputs' rows weigh past the
-        /// last reading at the latest; on a block's boundary. <see cref="long.MaxValue"/> for an object that does not end by
-        /// its size or is full.
+        /// (<see cref="VortexFileWriter.GroupRows"/>), or before, in an object of a line's blocks at the end of the first
+        /// flight where what its blocks name says it is due (<see cref="ReadsNow"/>), looked at on each, and in a smaller one
+        /// where the rows at what a row weighs reach the object's size; on a block's boundary. <see cref="long.MaxValue"/>
+        /// for an object that does not end by its size or is full.
         /// </summary>
         /// <remarks>
         /// Asked as the merge's runs came, a reading fell at rows that hung on where an input's batch ended, which the job's
@@ -2613,21 +2616,12 @@ internal static partial class DatasetCompactor
                 long grid = output.Writer.GroupRows;
                 long next = grid > 0 ? ((_rowsRead / grid) + 1) * grid : long.MaxValue;
 
-                // In an object of a line's blocks at least (VortexFileWriter.LineObjectBlocks), a reading a quarter of the rows
-                // an object holds at what its inputs' rows weigh at the latest, whose quarter spans eight blocks: no aim follows
-                // a weight that moves along the keys, and the rows past one placed by lighter rows overshoot by that much at
-                // most. One that falls within a drift short of the writer's next end of a group waits for it, which writes
-                // nothing more: metric records, whose rows weigh the same along the keys, read on the grid alone.
-                double blockBytes = _inputBytesPerRow * block;
-                bool lined = blockBytes > 0 && _target / blockBytes >= VortexFileWriter.LineObjectBlocks;
-                if (lined)
+                // In an object of a line's blocks, at the end of the first flight where what its blocks name says it is due
+                // (ReadsNow), looked at on each, which follows a weight that moves along the keys with no chunk ended before.
+                if (output.Writer.Weights is { } weights)
                 {
-                    long stepped = _rowsRead + (long)(_target / _inputBytesPerRow / 4);
-                    stepped = (stepped + block - 1) / block * block;
-                    if (next > stepped * (1 + _drift))
-                    {
-                        next = stepped;
-                    }
+                    long boundary = (_rows + block - 1) / block * block;
+                    return Math.Min(next, boundary > _rows ? boundary : ReadsNow(output.Writer, weights, block, next) ? _rows : _rows + block);
                 }
 
                 // None by the weight of the rows when those the object can take at most, the job's left or its partition
@@ -2638,11 +2632,10 @@ internal static partial class DatasetCompactor
                 }
 
                 // On a block's boundary, where every row handed over is in the file; within an object's first block for a size a
-                // block outweighs, where the rows past the file's whole blocks count at what a row weighs. In an object of a
-                // line's blocks, at the heavier of the object's mean and its last stretch's, which says best what the rows ahead
-                // weigh when they grow; in a smaller one at its mean, a stretch of a few blocks weighing its chunks' fixed cost,
-                // which read objects short of their size again and again.
-                double rows = (_target - _dataRead) / (lined ? Math.Max(_bytesPerRow, _stretchRate) : _bytesPerRow);
+                // block outweighs, where the rows past the file's whole blocks count at what a row weighs. At the object's mean:
+                // a stretch of a few blocks weighs its chunks' fixed cost, which read objects short of their size again and
+                // again.
+                double rows = (_target - _dataRead) / _bytesPerRow;
                 if (rows < (long.MaxValue >> 2))
                 {
                     long byWeight = _rowsRead + Math.Max((long)Math.Ceiling(rows), 1);
@@ -2684,16 +2677,149 @@ internal static partial class DatasetCompactor
             // The rows past the file's whole blocks, which wait for the chunks after, at what a row weighs.
             long data = end.DataBytes + (long)((_rows - end.Rows) * _bytesPerRow);
 
-            // What a row weighed over the stretch since the last reading, the last object's for an object's first.
-            if (_rows > _rowsRead)
+            // What the blocks named, every flight landed. A reading asked where what a row named drifted starts a window there,
+            // whose rows the next reading measures (ReadsNow); any other measures the data a byte named takes over the window,
+            // which places the readings after, and the bytes a row named, which counts the rows flown since the last flight
+            // known (NamedNow). Over a window, an object's stretches count what ending their groups wrote past their rows: over
+            // the stretch since the last reading alone, the last stretch of objects of steady rows took 0.30 bytes of data a
+            // byte named where their whole took 0.264, and the next object was read at 87 % of its size, then again
+            // (2026-11-21).
+            if (output.Writer.Weights is { } weights)
             {
-                _stretchRate = Math.Max(0, (double)(data - _dataRead) / (_rows - _rowsRead));
+                long named = weights.Through(output.Writer.Flown - 1);
+                long block = Math.Max(1, output.Writer.BlockRows);
+                if (_dataPerNamed > 0 && Drifts(output.Writer, weights, block))
+                {
+                    _windowData = data;
+                    _windowNamed = named;
+                    _windowRows = _rows;
+                    _measuring = true;
+                    _firstWindow = false;
+                }
+                else if (named > _windowNamed && data > _windowData && _rows > _windowRows)
+                {
+                    _dataPerNamed = (double)(data - _windowData) / (named - _windowNamed);
+                    _namedPerRow = (double)(named - _windowNamed) / (_rows - _windowRows);
+                    _windowSpan = named - _windowNamed;
+                    _measuring = false;
+                }
+
+                _namedRead = named;
             }
 
             _rowsRead = _rows;
             _dataRead = data;
             _full = data >= _target - _slack;
             GroupEnds++;
+        }
+
+        /// <summary>
+        /// Whether the object being written, on a flight's end, is read there (<see cref="NextReading"/>), the end of its
+        /// writer's next group at row <paramref name="grid"/>. Before the stream measured what its rows' data takes a byte
+        /// named, or past a drift, once its last <see cref="VortexFileWriter.FlightDepth"/> blocks known lie past the window's
+        /// start, which they measure. Otherwise once what it holds from its last reading, at what a byte named took over the
+        /// window measured, reaches its size; once what a row names drifts (<see cref="Drifts"/>); or, in the stream's first
+        /// window, once its blocks named since the window's start reach <see cref="WindowGrowth"/> times the window measured.
+        /// The first window's readings wait for the grid when they can (<see cref="WaitsForGrid"/>).
+        /// </summary>
+        /// <remarks>
+        /// What a byte named takes moves along the keys even where what a row names does not, which a window a few times
+        /// smaller than what it places says little of: rows of three keys took 0.084 bytes of data a byte named over the
+        /// first 4 % of an object and 0.096 over the whole, and an object placed from the first ended at 114 % of its size.
+        /// Past the stream's first window, a window spans an object or the rows a drift started, and a reading extrapolates
+        /// from it however far: grown four times at a time after every window, the readings of a consolidation of 60 million
+        /// log records rose from 24 to 30, each drift then read four times more. Such rows of a test, placed from 2 048 rows
+        /// past a drift, end an object at 124 % of its size (2026-11-21).
+        /// </remarks>
+        private bool ReadsNow(VortexFileWriter writer, Writing.BlockWeights weights, long flightRows, long grid)
+        {
+            if (_dataPerNamed <= 0)
+            {
+                return PastWindow(writer, flightRows) && !WaitsForGrid(grid);
+            }
+
+            if (_measuring)
+            {
+                return PastWindow(writer, flightRows);
+            }
+
+            double named = NamedNow(writer, weights, flightRows);
+            return _dataRead + ((named - _namedRead) * _dataPerNamed) >= _target
+                || Drifts(writer, weights, flightRows)
+                || (_firstWindow && named - _windowNamed >= WindowGrowth * (double)_windowSpan && !WaitsForGrid(grid));
+        }
+
+        /// <summary>
+        /// Whether a reading of the stream's first window waits for the writer's next end of a group at row
+        /// <paramref name="grid"/>, which writes nothing more: while the rows up to it, at what a row weighs and a drift more,
+        /// leave the object short of its size.
+        /// </summary>
+        /// <remarks>
+        /// Read from its eighth block, its first window cut every chunk of a consolidation of 200 million metric records
+        /// three times more in its first object, all before the writer's first end of a group, at four million rows.
+        /// </remarks>
+        private bool WaitsForGrid(long grid) =>
+            grid != long.MaxValue && _dataRead + ((grid - _rowsRead) * _bytesPerRow * (1 + _drift)) < _target - _slack;
+
+        // Whether the window measured is the stream's first, from its first row, no object sealed and no drift met.
+        private bool _firstWindow = true;
+
+        /// <summary>The times its window the bytes named a reading extrapolates to at most (<see cref="ReadsNow"/>).</summary>
+        private const int WindowGrowth = 4;
+
+        /// <summary>
+        /// What the blocks of the object being written name as its rows stand: counted through the flight
+        /// <see cref="VortexFileWriter.FlightDepth"/> behind the last flown, which its writer landed, as many at any degree;
+        /// the rows flown since, and those not flown, at what a row of the blocks known since the last reading named, or of
+        /// the window measured when none is.
+        /// </summary>
+        private double NamedNow(VortexFileWriter writer, Writing.BlockWeights weights, long flightRows)
+        {
+            long known = writer.Flown - writer.FlightDepth;
+            long rowsKnown = known * flightRows;
+            if (known > 0 && rowsKnown > _rowsRead)
+            {
+                long through = weights.Through(known - 1);
+                return through + ((_rows - rowsKnown) * ((double)(through - _namedRead) / (rowsKnown - _rowsRead)));
+            }
+
+            return _namedRead + ((_rows - _rowsRead) * _namedPerRow);
+        }
+
+        /// <summary>
+        /// Whether what a row names drifted by more than a drift from the window the data a byte named takes was measured over
+        /// (<see cref="ReadSizeAsync"/>): over the last <see cref="VortexFileWriter.FlightDepth"/> blocks known, all past the
+        /// last reading, which measured the window with those before them. The rows then are other rows, which a window
+        /// started at the reading measures.
+        /// </summary>
+        private bool Drifts(VortexFileWriter writer, Writing.BlockWeights weights, long flightRows)
+        {
+            if (_measuring || _namedPerRow <= 0 || !KnownPast(writer, flightRows, _rowsRead))
+            {
+                return false;
+            }
+
+            int window = writer.FlightDepth;
+            long known = writer.Flown - window;
+            double recent = (double)(weights.Through(known - 1) - weights.Through(known - 1 - window)) / (window * flightRows);
+            return Math.Abs((recent / _namedPerRow) - 1) > _drift;
+        }
+
+        /// <summary>
+        /// Whether the last <see cref="VortexFileWriter.FlightDepth"/> blocks known all lie past the start of the window, which
+        /// they measure.
+        /// </summary>
+        private bool PastWindow(VortexFileWriter writer, long flightRows) => KnownPast(writer, flightRows, _windowRows);
+
+        /// <summary>
+        /// Whether the last <see cref="VortexFileWriter.FlightDepth"/> blocks known all lie past row <paramref name="row"/> of
+        /// the object being written.
+        /// </summary>
+        private static bool KnownPast(VortexFileWriter writer, long flightRows, long row)
+        {
+            int window = writer.FlightDepth;
+            long known = writer.Flown - window;
+            return known >= window && (known - window) * flightRows >= row;
         }
 
         // The share of the size an object may hold less or more (DatasetOptions.ObjectEndSlack), in bytes; the share by which
@@ -2708,13 +2834,24 @@ internal static partial class DatasetCompactor
         private bool _full;
 
         // What a row weighs in the object last read, its data over its rows at that reading, the stream's next object going
-        // by it until its own first reading; before any, what a row of the job's inputs weighs (FirstBytesPerRow), which stays
-        // what places readings while the weight of the rows moves.
+        // by it until its own first reading; before any, what a row of the job's inputs weighs (FirstBytesPerRow).
         private double _bytesPerRow;
-        private double _inputBytesPerRow;
 
-        // What a row weighed over the stretch between the last two readings, 0 before one.
-        private double _stretchRate;
+        // Where the writer of an object of a line's blocks counts what each of its blocks names (BlockWeights), the stream's
+        // own, given to each such object's writer; what its blocks named at the last reading, 0 before one. The data a byte
+        // named took and the bytes a row named, over the stream's last window measured, 0 before one: from the object's
+        // start, or from the reading where what a row named drifted, to the last reading; and the bytes named over it. The
+        // data, the bytes named and the rows at the window's start in the object being written; and whether the window
+        // started at a drift, its rows not measured yet.
+        private Writing.BlockWeights? _weights;
+        private long _namedRead;
+        private double _dataPerNamed;
+        private double _namedPerRow;
+        private long _windowSpan;
+        private long _windowData;
+        private long _windowNamed;
+        private long _windowRows;
+        private bool _measuring;
 
         // The stream's first row, which the rows it handed over count from.
         private readonly long _startRow;
@@ -2764,7 +2901,7 @@ internal static partial class DatasetCompactor
         /// <summary>What a row of the job's inputs weighs: what places a stream's first reading.</summary>
         internal double FirstBytesPerRow
         {
-            init => _bytesPerRow = _inputBytesPerRow = value;
+            init => _bytesPerRow = value;
         }
 
         /// <summary>The ends of groups of rows the job asked its objects' writers for, each to read what an object held (<see cref="ReadSizeAsync"/>).</summary>
@@ -2849,8 +2986,8 @@ internal static partial class DatasetCompactor
         /// </summary>
         internal async ValueTask WriteAsync(IMergedRun merge, int from, int to, CancellationToken cancellationToken)
         {
-            Starts(merge.KeyAt(from));
-            ObjectOutput output = Open();
+            Opens(merge.KeyAt(from));
+            ObjectOutput output = _output!;
             if (Keys is { } keys)
             {
                 (_sorted ??= new SortedRows(keys, Prefix, skip: Skip)).Take(merge, from, to, output.Writer.BlockRows);
@@ -3017,6 +3154,15 @@ internal static partial class DatasetCompactor
             _output = output;
             output.Writer.Ledger = Ledger;
             output.Writer.FlightDepth = FlightDepthOf(output.Writer.BlockRows);
+
+            // An object of a line's blocks that ends by its size has its writer count what each block names, which places its
+            // readings (NextReading): its flights a block each, so that they end where its readings may fall.
+            if (_endsBySize && output.Writer.FlightDepth > 1 && output.Writer.MapRows == output.Writer.BlockRows)
+            {
+                (_weights ??= new Writing.BlockWeights()).Reset();
+                output.Writer.Weights = _weights;
+            }
+
             Postings?.BlocksOf(VortexDataset.Uid(output.Identity), output.Writer.BlockRows);
             foreach ((int field, ObjectDictionary dictionary, long rowBytes) in Dictionaries)
             {
@@ -3028,6 +3174,16 @@ internal static partial class DatasetCompactor
         // The place among the shreddings of the value being written and its first key.
         private int _value = -1;
         private byte[]? _valueKey;
+
+        /// <summary>
+        /// Starts the object the rows of key <paramref name="key"/> go to when none is: what the job cuts their run for
+        /// (<see cref="RowsToReading"/>) before it writes them.
+        /// </summary>
+        internal void Opens(ReadOnlySpan<byte> key)
+        {
+            Starts(key);
+            _ = Open();
+        }
 
         /// <summary>
         /// Records the first key of the rows written next, which starts the next partition value's shredding when they
@@ -3136,6 +3292,11 @@ internal static partial class DatasetCompactor
             _rows = 0;
             _dataRead = 0;
             _rowsRead = 0;
+            _namedRead = 0;
+            _windowData = 0;
+            _windowNamed = 0;
+            _windowRows = 0;
+            _firstWindow = false;
             _full = false;
         }
 

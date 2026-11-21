@@ -77,6 +77,11 @@ public sealed class ResidueTests
         (Dataset, @"\bMostRanges\b", 0),
         (Dataset, @"\bRangesAsync\b", 0),
         (Dataset, @"\bgatherShare\b", 0),
+
+        // The readings of an object of a line's blocks a quarter of its rows apart, placed by what a row of the job's inputs
+        // weighed and by the last stretch's weight of a row: given up on 2026-11-21 for what the object's blocks name.
+        (Compactor, @"\b_stretchRate\b", 0),
+        (Compactor, @"\b_inputBytesPerRow\b", 0),
     ];
 
     [Fact]

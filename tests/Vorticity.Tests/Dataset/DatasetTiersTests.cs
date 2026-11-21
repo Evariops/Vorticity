@@ -364,9 +364,10 @@ public sealed partial class DatasetTiersTests
     /// <summary>
     /// Light rows first, then rows under services of their own that encode to some ten times what they do, in objects of
     /// hundreds of blocks whose writer ends a group every four million rows: no reading in between but the job's. An end
-    /// aimed at what the light rows weighed falls deep in the heavy ones, and one a quarter of an object's rows apart at
-    /// the latest (<see cref="DatasetOptions.RowWeightDrift"/>) keeps every object but the last within a quarter of its
-    /// size past it: 97 to 101 % of it, where an object without them held 371 % (2026-11-21).
+    /// aimed at what the light rows weighed falls deep in the heavy ones, where an object held 371 %. Read where what its
+    /// blocks name says it is full, an object of the heavy rows ends at 99 to 100 % of its size, read again where what a
+    /// row names drifts (<see cref="DatasetOptions.RowWeightDrift"/>); the light rows, whose data a byte named moves with
+    /// no such drift, end theirs at 115 and 124 %, within a quarter of their size past it (2026-11-21).
     /// </summary>
     [Fact]
     public async Task HeavierRowsPastLightOnesEndTheirObjectNearItsSize()
@@ -383,6 +384,28 @@ public sealed partial class DatasetTiersTests
         Console.WriteLine($"HEAVIER PAST LIGHT: {sizes}");
         Assert.True(objects.Count >= 3, sizes);
         Assert.All(objects.SkipLast(1), held => Assert.InRange(held.Data, Top * (1 - DatasetOptions.DefaultObjectEndSlack), Top * 5 / 4));
+    }
+
+    /// <summary>
+    /// Rows that weigh the same along the keys, in objects of a hundred blocks whose writer ends no group by itself: past the
+    /// stream's first object, which its readings measure the rows by, each object is read where what its blocks name says it
+    /// holds its size, once as a rule and twice when that finds it short, and holds it within a group of rows. Every
+    /// reading ends each column's chunk; read a quarter of an object apart, these objects were read five times each.
+    /// </summary>
+    [Fact]
+    public async Task AnObjectOfSteadyRowsIsReadOnceOrTwice()
+    {
+        const long Top = 256 << 10;
+        Random random = new Random(53);
+        List<CompactionResult> jobs = [];
+        List<(long Bytes, long Data, long Rows)> objects = await ConsolidatedAsync(
+            Top, chunkBytes: 1 << 20, (first, count) => Rows(random, count, first, day: 0), groupRows: 1L << 22, ran: jobs);
+        int groupEnds = jobs.Sum(job => job.GroupEnds);
+        string sizes = $"{string.Join(", ", objects)}; {groupEnds} group ends";
+        Console.WriteLine($"STEADY: {sizes}");
+        Assert.True(objects.Count >= 8, sizes);
+        Assert.InRange(groupEnds, objects.Count - 1, (2 * (objects.Count - 1)) + 4);
+        Assert.All(objects.SkipLast(1), held => Assert.InRange(held.Data, Top * (1 - DatasetOptions.DefaultObjectEndSlack), Top * 21 / 20));
     }
 
     /// <summary>
@@ -406,9 +429,10 @@ public sealed partial class DatasetTiersTests
     /// <summary>
     /// The bytes and the bytes of data of the objects a consolidation of sixteen appends of 20 000 rows of one day writes,
     /// in the order of their rows, into objects aimed at <paramref name="top"/> bytes of data, in blocks of 256 rows and
-    /// column chunks aimed at <paramref name="chunkBytes"/>; every row read back.
+    /// column chunks aimed at <paramref name="chunkBytes"/>; every row read back. The jobs run go to <paramref name="ran"/>.
     /// </summary>
-    private static async Task<List<(long Bytes, long Data, long Rows)>> ConsolidatedAsync(long top, int chunkBytes, Func<long, int, Row[]> rows, long groupRows = GroupRows)
+    private static async Task<List<(long Bytes, long Data, long Rows)>> ConsolidatedAsync(
+        long top, int chunkBytes, Func<long, int, Row[]> rows, long groupRows = GroupRows, List<CompactionResult>? ran = null)
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
@@ -434,6 +458,7 @@ public sealed partial class DatasetTiersTests
 
         IReadOnlyList<CompactionResult> jobs = await dataset.ConsolidateAsync(Ct);
         Assert.NotEmpty(jobs);
+        ran?.AddRange(jobs);
         List<(long Bytes, long Data, long Rows)> objects = [];
         await foreach (PositionedObject written in dataset.ScanBuilder().ObjectsAsync(Ct))
         {

@@ -3134,7 +3134,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 await staging.Assembly!.RunOrWaitAsync(_core).ConfigureAwait(false);
             }
 
-            await WriteStagedAsync(staging, cancellationToken).ConfigureAwait(false);
+            await WriteStagedAsync(staging, cancellationToken, flown: true).ConfigureAwait(false);
             return;
         }
 
@@ -3148,7 +3148,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 // Its assembly, run here on the flight's lane when no pump took it yet.
                 await staging.Assembly!.RunOrWaitAsync(_core).ConfigureAwait(false);
-                await WriteStagedAsync(staging, cancellationToken).ConfigureAwait(false);
+                await WriteStagedAsync(staging, cancellationToken, flown: true).ConfigureAwait(false);
             });
     }
 
@@ -3261,13 +3261,26 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>Writes the small batches <paramref name="staging"/> holds, as one batch of all their rows, and drops them.</summary>
-    private async ValueTask WriteStagedAsync(Staging staging, CancellationToken cancellationToken)
+    /// <param name="staging">The staging.</param>
+    /// <param name="cancellationToken">Cancels the write.</param>
+    /// <param name="flown">
+    /// Whether it is the last flight flown off the writer's line, which counts what its block names (<see cref="Weights"/>):
+    /// the thread that hands the rows over flies no other until it lands.
+    /// </param>
+    private async ValueTask WriteStagedAsync(Staging staging, CancellationToken cancellationToken, bool flown = false)
     {
         // The rows still held where they lie in a merge's inputs are copied now, and concatenated: a block that flies was
-        // assembled on its lane already, while the block before it went through.
+        // assembled on its lane already, while the block before it went through. What it names is counted as it was
+        // assembled, as a block on the line counts it at its prologue, before any of its values are put back together.
         ScanContext context = staging.Context;
         int rows = staging.Rows;
-        int node = PutBackWhole(staging, staging.Assembled >= 0 ? staging.Assembled : Assemble(staging));
+        int assembled = staging.Assembled >= 0 ? staging.Assembled : Assemble(staging);
+        if (flown && Weights is { } weights)
+        {
+            weights.Weigh(_flown - 1, ColumnBytes(context.Canonical, assembled).Total);
+        }
+
+        int node = PutBackWhole(staging, assembled);
         staging.Assembled = -1;
         staging.Rows = 0;
         staging.Bytes = 0;
