@@ -126,6 +126,56 @@ public sealed partial class JobMemoryTests
     private static readonly string[] Services = [.. Enumerable.Range(0, 12).Select(static k => $"svc-{k:D2}-".PadRight(512, (char)('a' + k)))];
 
     /// <summary>
+    /// A partition of 35 small objects under a budget that holds some 14 of them open at once, its fan-out 64, so that no
+    /// merge of its size classes is ever due: its consolidation is preceded by merges of its smallest neighbours, each
+    /// committed, until what is left fits, and runs refused nothing, the handle narrowed in nothing. Level 1 then holds the
+    /// rows a consolidation of the same appends under a large budget holds. Without the merges, it consolidated the 35 at
+    /// once, which its price said the budget does not hold.
+    /// </summary>
+    [Fact]
+    public async Task AConsolidationWiderThanAMergeMergesItsSmallestNeighboursFirst()
+    {
+        const int Objects = 35;
+        long budget = (14 * DatasetCompactor.InputFloorBytes) + (256 << 10);
+        await using VortexSession session = VortexSession.Create(o => o.JobMemoryBudget = new QueryMemoryBudget(budget));
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(session, fanout: 64), Ct);
+        Random random = new Random(23);
+        List<Row> all = [];
+        for (int a = 0; a < Objects; a++)
+        {
+            await AppendAsync(dataset, all, Rows(random, 20 + (a % 7), all.Count));
+        }
+
+        IReadOnlyList<CompactionResult> results = await dataset.ConsolidateAsync(Ct);
+
+        string ran = string.Join(", ", results.Select(static r => $"{r.Trigger} {r.ObjectsIn}"));
+        Assert.True(results.Count >= 2 && results[0].Trigger == CompactionTrigger.Tier, ran);
+        Assert.Equal(CompactionTrigger.Consolidation, results[^1].Trigger);
+        Assert.True(results[^1].ObjectsIn < Objects, ran);
+        Assert.Equal(0, dataset.JobWidthCap);
+        Assert.Equal(0, dataset.Levels[0].Entries);
+        List<Row> read = (await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(r => r.Sequence).ToList();
+        Assert.Equal(all.OrderBy(r => r.Sequence), read);
+
+        // The same appends consolidated at once under a large budget hold the same rows in level 1.
+        await using MemoryObjectStore wide = new MemoryObjectStore();
+        await using VortexDataset direct = await VortexDataset.CreateAsync(wide, Row.Schema, Options(VortexSession.Default, fanout: 64), Ct);
+        List<Row> again = [];
+        int at = 0;
+        for (int a = 0; a < Objects; a++)
+        {
+            int count = 20 + (a % 7);
+            await AppendAsync(direct, again, [.. all.Skip(at).Take(count)]);
+            at += count;
+        }
+
+        IReadOnlyList<CompactionResult> once = await direct.ConsolidateAsync(Ct);
+        Assert.Equal(CompactionTrigger.Consolidation, Assert.Single(once).Trigger);
+        Assert.Equal(read, (await direct.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(r => r.Sequence));
+    }
+
+    /// <summary>
     /// A partition of 120 small objects under a budget that holds some 40 of them open at once: its consolidation is
     /// preceded by merges of its size classes, each committed, until what is left fits; the consolidation then takes
     /// what the budget holds, and every row reads back from level 1 alone.

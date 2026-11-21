@@ -467,7 +467,8 @@ internal static partial class DatasetCompactor
 
     /// <summary>
     /// How many of <paramref name="inputs"/>, objects of one size class of one partition in the order of the tree, a tier
-    /// merge takes: <paramref name="least"/> whatever the bounds, then as many more as keep their bytes within
+    /// merge takes: <paramref name="least"/> whatever the bounds but what a merge holds open at once (<see cref="MemoryWidth"/>),
+    /// two at least, then as many more as keep their bytes within
     /// <paramref name="bytes"/>, the layout's object size or a caller's bound, and what the merge holds within the jobs'
     /// budget, each input open at once at what an input of the handle's last job held (<see cref="InputCost"/>), the writer
     /// at what it held (<see cref="WriterCost"/>); and no more than half a job the budget refused
@@ -481,6 +482,10 @@ internal static partial class DatasetCompactor
         bytes = Math.Min(bytes, JobBytesBound(dataset));
         int cap = dataset.JobWidthCap;
         least = cap > 0 ? Math.Min(least, Math.Max(2, cap)) : least;
+
+        // The fan-out at least, but no more than a merge holds open at once: a merge due when its class reached the fan-out
+        // took it whatever its bounds, and was refused when its memory did not hold it, then narrowed.
+        least = Math.Min(least, Math.Max(2, MemoryWidth(dataset, inputs)));
         long rowBytes = RowBytesOf(dataset);
         long targets = TargetsBytes(dataset, schema, null);
         long held = 0;

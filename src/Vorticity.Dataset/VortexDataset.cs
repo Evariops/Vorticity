@@ -2419,9 +2419,20 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
                 CompactionPlan tiers = await CompactionPolicy.PlanAsync(this, null, int.MaxValue, cancellationToken).ConfigureAwait(false);
                 foreach (CompactionJob merge in tiers.Jobs)
                 {
-                    if (merge.Trigger == CompactionTrigger.Tier && passes.Contains(CompactionPolicy.PartitionOf(this, merge)))
+                    if (merge.Trigger == CompactionTrigger.Tier && passes.Remove(CompactionPolicy.PartitionOf(this, merge)))
                     {
                         merges.Add(merge);
+                    }
+                }
+
+                // A pass with no merge of its classes due merges its smallest neighbours first, a merge's width of them at
+                // most (CompactionPolicy.NarrowingOf): it consolidated anyway, and was refused at its fewest inputs.
+                foreach (CompactionJob job in plan.Jobs)
+                {
+                    if (job.Trigger == CompactionTrigger.Consolidation && passes.Remove(CompactionPolicy.PartitionOf(this, job))
+                        && CompactionPolicy.NarrowingOf(this, job) is { } narrowing)
+                    {
+                        merges.Add(narrowing);
                     }
                 }
             }

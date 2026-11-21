@@ -146,11 +146,13 @@ internal static partial class CompactionPolicy
                 continue;
             }
 
-            if (await ConsolidationAsync(dataset, partition, top, fanout, layout.LateShare, consolidateAll, cancellationToken).ConfigureAwait(false) is { } job
-                && (consolidateAll || !deferred.ContainsKey(partition) || DatasetCompactor.Fits(dataset.Handle, job)))
+            CompactionJob? job = await ConsolidationAsync(dataset, partition, top, fanout, layout.LateShare, consolidateAll, cancellationToken).ConfigureAwait(false);
+            bool fits = job is not null && (consolidateAll || DatasetCompactor.Fits(dataset.Handle, job));
+            if (job is not null && (fits || !deferred.ContainsKey(partition)))
             {
+                // Too wide for a merge with no merge of its classes due: its smallest neighbours merged first.
                 busy.Add(index);
-                jobs.Add(job);
+                jobs.Add(!fits && Narrowing(dataset, job, top) is { } narrowing ? narrowing : job);
             }
             else if (deferred.TryGetValue(partition, out CompactionJob? merge))
             {
@@ -228,6 +230,63 @@ internal static partial class CompactionPolicy
         int width = DatasetCompactor.TierWidth(dataset.Handle, inputs, fanout, bytes);
         return Tier(dataset, width == inputs.Count ? inputs : inputs.GetRange(0, width), top);
     }
+
+    /// <summary>
+    /// The merge that narrows <paramref name="consolidation"/>, whose level 0 a merge does not hold open at once: of its
+    /// inputs of level 0 in the order of the tree, the run of neighbours whose bytes are the fewest, as many as a merge holds
+    /// open (<see cref="DatasetCompactor.MemoryWidth"/>) or as many as leave the partition's level 0 that wide once merged,
+    /// whichever is fewer, merged into level 0. Each such merge is committed, and the passes end once level 0 fits: the
+    /// rows of the smallest inputs are written once more for each, a logarithm of the inputs in base the width. Null when
+    /// the level 0 fits, or a merge holds fewer than two inputs open, which the consolidation then meets as it runs.
+    /// </summary>
+    /// <remarks>
+    /// A consolidation takes its partition's whole level 0, its inputs overlapping and all open at once: one of 35 inputs of
+    /// log records under 2 GiB failed on its inputs alone, at its fewest inputs and its shortest batches, when no merge of
+    /// its size classes was due to narrow it first.
+    /// </remarks>
+    private static CompactionJob? Narrowing(PlannedVersion dataset, CompactionJob consolidation, long top)
+    {
+        List<CompactionInput> fresh = new List<CompactionInput>(consolidation.Inputs.Count);
+        foreach (CompactionInput input in consolidation.Inputs)
+        {
+            if (input.Level == 0)
+            {
+                fresh.Add(input);
+            }
+        }
+
+        fresh.Sort(static (left, right) => left.Key.Span.SequenceCompareTo(right.Key.Span));
+        int width = DatasetCompactor.MemoryWidth(dataset.Handle, fresh);
+        if (fresh.Count <= width || width < 2)
+        {
+            return null;
+        }
+
+        int take = Math.Min(width, fresh.Count - width + 1);
+        int best = 0;
+        long least = long.MaxValue;
+        long sum = 0;
+        for (int i = 0; i < fresh.Count; i++)
+        {
+            sum += fresh[i].Entry.Bytes;
+            if (i >= take)
+            {
+                sum -= fresh[i - take].Entry.Bytes;
+            }
+
+            if (i >= take - 1 && sum < least)
+            {
+                least = sum;
+                best = i - take + 1;
+            }
+        }
+
+        return Tier(dataset, fresh.GetRange(best, take), top);
+    }
+
+    /// <summary>The merge that narrows <paramref name="consolidation"/> of <paramref name="dataset"/> (<see cref="Narrowing"/>), what a consolidation asked for runs first.</summary>
+    internal static CompactionJob? NarrowingOf(VortexDataset dataset, CompactionJob consolidation) =>
+        Narrowing(new PlannedVersion(dataset), consolidation, consolidation.TargetBytes);
 
     /// <summary>
     /// The merge of <paramref name="inputs"/>, objects of one class of one partition at level 0, into level 0: on the key,
