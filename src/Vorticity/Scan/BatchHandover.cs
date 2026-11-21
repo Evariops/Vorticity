@@ -47,6 +47,16 @@ internal sealed class BatchHandover
     /// <inheritdoc cref="Own"/>
     internal int Borrowed;
 
+    /// <summary>The decoded bytes the scan took each window of <see cref="Ahead"/> for, which it gives it back for: those of a split of its plan.</summary>
+    internal long BorrowedBytes;
+
+    /// <summary>
+    /// What the consumer counts a batch of the scan to weigh decoded, from what it knows of the file's rows; 0 for none.
+    /// The scan takes a window of <see cref="Ahead"/> for that when it is more than its own count of a split, which goes
+    /// by the schema alone: a split of a shredded variant's rows weighed several times what its schema says.
+    /// </summary>
+    internal long WindowBytes;
+
     /// <summary>The scan that hands its batches over, once started.</summary>
     internal BatchAsyncEnumerator? Scan { get; set; }
 

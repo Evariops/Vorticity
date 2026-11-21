@@ -77,6 +77,25 @@ internal sealed class SlicedMerge : IMergedRuns
     /// <summary>The slices merged ahead on lanes of their own, rather than by the taking flow.</summary>
     internal int SlicesAhead { get; private set; }
 
+    /// <summary>
+    /// What the slices past the one being taken hold of the job's inputs' blocks now, each as its account counts it: what
+    /// the job's memory tells from what the slice taken must hold (<see cref="JobMemory.AheadHeld"/>). Read from any
+    /// flow, as an admission reads it: a slice that starts or ends meanwhile is counted or not.
+    /// </summary>
+    internal long AheadHeld
+    {
+        get
+        {
+            long held = 0;
+            for (int slice = Math.Max(Volatile.Read(ref _slice), -1) + 1; slice < _ahead.Length; slice++)
+            {
+                held += Volatile.Read(ref _ahead[slice])?.Account?.Held ?? 0;
+            }
+
+            return held;
+        }
+    }
+
     /// <summary>The most slices merging at once, the one being taken and those ahead of it: 1 when none merged ahead.</summary>
     internal int PeakAtOnce { get; private set; } = 1;
 

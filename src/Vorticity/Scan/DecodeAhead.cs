@@ -22,6 +22,15 @@ internal sealed class DecodeAhead(int most, Func<long, bool> admits)
     private int _free = most;
     private long _taken;
 
+    // The decoded bytes of the windows taken and not given back, as their scans counted them when they took them.
+    private long _bytes;
+
+    /// <summary>
+    /// The decoded bytes of the windows taken and not given back yet, as their scans counted them: what the job's memory
+    /// tells from what its inputs must hold (<c>JobMemory.AheadHeld</c>).
+    /// </summary>
+    internal long Bytes => Math.Max(0, Interlocked.Read(ref _bytes));
+
     /// <summary>The windows one input may take past its own, the most the pool holds.</summary>
     internal int PerInput { get; } = most;
 
@@ -57,10 +66,15 @@ internal sealed class DecodeAhead(int most, Func<long, bool> admits)
             return false;
         }
 
+        Interlocked.Add(ref _bytes, bytes);
         Interlocked.Increment(ref _taken);
         return true;
     }
 
-    /// <summary>Gives back <paramref name="windows"/> windows the merge has passed.</summary>
-    internal void Give(int windows) => Interlocked.Add(ref _free, windows);
+    /// <summary>Gives back <paramref name="windows"/> windows the merge has passed, taken for <paramref name="bytes"/> decoded bytes in all.</summary>
+    internal void Give(int windows, long bytes)
+    {
+        Interlocked.Add(ref _bytes, -bytes);
+        Interlocked.Add(ref _free, windows);
+    }
 }

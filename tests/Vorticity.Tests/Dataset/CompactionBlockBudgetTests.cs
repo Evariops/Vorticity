@@ -57,14 +57,16 @@ public sealed partial class CompactionBlockBudgetTests
     }
 
     /// <summary>
-    /// A budget of 18 MiB and a handle that learned an input and a writer cost a byte each, so that its plan takes the whole
-    /// class: the job is refused a block, given up, and a narrower one runs in its place within the budget; once it ends,
-    /// the budget holds nothing, and the next job has it whole.
+    /// A handle under a budget of 18 MiB runs a job planned for the whole class by a handle under a large one: the job is
+    /// refused a block, given up, and a narrower one, planned by the handle itself, runs in its place within the budget;
+    /// once it ends, the budget holds nothing, and the next job has it whole.
     /// </summary>
     /// <remarks>
     /// The last job of the backlog, two objects of 60 000 rows, held 16.22 MB of a budget of 16 MiB, then 16.74 MB once an
     /// input's batch stays until the writers copied the runs they keep of it (2026-11-17): refused under a busy test run, it
-    /// narrowed nothing. 18 MiB holds it, and still refuses the first job, planned at the whole class.
+    /// narrowed nothing. 18 MiB holds it, and still refuses the first job, planned at the whole class. The handle planned
+    /// that job itself, having learned that an input and a writer cost a byte each: it now counts its inputs by what their
+    /// entries say they hold, and takes of the class what its budget holds, so the job too wide for it is another handle's.
     /// </remarks>
     [Fact]
     public async Task AJobTheBudgetRefusesGivesWayToANarrowerOneAndLeavesTheBudgetWhole()
@@ -75,12 +77,15 @@ public sealed partial class CompactionBlockBudgetTests
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(session), Ct);
         List<Row> all = await AppendAsync(dataset, appends: 64, rows: 4_096);
-        dataset.LearnDecodedRowBytes(1);
-        dataset.LearnJobCosts(DatasetCompactor.InputFloorBytes + 1, 8_192, 1, width: int.MaxValue);
-        int planned = (await dataset.PlanCompactionAsync(cancellationToken: Ct)).Job!.Inputs.Count;
+        await using VortexSession large = VortexSession.Create(static o => o.JobMemoryBudget = new QueryMemoryBudget(4L << 30));
+        await using VortexDataset wide = await VortexDataset.OpenAsync(store, Options(large), Ct);
+        CompactionJob whole = (await wide.PlanCompactionAsync(cancellationToken: Ct)).Job!;
+        int planned = whole.Inputs.Count;
         Assert.Equal(64, planned);
+        Assert.True((await dataset.PlanCompactionAsync(cancellationToken: Ct)).Job!.Inputs.Count < planned, "the handle's own plan takes the whole class");
 
-        CompactionResult? first = await dataset.CompactAsync(cancellationToken: Ct);
+        CompactionResult? first = await dataset.RunWithinBudgetAsync(
+            whole, async token => (await dataset.PlanCompactionAsync(cancellationToken: token)).Job, Ct);
 
         Assert.NotNull(first);
         Assert.True(first.ObjectsIn < planned, $"the job took {first.ObjectsIn} objects of the {planned} first planned");

@@ -176,6 +176,94 @@ public sealed partial class JobMemoryTests
     }
 
     /// <summary>
+    /// A partition of 35 objects that lie in two rows along the keys, 18 one after the other, a service each, and 17 that
+    /// each start in one of them and end in the next: a merge opens an object at its first key and lets go of it past its
+    /// last, so no more than three are open at once. Under a budget that holds some 14 objects open, the consolidation
+    /// takes the 35 at once, with no merge before it, and is refused nothing. Counted all open together, as every object
+    /// of level 0 was, the partition was merged by its smallest neighbours first, its rows written once more.
+    /// </summary>
+    [Fact]
+    public async Task AConsolidationOfObjectsThatFollowOneAnotherAlongTheKeysRunsAtOnce()
+    {
+        const int Services = 18;
+        long budget = (14 * DatasetCompactor.InputFloorBytes) + (256 << 10);
+        await using VortexSession session = VortexSession.Create(o => o.JobMemoryBudget = new QueryMemoryBudget(budget));
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(session, fanout: 64), Ct);
+        List<Row> all = [];
+        for (int k = 0; k < Services; k++)
+        {
+            // A service whole, then the upper half of its statuses with the lower half of the next one's.
+            await AppendAsync(dataset, all, [.. Enumerable.Range(0, 100).Select(status => new Row(0, $"svc-{k:D2}", all.Count + status, status, status))]);
+            if (k + 1 < Services)
+            {
+                await AppendAsync(dataset, all, [.. Enumerable.Range(50, 100).Select(i => new Row(0, $"svc-{k + (i / 100):D2}", all.Count + i - 50, i % 100, i))]);
+            }
+        }
+
+        Assert.Equal((2 * Services) - 1, dataset.Levels[0].Entries);
+        IReadOnlyList<CompactionResult> results = await dataset.ConsolidateAsync(Ct);
+
+        string ran = string.Join(", ", results.Select(static r => $"{r.Trigger} {r.ObjectsIn}"));
+        CompactionResult consolidation = Assert.Single(results);
+        Assert.True(consolidation.Trigger == CompactionTrigger.Consolidation && consolidation.ObjectsIn == (2 * Services) - 1, ran);
+        Assert.InRange(consolidation.InputsPlanned, 1, budget);
+        Assert.InRange(consolidation.MemoryReserved, 1, budget);
+        Assert.Equal(0, dataset.JobWidthCap);
+        Assert.Equal(0, dataset.Levels[0].Entries);
+        Assert.Equal(all.OrderBy(r => r.Sequence), (await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(r => r.Sequence));
+    }
+
+    /// <summary>
+    /// Eight appends that each hold every key, each about an object's size, under a budget that holds two or three of them
+    /// open: no merge makes them fewer, two of them merged give two objects again. Those two lie one after the other along
+    /// the keys, though, and are open one at a time: each merge leaves one object fewer open where the partition held the
+    /// most, and the consolidation runs once what is open at once fits, every row read back from level 1. Counted all open
+    /// together, the partition was merged two objects into two without end, and its consolidation never fitted: 262
+    /// merges of a backlog of log records under 2 GiB, then a failure (2026-11-21).
+    /// </summary>
+    [Fact]
+    public async Task APartitionOfObjectsAtTheirSizeIsNarrowedUntilItsConsolidationFits()
+    {
+        const int Appends = 8;
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        DatasetOptions options = Options(VortexSession.Default, fanout: 64);
+        options = options with { Layout = options.Layout! with { ObjectBytes = 24 << 10 } };
+        Random random = new Random(31);
+        List<Row> all = [];
+        long window = 0;
+        await using (VortexDataset appending = await VortexDataset.CreateAsync(store, Row.Schema, options, Ct))
+        {
+            for (int a = 0; a < Appends; a++)
+            {
+                await AppendAsync(appending, all, Rows(random, 4_000, all.Count));
+            }
+
+            // What a merge counts an append at as one of its inputs, at its shortest batches: the heaviest of them.
+            await foreach ((_, ObjectEntry entry) in appending.Snapshot.EntriesAsync(0, Ct))
+            {
+                window = Math.Max(window, DatasetCompactor.Window(appending, appending.Snapshot.Schema, entry, DatasetCompactor.LeastBatchRows));
+            }
+        }
+
+        // A budget whose inputs' part, three fifths, holds two appends open and not three.
+        long budget = (window * 21) / 5;
+        await using VortexSession session = VortexSession.Create(o => o.JobMemoryBudget = new QueryMemoryBudget(budget));
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, options with { Session = session }, Ct);
+        IReadOnlyList<CompactionResult> results = await dataset.ConsolidateAsync(Ct);
+
+        string ran = string.Join(", ", results.Select(static r => $"{r.Trigger} {r.ObjectsIn}->{r.ObjectsOut}"));
+        Console.WriteLine($"NARROWED: {ran}");
+        Assert.Equal(CompactionTrigger.Consolidation, results[^1].Trigger);
+        Assert.Contains(results, static r => r.Trigger == CompactionTrigger.Tier);
+        Assert.True(results.Count <= 6 * Appends, ran);
+        Assert.All(results, r => Assert.InRange(r.MemoryReserved, 1, budget));
+        Assert.Equal(0, dataset.JobWidthCap);
+        Assert.Equal(0, dataset.Levels[0].Entries);
+        Assert.Equal(all.OrderBy(r => r.Sequence), (await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(r => r.Sequence));
+    }
+
+    /// <summary>
     /// A size class of 72 small objects of one weight, due under a fan-out of 64, whose merges a budget holds to two inputs
     /// open at once: each merge takes the lightest neighbours of the class, two objects of one weight, and no merge takes the
     /// object the merge before wrote. Taking the first of the class, that object, a merge took it again with the next, and
@@ -272,43 +360,10 @@ public sealed partial class JobMemoryTests
     }
 
     /// <summary>
-    /// A handle that has run no job measures one input before its first merge, through a merge of that input alone: what an
-    /// input holds at a batch of a block and what a row weighs, read from one object, which the next plan prices its inputs
-    /// by; nothing of the dataset is written.
-    /// </summary>
-    [Fact]
-    public async Task AHandlesFirstMergeMeasuresAnInputOfItsOwnFirst()
-    {
-        await using MemoryObjectStore inner = new MemoryObjectStore();
-        CountingObjectStore store = new CountingObjectStore(inner);
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(VortexSession.Default, fanout: 4), Ct);
-        Random random = new Random(3);
-        List<Row> all = [];
-        for (int a = 0; a < 8; a++)
-        {
-            await AppendAsync(dataset, all, Rows(random, 2_000, all.Count));
-        }
-
-        CompactionPlan plan = await dataset.PlanCompactionAsync(cancellationToken: Ct);
-        Assert.NotNull(plan.Job);
-        Assert.Equal(0, dataset.InputJobBytes);
-        Assert.Equal(0, dataset.DecodedRowBytes);
-        ulong version = dataset.Version;
-        store.Reset();
-
-        Assert.True(await DatasetCompactor.MeasureInputAsync(dataset, plan.Job, Ct));
-        Assert.InRange(dataset.InputJobBytes, 1, 64L << 20);
-        Assert.InRange(dataset.DecodedRowBytes, 1, 64L << 10);
-        Assert.InRange(store.CountOf(ObjectOperation.Read), 1, 2);
-        Assert.Equal(0, store.CountOf(ObjectOperation.Put));
-        Assert.Equal(version, dataset.Version);
-    }
-
-    /// <summary>
     /// A job refused its blocks narrows the next: half its inputs for a merge by size class, and for any job half the rows of
     /// its batches, as many inputs open at once at most. A refusal that narrowed none of those of the one before it halves
-    /// what the next job's writer gathers, down to a mebibyte, then fails, one given up on its price alone excepted; and a
-    /// job that ran to its end lifts the caps, its writer's among them.
+    /// what the next job's writer gathers, down to a mebibyte, then fails, one that taught the handle what an input holds
+    /// open excepted; and a job that ran to its end lifts the caps, its writer's among them.
     /// </summary>
     [Fact]
     public async Task AJobRefusedNarrowsTheNextUntilNothingIsLeftToNarrow()
@@ -344,7 +399,7 @@ public sealed partial class JobMemoryTests
 
         Assert.Equal(DatasetCompactor.LeastGatherCeiling, DatasetCompactor.GatherCeiling(dataset));
         Assert.Throws<VortexMemoryException>(() => dataset.Narrowed(shorter, same));
-        dataset.Narrowed(new JobTooWideException(job, 1, 8L << 20), same);
+        dataset.Narrowed(shorter, new JobTooWideException(job, 8L << 20, 8L << 20, new VortexMemoryException("refused")) { Sizing = (8_192, 8), Learned = true });
 
         dataset.LearnJobCosts(1L << 20, 8_192, writerBytes: 0, width: int.MaxValue);
         Assert.Equal(0, dataset.JobWidthCap);

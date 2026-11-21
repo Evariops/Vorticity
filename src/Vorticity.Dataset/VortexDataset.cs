@@ -392,24 +392,50 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         }
     }
 
+    // What the scans of objects were measured to hold open in jobs of the handle that were refused a block, by object key.
+    private readonly Dictionary<string, long> _measuredOpenBytes = new Dictionary<string, long>(StringComparer.Ordinal);
+
     /// <summary>
-    /// Keeps what an input measured before the handle's first job held, <paramref name="inputBytes"/> at batches of
-    /// <paramref name="batchRows"/> rows, as a job's would be kept; the caps a refusal set stay, no job having run since.
+    /// What a job of the handle measured the scan of the object <paramref name="key"/> to hold open besides its batches,
+    /// when one refused a block had it open and it held more than the handle counted it at; 0 for none. A plan counts
+    /// the object at that when it is more than its entry says (<see cref="DatasetCompactor.OpenBytes"/>).
     /// </summary>
-    internal void LearnInputCost(long inputBytes, int batchRows)
+    internal long MeasuredOpenBytes(string key)
     {
-        if (inputBytes > 0)
+        lock (_measuredOpenBytes)
         {
-            Volatile.Write(ref _inputJobBytes, inputBytes);
-            Volatile.Write(ref _jobBatchRows, Math.Max(batchRows, 1));
+            return _measuredOpenBytes.GetValueOrDefault(key);
         }
     }
 
-    /// <summary>
-    /// A job was given up before it read anything, its first input's measure fitting <paramref name="inputs"/> of them in
-    /// the jobs' budget: the next takes that many at most, below the fan-out if need be, as one refused would.
-    /// </summary>
-    internal void CapJobWidth(int inputs) => Volatile.Write(ref _jobWidthCap, Math.Max(1, inputs));
+    /// <summary>Keeps <paramref name="bytes"/> as what the scan of the object <paramref name="key"/> holds open, when it is more than was kept.</summary>
+    internal void LearnOpenBytes(string key, long bytes)
+    {
+        lock (_measuredOpenBytes)
+        {
+            if (bytes > _measuredOpenBytes.GetValueOrDefault(key))
+            {
+                _measuredOpenBytes[key] = bytes;
+            }
+        }
+    }
+
+    /// <summary>Forgets what was measured of <paramref name="inputs"/>, objects a job that ran to its end took out of the dataset.</summary>
+    internal void ForgetOpenBytes(IReadOnlyList<CompactionInput> inputs)
+    {
+        lock (_measuredOpenBytes)
+        {
+            if (_measuredOpenBytes.Count == 0)
+            {
+                return;
+            }
+
+            foreach (CompactionInput input in inputs)
+            {
+                _measuredOpenBytes.Remove(input.Entry.Key);
+            }
+        }
+    }
 
     /// <summary>
     /// A job of <paramref name="inputs"/> inputs was refused its blocks: the next takes half as many, until one runs to its end.
@@ -2367,7 +2393,7 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// <exception cref="VortexMemoryException">The job narrowed nothing of the one before it, its writer gathering a mebibyte already.</exception>
     internal void Narrowed(JobTooWideException? before, JobTooWideException now)
     {
-        if (before is null || before.Job.Trigger != now.Job.Trigger || before.Priced
+        if (before is null || before.Job.Trigger != now.Job.Trigger || now.Learned
             || now.Job.Inputs.Count < before.Job.Inputs.Count
             || (now.Sizing.BatchRows > 0 && now.Sizing.BatchRows < before.Sizing.BatchRows)
             || (now.Sizing.Open > 0 && now.Sizing.Open < before.Sizing.Open)

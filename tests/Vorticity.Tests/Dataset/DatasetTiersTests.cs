@@ -435,8 +435,15 @@ public sealed partial class DatasetTiersTests
         long top, int chunkBytes, Func<long, int, Row[]> rows, long groupRows = GroupRows, List<CompactionResult>? ran = null)
     {
         await using MemoryObjectStore store = new MemoryObjectStore();
+
+        // A jobs' budget of the test's own: the default one is what the process's limit leaves past the rest of its
+        // memory, and moves with what the tests beside this one hold. Under 16 MiB the job's writer gathers less and its
+        // objects end elsewhere, 23 group ends for 17: read under the default budget, an object ended 6 % past its size
+        // once in eleven runs of the whole namespace (2026-11-21).
+        await using VortexSession session = VortexSession.Create(static o => o.JobMemoryBudget = new QueryMemoryBudget(1L << 30));
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
         {
+            Session = session,
             Layout = new DatasetLayout
             {
                 Partition = LayoutValue.Column(nameof(Row.Day)),

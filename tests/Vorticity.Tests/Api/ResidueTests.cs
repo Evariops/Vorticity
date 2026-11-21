@@ -82,6 +82,21 @@ public sealed class ResidueTests
         // weighed and by the last stretch's weight of a row: given up on 2026-11-21 for what the object's blocks name.
         (Compactor, @"\b_stretchRate\b", 0),
         (Compactor, @"\b_inputBytesPerRow\b", 0),
+
+        // What a job priced an input by: the measure of one input before a handle's first merge, what the last job's inputs
+        // had held a row of their batch, the first guess before any, and the batches repriced as the inputs opened. Given up
+        // on 2026-11-21 for what each object's entry says a reader holds of it open, summed over the inputs open at once.
+        (Dataset, @"\bMeasureInputAsync\b", 0),
+        (Dataset, @"\bPriceAsync\b", 0),
+        (Dataset, @"\bHeldPerRow\b", 0),
+        (Dataset, @"\bFirstGuessPerBatchByte\b", 0),
+        (Dataset, @"\bInputCost\b", 0),
+        (Dataset, @"\bInputsBytes\b", 0),
+        (Dataset, @"\bReprice\b", 0),
+        (Dataset, @"\bInputRows\b", 0),
+        (Dataset, @"\bOpenAtOnce\b", 0),
+        (Dataset, @"\bCapJobWidth\b", 0),
+        (Dataset, @"\bLearnInputCost\b", 0),
     ];
 
     [Fact]

@@ -237,6 +237,15 @@ internal sealed class KeyOrderedMerge : IMergedRuns
         {
             MergeObject next = _objects.Current;
             _pending = await _objects.MoveNextAsync().ConfigureAwait(false);
+
+            // Inputs done still wait for their windows, which a writer reads: the caller has its writers let go of them when
+            // the input to open does not hold beside them, and they go first.
+            if (_ending.Count > 0 && LetGo is { } letGo)
+            {
+                await letGo(next.Entry).ConfigureAwait(false);
+                await GiveBackCopiedAsync().ConfigureAwait(false);
+            }
+
             await OpenAsync(next).ConfigureAwait(false);
         }
 
@@ -581,14 +590,22 @@ internal sealed class KeyOrderedMerge : IMergedRuns
 
         Push(input);
         MostOpen = Math.Max(MostOpen, _open.Count);
-        Opened?.Invoke(_open.Count);
     }
 
     /// <summary>
-    /// What the merge calls once an input is open and its first batch decoded, with the inputs open then: a job reprices the
-    /// batches of the inputs it has yet to open from what the open ones hold (<see cref="JobMemory.InputRows"/>); null for none.
+    /// What the merge calls before it opens the object of an entry while inputs it is done with still wait for their
+    /// windows to come back, runs noted on them not copied yet: the caller, which drives the writers, has them copy the
+    /// runs they keep when the object would not hold beside those inputs, and the merge gives the windows back and lets
+    /// the inputs go before it opens the object. Null for a merge whose caller does not drive the writers, a slice merged
+    /// ahead.
     /// </summary>
-    internal Action<int>? Opened { get; set; }
+    /// <remarks>
+    /// Objects that follow one another along the keys, a level's or those one merge wrote, are open one at a time, and a
+    /// job counts them so (<see cref="DatasetCompactor.Peak"/>). An input done went only once the writers had copied its
+    /// last runs, a few blocks later, and the next one opened beside it meanwhile: two objects of a run held at once what
+    /// the job counted one to hold.
+    /// </remarks>
+    internal Func<ObjectEntry, ValueTask>? LetGo { get; init; }
 
     /// <summary>The input holding the smallest key, and how many of its rows go before any other's.</summary>
     private (MergeInput Chosen, int Count) Choose()

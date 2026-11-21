@@ -4,8 +4,9 @@ namespace Vorticity.Buffers;
 
 /// <summary>
 /// The blocks of one piece of a larger work, taken and given back in the work's account and counted here too: what the
-/// piece holds now, measured rather than modelled. A slice of a merge (<c>SlicedMerge</c>): its inputs' batches and windows,
-/// and the runs it keeps waiting in them.
+/// piece holds now, and the most it held, measured rather than modelled. A slice of a merge (<c>SlicedMerge</c>): its
+/// inputs' batches and windows, and the runs it keeps waiting in them. An input of a merge: its scan's reads, what it
+/// decodes whole of its chunks, and its batches (<c>JobMemory.OpenInput</c>).
 /// </summary>
 /// <remarks>
 /// A slice merged ahead kept up to 16 384 runs waiting, each holding its input's batch: over log records, whose runs are
@@ -15,9 +16,13 @@ namespace Vorticity.Buffers;
 internal sealed class CountedAccount(MemoryAccount work) : MemoryAccount
 {
     private long _held;
+    private long _peak;
 
     /// <summary>The bytes the piece's blocks hold now.</summary>
     internal long Held => Volatile.Read(ref _held);
+
+    /// <summary>The most bytes the piece's blocks held at once.</summary>
+    internal long Peak => Volatile.Read(ref _peak);
 
     internal override bool TryTake(long bytes)
     {
@@ -26,7 +31,20 @@ internal sealed class CountedAccount(MemoryAccount work) : MemoryAccount
             return false;
         }
 
-        Interlocked.Add(ref _held, bytes);
+        // A block is rented a chunk or a batch, never a row: the peak is kept on that path, one compare a block.
+        long held = Interlocked.Add(ref _held, bytes);
+        long peak = Volatile.Read(ref _peak);
+        while (held > peak)
+        {
+            long seen = Interlocked.CompareExchange(ref _peak, held, peak);
+            if (seen == peak)
+            {
+                break;
+            }
+
+            peak = seen;
+        }
+
         return true;
     }
 

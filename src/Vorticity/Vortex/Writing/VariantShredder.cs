@@ -791,6 +791,7 @@ internal static class VariantShredder
             encodings.Clear();
             work.Builder.Clear();
             work.Whole = 0;
+            work.PastNamed = 0;
             work.EncodesValidity = job.Validity;
             try
             {
@@ -800,6 +801,10 @@ internal static class VariantShredder
                     LeafKind.Values => job.Group!.Values.Build(leaves, types, types.Binary(Nullability.Nullable), _rows),
                     _ => ((Leaf)job.Group!).Typed(leaves, types, _rows),
                 };
+
+                // What a reader decodes of the leaf for the rows it reads, beside the values it puts back together: the
+                // rows' metadata is in what the rows weigh already.
+                work.PastNamed = job.Kind == LeafKind.Metadata ? 0 : leaves.NamedBytes(node);
                 int written = ArrayBlobWriter.WriteChild(work, leaves, node, encodings, compress);
 
                 // Its buffers its own, past the leaves' arena emptied below, and its tree as the builder finished it.
@@ -868,8 +873,9 @@ internal static class VariantShredder
 
             made.Taken = true;
 
-            // What a read decodes whole of the leaf, each time the blob names it.
+            // What a read decodes whole of the leaf, and what it decodes of it for its rows, each time the blob names it.
             blob.Whole += made.Whole;
+            blob.PastNamed += made.PastNamed;
 
             int budget = VortexLimits.MaxFlatBufferTables;
             FlatBufferTable root = FlatBufferTable.Root(made.Tree.AsSpan(0, made.TreeLength), ref budget);
@@ -936,6 +942,7 @@ internal static class VariantShredder
             int frame = _arena.AddStruct(variant.DType, _rows, variant.Validity, []);
             blob.Builder.Clear();
             blob.Whole = 0;
+            blob.PastNamed = 0;
             try
             {
                 int root = ArrayBlobWriter.WriteShredded(
@@ -1039,6 +1046,9 @@ internal static class VariantShredder
                 int node = values
                     ? group.Values.Build(leaves, _types, _types.Binary(Nullability.Nullable), _rows)
                     : ((Leaf)group).Typed(leaves, _types, _rows);
+
+                // What a reader decodes of the leaf for the rows it reads, beside the values it puts back together.
+                blob.PastNamed += leaves.NamedBytes(node);
                 int written = ArrayBlobWriter.WriteChild(blob, leaves, node, encodings, compress);
                 blob.Keep(first);
                 return written;
@@ -1095,6 +1105,9 @@ internal static class VariantShredder
         /// <summary>What a read of any part of the leaf decodes whole, as its workspace counted it (<see cref="ArrayBlobWriter.Workspace.Whole"/>).</summary>
         internal long Whole;
 
+        /// <summary>What a batch of its rows weighs past the bytes the chunk's rows name: what it lays out over them, less the texts a dictionary keeps once (<see cref="ArrayBlobWriter.Workspace.PastNamed"/>).</summary>
+        internal long PastNamed;
+
         internal List<ArrayBlobWriter.PendingBuffer> Buffers { get; } = [];
 
         /// <summary>Takes what <paramref name="work"/> wrote of the leaf, its tree at <paramref name="written"/>, against <paramref name="encodings"/>.</summary>
@@ -1113,6 +1126,7 @@ internal static class VariantShredder
             Buffers.AddRange(work.Buffers);
             work.Buffers.Clear();
             Whole = work.Whole;
+            PastNamed = work.PastNamed;
             Ids = [.. encodings.Ids];
             Taken = false;
             Done = true;

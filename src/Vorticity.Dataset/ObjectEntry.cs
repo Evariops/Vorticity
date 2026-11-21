@@ -599,8 +599,9 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     public long OpenBytes { get; private set; }
 
     /// <summary>
-    /// The canonical bytes of the object's rows, as its writer counted them: what a reader's batches of them weigh
-    /// decoded, <see cref="Rows"/> of them. 0 when the entry does not say.
+    /// What a reader's batches of the object's rows weigh decoded, all its rows together, as its writer counted them:
+    /// their canonical bytes, less the texts a column written against a dictionary or in runs keeps once, which a batch
+    /// names by views into what the reader holds open (<see cref="OpenBytes"/>). 0 when the entry does not say.
     /// </summary>
     public long DecodedBytes { get; private set; }
 

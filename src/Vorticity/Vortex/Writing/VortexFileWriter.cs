@@ -196,11 +196,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private long _sharedOpenBytes;
 
     /// <summary>
-    /// The canonical bytes of the rows written, the bytes their texts name counted and not the heaps their batches
-    /// kept: what a reader's batches of them weigh decoded, which a merge sizes its inputs' batches by.
+    /// What a reader's batches of the rows written weigh decoded, which a merge sizes its inputs' batches by: the
+    /// canonical bytes of the rows, the bytes their texts name counted and not the heaps their batches kept, less the texts
+    /// a column written against a dictionary or in runs keeps once, which a batch names by views into what the reader
+    /// holds open (<see cref="OpenBytes"/>), and more what a shredded variant's typed columns and values decode to, beside
+    /// the rows a reader puts back together from them (<see cref="ArrayBlobWriter.BlobLease.PastNamed"/>).
     /// </summary>
-    internal long DecodedBytes => _decodedBytes;
+    internal long DecodedBytes => Math.Max(0, Interlocked.Read(ref _decodedBytes));
 
+    // Added to as rows are taken, on the flow that hands them over, and taken from as a chunk is written, on the flow
+    // that writes the file.
     private long _decodedBytes;
 
     /// <summary>
@@ -1727,7 +1732,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     staging.Parts.Add(new StagedPart(arena, blocks[b], 0, block, -1));
                     staging.Rows = block;
                     staging.Bytes = arena.NamedBytes(blocks[b]);
-                    _decodedBytes += staging.Bytes;
+                    Interlocked.Add(ref _decodedBytes, staging.Bytes);
                     await FlyAsync(cancellationToken).ConfigureAwait(false);
                 }
 
@@ -1789,7 +1794,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         await UnstageAsync(cancellationToken).ConfigureAwait(false);
 
         // Rows that go out without waiting: what they weigh decoded, which the rows staged count as they are staged.
-        _decodedBytes += arena.NamedBytes(root);
+        Interlocked.Add(ref _decodedBytes, arena.NamedBytes(root));
         await WriteDecodedAsync(arena, root, rows, seal, cancellationToken).ConfigureAwait(false);
     }
 
@@ -2271,7 +2276,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         staging.Rows += map.Rows;
         staging.Bytes += map.Bytes;
-        _decodedBytes += map.Bytes;
+        Interlocked.Add(ref _decodedBytes, map.Bytes);
         Ledger?.Transfer(map, ref map.FirstRun, staging, ref staging.FirstRun);
         map.Clear();
         if (staging.Rows >= _stagedRows)
@@ -3097,7 +3102,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         staging.Rows += rows;
         long bytes = into.NamedBytes(owned);
         staging.Bytes += bytes;
-        _decodedBytes += bytes;
+        Interlocked.Add(ref _decodedBytes, bytes);
         return staging;
     }
 
@@ -4395,8 +4400,13 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _gathering?[field]?.Measured(length);
 
             // What a reader holds of the chunk open: its bytes, as the block they are read in holds them, and what it decodes
-            // whole of them.
+            // whole of them. The texts its rows name there are in no batch of them; and a batch of a shredded variant's rows
+            // holds what its typed columns and its values decode to beside the rows put back together.
             _columns[field].Opens(ArrayBlobWriter.Held(length) + blob.Whole);
+            if (blob.PastNamed != 0)
+            {
+                Interlocked.Add(ref _decodedBytes, blob.PastNamed);
+            }
         }
 
         // The compact summaries stay -- the zone map wants them at completion -- and only the sized

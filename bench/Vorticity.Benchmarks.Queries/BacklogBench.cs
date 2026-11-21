@@ -278,7 +278,7 @@ internal static class BacklogBench
             refusals += Interlocked.Read(ref s_refused);
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"{(repeat > 1 ? $"round {round} " : "")}job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB (inputs {Mib(result.MemoryReservedBy.Inputs)}, writer {Mib(result.MemoryReservedBy.Writer)}), {result.RangesAtOnce} at once, {result.MergeSlices} slices ({result.MergeSlicesAhead} ahead), {result.InputWindowsAhead} windows ahead, held back {result.AdvancesHeldBack}, {result.BoundRestarts} restarts under a doubled bound, {result.GroupEnds} group ends asked, written {(double)result.BytesOut / Math.Max(1, result.BytesIn):F2} of read, {result.InputsToldByDirectories} inputs counted from their directories, {result.CensusParts.Inputs} in {result.CensusParts.Parts} parts, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of lanes, {session.Lanes.PeakHeld} of {session.Lanes.Lanes} lanes at most, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {result.WriterBlocksOnLine:N0} on the line, {result.WriterChunksEndedOnLine:N0} chunks ended there, {result.WriterChunksCutOnLine:N0} cut column by column, {GC.CollectionCount(2) - fullCollections} full collections, {(GC.GetTotalPauseDuration() - paused).TotalSeconds:F2} s paused by the collector, {Slabs.Slab.Made - slabsMade} slabs made, {session.Core.UnitsRun - unitsRun:N0} units of the core on {session.Core.PumpsStarted - pumpsStarted:N0} pumps started, {result.WriterBlocksOfRunsTaken:N0} blocks took their runs of a variant ({result.WriterBlocksPutBack:N0} put back whole, {result.WriterColumnsPutBackApart:N0} columns apart), {result.InputVariantChunks.Held:N0} variant chunks handed over as shredded ({result.InputVariantChunks.Refused:N0} refused, {result.InputVariantChunks.Inexact:N0} of them inexact); passes: {PassesOfJob()}; {sampler.Peaks()}"));
+                $"{(repeat > 1 ? $"round {round} " : "")}job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB (inputs {Mib(result.MemoryReservedBy.Inputs)}, writer {Mib(result.MemoryReservedBy.Writer)}), inputs counted {Mib(result.InputsPlanned)} MiB a merge{Windows(result)}, {result.RangesAtOnce} at once, {result.MergeSlices} slices ({result.MergeSlicesAhead} ahead), {result.InputWindowsAhead} windows ahead, held back {result.AdvancesHeldBack}, {result.BoundRestarts} restarts under a doubled bound, {result.GroupEnds} group ends asked, written {(double)result.BytesOut / Math.Max(1, result.BytesIn):F2} of read, {result.InputsToldByDirectories} inputs counted from their directories, {result.CensusParts.Inputs} in {result.CensusParts.Parts} parts, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of lanes, {session.Lanes.PeakHeld} of {session.Lanes.Lanes} lanes at most, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {result.WriterBlocksOnLine:N0} on the line, {result.WriterChunksEndedOnLine:N0} chunks ended there, {result.WriterChunksCutOnLine:N0} cut column by column, {GC.CollectionCount(2) - fullCollections} full collections, {(GC.GetTotalPauseDuration() - paused).TotalSeconds:F2} s paused by the collector, {Slabs.Slab.Made - slabsMade} slabs made, {session.Core.UnitsRun - unitsRun:N0} units of the core on {session.Core.PumpsStarted - pumpsStarted:N0} pumps started, {result.WriterBlocksOfRunsTaken:N0} blocks took their runs of a variant ({result.WriterBlocksPutBack:N0} put back whole, {result.WriterColumnsPutBackApart:N0} columns apart), {result.InputVariantChunks.Held:N0} variant chunks handed over as shredded ({result.InputVariantChunks.Refused:N0} refused, {result.InputVariantChunks.Inexact:N0} of them inexact); passes: {PassesOfJob()}; {sampler.Peaks()}"));
             if (objectSizes)
             {
                 Console.WriteLine(await ObjectSizesAsync(maintainer, known, repeat > 1 ? $"round {round} job {jobs}" : $"job {jobs}", result));
@@ -637,6 +637,38 @@ internal static class BacklogBench
     }
 
     private static string Mib(long bytes) => (bytes / (1024.0 * 1024)).ToString("F0", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// What the scans of a job's inputs held against the windows they were counted at: how many scans, what they were
+    /// counted to hold open and held at most in all, and the scan that held the most of its window. Nothing for a job
+    /// that merged nothing.
+    /// </summary>
+    private static string Windows(CompactionResult result)
+    {
+        if (result.InputWindows.Count == 0)
+        {
+            return "";
+        }
+
+        long open = 0;
+        long held = 0;
+        double worst = 0;
+        int past = 0;
+        foreach ((long window, long opened, long scan) in result.InputWindows)
+        {
+            open += opened;
+            held += scan;
+            worst = Math.Max(worst, (double)scan / Math.Max(1, window));
+            past += scan > window ? 1 : 0;
+        }
+
+        // The scans that held the most, each its window, of which what its object holds open, and what it held, in MiB.
+        string fullest = string.Join(
+            " ", result.InputWindows.OrderByDescending(static scan => scan.Held).Take(4).Select(static scan => $"{Mib(scan.Window)}/{Mib(scan.Open)}/{Mib(scan.Held)}"));
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $", {result.InputWindows.Count} scans counted {Mib(open)} MiB open and holding {Mib(held)} at their peaks, the fullest {worst:F2} of its window, {past} past theirs (window/open/held of the heaviest: {fullest})");
+    }
 
     /// <summary>
     /// The process's resident bytes, the blocks alive, those the pool keeps, and the heap past the blocks, sampled every 50 ms,

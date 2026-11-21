@@ -76,38 +76,66 @@ internal sealed class JobMemory : IAsyncDisposable
     internal bool Refused => Job.WasRefused || Inputs.WasRefused || Writer.WasRefused;
 
     /// <summary>
-    /// The rows of the batches the inputs the merge opens next read, once the job measured what the open ones hold
-    /// (<see cref="Reprice"/>); 0 before, when the plan's rows hold.
+    /// What the inputs a merge of the job holds open at once were counted to hold at most, their windows along the keys
+    /// (<see cref="DatasetCompactor.Peak"/>): what the work started ahead leaves the inputs the merge has yet to open
+    /// (<see cref="StillToOpen"/>). 0 before the job sized its batches.
     /// </summary>
-    internal int InputRows { get; private set; }
+    internal long InputsPlanned { get; set; }
 
     /// <summary>
-    /// Reprices the batches of the inputs a merge has yet to open, <paramref name="total"/> of them in all and
-    /// <paramref name="open"/> open, read at <paramref name="rows"/> rows: what the open ones hold now, an input's share of it
-    /// times the inputs to come, must leave the writer what it was priced at, <paramref name="writer"/>, under the job's
-    /// ceiling; the rows halve until it does, down to <paramref name="least"/>. A job priced by a guess, or by a measure of one
-    /// input of another shape, ran past the jobs' budget and was given up twice before a job of a fifth of its inputs ran
-    /// (2026-11-16): narrowed here as its inputs open, it runs at its width.
+    /// What the work the job started ahead holds of its inputs' blocks now: the windows its inputs decode ahead of their own
+    /// (<see cref="Scanning.DecodeAhead.Bytes"/>) and the slices merged ahead of the one taken; null for none.
     /// </summary>
-    internal void Reprice(int open, int total, int rows, long writer, int least)
+    internal Func<long>? AheadHeld { get; set; }
+
+    /// <summary>
+    /// What the inputs the merge has yet to open may still take: what they were counted to hold at once
+    /// (<see cref="InputsPlanned"/>), less what the inputs hold now that no work ahead holds. A unit ahead is admitted in
+    /// what the inputs' share holds past it, so that an input the merge reaches finds the room its window was counted at.
+    /// </summary>
+    /// <remarks>
+    /// A merge opens an input when it reaches its first key, and cannot go on without it. Admitted by what the inputs
+    /// held alone, the windows decoded ahead of the inputs open took the room of those still to open.
+    /// </remarks>
+    private long StillToOpen =>
+        Math.Max(0, InputsPlanned - Math.Max(0, Inputs.ReservedBytes - (AheadHeld?.Invoke() ?? 0)));
+
+    // The inputs the job's merges opened, each with the account its scan rents under and the rows of its batches: what each
+    // held at most, measured.
+    private readonly List<(ObjectEntry Entry, CountedAccount Account, int BatchRows)> _opened = [];
+
+    /// <summary>
+    /// The account the scan of the job's input <paramref name="entry"/> rents under, read in batches of
+    /// <paramref name="batchRows"/> rows: it counts in <paramref name="under"/>, the merge's or a slice's, and tells what
+    /// the input holds (<see cref="OpenedInputs"/>).
+    /// </summary>
+    internal MemoryAccount OpenInput(ObjectEntry entry, MemoryAccount under, int batchRows)
     {
-        if (open <= 0 || open >= total)
+        CountedAccount account = new CountedAccount(under);
+        lock (_opened)
         {
-            return;
+            _opened.Add((entry, account, batchRows));
         }
 
-        int now = InputRows > 0 ? InputRows : rows;
-        long held = Inputs.ReservedBytes;
-        long perInput = held / open;
-        long room = Jobs.CeilingBytes - writer - held;
-        long needed = perInput * (total - open);
-        while (needed > room && now > least)
-        {
-            now /= 2;
-            needed /= 2;
-        }
+        return account;
+    }
 
-        InputRows = Math.Max(now, least);
+    /// <summary>
+    /// The inputs the job's merges opened so far, each with what its scan held at most and the rows of its batches: a
+    /// slice that reads an input opens it again, and it is listed once a scan.
+    /// </summary>
+    internal (ObjectEntry Entry, long Peak, int BatchRows)[] OpenedInputs()
+    {
+        lock (_opened)
+        {
+            (ObjectEntry, long, int)[] inputs = new (ObjectEntry, long, int)[_opened.Count];
+            for (int i = 0; i < inputs.Length; i++)
+            {
+                inputs[i] = (_opened[i].Entry, _opened[i].Account.Peak, _opened[i].BatchRows);
+            }
+
+            return inputs;
+        }
     }
 
     /// <summary>Which budget refused the job a block, and what its inputs and its writer held at most, in MiB: for its activity.</summary>
@@ -156,18 +184,19 @@ internal sealed class JobMemory : IAsyncDisposable
     private long WriterKeep => Math.Max(0, Math.Max(WriterPrice, Writer.PeakBytes) - Writer.ReservedBytes);
 
     /// <summary>
-    /// Whether the job admits a window of <paramref name="bytes"/> decoded ahead by an input of its merge, past the two its
-    /// price counts: the inputs' share holds it past what they hold (<see cref="JobShares.MergeAhead"/>), and the room left
-    /// holds it and still what the writer may take. Counted when refused.
+    /// Whether the job admits a window of <paramref name="bytes"/> decoded ahead by an input of its merge, past those its
+    /// window counts: the inputs' share holds it past what they hold and what the inputs still to open may take
+    /// (<see cref="JobShares.MergeAhead"/>, <see cref="StillToOpen"/>), and the room left holds it and still what the writer
+    /// may take. Counted when refused.
     /// </summary>
-    internal bool AdmitsRead(long bytes) => Admits(bytes, Inputs, Shares.MergeAhead, WriterKeep, ref _readsHeldBack);
+    internal bool AdmitsRead(long bytes) => Admits(bytes, Inputs, Shares.MergeAhead - StillToOpen, WriterKeep, ref _readsHeldBack);
 
     /// <summary>
     /// Whether the job admits a slice of its merge merged ahead on a lane of its own, which with the slices ahead already
-    /// merging may still take <paramref name="bytes"/>: the inputs' share holds them past what they hold, and the room left
-    /// holds them and still what the writer may take. Counted when refused.
+    /// merging may still take <paramref name="bytes"/>: the inputs' share holds them past what they hold and what the inputs
+    /// still to open may take, and the room left holds them and still what the writer may take. Counted when refused.
     /// </summary>
-    internal bool AdmitsMerge(long bytes) => Admits(bytes, Inputs, Shares.MergeAhead, WriterKeep, ref _slicesHeldBack);
+    internal bool AdmitsMerge(long bytes) => Admits(bytes, Inputs, Shares.MergeAhead - StillToOpen, WriterKeep, ref _slicesHeldBack);
 
     /// <summary>
     /// Whether the job admits one more block of <paramref name="bytes"/> in flight on its writer's line past the one that must

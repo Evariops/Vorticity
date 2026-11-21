@@ -63,8 +63,10 @@ public sealed partial class ObjectOpenWeightTests
         // each keep one, and a scan that crosses from the first to the second holds both.
         Assert.True(entry.OpenBytes >= 2 * values, $"the entry says {entry.OpenBytes:N0} open, under its two dictionaries of {values:N0}");
 
-        // What the rows weigh decoded: the bytes their texts name at least, their views and their numbers past them.
-        Assert.InRange(entry.DecodedBytes, named, named + (rows.Length * 64L));
+        // What a batch of the rows weighs decoded: two views and two numbers a row, 44 bytes. The texts they name are the
+        // dictionary's, counted in what the object holds open, and in no batch.
+        Assert.InRange(entry.DecodedBytes, rows.Length * 44L, rows.Length * 64L);
+        Assert.True(entry.DecodedBytes < named / 8, $"the entry says {entry.DecodedBytes:N0} decoded, of rows that name {named:N0}");
 
         // A scan at its shortest batches, none decoded ahead, holds no more than the entry says; and the entry says no more
         // than half as much again. Read within its first chunk, it holds one dictionary, not two.
@@ -72,9 +74,11 @@ public sealed partial class ObjectOpenWeightTests
         Assert.True(entry.OpenBytes <= least + (least / 2), $"the entry says {entry.OpenBytes:N0}, half as much again as the {least:N0} a scan held");
         Assert.True(within <= (entry.OpenBytes * 3) / 5, $"a scan of the first chunk's rows held {within:N0}, more than a chunk of the {entry.OpenBytes:N0} its entry says");
 
-        // With batches of 1 024 rows, one decoded ahead, it holds them past what the entry says: three, a row some 600 bytes.
-        long batches = 3 * 1_024 * (entry.DecodedBytes / rows.Length);
-        Assert.True(peak <= entry.OpenBytes + batches, $"a scan held {peak:N0}, past the {entry.OpenBytes:N0} its entry says and {batches:N0} of batches");
+        // At its first scan, with batches of 1 024 rows, one decoded ahead, it holds past what the entry says its reader's
+        // own and its batches, three of them, a row 44 bytes: the window a merge counts it at.
+        long window = DatasetCompactor.Window(dataset, dataset.Snapshot.Schema, entry, 1_024);
+        Assert.True(peak <= window, $"a scan held {peak:N0}, past the window of {window:N0} a merge counts it at, of which {entry.OpenBytes:N0} its entry says");
+        Assert.True(window <= peak + (peak / 8), $"a merge counts it at {window:N0}, an eighth past the {peak:N0} a scan held");
     }
 
     /// <summary>
@@ -104,11 +108,44 @@ public sealed partial class ObjectOpenWeightTests
         Assert.Equal(4, merged.ObjectsIn);
         ObjectEntry written = Assert.Single(await EntriesAsync(dataset, 0));
 
-        // The merged object's rows weigh what its inputs' did, about: counted by runs of its inputs' batches, at what a
-        // row of a batch names on average.
+        // The merged object says what its own rows' batches weigh, counted by runs of its inputs' batches: less than its
+        // inputs' together, whose 5 000 rows each kept their messages as they came where its 20 000 keep them in a
+        // dictionary, which it holds open instead.
         long before = appended.Sum(static entry => entry.DecodedBytes);
-        Assert.InRange(written.DecodedBytes, before - (before / 8), before + (before / 8));
+        Assert.InRange(written.DecodedBytes, written.Rows * 36L, before);
         Assert.True(written.OpenBytes > 0);
+    }
+
+    /// <summary>
+    /// A merge of objects whose dictionaries weigh several times their batches counts each input at its window, what its
+    /// entry says it holds open and its batches: on one lane, where no input decodes ahead of its own, each input's scan
+    /// holds no more than its window, and the inputs together no more than they were counted to hold at once.
+    /// </summary>
+    [Fact]
+    public async Task AMergesInputsEachHoldNoMoreThanTheirWindow()
+    {
+        await using VortexSession session = VortexSession.Create(static o => o.MaxDegreeOfParallelism = 1);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Line.Schema, Options(session), Ct);
+        Random random = new Random(19);
+        long first = 0;
+        for (int append = 0; append < 4; append++)
+        {
+            Line[] rows = [.. Enumerable.Range(0, 20_000).Select(i => new Line(0, $"svc-{random.Next(0, 12):D2}", first + i, Texts[random.Next(Messages)]))];
+            await AppendAsync(dataset, rows);
+            first += rows.Length;
+        }
+
+        CompactionResult merged = Assert.IsType<CompactionResult>(await dataset.CompactAsync(cancellationToken: Ct));
+        Assert.Equal(4, merged.ObjectsIn);
+        string held = string.Join("; ", merged.InputWindows.Select(static input => $"window {input.Window:N0} (open {input.Open:N0}), held {input.Held:N0}"));
+        TestContext.Current.TestOutputHelper?.WriteLine($"WINDOWS: planned {merged.InputsPlanned:N0}, inputs held {merged.MemoryReservedBy.Inputs:N0}; {held}");
+        Assert.Equal(4, merged.InputWindows.Count);
+        Assert.All(merged.InputWindows, input => Assert.True(input.Held <= input.Window, held));
+        Assert.True(merged.MemoryReservedBy.Inputs <= merged.InputsPlanned, $"the inputs held {merged.MemoryReservedBy.Inputs:N0}, counted {merged.InputsPlanned:N0}; {held}");
+
+        // Most of what an input holds is what its entry says it holds open, its dictionaries: its batches are the rest.
+        Assert.All(merged.InputWindows, input => Assert.True(input.Held >= input.Open / 2 && input.Open >= 4 * (input.Held - input.Open), held));
     }
 
     /// <summary>

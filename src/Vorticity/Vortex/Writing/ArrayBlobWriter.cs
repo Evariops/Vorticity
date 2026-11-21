@@ -64,6 +64,7 @@ internal static class ArrayBlobWriter
     {
         blob.Builder.Clear();
         blob.Whole = 0;
+        blob.PastNamed = 0;
         try
         {
             // The compressed forms are chosen and materialized before the builder starts, because both
@@ -155,7 +156,25 @@ internal static class ArrayBlobWriter
         BinaryPrimitives.WriteUInt32LittleEndian(
             bytes.AsSpan((int)(total - sizeof(uint))), (uint)flatBuffer.Length);
 
-        return new BlobLease(bytes, blob.Whole);
+        return new BlobLease(bytes, blob.Whole, blob.PastNamed);
+    }
+
+    /// <summary>
+    /// Counts the texts the rows of node <paramref name="nodeIndex"/> name, which its encoding keeps once in values a read
+    /// decodes whole, as bytes a reader's batch of the rows does not hold (<see cref="Workspace.PastNamed"/>): its batch is
+    /// views into those values. Numbers are gathered into the batch, and count for nothing here.
+    /// </summary>
+    /// <remarks>
+    /// Four inputs of 20 000 rows, each row one of 2 000 messages of 600 bytes kept in a dictionary, held 5.5 MB each
+    /// read as one batch, 4.5 of them the dictionary: counted at the bytes its rows name, the batch alone was 12 MB
+    /// (2026-11-21).
+    /// </remarks>
+    private static void SharesRows(Workspace blob, CanonicalArena arena, int nodeIndex)
+    {
+        if (arena.GetNode(nodeIndex).Kind == CanonicalKind.VarBinView)
+        {
+            blob.PastNamed -= arena.NamedDataBytes(nodeIndex);
+        }
     }
 
     /// <summary>
@@ -1811,6 +1830,7 @@ internal static class ArrayBlobWriter
         // The runs' ends and their values, which a read of any rows of the column decodes whole.
         blob.Whole += Held((long)plan.RunCount * endsPType.ByteWidth());
         Shares(blob, arena, values);
+        SharesRows(blob, arena, nodeIndex);
 
         Span<int> children = stackalloc int[2];
         children[0] = ends;
@@ -1849,8 +1869,10 @@ internal static class ArrayBlobWriter
         }
         int valuesNode = WriteCompressed(blob, arena, values, encodings, cascade: Cascade.ValuesChild(owner));
 
-        // The dictionary's values, which a read of any row decodes whole: the row's code may name any of them.
+        // The dictionary's values, which a read of any row decodes whole: the row's code may name any of them. The rows'
+        // batch then names its texts there.
         Shares(blob, arena, values);
+        SharesRows(blob, arena, nodeIndex);
 
         Span<int> children = stackalloc int[2];
         children[0] = codes;
@@ -3043,10 +3065,11 @@ internal static class ArrayBlobWriter
     {
         private readonly Block<byte> _bytes;
 
-        internal BlobLease(Block<byte> bytes, long whole = 0)
+        internal BlobLease(Block<byte> bytes, long whole = 0, long pastNamed = 0)
         {
             _bytes = bytes;
             Whole = whole;
+            PastNamed = pastNamed;
         }
 
         /// <summary>Bytes that belong in the file.</summary>
@@ -3058,6 +3081,14 @@ internal static class ArrayBlobWriter
         /// With <see cref="Length"/>, what a reader holds of the chunk open besides its batch.
         /// </summary>
         internal long Whole { get; }
+
+        /// <summary>
+        /// What a reader's batch of the blob's rows weighs past the bytes the rows name, below them when negative: less the
+        /// texts a dictionary or runs keep once, which a batch names by views into what <see cref="Whole"/> counts, and
+        /// more the typed columns and the values a shredded variant's blob lays out over its rows, which a reader decodes
+        /// beside the rows it puts back together.
+        /// </summary>
+        internal long PastNamed { get; }
 
         /// <summary>The blob, exactly <see cref="Length"/> bytes of it.</summary>
         internal ReadOnlyMemory<byte> Memory => _bytes.AsMemory();
@@ -3323,6 +3354,16 @@ internal static class ArrayBlobWriter
         /// (<see cref="BlobLease.Whole"/>). Emptied by whoever starts a blob.
         /// </summary>
         internal long Whole { get; set; }
+
+        /// <summary>
+        /// What a reader's batch of the rows of the blob being written weighs past the bytes the rows name, below them when
+        /// negative. Taken off: the texts of a column written against a dictionary or in runs, which a batch names by
+        /// views into the values a read keeps whole (<see cref="Whole"/>, <see cref="SharesRows"/>). Added: the typed
+        /// columns and the values a shredded variant's blob lays out over its rows (<see cref="VariantShredder"/>), which a
+        /// reader decodes beside the rows it puts back together from them. Handed on with the blob
+        /// (<see cref="BlobLease.PastNamed"/>), emptied with <see cref="Whole"/>.
+        /// </summary>
+        internal long PastNamed { get; set; }
 
         /// <summary>The metadata writer, emptied for one node.</summary>
         /// <remarks>

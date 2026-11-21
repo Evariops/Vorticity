@@ -130,9 +130,12 @@ public sealed class WriteAllocationTests
         // file open and what its rows weigh decoded, which a dataset's entry says so that a compaction counts its inputs
         // without measuring them: two numbers a file and two a column, its heaviest neighbouring chunks and the chunk
         // before, 32 to 40 bytes more on a file of one column. The two ceilings they passed go up by that, 36 and 28
-        // bytes past the ones before, to four bytes over their measures (2026-11-21).
+        // bytes past the ones before, to four bytes over their measures (2026-11-21). A blob's workspace counts one
+        // number more, what a batch of its rows weighs past the bytes they name, the texts a dictionary keeps once taken
+        // off, so that an entry says what a reader's batches weigh and not what its rows name: 8 bytes more a file, and
+        // the same two ceilings go up by 8 (2026-11-21).
         ("containers/zoned_many_zones_nulls", 70_524),   // 69 376 measured, including 40 bytes more on each batch it reads, the public writer and report, and its text column's string bounds; the read back decompresses through one zstd decoder a scan and, reading only, in batches of several zones
-        ("distributions/high_cardinality_i64_r8193", 10_172),   // 10 168 measured on 2026-11-21 with the open weights' counts, 10 132 its ceiling before; 9 864 measured earlier, including the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row
+        ("distributions/high_cardinality_i64_r8193", 10_180),   // 10 176 measured on 2026-11-21 with the open weights' counts and a batch's weight, 10 132 its ceiling before them; 9 864 measured earlier, including the file statistics segment -- a FlatBufferBuilder, a ScalarStore, the bounds in protobuf -- per file, not per row
         ("encodings/fsst", 8_952),   // 8 576 measured
         ("encodings/onpair", 9_888),   // 9 528 measured, including the public writer and report and the text column's string bounds
         ("types/utf8_nullable_r1025", 14_012),   // 13 520 measured, its FSST tables reordered on the stack and the trained one reused, including the public writer and report and the text column's string bounds
@@ -144,7 +147,7 @@ public sealed class WriteAllocationTests
         // this SHAPE of data cost", which is the question a ratchet can answer. Whether our writer
         // re-elects the same encoding is a different question and `bench/crosscheck.sh` is where
         // it is asked.
-        ("encodings/fastlanes_delta", 7_636),   // 7 632 measured on 2026-11-21 with the open weights' counts, 7 604 its ceiling before; 7 352 measured earlier, including the file statistics segment: per file, not per row; 7 608 on 2026-10-27, 256 bytes more: the writer's fields for object dictionaries, chunk geometry and gathered columns, the NaN counts its blocks' statistics keep, and the read back's scan, which holds its granules' geometry and its pushed predicates
+        ("encodings/fastlanes_delta", 7_644),   // 7 640 measured on 2026-11-21 with the open weights' counts and a batch's weight, 7 604 its ceiling before them; 7 352 measured earlier, including the file statistics segment: per file, not per row; 7 608 on 2026-10-27, 256 bytes more: the writer's fields for object dictionaries, chunk geometry and gathered columns, the NaN counts its blocks' statistics keep, and the read back's scan, which holds its granules' geometry and its pushed predicates
         ("encodings/pco", 7_592),   // 7 560 measured on 2026-10-27, 256 bytes more as fastlanes_delta's above; 7 304 measured in the suite before, where dynamic PGO adds the JIT's instrumentation, 72 bytes that are not the writer's; the read half reads its page sizes in place and keeps the chunk metadata, its ANS tables and the latent states from one decode to the next
         // The read half of this axis decompresses through the scan's `ZstdDecompressor`, so a
         // change on the zstd read path can move this ceiling while the write path stays put.

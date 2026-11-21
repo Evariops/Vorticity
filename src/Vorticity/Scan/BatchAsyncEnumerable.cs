@@ -2934,12 +2934,14 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
                 // scan, past its first batch, and while the job's memory admits it.
                 if (handover is { Ahead: { } shared } && assigned - _delivered >= handover.Own + handover.Borrowed)
                 {
-                    if (_drained || _delivered == 0 || !shared.TryTake((long)lanes.SplitBytes))
+                    long ahead = Math.Max((long)lanes.SplitBytes, handover.WindowBytes);
+                    if (_drained || _delivered == 0 || !shared.TryTake(ahead))
                     {
                         break;
                     }
 
                     handover.Borrowed++;
+                    handover.BorrowedBytes = ahead;
                 }
 
                 if (_drained || !TryNextSplit(out RowRange split))
@@ -2978,7 +2980,7 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         if (over > 0)
         {
             handover.Borrowed -= over;
-            handover.Ahead!.Give(over);
+            handover.Ahead!.Give(over, over * handover.BorrowedBytes);
         }
     }
 

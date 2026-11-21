@@ -149,10 +149,20 @@ public sealed class DatasetInlineCompactionTests
         Assert.Equal((DatasetLevels.DefaultLevelZeroCeiling + 2) * 50, await RowsAsync(dataset, ct));
     }
 
-    /// <summary>A store whose first read of a data object, once asked to, waits until the test releases it.</summary>
+    /// <summary>
+    /// A store whose first read of a data object, once asked to, waits until the test releases it. One read alone: a
+    /// compaction opens its inputs side by side, and two reads that both found it asked to hold both told the test it was
+    /// reached, the second failing its job.
+    /// </summary>
     private sealed class HeldReads(IObjectStore inner) : ForwardingStore(inner)
     {
-        internal bool Holding { get; set; }
+        private int _holding;
+
+        internal bool Holding
+        {
+            get => Volatile.Read(ref _holding) != 0;
+            set => Volatile.Write(ref _holding, value ? 1 : 0);
+        }
 
         internal TaskCompletionSource Reached { get; } = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
 
@@ -172,9 +182,8 @@ public sealed class DatasetInlineCompactionTests
 
         private async ValueTask HoldAsync(string key, CancellationToken cancellationToken)
         {
-            if (Holding && key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal))
+            if (key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal) && Interlocked.Exchange(ref _holding, 0) != 0)
             {
-                Holding = false;
                 Reached.SetResult();
                 await Release.Task.WaitAsync(cancellationToken);
             }
