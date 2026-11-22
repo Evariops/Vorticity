@@ -418,6 +418,18 @@ internal static class RatioCheck
     /// Rust side moved as much in the same run.
     /// </para>
     /// <para>
+    /// CARRIED ON 2026-11-22, on the Apple M4 Pro, to the binary built on Vortex 0.93.0
+    /// (ce29a58870e3). ee3ce208b623 was gone with its cache, as 916afe970968 had been, and a rebuild
+    /// of 0.90.0 from the same lock and compiler gave ed7274412e1a, not byte-identical, which stood
+    /// in for it:
+    /// `--recalibrate 3 --rebase-from` on it, on main's code (41d4362d), the machine held awake and
+    /// loaded at 5 to 10 by another session's tests. 0.93.0 reads a little slower on most axes, so
+    /// most lines came down, `filtered scan, band, runend` by 9.7 %, and five rose, `full scan, 1M
+    /// table` by 5.5 %. A second carry of the same table moved each line by up to a tenth either way.
+    /// `filtered scan, 1% band` keeps the first, 0.324: the second, 0.296, put its ceiling on the
+    /// 0.340 a `--ratio-check` read beside it, and a lowered line has to clear such a reading.
+    /// </para>
+    /// <para>
     /// A line is replaced only when its ceiling does not rise. `--recalibrate` never raises a
     /// reference, but it reprints the dispersion it measured, and on a held line a wider dispersion
     /// is a wider ceiling: that line keeps the calibration it had.
@@ -435,30 +447,30 @@ internal static class RatioCheck
     /// </remarks>
     private static readonly Dictionary<string, Reference> References = new()
     {
-        ["full scan"] = new(0.415, 2, 0.031),   // 3 passes, spread 0.402-0.415; REBASED UP from 0.322 (a new reference binary): +29.0%
-        ["projected scan, 1 of 5 columns"] = new(0.494, 10, 0.026),   // 3 passes, spread 0.481-0.494; REBASED UP from 0.458 (a new reference binary): +7.8%
-        ["open to first batch"] = new(0.090, 10, 0.011),   // 3 passes, spread 0.089-0.090; REBASED UP from 0.071 (a new reference binary): +26.8%
-        ["open, footer only"] = new(0.596, 38, 0.008),   // 3 passes, spread 0.591-0.596; REBASED UP from 0.567 (a new reference binary): +5.1%
-        ["read and write back"] = new(0.369, 1, 0.012),   // 3 passes, spread 0.365-0.369; REBASED UP from 0.323 (a new reference binary): +14.2%
-        ["filtered scan, 1% band"] = new(0.323, 11, 0.026),   // 3 passes, spread 0.315-0.323; REBASED UP from 0.322 (a new reference binary): +0.4%
-        ["filtered scan, half the rows"] = new(0.363, 6, 0.066),   // 3 passes, spread 0.339-0.363; REBASED UP from 0.293 (a new reference binary): +23.8%
-        ["scattered take, 64 of 64 splits"] = new(0.320, 4, 0.021),   // 3 passes, spread 0.314-0.320; REBASED UP from 0.222 (a new reference binary): +44.3%
-        ["rewritten zoned, reference's"] = new(0.418, 2, 0.006),   // 3 passes, spread 0.415-0.418; REBASED UP from 0.321 (a new reference binary): +30.2%
-        ["rewritten zoned, ours"] = new(0.756, 2, 0.017),   // 3 passes, spread 0.743-0.756; REBASED UP from 0.693 (a new reference binary): +9.1%
-        ["rewritten high card, reference's"] = new(0.890, 29, 0.004),   // 3 passes, spread 0.886-0.890; REBASED UP from 0.875 (a new reference binary): +1.7%
-        ["rewritten high card, ours"] = new(0.948, 23, 0.033),   // 3 passes, spread 0.916-0.948; REBASED UP from 0.920 (a new reference binary): +3.0%
-        ["key order, sorted column, 1% band"] = new(0.849, 14, 0.024),   // 3 passes, spread 0.829-0.849; REBASED UP from 0.767 (a new reference binary): +10.7%
-        ["key order, uncorrelated, 64 rows"] = new(0.837, 6, 0.042),   // 3 passes, spread 0.802-0.837; was 1.036, -19.2%: a file's index runs are blocks of the pool
-        ["count, exact cover, 1% band"] = new(0.729, 9, 0.048),   // 3 passes, spread 0.694-0.729; was 1.005, -27.4%: a file's index runs are blocks of the pool
-        ["key order, uncorrelated, against a take"] = new(1.418, 8, 0.065),   // 3 passes, spread 1.326-1.418; REBASED UP from 1.209 (k 7->8): +17.3%
-        ["filtered scan, string equality, fsst"] = new(0.871, 4, 0.059),   // 3 passes, spread 0.819-0.871; REBASED UP from 0.791 (k 5->4): +10.1%
-        ["filtered scan, string prefix, fsst"] = new(1.183, 2, 0.047),   // 3 passes, spread 1.127-1.183; REBASED UP from 1.115 (a new reference binary): +6.1%
-        ["filtered scan, string equality, dict"] = new(0.984, 12, 0.009),   // 3 passes, spread 0.975-0.984; REBASED UP from 0.844 (k 13->12): +16.5%
-        ["filtered scan, string prefix, dict"] = new(0.945, 9, 0.020),   // 3 passes, spread 0.926-0.945; REBASED UP from 0.823 (a new reference binary): +14.8%
-        ["filtered scan, band, runend"] = new(0.892, 16, 0.027),   // 3 passes, spread 0.868-0.892; REBASED UP from 0.810 (a new reference binary): +10.1%
-        ["filtered scan, band, bitpacked"] = new(1.090, 15, 0.030),   // 3 passes, spread 1.057-1.090; REBASED UP from 0.982 (k 14->15): +11.0%
-        ["full scan, 1M table"] = new(0.920, 1, 0.018),   // 3 passes, spread 0.903-0.920; REBASED UP from 0.622 (a new reference binary): +47.9%
-        ["projected scan, 1 of 50 columns"] = new(0.771, 18, 0.015),   // 3 passes, spread 0.759-0.771; REBASED UP from 0.755 (a new reference binary): +2.1%
+        ["full scan"] = new(0.404, 2, 0.031),   // 3 passes, spread 0.397-0.409; carried from 0.415, -2.7% under the new binary (0.421 -> 0.409, k 2 -> 2)
+        ["projected scan, 1 of 5 columns"] = new(0.499, 8, 0.110),   // 3 passes, spread 0.437-0.492; carried from 0.494, +1.1% under the new binary (0.487 -> 0.492, k 9 -> 8)
+        ["open to first batch"] = new(0.086, 7, 0.024),   // 3 passes, spread 0.085-0.087; carried from 0.090, -4.8% under the new binary (0.091 -> 0.087, k 8 -> 7)
+        ["open, footer only"] = new(0.577, 25, 0.054),   // 3 passes, spread 0.560-0.592; carried from 0.596, -3.2% under the new binary (0.611 -> 0.592, k 25 -> 25)
+        ["read and write back"] = new(0.346, 1, 0.049),   // 3 passes, spread 0.308-0.324; carried from 0.369, -6.3% under the new binary (0.346 -> 0.324, k 1 -> 1)
+        ["filtered scan, 1% band"] = new(0.324, 9, 0.123),   // 3 passes, spread 0.289-0.329; carried from 0.323, +0.3% under the new binary (0.328 -> 0.329, k 10 -> 9); the first of two carries, the second gave 0.296 off a pass of the old binary 10% over its reference, and a check beside it read 0.340
+        ["filtered scan, half the rows"] = new(0.353, 4, 0.074),   // 3 passes, spread 0.323-0.348; carried from 0.363, -2.8% under the new binary (0.358 -> 0.348, k 5 -> 4)
+        ["scattered take, 64 of 64 splits"] = new(0.308, 3, 0.028),   // 3 passes, spread 0.310-0.319; carried from 0.320, -3.7% under the new binary (0.331 -> 0.319, k 3 -> 3)
+        ["rewritten zoned, reference's"] = new(0.400, 2, 0.050),   // 3 passes, spread 0.380-0.399; carried from 0.418, -4.4% under the new binary (0.418 -> 0.399, k 2 -> 2)
+        ["rewritten zoned, ours"] = new(0.720, 2, 0.015),   // 3 passes, spread 0.714-0.725; carried from 0.756, -4.8% under the new binary (0.762 -> 0.725, k 2 -> 2)
+        ["rewritten high card, reference's"] = new(0.834, 20, 0.027),   // 3 passes, spread 0.821-0.844; carried from 0.890, -6.3% under the new binary (0.901 -> 0.844, k 20 -> 20)
+        ["rewritten high card, ours"] = new(0.948, 15, 0.035),   // 3 passes, spread 0.881-0.913; carried from 0.948, -0.1% under the new binary (0.914 -> 0.913, k 14 -> 15)
+        ["key order, sorted column, 1% band"] = new(0.821, 9, 0.053),   // 3 passes, spread 0.737-0.778; carried from 0.849, -3.3% under the new binary (0.805 -> 0.778, k 10 -> 9)
+        ["key order, uncorrelated, 64 rows"] = new(0.840, 6, 0.122),   // 3 passes, spread 0.701-0.798; carried from 0.837, +0.4% under the new binary (0.794 -> 0.798, k 6 -> 6)
+        ["count, exact cover, 1% band"] = new(0.695, 9, 0.029),   // 3 passes, spread 0.662-0.681; carried from 0.729, -4.6% under the new binary (0.714 -> 0.681, k 9 -> 9)
+        ["key order, uncorrelated, against a take"] = new(1.328, 7, 0.058),   // 3 passes, spread 1.105-1.174; carried from 1.418, -6.3% under the new binary (1.253 -> 1.174, k 10 -> 7)
+        ["filtered scan, string equality, fsst"] = new(0.853, 4, 0.077),   // 3 passes, spread 0.682-0.739; carried from 0.871, -2.0% under the new binary (0.755 -> 0.739, k 4 -> 4)
+        ["filtered scan, string prefix, fsst"] = new(1.104, 2, 0.019),   // 3 passes, spread 0.964-0.983; carried from 1.183, -6.7% under the new binary (1.054 -> 0.983, k 2 -> 2)
+        ["filtered scan, string equality, dict"] = new(0.898, 10, 0.061),   // 3 passes, spread 0.697-0.742; carried from 0.984, -8.7% under the new binary (0.812 -> 0.742, k 10 -> 10)
+        ["filtered scan, string prefix, dict"] = new(0.944, 7, 0.117),   // 3 passes, spread 0.741-0.839; carried from 0.945, -0.1% under the new binary (0.840 -> 0.839, k 8 -> 7)
+        ["filtered scan, band, runend"] = new(0.805, 11, 0.027),   // 3 passes, spread 0.772-0.794; carried from 0.892, -9.7% under the new binary (0.879 -> 0.794, k 12 -> 11)
+        ["filtered scan, band, bitpacked"] = new(1.104, 9, 0.097),   // 3 passes, spread 0.909-1.007; carried from 1.090, +1.3% under the new binary (0.994 -> 1.007, k 11 -> 9)
+        ["full scan, 1M table"] = new(0.970, 1, 0.063),   // 3 passes, spread 0.925-0.987; carried from 0.920, +5.5% under the new binary (0.936 -> 0.987, k 1 -> 1)
+        ["projected scan, 1 of 50 columns"] = new(0.759, 12, 0.030),   // 3 passes, spread 0.761-0.785; carried from 0.771, -1.6% under the new binary (0.797 -> 0.785, k 13 -> 12)
     };
 
     /// <summary>
@@ -474,7 +486,7 @@ internal static class RatioCheck
     /// <c>~/.cache/vorticity/vxbench/&lt;fingerprint&gt;/libvxbench.dylib</c>: <c>--rebase-from</c>
     /// carries the tables across a rebuild from that copy alone, our code held still.
     /// </remarks>
-    private static readonly string? CalibratedShim = "ee3ce208b623";
+    private static readonly string? CalibratedShim = "ce29a58870e3";
 
     /// <summary>
     /// How far under its reference a ratio may sit before it is called stale.
