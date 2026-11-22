@@ -411,7 +411,7 @@ long warmed = await dataset.WarmAsync<Request>(r => r.At >= DateTimeOffset.UtcNo
 
 By default only what an object's table of contents declares enters the cache: the directories that
 find its rows, of its chunks, its pages, its indexes and its variants' paths, never its data, along with
-the filters' pages questions evaluated. A read with no open of an object, such as a
+the filters' pages questions evaluated, which an encrypted dataset keeps in memory alone. A read with no open of an object, such as a
 lookup of an identifier in a large one, needs nothing else before its data; a read that opens the
 object reads its last 64 KiB from the store first. An object never changes, so an entry never goes
 stale. An object of 64 KiB at most holds its table of contents itself and is read through its open, which brings it whole: the cache keeps it when it keeps data, and nothing of it otherwise.

@@ -4974,16 +4974,17 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// </summary>
     private CommitPageSource PagesOf(ulong version, CommitObject commit)
     {
-        CommitPageSource pages = new CommitPageSource(_store, _pageCache, PageDisk) { Reading = version };
+        CommitPageSource pages = new CommitPageSource(_store, _pageCache, PlaintextDisk) { Reading = version };
         pages.Open(version, commit);
         return pages;
     }
 
     /// <summary>
-    /// The session's synopsis cache, which keeps the tree pages the handle reads on the disk: null for none, and for a
-    /// sealed dataset, whose pages stay off the disk, which holds no plaintext of it.
+    /// The session's synopsis cache, for what the handle draws from the dataset's plaintext and keeps on the disk, the tree
+    /// pages it reads and its filters' pages: null for none, and for a sealed dataset, which leaves no plaintext on the disk,
+    /// nor anything drawn from it. Its objects' frames go to the cache as the store holds them (<see cref="SealedSynopsisCache"/>).
     /// </summary>
-    private SynopsisCache? PageDisk => _store is SealedObjectStore { Seals: true } ? null : Session.Options.SynopsisCache;
+    internal SynopsisCache? PlaintextDisk => _store is SealedObjectStore { Seals: true } ? null : Session.Options.SynopsisCache;
 
     /// <summary>
     /// Completes an object's writer and puts the object in the store, keyed after <paramref name="firstRow"/> when the

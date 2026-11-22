@@ -415,7 +415,8 @@ The filter's pages are built (`PredicatePages`): a scan whose batches stay whole
 notes of each object it covers whole and reads by its own scan the batches where the filter kept a row,
 as ranges of the object's rows, under the object's identity, the filter's canonical text and the
 version's columns; the handle keeps them, and the session's synopsis cache, their bytes checked by their
-hash. Pages that hold more than half the object's rows, or more than 4 096 ranges (64 KB), are not kept:
+hash. A sealed dataset's stay in the handle alone: where the rows a filter kept lie is drawn from the
+plaintext, which no disk holds. Pages that hold more than half the object's rows, or more than 4 096 ranges (64 KB), are not kept:
 they would spare little. The filter asked again reads each range alone. On 100 000 events, bodies of
 300 bytes in chunks of 512 rows, thirty rows of a rare code asked as a range, which no sheet estimates
 and no index answers: 23.2 MB the first time, 5.3 MB after, 5.4 MB from a handle opened later on the
