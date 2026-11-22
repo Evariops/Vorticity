@@ -13,7 +13,7 @@ description = "Generates the golden Vortex corpus and expected-value sidecars fo
 # the corpus can cover every component in our scope with nothing left out. It requires
 # rustc >= 1.95 (local toolchain is 1.98.1, verified). The corpus was generated with 0.86.1 until
 # 2026-11-04, with 0.90.0 until 2026-11-22, and regenerated with 0.93.0 to the same coverage plus
-# two files only 0.93.0 writes.
+# files only 0.93.0 writes.
 [dependencies]
 vortex = "=0.93.0"
 # Only needed to name individual compression schemes: `SchemeId` is opaque outside this crate,

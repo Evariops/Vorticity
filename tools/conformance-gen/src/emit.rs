@@ -663,14 +663,6 @@ pub fn plan() -> (Vec<Entry>, Vec<SkipRecord>) {
 
 // --- A. type matrix --------------------------------------------------------------------------
 
-/// Whether the file root is a nullable struct. The 0.86.1 writer refused one outright: its
-/// file-statistics accumulator was built before any option was consulted and panicked on one
-/// (`vortex-layout-0.86.1/src/layouts/file_stats.rs:461`). 0.93.0 writes one, and the corpus still
-/// leaves it out: see the matching skip record in `static_skips`.
-fn nullable_struct_root(dtype: &DType) -> bool {
-    matches!(dtype, DType::Struct(_, n) if n.is_nullable())
-}
-
 fn type_matrix_entries() -> Vec<Entry> {
     let mut out = Vec::new();
 
@@ -685,13 +677,10 @@ fn type_matrix_entries() -> Vec<Entry> {
         };
 
         for (nullability, nullability_name) in nullabilities {
-            // A nullable top-level struct is left out: 0.93.0 writes one and Vorticity reads it,
-            // but Vorticity's writer cannot write one back yet. See the matching skip record in
-            // `static_skips`. The nullable-struct *column* case is still covered, by
-            // `struct_nested_deep`'s inner field `b`.
-            if matches!((case.dtype)(*nullability), Ok(d) if nullable_struct_root(&d)) {
-                continue;
-            }
+            // A nullable top-level struct is written since 0.93, whose file-statistics accumulator
+            // records nothing under a nullable root (vortex-layout-0.93.0/src/layouts/file_stats.rs:814)
+            // where 0.86.1's panicked on one, whatever `with_file_statistics` said
+            // (vortex-layout-0.86.1/src/layouts/file_stats.rs:461).
             for rows in schema::ROW_COUNTS {
                 let (rows, nullability) = (*rows, *nullability);
                 let dtype_fn = case.dtype;
@@ -1978,22 +1967,6 @@ fn static_skips() -> Vec<SkipRecord> {
                  resolution. It is produced by byte-patching instead, and ships in \
                  tests/Vorticity.Conformance/forged/ with its own manifest.json; see \
                  `--forged` in tools/conformance-gen/README.md."
-                    .into(),
-        },
-        SkipRecord {
-            id: "types/struct_flat_nullable, types/struct_nested_deep_nullable".into(),
-            dimension: "A".into(),
-            description: "a file whose ROOT dtype is a nullable struct".into(),
-            reason:
-                "Written by 0.93.0, whose file-statistics accumulator records nothing under a \
-                 nullable root (vortex-layout-0.93.0/src/layouts/file_stats.rs:814) where \
-                 0.86.1's panicked on one (vortex-layout-0.86.1/src/layouts/file_stats.rs:461), \
-                 and Vorticity reads all sixteen files value for value. Left out until Vorticity \
-                 writes such a root back: its writer lays the root struct out without the \
-                 validity child its reader asks for (3 children for 4), and its Parquet rewrite \
-                 refuses the root's nullability, so the corpus rewrite tests fail on them. \
-                 Nullable structs are still covered as non-root columns, by \
-                 `types/struct_nested_deep_*`'s inner field `b`."
                     .into(),
         },
         SkipRecord {

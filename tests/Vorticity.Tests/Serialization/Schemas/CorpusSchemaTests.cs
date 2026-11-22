@@ -1,4 +1,4 @@
-// The accessors, pointed at reality: all 878 golden files written by Vortex 0.93.0, cross-checked
+// The accessors, pointed at reality: all 894 golden files written by Vortex 0.93.0, cross-checked
 // against what tests/Vorticity.Conformance/corpus/manifest.json records about each of them.
 //
 // This is the test that catches a transcribed field id being off by one. A wrong id reads a
