@@ -320,8 +320,8 @@ public sealed class ScanTerminalTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
 
-        // The corpus file carries Exact file statistics: the whole-file extreme is one of them,
-        // and no segment is asked for.
+        // The corpus file carries Exact file statistics for its integer column: the whole-file
+        // extreme is one of them, and no segment is asked for.
         Decoders.EnsureRegistered();
         await using VortexFile file = await VortexFile.OpenAsync(Corpus.Path(Zoned), CancellationToken.None);
         Assert.True(file.HasFileStatistics);
@@ -329,13 +329,20 @@ public sealed class ScanTerminalTests
         ScanCounters metrics = new ScanCounters();
         FilterLiteral min = await file.ScanBuilder().WithMetrics(metrics).MinAsync("monotone", ct);
         FilterLiteral max = await file.ScanBuilder().WithMetrics(metrics).MaxAsync("monotone", ct);
-        FilterLiteral last = await file.ScanBuilder().WithMetrics(metrics).MaxAsync("strs", ct);
 
         Assert.Equal(1_000_000L, min.SignedValue);
         Assert.Equal(1_000_000L + (3 * (Rows - 1)), max.SignedValue);
-        Assert.Equal("z0063-1023", Encoding.UTF8.GetString(last.BytesValue));
         Assert.Equal(0, metrics.SegmentRequests);
         Assert.Equal(0, metrics.ValuesDecoded);
+
+        // A string column's are bounds: from 0.93 the reference records them through
+        // vortex.bounded_min and vortex.bounded_max, Inexact even when the value fits the bound.
+        // A bound is not the answer, so the column is read, and the extreme comes out the same.
+        ScanCounters bounded = new ScanCounters();
+        FilterLiteral last = await file.ScanBuilder().WithMetrics(bounded).MaxAsync("strs", ct);
+
+        Assert.Equal("z0063-1023", Encoding.UTF8.GetString(last.BytesValue));
+        Assert.True(bounded.SegmentRequests > 0, "an Inexact maximum answered the question");
     }
 
     [Fact]

@@ -531,9 +531,10 @@ internal static class LayoutParser
             LayoutsThrow.Arity("vortex.stats", "children", wireChildren, 2);
         }
 
-        // No fixture exercises this branch. The legacy stats metadata is not protobuf and carries
-        // no version byte: a little-endian u32 zone length, then a raw stat bitset whose bit index
-        // is the statistic's discriminant. A bare four-byte metadata is valid.
+        // containers/legacy_stats_zone_map exercises this branch, on what Vortex 0.93.0 writes. The
+        // legacy stats metadata is not protobuf and carries no version byte: a little-endian u32
+        // zone length, then a raw stat bitset whose bit index is the statistic's discriminant. A
+        // bare four-byte metadata is valid.
         if (metadata.Length < 4)
         {
             LayoutsThrow.Format(

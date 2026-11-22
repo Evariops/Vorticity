@@ -4,9 +4,9 @@
     "name": "conformance-gen",
     "version": "0.2.0",
     "source": "tools/conformance-gen",
-    "vortex_version": "0.90.0"
+    "vortex_version": "0.93.0"
   },
-  "about": "Fixtures that no conformant writer can produce, made by byte-patching a corpus file. These are NOT reference-implementation output. Most are deliberately malformed or out-of-scope files the Rust reader is expected to reject exactly as a .NET reader should; `legacy/stats_layout` is the exception, a perfectly valid file in an encoding 0.86.1 can read but not write. Each record states the source file, its hash, and the exact byte patch, so the fixture can be re-derived rather than trusted.",
+  "about": "Fixtures that no conformant writer can produce, made by byte-patching a corpus file. These are NOT reference-implementation output. Most are deliberately malformed or out-of-scope files the Rust reader is expected to reject exactly as a .NET reader should; `legacy/stats_layout` is the exception, a readable file in a layout no writer emitted before 0.93. Each record states the source file, its hash, and the exact byte patch, so the fixture can be re-derived rather than trusted.",
   "files": [
     {
       "id": "negative/unknown_encoding_id",
@@ -35,7 +35,7 @@
       "path": "negative/unknown_layout_id.vortex",
       "description": "a structurally valid file whose LAYOUT id `vortex.zzzzz` is registered nowhere. The array-level twin of this fixture renames an array id; this one renames a layout, which is a different resolution path and a different error. It exists because every test that needed an unknown LAYOUT had been using a real corpus file whose layout this build did not yet read - and each time that layout gained a reader, the test expired. A forged id cannot gain a reader",
       "source": "containers/dict_layout.vortex",
-      "source_sha256": "a03fb5f78287ef941ab60f66f06a86d62775438789659bbc93ada2935f6620e3",
+      "source_sha256": "5146b75f805019227e7717a03ff5456c7a96bd555c5c75f96b6d6b92986a143f",
       "patch": {
         "offset": 4780,
         "length": 12,
@@ -43,7 +43,7 @@
         "to": "vortex.zzzzz",
         "why_same_length": "the id is a length-prefixed flatbuffer string; an equal-length overwrite keeps every offset in the file valid, and Vortex checksums nothing"
       },
-      "sha256": "ebeb29fa6399896cce88cf5f1a8b68faeacbae76f61dc2818a5e456cc50e792b",
+      "sha256": "4711fe0d4d67d7244b55bfa17bb49d38449f7388bf19ffea9da55467a423d9f1",
       "size_bytes": 6168,
       "row_count": 4096,
       "expectations": [
@@ -55,24 +55,24 @@
     {
       "id": "legacy/stats_layout",
       "path": "legacy/stats_layout.vortex",
-      "description": "the canonical zone-map file with its layout id renamed to `vortex.stats`, the legacy zone map of editions core2025.05.0 through core2025.10.0 that Vortex 0.86.1 has no writer path for. Both vtables take (data, zones) with data at child 0 — vortex-layout-0.86.1/src/layouts/zoned/mod.rs asserts exactly that for each — so a structural reader must return the source's values through a code path nothing else exercises. PARTIAL BY CONSTRUCTION: child 1 still carries the zoned zone map, not a legacy stats table, because only the twelve-byte id was patched. That is enough to exercise a reader that treats vortex.stats as structural only and never parses the child, and it is NOT a conformant legacy file — a reader that parsed the legacy stats table would find the wrong schema there",
+      "description": "the canonical zone-map file with its layout id renamed to `vortex.stats`, the legacy zone map of editions core2025.05.0 through core2025.10.0 that Vortex had no writer path for before 0.93. Both vtables take (data, zones) with data at child 0 — vortex-layout-0.86.1/src/layouts/zoned/mod.rs asserts exactly that for each — so a structural reader must return the source's values through a code path nothing else exercises. PARTIAL BY CONSTRUCTION: child 1 still carries the zoned zone map, not a legacy stats table, because only the twelve-byte id was patched. That is enough to exercise a reader that treats vortex.stats as structural only and never parses the child, and it is NOT a conformant legacy file — a reader that parsed the legacy stats table would find the wrong schema there",
       "source": "containers/zoned_many_zones_nulls.vortex",
-      "source_sha256": "4195c0fff4fd62a6af8b01a3fe3b2712197dc1c376dc885863d564bc1c523573",
+      "source_sha256": "c2653bdccbff3b352575f8d04a4c1900dd9e0c61b4b95c142a2f60a06edfbfd3",
       "patch": {
-        "offset": 682676,
+        "offset": 682644,
         "length": 12,
         "from": "vortex.zoned",
         "to": "vortex.stats",
         "why_same_length": "the id is a length-prefixed flatbuffer string; an equal-length overwrite keeps every offset in the file valid, and Vortex checksums nothing"
       },
-      "sha256": "5d2dc47c5dcd5d2b043bad43e91373551d71431c0a7383192c933fe470b13bca",
-      "size_bytes": 689220,
+      "sha256": "07a2639bfadbeb2159744e880bd9ac86ba9b74ead4b03ede286f3f96754145d1",
+      "size_bytes": 689188,
       "row_count": 65536,
       "expectations": [
         "opening the file succeeds and the layout tree reports `vortex.stats` where the source reports `vortex.zoned`, with the same layout count and the same dtype",
         "a full scan returns EXACTLY the values containers/zoned_many_zones_nulls returns: the two files differ in one twelve-byte id and in nothing else",
         "a filtered scan returns the same ROWS as the source: vortex.stats reports pruning unavailable, so the filter is evaluated everywhere rather than skipped by zone, and a reader that pruned on a zone map it had not parsed would drop rows here",
-        "NOT asserted, because the fixture cannot support it: that legacy stats-table metadata parses. Child 1 holds a zoned zone map"
+        "NOT asserted, because the fixture cannot support it: that legacy stats-table metadata parses. Child 1 holds a zoned zone map. The corpus's containers/legacy_stats_zone_map, which 0.93.0 writes, holds a genuine one"
       ]
     }
   ]

@@ -74,7 +74,7 @@ public sealed class OutOfScopeTests
         }
 
         Assert.Equal(0, outOfScope);
-        Assert.Equal(876, CorpusCatalog.Entries.Length);
+        Assert.Equal(878, CorpusCatalog.Entries.Length);
     }
 
     [Theory]

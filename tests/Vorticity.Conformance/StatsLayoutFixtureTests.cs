@@ -1,10 +1,10 @@
-// vortex.stats, the only layout this library reads that no corpus file exercises.
+// vortex.stats, read through bytes no writer laid out that way.
 //
 // It is the legacy zone map of editions core2025.05.0 through core2025.10.0, read upstream by the
-// same ZonedReader as vortex.zoned and structurally identical to it - data at child 0. Vortex, 0.86.1
-// as 0.90.0, has no writer path that emits one, so no corpus file contains one. A reader can
-// support a component and never once be exercised, and nothing in the suite could tell the
-// difference between that and a reader that does not support it at all.
+// same ZonedReader as vortex.zoned and structurally identical to it - data at child 0. Up to 0.90.0
+// Vortex had no writer path that emits one; from 0.93.0 the zone map falls back to it under those
+// editions, and the corpus's containers/legacy_stats_zone_map is such a file. This fixture stays a
+// second witness: the zoned file it is patched from must read the same through the legacy path.
 //
 // THE FIXTURE IS THE SOURCE FILE WITH TWELVE BYTES CHANGED. `vortex.zoned` and `vortex.stats` are
 // both twelve bytes, so the equal-length patch that forged/ already uses applies unchanged: the id

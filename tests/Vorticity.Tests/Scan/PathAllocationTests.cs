@@ -430,7 +430,7 @@ public sealed class PathAllocationTests
         //
         // This file is written with editions off, so its footer declares every array id the
         // writer's session registers. Since the corpus came from Vortex 0.90.0 that is 41 ids
-        // rather than 39: version 2 of FoR, of bit-packing and of decimal byte parts joined, and
+        // rather than 39, and 0.93.0 registers the same 41: version 2 of FoR, of bit-packing and of decimal byte parts joined, and
         // fastlanes.transposed_bool left. The open resolves each declared id into two tables, a
         // ushort and an 8-byte location: 24 bytes more, the file's and not the path's.
         //

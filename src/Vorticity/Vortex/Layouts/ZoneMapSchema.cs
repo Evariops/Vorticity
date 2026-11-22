@@ -143,8 +143,10 @@ internal static class ZoneMapSchema
     /// <param name="presentStats">The stat bitset, ascending by discriminant.</param>
     /// <returns>A non-nullable struct; <c>max</c> and <c>min</c> each add a truncation-flag column.</returns>
     /// <remarks>
-    /// No writer in the reference corpus emits a legacy stats table, so this derivation has no
-    /// fixture behind it and is exercised only by files found in the wild.
+    /// The corpus's <c>containers/legacy_stats_zone_map</c>, which Vortex 0.93.0 writes under
+    /// <c>core2025.10.0</c>, holds four such tables (i64, a nullable i32, an f64 with
+    /// <c>nan_count</c>, utf8), and the layout tree test holds this derivation to the dtype the
+    /// reference gives each zones child.
     /// </remarks>
     internal static DType LegacyStatsTable(DTypeArena types, DType column, ReadOnlySpan<LegacyStat> presentStats)
     {
