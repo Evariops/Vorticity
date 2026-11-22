@@ -19,7 +19,7 @@ namespace Vorticity.Tests.RowEncoding;
 public sealed class RowTwoPassTests
 {
     /// <summary>Builds a column set exercising every encoder path, including both null bodies.</summary>
-    private static int[] EveryPath(RowFixture fixture, out RowSortField[] fields)
+    internal static int[] EveryPath(RowFixture fixture, out RowSortField[] fields)
     {
         int ints = fixture.Primitive<int>(PType.I32, [1, -2, 3, 4], [true, true, false, true]);
         int flags = fixture.Bool([true, false, true, false], [true, false, true, true]);
@@ -162,56 +162,6 @@ public sealed class RowTwoPassTests
         using RowKeys second = RowEncoder.Encode(fixture.Arena, columns, fields);
 
         Assert.Equal(snapshot, second.Elements.ToArray());
-    }
-
-    /// <summary>
-    /// The write pass allocates nothing once the pools are warm. Its buffers are rented, and the
-    /// scratch a variable-width child needs is rented too - a per-call allocation there would be
-    /// paid on every batch of a sort.
-    /// </summary>
-    /// <remarks>
-    /// The least of several windows is what the pass cannot avoid. A gen 2 collection under memory
-    /// pressure makes the shared pool let its arrays go, the caches of every thread at once, and the
-    /// pass that follows rents new ones: 88 bytes for an <c>int[16]</c>, counted on this thread. One
-    /// collection reaches one window, while an allocation the encoder makes itself shows in all of
-    /// them. Measured with the pressure forced high and four threads collecting beside: 54 windows
-    /// of 3,000 allocated, and the least of five never did.
-    /// </remarks>
-    [Fact]
-    public void AWarmWritePassAllocatesNothing()
-    {
-        using RowFixture fixture = new RowFixture();
-        int[] columns = EveryPath(fixture, out RowSortField[] fields);
-        const int rows = 4;
-
-        int[] sizes = new int[rows];
-        int total = RowEncoder.ComputeSizes(fixture.Arena, columns, fields, sizes);
-        int[] offsets = new int[rows];
-        _ = RowEncoder.ComputeOffsets(sizes, offsets);
-        byte[] destination = new byte[total];
-        int[] cursors = new int[rows];
-
-        // Warm the array pools and the JIT.
-        for (int i = 0; i < 8; i++)
-        {
-            Array.Clear(cursors);
-            RowEncoder.Encode(fixture.Arena, columns, fields, offsets, cursors, destination);
-        }
-
-        long least = long.MaxValue;
-        for (int window = 0; window < 5; window++)
-        {
-            long before = GC.GetAllocatedBytesForCurrentThread();
-            for (int i = 0; i < 16; i++)
-            {
-                Array.Clear(cursors);
-                RowEncoder.Encode(fixture.Arena, columns, fields, offsets, cursors, destination);
-            }
-
-            least = Math.Min(least, GC.GetAllocatedBytesForCurrentThread() - before);
-        }
-
-        Assert.Equal(0, least);
     }
 
     /// <summary>The sizing pass does not walk fixed-width columns, so its cost is theirs to prove.</summary>
