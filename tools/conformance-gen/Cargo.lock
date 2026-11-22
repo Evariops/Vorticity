@@ -628,6 +628,7 @@ dependencies = [
  "anyhow",
  "arrow-array",
  "arrow-schema",
+ "flatbuffers",
  "futures-lite",
  "parquet",
  "parquet-variant-compute",

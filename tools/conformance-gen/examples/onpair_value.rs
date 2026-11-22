@@ -72,7 +72,7 @@ fn main() -> VortexResult<()> {
     ];
 
     let with = BtrBlocksCompressorBuilder::from_session(&session).build();
-    let without = BtrBlocksCompressorBuilder::from_session(&session).exclude_schemes([OnPairScheme.id()]).build();
+    let without = BtrBlocksCompressorBuilder::from_session(&session).exclude_schemes([OnPairScheme::default().id()]).build();
     println!("{:<14} {:>10} {:>12} {:<22} {:>12} {:<22} {:>7}", "column", "plain", "with onpair", "", "without", "", "ratio");
     for (name, values) in datasets {
         let array: ArrayRef = VarBinViewArray::from_iter_str(values.iter().map(String::as_str)).into_array();

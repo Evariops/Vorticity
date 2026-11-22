@@ -8,6 +8,12 @@
 //!
 //! Output is JSON on stdout: per case, the pco header, chunk metadata and page bytes as hex, plus
 //! the exact values. The C# side decodes the bytes and must reproduce the values.
+//!
+//! One case is not byte-stable from run to run: the dictionary-mode case, whose values tie on
+//! their counts. pco counts them in a std `HashMap`, seeded per process, then sorts by count with
+//! an unstable sort (pco-1.1.0/src/mode/dict.rs:12 and :29), so tied values come out in either
+//! order. Both outputs decode to the same values; a regeneration that only reorders that
+//! dictionary is noise, not a change, and the committed vector stays.
 
 use pco::ChunkConfig;
 use pco::DeltaSpec;

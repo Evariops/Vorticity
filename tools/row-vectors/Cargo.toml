@@ -23,3 +23,4 @@ vortex-row = { git = "https://github.com/vortex-data/vortex", tag = "0.93.0" }
 vortex-array = { git = "https://github.com/vortex-data/vortex", tag = "0.93.0" }
 vortex-buffer = { git = "https://github.com/vortex-data/vortex", tag = "0.93.0" }
 vortex-error = { git = "https://github.com/vortex-data/vortex", tag = "0.93.0" }
+vortex-session = { git = "https://github.com/vortex-data/vortex", tag = "0.93.0" }

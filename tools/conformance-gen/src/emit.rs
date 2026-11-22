@@ -81,11 +81,14 @@ pub const LIST_LAYOUT_EDITION_NAME: &str = "conformance2026.11.0";
 
 /// An edition of this corpus's own family that admits the `vortex.list` layout. No edition of
 /// Vortex 0.90 does, and its default writer lays lists out with that layout only when an enabled
-/// edition admits it, where 0.86.1 took `VORTEX_EXPERIMENTAL_LIST_LAYOUT=1`. Enabled beside core,
-/// it leaves every other id under core's enforcement.
+/// edition admits it, where 0.86.1 took `VORTEX_EXPERIMENTAL_LIST_LAYOUT=1`. 0.93 admits it in its
+/// `UNSTABLE` draft alone, which would admit far more beside it. Enabled beside core, this one
+/// leaves every other id under core's enforcement. Immutable, as a frozen core edition is: its
+/// members never change.
 pub static LIST_LAYOUT_EDITION: EditionDeclaration = EditionDeclaration {
     edition: Edition {
         id: EditionId::new("conformance", 2026, 11, 0),
+        immutable: true,
         min_library_version: Some("0.90.0"),
     },
     added: &[EditionMember::layout(&"vortex.list")],
@@ -121,6 +124,9 @@ pub enum StrategyKind {
 pub struct WriteSpec {
     pub strategy: StrategyKind,
     pub file_statistics: bool,
+    /// `include_nested_statistics()`: the footer's statistics also carry one entry per field in
+    /// post-order, nested structs included, beside the legacy `field_stats`.
+    pub nested_file_statistics: bool,
     pub exclude_dtype: bool,
     pub disable_editions: bool,
     pub metadata: Vec<(String, Vec<u8>)>,
@@ -131,6 +137,7 @@ impl Default for WriteSpec {
         Self {
             strategy: StrategyKind::Default,
             file_statistics: true,
+            nested_file_statistics: false,
             exclude_dtype: false,
             disable_editions: false,
             metadata: Vec::new(),
@@ -245,6 +252,9 @@ pub fn build_options(session: &VortexSession, spec: &WriteSpec) -> VortexWriteOp
     if !spec.file_statistics {
         opts = opts.with_file_statistics(vec![]);
     }
+    if spec.nested_file_statistics {
+        opts = opts.include_nested_statistics();
+    }
     if spec.exclude_dtype {
         opts = opts.exclude_dtype();
     }
@@ -297,12 +307,19 @@ pub async fn produce(
     collect_extension_ids(file.dtype(), &mut extension_dtype_ids);
 
     // Everything the sidecar needs that the reader will not tell it: which entry it is, and the
-    // hash of the bytes it describes. Read once, reused for the EOF marker and for the user
-    // metadata payloads (the footer gives their offsets, not their bytes).
+    // hash of the bytes it describes. Read once, reused for the EOF marker, for the user metadata
+    // payloads (the footer gives their offsets, not their bytes) and for the footer's
+    // `field_stats` (the reader gives aggregates, without the order flags).
     let file_bytes = std::fs::read(&vortex_path)?;
     let (file_format_version, postscript_bytes) = read_eof(&file_bytes, &vortex_path)?;
     let sha256 = crate::util::sha256_bytes(&file_bytes);
     let metadata_segments = read_metadata_segments(&file, &file_bytes)?;
+    let field_stats = crate::field_stats::read_field_stats(&file_bytes, file.dtype(), session)?;
+    // The writer leaves the nested statistics out without a word when the enabled editions do not
+    // admit `vortex.min` (vortex-file-0.93.0/src/writer.rs:331), so the claim is read back.
+    if build.spec.nested_file_statistics && !crate::field_stats::has_nested_statistics(&file_bytes)? {
+        anyhow::bail!("{}: asked for nested file statistics, and the footer holds none", entry.id);
+    }
 
     let info = sidecar::write_sidecar(
         session,
@@ -313,6 +330,7 @@ pub async fn produce(
             path: &format!("{}.vortex", entry.id),
             sha256: &sha256,
             metadata_segments: &metadata_segments,
+            field_stats: field_stats.as_deref(),
         },
     )
     .await?;
@@ -645,9 +663,10 @@ pub fn plan() -> (Vec<Entry>, Vec<SkipRecord>) {
 
 // --- A. type matrix --------------------------------------------------------------------------
 
-/// Whether the file root is a nullable struct, which the 0.86.1 writer refuses outright: the
-/// file-statistics accumulator is built before any option is consulted and panics on one
-/// (`vortex-layout-0.86.1/src/layouts/file_stats.rs:461`).
+/// Whether the file root is a nullable struct. The 0.86.1 writer refused one outright: its
+/// file-statistics accumulator was built before any option was consulted and panicked on one
+/// (`vortex-layout-0.86.1/src/layouts/file_stats.rs:461`). 0.93.0 writes one, and the corpus still
+/// leaves it out: see the matching skip record in `static_skips`.
 fn nullable_struct_root(dtype: &DType) -> bool {
     matches!(dtype, DType::Struct(_, n) if n.is_nullable())
 }
@@ -666,11 +685,10 @@ fn type_matrix_entries() -> Vec<Entry> {
         };
 
         for (nullability, nullability_name) in nullabilities {
-            // A nullable top-level struct cannot be written by 0.86.1 at all: the file-statistics
-            // accumulator is constructed unconditionally and panics on one, whatever
-            // `with_file_statistics` says. See the matching skip record in `static_skips`. The
-            // nullable-struct *column* case is still covered, by `struct_nested_deep`'s inner
-            // field `b`.
+            // A nullable top-level struct is left out: 0.93.0 writes one and Vorticity reads it,
+            // but Vorticity's writer cannot write one back yet. See the matching skip record in
+            // `static_skips`. The nullable-struct *column* case is still covered, by
+            // `struct_nested_deep`'s inner field `b`.
             if matches!((case.dtype)(*nullability), Ok(d) if nullable_struct_root(&d)) {
                 continue;
             }
@@ -1154,6 +1172,26 @@ fn container_entries() -> Vec<Entry> {
     );
     out.push(zoned);
 
+    // From 0.93 the zone map degrades to the legacy `vortex.stats` layout when the write's
+    // editions admit that layout and not `vortex.zoned` (vortex-layout-0.93.0/src/layouts/zoned/
+    // writer.rs:136): `core2025.10.0`, the last edition before `vortex.zoned` joins core. Before
+    // 0.93 no writer path built one, and the forged `legacy/stats_layout` stood in for it.
+    let mut legacy_stats = entry(
+        "containers/legacy_stats_zone_map",
+        "D",
+        "the legacy vortex.stats zone map the writer falls back to under core2025.10.0, two \
+         zones of the zoned_layout table",
+        Box::new(|_session, _rng| {
+            Ok(Build {
+                array: zone_map_table(2 * 8192)?,
+                spec: WriteSpec::default(),
+            })
+        }),
+    );
+    legacy_stats.edition = Some("core2025.10.0");
+    legacy_stats.expected_layout_ids = vec!["vortex.stats".into(), "vortex.struct".into()];
+    out.push(legacy_stats);
+
     let mut chunked_layout = entry(
         "containers/chunked_layout_rowblock1024",
         "D",
@@ -1321,6 +1359,31 @@ fn container_entries() -> Vec<Entry> {
                 array: mixed_table(4096)?,
                 spec: WriteSpec {
                     file_statistics: false,
+                    ..WriteSpec::default()
+                },
+            })
+        }),
+    ));
+
+    // From 0.93 the statistics table can also carry aggregates for every field in post-order,
+    // nested structs included (`aggregate_specs`, `aggregate_sets`, `entry_sets`, `partials`),
+    // beside the legacy `field_stats` it still writes. Off by default, so no other file has
+    // them. The table is `types/struct_nested_deep`'s: a leaf at the top, then a nullable struct
+    // whose own entry trails its children's, over a struct two levels down.
+    out.push(entry(
+        "containers/nested_file_statistics",
+        "D",
+        "include_nested_statistics(): per-field aggregates in post-order beside field_stats",
+        Box::new(|_session, _rng| {
+            let case = schema::type_matrix()
+                .into_iter()
+                .find(|case| case.id == "struct_nested_deep")
+                .ok_or_else(|| vortex_err!("no struct_nested_deep type case"))?;
+            let dtype = (case.dtype)(Nullability::NonNullable)?;
+            Ok(Build {
+                array: schema::build_column(&dtype, 4096, case.value)?,
+                spec: WriteSpec {
+                    nested_file_statistics: true,
                     ..WriteSpec::default()
                 },
             })
@@ -1742,10 +1805,12 @@ fn edition_entries() -> Vec<Entry> {
         .iter()
         .enumerate()
         .map(|(index, (name, _))| {
-            // The `vortex.zoned` layout and its aggregates join core at `core2026.08.0`, and the
-            // 0.86.1 writer never emits the legacy `vortex.stats` layout that older editions
-            // would need. So editions before that can only be written zone-map-free, with the
-            // compressor restricted by hand to the edition's own encodings.
+            // The `vortex.zoned` layout and its aggregates join core at `core2026.08.0`, and no
+            // writer before 0.93 emitted the legacy `vortex.stats` layout that older editions
+            // allow. So editions before that were written zone-map-free, with the compressor
+            // restricted by hand to the edition's own encodings, and they stay so: the legacy
+            // zone map 0.93 writes under them has a file of its own,
+            // `containers/legacy_stats_zone_map`.
             let pre_zoned = name.starts_with("core2025");
             let mut e = entry(
                 format!("editions/{name}"),
@@ -1780,8 +1845,9 @@ fn edition_entries() -> Vec<Entry> {
             }
             if pre_zoned {
                 e.notes.push(
-                    "no zone maps: vortex.zoned joins core at core2026.08.0 and the 0.86.1 writer \
-                     never emits the legacy vortex.stats layout that this edition would allow"
+                    "no zone maps: vortex.zoned joins core at core2026.08.0, and the legacy \
+                     vortex.stats layout this edition allows, which the writer emits from 0.93, \
+                     is containers/legacy_stats_zone_map's"
                         .into(),
                 );
                 e.notes.push(
@@ -1915,30 +1981,18 @@ fn static_skips() -> Vec<SkipRecord> {
                     .into(),
         },
         SkipRecord {
-            id: "layouts/vortex_stats".into(),
-            dimension: "D".into(),
-            description: "a file containing the legacy `vortex.stats` zone-map layout".into(),
-            reason:
-                "The vtable exists and readers handle it, but no writer path constructs it: over \
-                 all of vortex-layout-0.86.1/src, `LegacyStats` appears only in session \
-                 registration (session.rs:62) and in reader tests. `ZonedMetadata::metadata` even \
-                 panics on the legacy schema (layouts/zoned/mod.rs:108). A `vortex.stats` file \
-                 must come from an older Vortex release, which would break the single-version pin \
-                 this corpus records."
-                    .into(),
-        },
-        SkipRecord {
             id: "types/struct_flat_nullable, types/struct_nested_deep_nullable".into(),
             dimension: "A".into(),
             description: "a file whose ROOT dtype is a nullable struct".into(),
             reason:
-                "Unwritable in 0.86.1 by any configuration. `VortexWriteOptions::write_internal` \
-                 always calls `accumulate_stats`, which constructs a `FileStatsAccumulator` before \
-                 looking at the requested statistics, and that constructor panics on a nullable \
-                 top-level struct: \"FileStatsAccumulator temporarily does not support nullable \
-                 top-level structs\" (vortex-layout-0.86.1/src/layouts/file_stats.rs:461). \
-                 `with_file_statistics(vec![])` does not help — the accumulator is built either \
-                 way. Nullable structs are still covered as non-root columns, by \
+                "Written by 0.93.0, whose file-statistics accumulator records nothing under a \
+                 nullable root (vortex-layout-0.93.0/src/layouts/file_stats.rs:814) where \
+                 0.86.1's panicked on one (vortex-layout-0.86.1/src/layouts/file_stats.rs:461), \
+                 and Vorticity reads all sixteen files value for value. Left out until Vorticity \
+                 writes such a root back: its writer lays the root struct out without the \
+                 validity child its reader asks for (3 children for 4), and its Parquet rewrite \
+                 refuses the root's nullability, so the corpus rewrite tests fail on them. \
+                 Nullable structs are still covered as non-root columns, by \
                  `types/struct_nested_deep_*`'s inner field `b`."
                     .into(),
         },
@@ -1969,7 +2023,7 @@ fn static_skips() -> Vec<SkipRecord> {
             dimension: "E".into(),
             description: "files written by Vortex 0.36.0, the read-forever floor".into(),
             reason:
-                "This crate is pinned to exactly 0.86.1, which is a conformance decision recorded \
+                "This crate is pinned to exactly one release, 0.93.0, which is a conformance decision recorded \
                  in docs/design/04-conformance.md §3, not a dependency choice. Files from the 0.36.0 \
                  floor have to come from a separately pinned generator; `editions/core2025.05.0` \
                  is the closest this one can get (the same component set, written by a modern \
