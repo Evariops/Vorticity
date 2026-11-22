@@ -29,11 +29,7 @@ anchored in the Rust reference, in both directions. Tests use xUnit v3 on Micros
 
 ## 3. The golden corpus
 
-`tools/conformance-gen`, a Rust crate pinned to `vortex = "=0.90.0"`, writes the corpus under
-`tests/Vorticity.Conformance/corpus`: 876 files, deterministic from a fixed seed, across the seven
-core editions from `core2025.05.0` to `core2026.08.3`. It was first written with 0.86.1 and
-regenerated with 0.90.0 to the same array, layout, extension and aggregate ids. The matrix is
-deliberate:
+`tools/conformance-gen`, a Rust crate pinned to `vortex = "=0.93.0"`, writes the corpus under `tests/Vorticity.Conformance/corpus`: 878 files, deterministic from a fixed seed, across the seven core editions from `core2025.05.0` to `core2026.08.3`. It was first written with 0.86.1 and regenerated with 0.90.0, then 0.93.0, to the same array, layout, extension and aggregate ids. 0.93.0 adds two files no earlier release writes: the legacy `vortex.stats` zone map, which closes the last layout the corpus lacked, and a footer carrying nested file statistics. The matrix is deliberate:
 
 - every dtype × nullability × row counts of 0, 1, 1 023, 1 024, 1 025, 8 191, 8 192 and 8 193,
   because the block edges at 1 024 (FastLanes) and 8 192 (the default block) are where bugs live
@@ -50,10 +46,7 @@ floats compared by their bits, so a wrong NaN payload or a `-0.0` read as `+0.0`
 therefore need no Rust toolchain. A `manifest.json` records the Vortex version, the edition, the
 encodings and the SHA-256 of every file.
 
-A coverage gate checks that the union of the corpus's array and layout ids covers every component
-this library claims to read, or the build fails. What no Rust writer can produce is forged by
-patching bytes, in `forged/`: the legacy `vortex.stats` layout, and the unknown ids of the
-[negative tests](#6-negative-and-forward-compatibility-tests).
+A coverage gate checks that the union of the corpus's array and layout ids covers every component this library claims to read, or the build fails. What no Rust writer can produce is forged by patching bytes, in `forged/`: the unknown ids of the [negative tests](#6-negative-and-forward-compatibility-tests), and a `vortex.stats` layout over a zoned file's bytes, made when no release wrote that layout and kept beside the one 0.93.0 writes.
 
 Shredded variants have files of their own, in `tests/Vorticity.Tests/Data/shredded-variants`, written
 by `examples/gen_shredded_variants.rs`. The sidecar would record a variant as the reference reads it,
@@ -121,21 +114,11 @@ format match ([06-row-encoding.md](06-row-encoding.md)):
 - Adversarial values are covered: `-0.0` and `+0.0`, NaN bit patterns, `i64::MIN`, empty against
   null against one-byte strings, strings of 31, 32, 33 and 64 bytes around the block size, prefix
   pairs, and nulls under nested structs with garbage in their children.
-- The bytes are checked against Rust. `tools/row-vectors` encodes generated tables with the reference
-  `vortex-row` and records the bytes in `tests/Vorticity.Conformance/row-vectors`, and the tests
-  compare every one. `vortex-row` is not published on crates.io, so that crate takes the Vortex
-  repository at tag `0.90.0` as a git dependency, the only one in the repository, and its output is
-  committed. The vectors name the row format `0.86.1`, whose bytes `0.90.0` still writes. Being
-  order-compatible is not enough, since two encoders can each be consistent and still disagree,
-  which would break any comparison across languages.
+- The bytes are checked against Rust. `tools/row-vectors` encodes generated tables with the reference `vortex-row` and records the bytes in `tests/Vorticity.Conformance/row-vectors`, and the tests compare every one. `vortex-row` is not published on crates.io, so that crate takes the Vortex repository at tag `0.93.0` as a git dependency, the only one in the repository, and its output is committed. The vectors name the row format `0.86.1`, whose bytes `0.93.0` still writes. Being order-compatible is not enough, since two encoders can each be consistent and still disagree, which would break any comparison across languages.
 
 ## 8. Read forever
 
-Files written under the oldest edition must stay readable, and the corpus holds files written under
-each edition from `core2025.05.0` on. The files of the older editions are what catches a reader that
-hard-codes the encodings of the newest edition. They are written by the pinned 0.90.0 generator
-restricted to each edition, which gives the same component set as the 0.36.0 floor with a modern
-writer. Files from a 0.36.0 writer itself would need a second, older generator.
+Files written under the oldest edition must stay readable, and the corpus holds files written under each edition from `core2025.05.0` on. The files of the older editions are what catches a reader that hard-codes the encodings of the newest edition. They are written by the pinned 0.93.0 generator restricted to each edition, which gives the same component set as the 0.36.0 floor with a modern writer. Files from a 0.36.0 writer itself would need a second, older generator.
 
 A CI job vendors the upstream schemas again and reports any drift. A change there is a format change,
 reviewed against [90-registry.md](90-registry.md), and the corpus is regenerated with the generator

@@ -80,9 +80,10 @@ pub const CLAIMED_LAYOUTS: &[&str] = &[
     "vortex.zoned",
 ];
 
-/// Layout ids that exist in 0.86.1 but belong to no core edition, and so are not in
-/// the registry's layout table. `vortex.list` is reachable only under
-/// `VORTEX_EXPERIMENTAL_LIST_LAYOUT=1`; a file containing one is a forward-compatibility fixture,
+/// Layout ids that belong to no core edition, and so are not in the registry's layout table.
+/// `vortex.list` is reachable only under an edition that admits it: the corpus's own
+/// `conformance2026.11.0`, or from 0.93 the `UNSTABLE` draft (under 0.86.1,
+/// `VORTEX_EXPERIMENTAL_LIST_LAYOUT=1`); a file containing one is a forward-compatibility fixture,
 /// not a conformance target, exactly as `vortex.patched` is on the array side. Listed here so the
 /// unclaimed-observed report stays a signal rather than a permanent known-noise line.
 pub const EXPERIMENTAL_LAYOUTS: &[&str] = &["vortex.list"];
@@ -158,7 +159,7 @@ pub struct Manifest {
     pub determinism: Determinism,
     pub coverage: Coverage,
     /// Reference-implementation behaviours a consumer must not mistake for its own bug. The
-    /// sidecars record what Vortex 0.86.1 actually wrote, including where that is surprising; a
+    /// sidecars record what the pinned Vortex actually wrote, including where that is surprising; a
     /// .NET test that "corrects" one of these will disagree with every real Vortex file.
     pub caveats: Vec<&'static str>,
     pub files: Vec<FileRecord>,

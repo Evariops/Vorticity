@@ -1,8 +1,6 @@
-# Vortex Rust API — notes for the corpus generator, from 0.86.1 to 0.90.0
+# Vortex Rust API, notes for the corpus generator from 0.86.1 to 0.93.0
 
-Sections 0 to 6 are verified by compiling and running against `vortex = "=0.86.1"` on
-rustc 1.98.1 (macOS aarch64). Section 7 says what 0.90.0 changed, verified against `=0.90.0` the same
-way, and the second appendix is its run. Two runnable artefacts back these notes:
+Sections 0 to 6 are verified by compiling and running against `vortex = "=0.86.1"` on rustc 1.98.1 (macOS aarch64). Section 7 says what 0.90.0 changed, verified against `=0.90.0` the same way, and the second appendix is its run. Section 8 says what 0.93.0 changed, and how its run differs from that appendix. Two runnable artefacts back these notes:
 
 | what | how to run |
 | --- | --- |
@@ -631,11 +629,7 @@ A `.table_display()` for tabular value dumps sits behind the `vortex/pretty` fea
 What the signatures leave open, answered by building the corpus with `src/`. An answer that is a
 corpus gap is also recorded in `manifest.json`'s `skipped` list.
 
-1. **Writing a `vortex.stats` (legacy zone map) layout — NOT POSSIBLE.** Confirmed: no writer path
-   constructs it, and `ZonedMetadata::metadata` *panics outright* on the legacy schema
-   (`vortex-layout-0.86.1/src/layouts/zoned/mod.rs:108`,
-   `"Cannot serialize legacy stats schema as vortex.zoned"`). The corpus therefore covers 5 of the
-   6 claimed layouts; a `vortex.stats` file must come from an older Vortex release.
+1. **Writing a `vortex.stats` (legacy zone map) layout is NOT POSSIBLE in 0.86.1 or 0.90.0.** Confirmed: no writer path constructs it, and `ZonedMetadata::metadata` *panics outright* on the legacy schema (`vortex-layout-0.86.1/src/layouts/zoned/mod.rs:108`, `"Cannot serialize legacy stats schema as vortex.zoned"`). The corpus covered 5 of the 6 claimed layouts until 0.93.0, which writes one, as section 8 says.
 
 2. **`DType::Union` — NOT POSSIBLE, and correctly so.** `vortex.union` is a member of no core
    edition (grep the 34 array ids in `spec/editions/core2026.08.3.toml`), so a conformant writer
@@ -685,10 +679,7 @@ corpus gap is also recorded in `manifest.json`'s `skipped` list.
 
 ### Writer limitations
 
-* **A nullable top-level struct cannot be written at all.** `write_internal` always calls
-  `accumulate_stats`, whose `FileStatsAccumulator::new` panics on one before looking at the
-  requested statistics (`vortex-layout-0.86.1/src/layouts/file_stats.rs:461`).
-  `with_file_statistics(vec![])` does not help. Nullable structs below the root are fine.
+* **A nullable top-level struct cannot be written at all** up to 0.90.0, and 0.93.0 writes one, as section 8 says. `write_internal` always calls `accumulate_stats`, whose `FileStatsAccumulator::new` panics on one before looking at the requested statistics (`vortex-layout-0.86.1/src/layouts/file_stats.rs:461`). `with_file_statistics(vec![])` does not help. Nullable structs below the root are fine.
 * **Segment- and buffer-level compression are reserved but never written.**
   `PostscriptSegment::write_flatbuffer` hard-codes `_compression: None`
   (`footer/postscript.rs:251`) and `FileLayout` hard-codes `compression_specs: None`
@@ -734,6 +725,20 @@ uses.
   `MaskedArray::try_new`, `Sparse::try_new`, `Patches::new` and `ListViewArray::list_elements_at`.
   `Delta::try_new` takes the array's validity.
 - The UUID extension moved from `vortex::extension::uuid` to `vortex::encodings::uuid`.
+
+## 8. What 0.93.0 changed
+
+The generator moved to 0.93.0 on 2026-11-22. The corpus came out with the same array, layout, extension and aggregate ids, identical from one run to the next, plus two files only 0.93.0 writes. These are the changes in the API it uses and in what the writer produces.
+
+- File statistics are aggregates. `FileStatistics` holds `AggregateStats` per `FieldPath` (`aggregates()`, `paths()`, `get_by_path()`), and `stats_sets()` is gone. A statistic with no aggregate function has no place there: `Stat::aggregate_fn` answers `None` for `IsConstant`, `IsSorted` and `IsStrictSorted` (`vortex-array-0.93.0/src/expr/stats/mod.rs:198`). The reader also drops a statistics table it cannot parse, with a warning, instead of failing the open (`vortex-file-0.93.0/src/footer/deserializer.rs:170`). So the sidecar and `verify_written` read the footer's `field_stats` from the file's bytes (`src/field_stats.rs`), and `verify_written` fails when the reference reads no statistics where our footer stores them.
+- The writer derives `field_stats` from aggregates (`FileStatsAccumulator::legacy_aggregate_stats`, `vortex-layout-0.93.0/src/layouts/file_stats.rs:802`). A column's `sum` is no longer recorded, `uncompressed_size_in_bytes` is, and a string column's minimum and maximum come from `vortex.bounded_min` and `vortex.bounded_max`, so they are `Inexact` even when the value fits the bound. 583 files of the 876 carried over change bytes. Their sidecars change in the header's hash and, for 575 of them, in the `file_stats` line, and no other line moves. A reader that answers a string column's extreme from the file statistics now has a bound, not a value, so `ScanTerminalTests` reads the column for it.
+- `include_nested_statistics()` appends, beside `field_stats`, the aggregates of every field in post-order, nested structs included, a nullable struct's own null count after its children (`aggregate_specs`, `aggregate_sets`, `entry_sets`, `partials` in `footer.fbs`). The writer leaves them out by default, and without a word when the enabled editions do not admit `vortex.min` (`vortex-file-0.93.0/src/writer.rs:331`), so `containers/nested_file_statistics` asks for them and the generator checks that `entry_sets` is there.
+- When the write's editions admit `vortex.stats` and not `vortex.zoned`, `ZonedStrategy` writes a legacy `vortex.stats` zone map (`write_legacy_stream`, `vortex-layout-0.93.0/src/layouts/zoned/writer.rs:136`), where 0.90.0 wrote none. `containers/legacy_stats_zone_map` is one, under `core2025.10.0`, and `layouts/vortex_stats` left the skipped list. The edition files below `core2026.08.0` keep their zone-map-free write.
+- A nullable top-level struct is written. The statistics accumulator records nothing under a nullable root (`vortex-layout-0.93.0/src/layouts/file_stats.rs:814`) instead of panicking. Vorticity reads the sixteen type-matrix files this allows value for value, and they stay out of the corpus until Vorticity's writer can write such a root back, as their skip record says.
+- `Edition` has an `immutable` field, `true` for a frozen edition, and 0.93.0 adds an `UNSTABLE` draft edition, which admits among others the `vortex.list` layout, `fastlanes.delta`, `vortex.patched`, `vortex.union` and the Bloom filter aggregate (`vortex-edition-0.93.0/src/declarations/unstable/mod.rs`). The corpus's own `conformance2026.11.0` is immutable.
+- `array_session()` is gone. A `VortexSession::empty()` builds each session variable on first use, which is what `row-vectors` now does, with `vortex-session` as one more crate from the same tag.
+- `OnPairScheme` is a value with a dictionary budget, and `OnPairScheme::default()` is the former unit struct, 12 bits.
+- `api_experiments` prints what the 0.90.0 appendix records, but for the `core2025.05.0` experiment. Its default strategy, which failed with `Aggregate vortex.max not permitted by ctx`, now writes 9 628 bytes with a `vortex.stats` zone map, and error messages lose their `Other error: ` prefix.
 
 ## Appendix — recorded output of `cargo run --release --example api_experiments`, at 0.86.1
 

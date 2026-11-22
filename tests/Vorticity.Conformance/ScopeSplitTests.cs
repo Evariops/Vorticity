@@ -18,13 +18,13 @@ public sealed class ScopeSplitTests
     // Bumped deliberately, one decoder at a time: a moved count is the visible half of a
     // decoder landing, and an unexplained move is the visible half of one being dropped.
     //
-    // THE SPLIT IS 876/0, and the zero is the point: every file of the conformance corpus is
+    // THE SPLIT IS 878/0, and the zero is the point: every file of the conformance corpus is
     // readable by this build. No component is left unread, whether once left out of scope or in
     // no core edition -- `fastlanes.delta` and `vortex.zstd_buffers` are both read, and both
     // variants are, shredded or not. What is still refused is a SHAPE rather than an id: the
     // two-buffer form of fsst, refused by its decoder with a message naming the shape, and not in
     // the corpus.
-    private const int ExpectedInScope = 876;
+    private const int ExpectedInScope = 878;
     private const int ExpectedOutOfScope = 0;
 
     [Fact]
@@ -60,7 +60,7 @@ public sealed class ScopeSplitTests
 
         Console.Out.Write(report.ToString());
 
-        Assert.Equal(876, total);
+        Assert.Equal(878, total);
         Assert.Equal(ExpectedInScope, inScope);
         Assert.Equal(ExpectedOutOfScope, outOfScope);
     }

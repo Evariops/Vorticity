@@ -56,8 +56,16 @@ public sealed class WrittenSizeTests
     /// three to four times larger, which moved the whole corpus from 0.6292 to 0.6325. The
     /// headroom above the ratio is the one the ceiling had.
     /// </para>
+    /// <para>
+    /// Raised from 0.635 when the corpus moved to Vortex 0.93.0 and took two files, a legacy
+    /// <c>vortex.stats</c> zone map and a footer with nested file statistics: 160 232 bytes the
+    /// reference wrote, which this writer rewrites in 152 648, 0.95x, against 0.63x for the rest.
+    /// The 876 files carried over rewrite in the same 10 172 648 bytes, against 16 035 117 for the
+    /// reference (0.6344, 0.6341 under 0.90.0), and the whole corpus moved to 0.6375. The headroom is
+    /// the 0.0025 the last raise left.
+    /// </para>
     /// </remarks>
-    private const double CorpusCeiling = 0.635;
+    private const double CorpusCeiling = 0.640;
 
     /// <summary>How many of the worst offenders to name, so the number is actionable.</summary>
     private const int Worst = 12;

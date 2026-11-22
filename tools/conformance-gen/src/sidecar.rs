@@ -29,6 +29,7 @@ use vortex::array::ArrayRef;
 use vortex::array::VortexSessionExecute;
 use vortex::array::serde::SerializedArray;
 use vortex::array::stream::ArrayStreamExt;
+use vortex::array::stats::StatsSet;
 use vortex::dtype::DType;
 use vortex::dtype::Nullability;
 use vortex::error::VortexResult;
@@ -110,6 +111,10 @@ pub struct SidecarIdentity<'a> {
     pub sha256: &'a str,
     /// User metadata segments in the order the footer stores them, with their payload bytes.
     pub metadata_segments: &'a [(String, Vec<u8>)],
+    /// The footer's `field_stats`, one set per top-level field, read from the file's bytes
+    /// (`crate::field_stats`): the reader hands file statistics out as aggregates, which leave the
+    /// order flags out. `None` when the file has no statistics segment.
+    pub field_stats: Option<&'a [StatsSet]>,
 }
 
 /// Read `file` back and write its expected values to `path`.
@@ -196,7 +201,7 @@ pub async fn write_sidecar(
 
     write_metadata_segments(&mut out, identity.metadata_segments)?;
 
-    let has_file_statistics = write_file_statistics(&mut out, file)?;
+    let has_file_statistics = write_file_statistics(&mut out, file, identity.field_stats)?;
     let zone_maps = write_zone_maps(&mut out, session, file).await?;
 
     let mut utf8_scan = Utf8Scan::default();
@@ -728,21 +733,29 @@ fn layout_json(
 // Statistics
 // -------------------------------------------------------------------------------------------
 
-fn write_file_statistics(out: &mut impl Write, file: &VortexFile) -> VortexResult<bool> {
-    let Some(stats) = file.footer().statistics() else {
+fn write_file_statistics(
+    out: &mut impl Write,
+    file: &VortexFile,
+    field_stats: Option<&[StatsSet]>,
+) -> VortexResult<bool> {
+    let Some(stats) = field_stats else {
         writeln_json(out, &json!({ "kind": "file_stats", "present": false }))?;
         return Ok(false);
     };
 
-    let names: Vec<String> = match file.dtype() {
-        DType::Struct(fields, _) => fields.names().iter().map(|n| n.to_string()).collect(),
-        _ => vec![String::new()],
+    let (names, dtypes): (Vec<String>, Vec<DType>) = match file.dtype() {
+        DType::Struct(fields, _) => fields
+            .names()
+            .iter()
+            .map(|n| n.to_string())
+            .zip(fields.fields())
+            .unzip(),
+        other => (vec![String::new()], vec![other.clone()]),
     };
 
     let fields: Vec<Value> = stats
-        .stats_sets()
         .iter()
-        .zip(stats.dtypes().iter())
+        .zip(dtypes.iter())
         .enumerate()
         .map(|(idx, (set, dtype))| {
             Ok(json!({
@@ -762,7 +775,7 @@ fn write_file_statistics(out: &mut impl Write, file: &VortexFile) -> VortexResul
 }
 
 fn stats_set_json(
-    set: &vortex::array::stats::StatsSet,
+    set: &StatsSet,
     field_dtype: &DType,
 ) -> VortexResult<Value> {
     let mut obj = serde_json::Map::new();

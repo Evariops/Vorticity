@@ -49,6 +49,9 @@ use vortex::io::session::RuntimeSessionExt;
 use vortex::scalar::Scalar;
 use vortex::session::VortexSession;
 
+#[path = "../src/field_stats.rs"]
+mod field_stats;
+
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let original = PathBuf::from(
@@ -270,6 +273,9 @@ async fn check_string_pruning(
 /// and IsStrictSorted at the file level), so this is the one place their meaning is checked
 /// against the implementation that defines it; an extension's, which it does not define, against
 /// its storage's.
+///
+/// The claims are read from the footer's `field_stats` as stored (`src/field_stats.rs`): from 0.93
+/// the reference hands file statistics out as aggregates, where the two order flags have no place.
 async fn check_statistics(
     session: &VortexSession,
     ours: &Path,
@@ -277,9 +283,16 @@ async fn check_statistics(
     ctx: &mut ExecutionCtx,
 ) -> anyhow::Result<()> {
     let file = session.open_options().open_path(ours).await?;
-    let Some(statistics) = file.footer().statistics() else {
+    let bytes = std::fs::read(ours)?;
+    let Some(field_stats) = field_stats::read_field_stats(&bytes, file.dtype(), session)? else {
         return Ok(());
     };
+    // From 0.93 the reference drops file statistics it cannot parse instead of failing the open
+    // (vortex-file-0.93.0/src/footer/deserializer.rs:170), so a table it refuses would otherwise
+    // go unnoticed.
+    if file.footer().statistics().is_none() {
+        anyhow::bail!("the reference reads no file statistics where our footer stores them");
+    }
 
     let Some(root) = actual.as_opt::<Struct>() else {
         return Ok(());
@@ -292,7 +305,7 @@ async fn check_statistics(
         Stat::IsSorted,
         Stat::IsStrictSorted,
     ];
-    for (index, set) in statistics.stats_sets().iter().enumerate() {
+    for (index, set) in field_stats.iter().enumerate() {
         let Some(encoded) = root.unmasked_field_opt(index) else {
             anyhow::bail!("file statistics name field {index}, which the data does not have");
         };

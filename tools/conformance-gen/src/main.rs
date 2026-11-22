@@ -21,6 +21,7 @@
 
 mod emit;
 mod encodings;
+mod field_stats;
 mod forged;
 mod manifest;
 mod schema;
@@ -665,7 +666,7 @@ fn report(
         for (label, id) in &undocumented {
             println!("      {label}: {id} — claimed in scope, no corpus file, no SkipRecord");
         }
-        println!("      Produce it, or record why 0.86.1 cannot, in emit::static_skips.");
+        println!("      Produce it, or record why the pinned release cannot, in emit::static_skips.");
     }
 
     // The shape gate: properties an id set cannot express. A miss here is a real hole — every one

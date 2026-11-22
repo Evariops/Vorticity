@@ -202,14 +202,7 @@ the segment table reserves a compression byte too. A compressed buffer is refuse
 `VortexUnsupportedException` naming the id `lz4` and the kind `compression`, and nothing is ever
 written compressed.
 
-There is nothing to conform to. In the whole of Vortex 0.90.0, as in 0.86.1, `lz4` appears in the two schemas that
-declare the enum and in the generated code that mirrors them, and nowhere else. The reference writes
-`Compression::None`, never reads the field, and depends on no LZ4 implementation. The schema names an
-algorithm and stops there: it does not say whether the bytes would be a raw LZ4 block or a frame, and
-it records no decompressed length anywhere, so a decoder could not even size its output without
-inventing a rule. Writing one would mean choosing a framing and calling it the format, the same
-mistake as inventing an order for `List` in the row encoder (see [unsupported
-types](06-row-encoding.md#6-unsupported-types)).
+There is nothing to conform to. In the whole of Vortex 0.93.0, as in 0.86.1, `lz4` appears in the two schemas that declare the enum and in the generated code that mirrors them, and nowhere else. The reference writes `Compression::None`, never reads the field, and depends on no LZ4 implementation. The schema names an algorithm and stops there: it does not say whether the bytes would be a raw LZ4 block or a frame, and it records no decompressed length anywhere, so a decoder could not even size its output without inventing a rule. Writing one would mean choosing a framing and calling it the format, the same mistake as inventing an order for `List` in the row encoder (see [unsupported types](06-row-encoding.md#6-unsupported-types)).
 
 Refusing is also the safer behaviour. The reference, which never inspects the field, would read
 compressed bytes as data and silently return wrong values. The decision will change the day upstream

@@ -25,7 +25,6 @@ use std::sync::Arc;
 use vortex_array::ArrayRef;
 use vortex_array::IntoArray;
 use vortex_array::VortexSessionExecute;
-use vortex_array::array_session;
 use vortex_array::arrays::BoolArray;
 use vortex_array::arrays::DecimalArray;
 use vortex_array::arrays::FixedSizeListArray;
@@ -44,9 +43,10 @@ use vortex_buffer::buffer;
 use vortex_error::VortexResult;
 use vortex_row::RowSortField;
 use vortex_row::convert_columns;
+use vortex_session::VortexSession;
 
 /// The Vortex release whose row format these vectors pin, as `RowEncoder.VortexVersion` names it:
-/// 0.86.1, whose bytes vortex-row 0.90.0 still writes, byte for byte. It moves when a regeneration
+/// 0.86.1, whose bytes vortex-row 0.93.0 still writes, byte for byte. It moves when a regeneration
 /// changes the bytes, never on a pin bump alone. A mismatch on the C# side is a loud failure rather
 /// than a silent re-baseline.
 const VORTEX_VERSION: &str = "0.86.1";
@@ -383,7 +383,7 @@ fn emit<W: Write>(
     columns: &[ArrayRef],
     fields: &[RowSortField],
 ) -> VortexResult<()> {
-    let mut ctx = array_session().create_execution_ctx();
+    let mut ctx = VortexSession::empty().create_execution_ctx();
     let encoded = convert_columns(columns, fields, &mut ctx)?;
     let rows = collect_row_bytes(&encoded);
 
@@ -403,7 +403,7 @@ fn emit<W: Write>(
 }
 
 fn collect_row_bytes(array: &ListViewArray) -> Vec<Vec<u8>> {
-    let mut ctx = array_session().create_execution_ctx();
+    let mut ctx = VortexSession::empty().create_execution_ctx();
     (0..array.len())
         .map(|i| {
             let slice = array.list_elements_at(i, &mut ctx).unwrap();

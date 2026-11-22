@@ -1,4 +1,4 @@
-// Every golden file, opened: real postscripts and footers written by Vortex 0.90.0, and the
+// Every golden file, opened: real postscripts and footers written by Vortex 0.93.0, and the
 // oracle that can tell the open path it is wrong about a real file.
 //
 // The I/O-count assertion in OpensEveryCorpusFile makes the open's headline promise measurable:
@@ -21,7 +21,7 @@ public sealed class VortexFileCorpusTests
     public async Task OpensEveryCorpusFileAndAgreesWithTheManifest()
     {
         CorpusEntry[] entries = CorpusManifest.Entries;
-        Assert.Equal(876, entries.Length);
+        Assert.Equal(878, entries.Length);
 
         List<string> failures = new List<string>();
         HashSet<long> rowCounts = new HashSet<long>();
@@ -145,7 +145,7 @@ public sealed class VortexFileCorpusTests
             }
         }
 
-        Assert.Equal(575, filesWithStatistics);
+        Assert.Equal(577, filesWithStatistics);
         Assert.Equal(2, filesWithMetadata);
         Assert.Equal(1, filesWithoutDTypeSegment);
 

@@ -22,9 +22,11 @@
 //!
 //! The second fixture is not negative at all, and the same mechanism produces it. `vortex.stats` is
 //! the legacy zone map of editions core2025.05.0 through core2025.10.0, read upstream by the same
-//! `ZonedReader` as `vortex.zoned` and structurally identical to it — data at child 0. Vortex 0.86.1
-//! has no writer path that emits one, so no corpus file contains one, so a reader can support it and
-//! never once be exercised. Both ids are twelve bytes, which makes the equal-length patch above
+//! `ZonedReader` as `vortex.zoned` and structurally identical to it — data at child 0. Before 0.93
+//! Vortex had no writer path that emits one, so no corpus file contained one, and a reader could
+//! support it and never once be exercised. The corpus now holds the one 0.93.0 writes,
+//! `containers/legacy_stats_zone_map`, and this fixture stays as a second witness, over a zoned
+//! file's bytes. Both ids are twelve bytes, which makes the equal-length patch above
 //! sufficient: the result is a file whose values must read back IDENTICALLY to its source through a
 //! different reader. That is a stronger oracle than a hand-built fixture would have, because the
 //! expected values are not asserted from a manifest — they are whatever the unpatched file says.
@@ -115,8 +117,8 @@ const FORGES: &[Forge] = &[
         to: b"vortex.stats",
         description:
             "the canonical zone-map file with its layout id renamed to `vortex.stats`, the legacy \
-             zone map of editions core2025.05.0 through core2025.10.0 that Vortex 0.86.1 has no \
-             writer path for. Both vtables take (data, zones) with data at child 0 — \
+             zone map of editions core2025.05.0 through core2025.10.0 that Vortex had no writer \
+             path for before 0.93. Both vtables take (data, zones) with data at child 0 — \
              vortex-layout-0.86.1/src/layouts/zoned/mod.rs asserts exactly that for each — so a \
              structural reader must return the source's values through a code path nothing else \
              exercises. PARTIAL BY CONSTRUCTION: child 1 still carries the zoned zone map, not a \
@@ -134,7 +136,8 @@ const FORGES: &[Forge] = &[
              unavailable, so the filter is evaluated everywhere rather than skipped by zone, and a \
              reader that pruned on a zone map it had not parsed would drop rows here",
             "NOT asserted, because the fixture cannot support it: that legacy stats-table metadata \
-             parses. Child 1 holds a zoned zone map",
+             parses. Child 1 holds a zoned zone map. The corpus's containers/legacy_stats_zone_map, \
+             which 0.93.0 writes, holds a genuine one",
         ],
     },
 ];
@@ -217,8 +220,8 @@ pub fn write_forged(corpus: &Path, out: &Path) -> anyhow::Result<usize> {
             "Fixtures that no conformant writer can produce, made by byte-patching a corpus file. \
              These are NOT reference-implementation output. Most are deliberately malformed or \
              out-of-scope files the Rust reader is expected to reject exactly as a .NET reader \
-             should; `legacy/stats_layout` is the exception, a perfectly valid file in an encoding \
-             0.86.1 can read but not write. Each record states the source file, its hash, and the \
+             should; `legacy/stats_layout` is the exception, a readable file in a layout no \
+             writer emitted before 0.93. Each record states the source file, its hash, and the \
              exact byte patch, so the fixture can be re-derived rather than trusted.",
         "files": records,
     });

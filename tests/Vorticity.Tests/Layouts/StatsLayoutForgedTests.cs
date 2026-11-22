@@ -1,17 +1,17 @@
-// The one test `vortex.stats` can have.
+// `vortex.stats` over a zoned file's bytes.
 //
-// No writer path of Vortex 0.86.1 or 0.90.0 constructs a vortex.stats layout, so the corpus has no fixture and never
-// will while the corpus records a single-version pin. But `vortex.zoned` and `vortex.stats` are
-// both exactly TWELVE BYTES, so overwriting the id in the footer's layout_specs is
-// length-preserving: every offset in the file stays valid and the reader takes the legacy path
-// against real bytes.
+// No writer path of Vortex 0.86.1 or 0.90.0 constructs a vortex.stats layout; 0.93.0 does under the
+// editions before vortex.zoned, and the corpus's containers/legacy_stats_zone_map is one. This test
+// predates it and stays: `vortex.zoned` and `vortex.stats` are both exactly TWELVE BYTES, so
+// overwriting the id in the footer's layout_specs is length-preserving, every offset in the file
+// stays valid and the reader takes the legacy path against a zoned file's real bytes.
 //
 // What that proves is exactly what we claim for the layout and no more:
 //   (a) the file still opens and its layout tree still parses;
 //   (b) the data child reads value-for-value equal to the unpatched original;
 //   (c) ZoneMap.IsPruningAvailable is false.
-// The zones-table dtype derivation stays untested - the metadata is a zoned one reinterpreted, so
-// its bitset is arbitrary - which is why that derivation carries an UNTESTED marker in the source.
+// The zones-table dtype derivation is not checked here - the metadata is a zoned one reinterpreted,
+// so its bitset is arbitrary - but on the genuine file, by the layout tree test.
 using System;
 using System.IO;
 using System.Threading.Tasks;
