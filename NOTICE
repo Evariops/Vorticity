@@ -12,21 +12,21 @@ Vendored schemas and edition manifests
 --------------------------------------
 
 Fifteen files under spec/ are copied verbatim from the Vortex repository
-(https://github.com/vortex-data/vortex) at tag 0.90.0, commit 6c3ef48e57, and
+(https://github.com/vortex-data/vortex) at tag 0.93.0, commit c1439e69bf, and
 remain under its license. Upstream paths are the ones that tag uses.
 
     SPDX-License-Identifier: Apache-2.0
     SPDX-FileCopyrightText: Copyright the Vortex contributors
 
-    spec/flatbuffers/dtype.fbs    vortex-flatbuffers/flatbuffers/vortex-dtype/dtype.fbs
-    spec/flatbuffers/array.fbs    vortex-flatbuffers/flatbuffers/vortex-array/array.fbs
-    spec/flatbuffers/layout.fbs   vortex-flatbuffers/flatbuffers/vortex-layout/layout.fbs
-    spec/flatbuffers/footer.fbs   vortex-flatbuffers/flatbuffers/vortex-file/footer.fbs
-    spec/proto/dtype.proto        vortex-proto/proto/dtype.proto
-    spec/proto/scalar.proto       vortex-proto/proto/scalar.proto
-    spec/proto/expr.proto         vortex-proto/proto/expr.proto
-    spec/editions/*.toml          the frozen core edition manifests, as upstream's
-                                  xtask generates them
+    spec/flatbuffers/dtype.fbs    vortex-array/flatbuffers/vortex-dtype/dtype.fbs
+    spec/flatbuffers/array.fbs    vortex-array/flatbuffers/vortex-array/array.fbs
+    spec/flatbuffers/layout.fbs   vortex-layout/flatbuffers/vortex-layout/layout.fbs
+    spec/flatbuffers/footer.fbs   vortex-file/flatbuffers/vortex-file/footer.fbs
+    spec/proto/dtype.proto        vortex-array/proto/dtype.proto
+    spec/proto/scalar.proto       vortex-array/proto/scalar.proto
+    spec/proto/expr.proto         vortex-array/proto/expr.proto
+    spec/editions/*.toml          vortex/editions/core/, the frozen core edition
+                                  manifests, as upstream's xtask generates them
 
 The three pages and the refresh script beside them are this repository's own.
 spec/METADATA.md in particular is a transcription, not a copy: the per-encoding
