@@ -194,6 +194,14 @@ public sealed class DatasetCompactionLoopTests
         // The data objects its jobs replaced went by the loop's own deletes; the commit objects, by its vacuum alone.
         int left = await CommitObjectsAsync(inner, ct);
         Assert.True(left < commits / 4, $"{left} commit objects of {commits} left");
+
+        // The loop's vacuum counts what it deleted as its pass ends, after its last delete: a dry run that finds nothing
+        // left to delete can come before the count, and read none of it.
+        while (Interlocked.Read(ref deleted) < commits - left && !patience.IsCancellationRequested)
+        {
+            await Task.Delay(20, ct);
+        }
+
         Assert.True(Interlocked.Read(ref deleted) >= commits - left, $"{deleted} counted for {commits - left} commit objects deleted");
         Assert.True(inner.Count < objects - (commits - left), $"{inner.Count} objects left of {objects}");
 
