@@ -724,6 +724,21 @@ public sealed partial class ShreddedVariantWriteTests
                             VariantShredder.Shredding shredding = grafting.Shredding(plan);
                             shredding.Take(batch.Arena, column, null);
                             int leaves = shredding.PrepareLeaves(grafting.EncodesValidity, compress);
+
+                            // What a writer reserves for the leaves it writes at once: the largest of them, each at what it
+                            // lays out and the largest first, a shorter list being the head of a longer one.
+                            long[] every = new long[leaves];
+                            int listed = shredding.LargestLeaves(every);
+                            for (int i = 0; i < listed; i++)
+                            {
+                                Assert.True(every[i] > 0 && (i == 0 || every[i - 1] >= every[i]), $"{name}: leaf {i} of {listed} lays out {every[i]} bytes");
+                            }
+
+                            long[] head = new long[Math.Min(2, leaves)];
+                            int few = shredding.LargestLeaves(head);
+                            Assert.Equal(Math.Min(head.Length, listed), few);
+                            Assert.True(head.AsSpan(0, few).SequenceEqual(every.AsSpan(0, few)), $"{name}: the two largest of {listed} leaves");
+
                             EncodingDictionary leafIds = new EncodingDictionary(ComponentKind.Array, Vorticity.Editions.EditionRegistry.Newest);
                             for (int leaf = leaves - 1; leaf >= 0; leaf--)
                             {

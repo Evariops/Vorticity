@@ -742,15 +742,17 @@ public sealed partial class VortexFileWriter
 
     /// <summary>
     /// How many of the <paramref name="leaves"/> of a shredded chunk are written at once: as many as the writer has lanes,
-    /// for a writer on its own. A job's writer reserves each leaf's layout first, at what the largest of them lays out
-    /// (<see cref="VariantShredder.Shredding.LargestLeaf"/>), without waiting, a lane's way, and writes at once as many as
-    /// the job admitted and the budget held: one at least, which is its least, the others taking their turn in the piece.
-    /// What it reserved goes back as the chunk's emission ends (<see cref="CloseRaised"/>).
+    /// for a writer on its own. A job's writer reserves first what the leaves it writes at once lay out, the largest of
+    /// them each at its own size (<see cref="VariantShredder.Shredding.LargestLeaves"/>): as many leaves never lay out
+    /// more than as many of the largest. Without waiting, a lane's way, it writes at once as many as the job admitted
+    /// and the budget held: one at least, which is its least, the others taking their turn in the piece. What it
+    /// reserved goes back as the chunk's emission ends (<see cref="CloseRaised"/>).
     /// </summary>
     /// <remarks>
     /// Offered all at once to fourteen lanes, the leaves of a chunk of a log's attributes laid out 84 MB at the same time,
-    /// in 17 blocks, of the 339 MiB a consolidation's writer held for a share of 269 (2026-11-21). The leaves are grafted
-    /// in the order the blob comes to them, whenever each was written: the chunk's bytes are the same at any width.
+    /// in 17 blocks, of the 339 MiB a consolidation's writer held for a share of 269 (2026-11-21). Each was then reserved
+    /// at what the largest of them lays out, a bound and not its size, until 2026-11-22. The leaves are grafted in the
+    /// order the blob comes to them, whenever each was written: the chunk's bytes are the same at any width.
     /// </remarks>
     private int LeavesAtOnce(ColumnEmission chunk, VariantShredder.Shredding shredding, int leaves)
     {
@@ -759,12 +761,20 @@ public sealed partial class VortexFileWriter
             return _lanes;
         }
 
-        long each = shredding.LargestLeaf();
-        int most = Math.Min(_lanes, Math.Max(leaves, 1));
+        int most = Math.Min(Math.Min(_lanes, MostLeavesReserved), Math.Max(leaves, 1));
+        Span<long> largest = stackalloc long[MostLeavesReserved];
+        int listed = shredding.LargestLeaves(largest[..most]);
         int width = 0;
         long raised = 0;
-        while (width < most && (each == 0 || (room.Admits(each) && reserve.TryRaise(each))))
+        while (width < most)
         {
+            // The leaves past those listed lay out nothing, and take a lane without a reservation.
+            long each = width < listed ? largest[width] : 0;
+            if (each != 0 && !(room.Admits(each) && reserve.TryRaise(each)))
+            {
+                break;
+            }
+
             raised += each;
             width++;
         }
@@ -772,6 +782,9 @@ public sealed partial class VortexFileWriter
         chunk.Raised += raised;
         return Math.Max(width, 1);
     }
+
+    /// <summary>The most leaves of a chunk a job's writer reserves for and writes at once (<see cref="LeavesAtOnce"/>): the lanes of a large machine.</summary>
+    private const int MostLeavesReserved = 64;
 
     /// <summary>
     /// Compresses <paramref name="chunk"/> of a column that is not shredded, under what its ingest knew of it: its zstd frames

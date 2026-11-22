@@ -297,36 +297,6 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     }
 
     /// <summary>
-    /// What the writer of the last job this handle ran held at most, the blocks of its objects' writers and sinks; 0 before
-    /// any job. What the plan after it counts a writer that gathers to its ceiling at, when that is more than its share
-    /// says (<see cref="DatasetCompactor.WriterCost"/>).
-    /// </summary>
-    /// <remarks>
-    /// A measure of one job counted for the next: the one such number left of what a job was priced by. A writer reserves
-    /// the copies whose size it counted and waits for what it has in the air (<see cref="JobMemory"/>), which no wait
-    /// brings below what one chunk of a shredded variant takes as it is compressed: under 2 GiB at degree 14, a
-    /// consolidation's writer held 331 to 339 MiB of a share of 269, of which the typed columns its variant's chunk is
-    /// laid out in 90 MB, what its columns gather 81, the keys its indexes are fed 41 and its sink 27. Counted at its
-    /// share alone, it left the inputs room it then took itself, and three jobs of a backlog of 10 million log records
-    /// ended short of room with nothing to commit (2026-11-21). It goes once a chunk's columns reserve what they lay out.
-    /// </remarks>
-    internal long WriterJobBytes => Volatile.Read(ref _writerJobBytes);
-
-    private long _writerJobBytes;
-
-    /// <summary>
-    /// Keeps what the writer of a job held at most: of a job that committed, as it is; of one that ended short of room with
-    /// nothing committed, when it is more than was kept, since what a writer held when it was stopped is less than it needs.
-    /// </summary>
-    internal void LearnWriterBytes(long bytes, bool committed)
-    {
-        if (bytes > 0 && (committed || bytes > WriterJobBytes))
-        {
-            Volatile.Write(ref _writerJobBytes, bytes);
-        }
-    }
-
-    /// <summary>
     /// How many times the writer of the next job gathers half its share of the jobs' budget
     /// (<see cref="DatasetCompactor.GatherCeiling"/>): once each time a job ended short of room with nothing it could
     /// commit and nothing learned of its inputs (<see cref="NarrowWriter"/>), until a job of as many inputs commits

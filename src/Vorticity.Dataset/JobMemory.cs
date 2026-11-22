@@ -33,9 +33,9 @@ namespace Vorticity.Dataset;
 /// </para>
 /// <para>
 /// The inputs' budget is never passed (<see cref="QueryMemoryBudget.Hard"/>), and an input reserves what it cannot go on
-/// without only in the room that leaves the writer what it has yet to take (<see cref="AdmitsInput"/>): it is then an
-/// input, on the job's flow, that finds no room first, where the merge can end at a key, and not a lane of the writer in
-/// the middle of a chunk. A block of theirs no reserve covers, a window the merge copies, is refused past the budget,
+/// without within the inputs' share of the job's memory (<see cref="AdmitsInput"/>): it is then an input, on the job's
+/// flow, that finds no room first, where the merge can end at a key, and not a lane of the writer in the middle of a
+/// chunk. A block of theirs no reserve covers, a window the merge copies, is refused past the budget,
 /// and ends the merge where nothing says it ends on a whole key: the job commits the objects it had sealed, each ended
 /// where its key did, and gives up the one it was writing. A job so ended before it sealed an object commits nothing,
 /// and its handle plans again. Work started ahead is admitted by the process too, whose room the jobs' budget does not
@@ -149,18 +149,25 @@ internal sealed class JobMemory : IAsyncDisposable
     internal Func<ValueTask>? GiveBackAhead { get; set; }
 
     /// <summary>
-    /// Whether an input of the job may reserve <paramref name="bytes"/> more: the room the jobs' budget leaves the job
-    /// holds them and still what the writer has yet to take (<see cref="WriterKeep"/>), what it was counted to hold, or
-    /// held at most so far, past what it holds now. What an input cannot go on without is asked on the job's flow, where
-    /// a merge that finds no room ends at a key and commits what it merged.
+    /// Whether an input of the job may reserve <paramref name="bytes"/> more: the inputs hold them within their share of
+    /// the job's memory (<see cref="JobShares.Inputs"/>), whatever its writer holds. What an input cannot go on without
+    /// is asked on the job's flow, where a merge that finds no room gives back what it started ahead, then ends at a key
+    /// and commits what it merged.
     /// </summary>
     /// <remarks>
-    /// Admitted by the budget alone, the inputs of a consolidation of 60 million log records took 484 MiB of its 672
-    /// while its writer held 190: the writer then took the 80 more its chunks need, past the budget, and it was a lane
-    /// of the writer, in the middle of a chunk, that the process refused a block. The job lost the object it was writing,
-    /// 8.5 s of merge, where its merge, an input short of room, would have ended at a key (2026-11-21).
+    /// <para>
+    /// Admitted by the budget alone, the inputs of a merge of 23 objects of log records took the whole of a budget of
+    /// 672 MiB under 2 GiB, its writer 214 to 227 MiB past it, and a reservation of 4 to 8 MiB was then not granted:
+    /// the job was given up, 5.5 to 9.1 s of merge, in three runs of three. Held to their share, 403 MiB, it runs to
+    /// its end in 5.2 to 7.2 s (2026-11-22).
+    /// </para>
+    /// <para>
+    /// For a day the room an input left was what the writer had been counted to take, or had held at most: a count made
+    /// ahead, where the share is dealt once and says the same of every job. Under it, a reservation of 112 KiB was not
+    /// granted to a job that held half a mebibyte of a budget of 18, the process not being short of room.
+    /// </para>
     /// </remarks>
-    private bool AdmitsInput(long bytes) => Room - bytes >= WriterKeep;
+    private bool AdmitsInput(long bytes) => Inputs.ReservedBytes + bytes <= Shares.Inputs;
 
     /// <summary>
     /// Whether the process holds <paramref name="bytes"/> more now, by what the rest of its memory leaves its work

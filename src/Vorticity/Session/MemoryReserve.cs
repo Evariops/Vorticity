@@ -54,8 +54,8 @@ internal sealed class MemoryReserve
 
     /// <summary>
     /// Whether the work the part belongs to admits the bytes it is given more of the part's, the budget holding them or
-    /// not: what a job asks of its inputs, so that they leave its writer what it has yet to take. A reservation it does
-    /// not admit is not granted, as one the budget does not hold. Null for a part its budget alone bounds.
+    /// not: what a job asks of its inputs, so that they hold to their share of its memory. A reservation it does not
+    /// admit is not granted, as one the budget does not hold. Null for a part its budget alone bounds.
     /// </summary>
     internal Func<long, bool>? Admits { get; set; }
 

@@ -255,24 +255,18 @@ internal static partial class DatasetCompactor
 
     /// <summary>
     /// What a writer whose columns gather <paramref name="gathered"/> bytes holds at most: that times what a writer holds
-    /// past its columns (<see cref="JobShares.WriterPerGathered"/>), within the writer's share; and, for a writer that
-    /// gathers to its ceiling, what the writer of the handle's last job held when that is more
-    /// (<see cref="VortexDataset.WriterJobBytes"/>).
+    /// past its columns (<see cref="JobShares.WriterPerGathered"/>), within the writer's share.
     /// </summary>
     /// <remarks>
     /// A writer's share bounds what its columns gather, not what it holds. It reserves the copies whose size it counted
-    /// and waits for what it has in the air before it starts more (<see cref="JobMemory"/>), which brought a
-    /// consolidation's writer under 2 GiB at degree 14 from 357 MiB to 331 of a share of 269: what one chunk of a shredded
-    /// variant takes as it is compressed, its typed columns laid out, no wait lowers. Counted at its share, the writer
-    /// left the inputs 403 MiB, which they took, and the job ended short of room. Counted at what the last job's writer
-    /// held, it leaves the inputs what is left: a measure of one job counted for the next, the last of them, which goes
-    /// once a chunk's columns reserve what they lay out (2026-11-21).
+    /// and waits for what it has in the air before it starts more (<see cref="JobMemory"/>), gives back the blocks its
+    /// arenas keep while the job does not hold it, and reserves the leaves of a shredded chunk it lays out at once, which
+    /// brought a consolidation's writer under 2 GiB at degree 14 from 357 MiB to 267 to 285 of a share of 269. A writer
+    /// that gathers to its ceiling was counted, until then, at what the writer of the handle's last job had held when
+    /// that was more: a measure of one job counted for the next, the last of them (2026-11-22).
     /// </remarks>
-    private static long WriterHeld(VortexDataset dataset, long gathered)
-    {
-        long counted = Math.Min(JobShares.Of(JobBudget(dataset)).Writer, (long)(gathered * JobShares.WriterPerGathered));
-        return gathered >= GatherCeiling(dataset) ? Math.Max(counted, dataset.WriterJobBytes) : counted;
-    }
+    private static long WriterHeld(VortexDataset dataset, long gathered) =>
+        Math.Min(JobShares.Of(JobBudget(dataset)).Writer, (long)(gathered * JobShares.WriterPerGathered));
 
     /// <summary>
     /// What a decoded row of the job's inputs weighs, about: what the handle's last merge measured, or, before any, the

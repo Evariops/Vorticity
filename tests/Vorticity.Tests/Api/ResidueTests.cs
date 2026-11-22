@@ -113,6 +113,14 @@ public sealed class ResidueTests
         (Dataset, @"\bRefusalReason\b", 0),
         (Dataset, @"\bUnsaidHeldPerEncoded\b", 0),
         (Dataset, @"\bLearnOpen\b", 0),
+
+        // What counted for a job what the one before had held, or reserved by a bound where a size was at hand: the plan
+        // counted a writer that gathers to its ceiling at what the last job's writer had held, and each leaf of a
+        // shredded chunk was reserved at what the largest of them lays out. Given up on 2026-11-22: the plan counts a
+        // writer by its share, and the largest leaves written at once are reserved each at its own size.
+        (Dataset, @"\bWriterJobBytes\b", 0),
+        (Dataset, @"\bLearnWriterBytes\b", 0),
+        (Writer, @"\bLargestLeaf\b", 0),
     ];
 
     [Fact]

@@ -829,23 +829,52 @@ internal static class VariantShredder
         }
 
         /// <summary>
-        /// The most a leaf of those <see cref="PrepareLeaves"/> listed lays out before it is compressed
-        /// (<see cref="WriteLeafApart"/>): the values its node took of the chunk, as a column. The rows' metadata is
-        /// read where it lies, and lays out nothing. What a writer reserves for each leaf it writes at once.
+        /// What the largest leaves of those <see cref="PrepareLeaves"/> listed lay out before they are compressed
+        /// (<see cref="WriteLeafApart"/>), each the values its node took of the chunk, as a column: the largest first,
+        /// as many as <paramref name="into"/> holds. The rows' metadata is read where it lies, and lays out nothing.
+        /// What a writer reserves for the leaves it writes at once: as many of them never lay out more than as many of
+        /// the largest, each at its own size.
         /// </summary>
-        internal long LargestLeaf()
+        /// <returns>How many it listed: fewer than <paramref name="into"/> holds when fewer leaves lay anything out.</returns>
+        internal int LargestLeaves(Span<long> into)
         {
-            long largest = 0;
-            for (int i = 0; i < _jobCount; i++)
+            int listed = 0;
+            for (int i = 0; i < _jobCount && into.Length > 0; i++)
             {
                 LeafJob job = _jobs[i];
                 long bytes = job.Same is not null || job.Kind == LeafKind.Metadata ? 0
                     : job.Kind == LeafKind.Values ? job.Group!.Values.LaidOut(_rows)
                     : ((Leaf)job.Group!).LaidOut(_rows);
-                largest = Math.Max(largest, bytes);
+                if (bytes <= 0)
+                {
+                    continue;
+                }
+
+                // Its place among those listed, the largest first; past the last, when the list is full, it is not one.
+                int at;
+                if (listed < into.Length)
+                {
+                    at = listed++;
+                }
+                else if (bytes > into[listed - 1])
+                {
+                    at = listed - 1;
+                }
+                else
+                {
+                    continue;
+                }
+
+                while (at > 0 && into[at - 1] < bytes)
+                {
+                    into[at] = into[at - 1];
+                    at--;
+                }
+
+                into[at] = bytes;
             }
 
-            return largest;
+            return listed;
         }
 
         /// <summary>

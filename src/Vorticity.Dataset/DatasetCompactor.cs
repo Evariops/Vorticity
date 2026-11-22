@@ -344,9 +344,7 @@ internal static partial class DatasetCompactor
             // refused, in its merge or in a pass before it: what its inputs held open, read in their files as it went, is
             // what the next plan counts them at.
             ReserveExhaustedException? stop = failure as ReserveExhaustedException;
-            long writerKnown = dataset.WriterJobBytes;
-            dataset.LearnWriterBytes(memory.WriterPeak, committed: false);
-            bool learned = KeepOpen(dataset, memory, stop) || dataset.WriterJobBytes > writerKnown;
+            bool learned = KeepOpen(dataset, memory, stop);
             (long heldBack, long madeRoom, _) = memory.Reserves;
 
             // A refusal says itself what its budget, the process and the process's pool held then.
@@ -728,7 +726,6 @@ internal static partial class DatasetCompactor
         long reserved = memory.Peak;
         dataset.LearnDecodedRowBytes(meter.BytesPerRow);
         dataset.LearnJobRate(ran.Bytes, dataset.Options.TimeProvider.GetUtcNow() - started);
-        dataset.LearnWriterBytes(memory.WriterPeak, committed: true);
         if (handed?.Stop is { } shortOf)
         {
             KeepOpen(dataset, memory, shortOf);
