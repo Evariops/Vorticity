@@ -209,18 +209,13 @@ jobs:
               status=1
               continue
             fi
-            left=$(grep -c . <<< "$versions" || true)
+            # Deleting the last version of a package deletes the package, and the next publication
+            # creates it again, private.
             while read -r id version; do
               [[ "$version" =~ -pr\.([0-9]+)\.[0-9]+$ ]] || continue
               goes "${BASH_REMATCH[1]}" || continue
-              # Should the registry refuse to delete the last version of a package, the package goes
-              # with it; a release pushed later creates it again.
               if gh api -X DELETE "orgs/$OWNER/packages/nuget/$name/versions/$id" < /dev/null; then
                 echo "$name $version: deleted"
-                left=$((left - 1))
-              elif [ "$left" -eq 1 ] && gh api -X DELETE "orgs/$OWNER/packages/nuget/$name" < /dev/null; then
-                echo "$name $version: the last version, deleted with its package"
-                left=0
               else
                 echo "::error::$name $version could not be deleted"
                 status=1
