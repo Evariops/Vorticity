@@ -189,3 +189,41 @@ comments](#references-in-comments).
   this way, not what it used to be.
 * A comment earns its place by saying something the code cannot: a measurement, a constraint from the
   format, a road not taken and the reason.
+
+## A pull request's packages
+
+The label `build-packages` on a pull request publishes its five packages to GitHub Packages as a pre-release, so that a project can try the change before it ships. Every push to the branch publishes again while the label stays. The version is the patch after the last release, then the pull request's number and the run's: `0.14.1-pr.180.42`. It sorts above the release, so a package that asks for at least `0.14.0` accepts it, and `0.14.1-pr.180.*` follows the pull request's last push. The run's summary gives the version and the references to paste.
+
+The versions of a pull request are deleted when the label comes off or when the pull request is closed, merged or not. A weekly run deletes whatever a failed cleanup left behind. Releases go to GitHub Packages as well as to nuget.org, so that each package keeps its versions once the pre-releases are gone: deleting the last version of a package deletes the package, and its visibility and access settings with it.
+
+Only someone who can write to the repository can publish. Applying a label takes the triage role. The workflow runs on `pull_request`, so a fork's code gets a read-only token whatever its labels, and it publishes only a branch of this repository, which only a writer can push to. [pr-packages.yml](.github/workflows/pr-packages.yml) holds the details.
+
+The registry asks for a token even for a public package. On a workstation, it is a personal access token (classic) with the `read:packages` scope. In another repository's workflow, it is that run's `github.token` with `packages: read`, once each package grants the repository read access under "Manage Actions access" in its settings. A package is private when it is first published, and an admin of the organization makes it public there, once. This `nuget.config` takes the Vorticity packages from GitHub Packages and everything else from nuget.org:
+
+```xml
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <packageSources>
+    <clear />
+    <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+    <add key="github" value="https://nuget.pkg.github.com/Evariops/index.json" />
+  </packageSources>
+  <packageSourceMapping>
+    <packageSource key="nuget.org">
+      <package pattern="*" />
+    </packageSource>
+    <packageSource key="github">
+      <package pattern="Vorticity" />
+      <package pattern="Vorticity.*" />
+    </packageSource>
+  </packageSourceMapping>
+  <packageSourceCredentials>
+    <github>
+      <add key="Username" value="%GITHUB_PACKAGES_USER%" />
+      <add key="ClearTextPassword" value="%GITHUB_PACKAGES_TOKEN%" />
+    </github>
+  </packageSourceCredentials>
+</configuration>
+```
+
+The user is your GitHub login, or `github.actor` in a workflow.

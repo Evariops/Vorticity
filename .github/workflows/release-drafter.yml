@@ -1,7 +1,8 @@
 name: Release Drafter
 
 # Keeps a draft release up to date on every push to main (config: .github/release-drafter.yml).
-# Publishing the draft fires the release run of build.yml, which pushes the packages to nuget.org.
+# Publishing the draft fires the release run of build.yml, which pushes the packages to nuget.org and
+# to GitHub Packages.
 #
 # With no published release the drafter resolves to 0.0.1, and every push to main puts that back
 # on the draft: set the version of a first release just before publishing it, or run this workflow
