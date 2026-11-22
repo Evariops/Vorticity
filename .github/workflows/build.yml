@@ -631,10 +631,12 @@ jobs:
   # A published release's packages go to nuget.org, under the Evariops account. Trusted Publishing trades
   # the job's GitHub OIDC token for an API key that lives an hour, so no key is stored here; the
   # policy nuget.org holds names this repository, this file (build.yml) and the release
-  # environment: renaming either stops the push. They go to GitHub Packages too, beside the pull
-  # request pre-releases of pr-packages.yml.
+  # environment: renaming either stops the push. A release goes to nuget.org only, and GitHub
+  # Packages holds only the pre-releases of pr-packages.yml: nuget.org signs what it receives, so a
+  # copy of the same version elsewhere would differ in bytes, and a consumer's lock file would fail
+  # its hash check depending on which source answered.
   publish:
-    name: push the packages to nuget.org and GitHub Packages
+    name: push the packages to nuget.org
     needs: [test, package, crosscheck]
     if: github.event_name == 'release'
     runs-on: ubuntu-latest
@@ -642,7 +644,6 @@ jobs:
     environment: release
     permissions:
       id-token: write # the OIDC token Trusted Publishing trades for a nuget.org key that lives an hour
-      packages: write # push the same packages to the organization's NuGet registry on GitHub
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -666,17 +667,3 @@ jobs:
           dotnet nuget push "packages/*.nupkg" --skip-duplicate \
             --api-key "$NUGET_API_KEY" \
             --source https://api.nuget.org/v3/index.json
-
-      # The releases keep each package alive on GitHub Packages once the pre-releases of the pull
-      # requests are deleted: a package whose last version goes is deleted, and its visibility and
-      # access settings with it. A consumer that maps Vorticity* to that registry finds the releases
-      # there too. It takes no symbol package, and its credential is the run's own token, which ends
-      # with the run.
-      - name: Push to GitHub Packages
-        env:
-          TOKEN: ${{ github.token }}
-          OWNER: ${{ github.repository_owner }}
-        run: |
-          dotnet nuget push "packages/*.nupkg" --skip-duplicate --no-symbols \
-            --api-key "$TOKEN" \
-            --source "https://nuget.pkg.github.com/$OWNER/index.json"

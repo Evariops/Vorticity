@@ -194,11 +194,11 @@ comments](#references-in-comments).
 
 The label `build-packages` on a pull request publishes its five packages to GitHub Packages as a pre-release, so that a project can try the change before it ships. Every push to the branch publishes again while the label stays. The version is the patch after the last release, then the pull request's number and the run's: `0.14.1-pr.180.42`. It sorts above the release, so a package that asks for at least `0.14.0` accepts it, and `0.14.1-pr.180.*` follows the pull request's last push. The run's summary gives the version and the references to paste.
 
-The versions of a pull request are deleted when the label comes off or when the pull request is closed, merged or not. A weekly run deletes whatever a failed cleanup left behind. Releases go to GitHub Packages as well as to nuget.org, so that each package keeps its versions once the pre-releases are gone: deleting the last version of a package deletes the package, and its visibility and access settings with it.
+The versions of a pull request are deleted when the label comes off or when the pull request is closed, merged or not. A weekly run deletes whatever a failed cleanup left behind. Deleting the last version of a package deletes the package, so a package exists on GitHub Packages only while a labelled pull request has published it, and it comes back private. Releases go to nuget.org only, so the two registries never hold the same version: nuget.org signs what it receives, and two copies of one version would differ in bytes, which fails a lock file's hash check.
 
 Only someone who can write to the repository can publish. Applying a label takes the triage role. The workflow runs on `pull_request`, so a fork's code gets a read-only token whatever its labels, and it publishes only a branch of this repository, which only a writer can push to. [pr-packages.yml](.github/workflows/pr-packages.yml) holds the details.
 
-The registry asks for a token even for a public package. On a workstation, it is a personal access token (classic) with the `read:packages` scope. In another repository's workflow, it is that run's `github.token` with `packages: read`, once each package grants the repository read access under "Manage Actions access" in its settings. A package is private when it is first published, and an admin of the organization makes it public there, once. This `nuget.config` takes the Vorticity packages from GitHub Packages and everything else from nuget.org:
+The registry asks for a token even for a public package. On a workstation, it is a personal access token (classic) with the `read:packages` scope, and an owner of the organization reads the private packages with it. In another repository's workflow, it is that run's `github.token` with `packages: read`, once each package grants the repository read access under "Manage Actions access" in its settings, a grant to make again whenever the package comes back. This `nuget.config` looks for the Vorticity packages in both registries, the releases being on nuget.org and the pre-releases on GitHub Packages, and for everything else on nuget.org:
 
 ```xml
 <?xml version="1.0" encoding="utf-8"?>
@@ -211,6 +211,8 @@ The registry asks for a token even for a public package. On a workstation, it is
   <packageSourceMapping>
     <packageSource key="nuget.org">
       <package pattern="*" />
+      <package pattern="Vorticity" />
+      <package pattern="Vorticity.*" />
     </packageSource>
     <packageSource key="github">
       <package pattern="Vorticity" />
@@ -226,4 +228,4 @@ The registry asks for a token even for a public package. On a workstation, it is
 </configuration>
 ```
 
-The user is your GitHub login, or `github.actor` in a workflow.
+The user is your GitHub login, or `github.actor` in a workflow. Every restore then asks both registries for the Vorticity packages, so it needs the token even for a release: drop the `github` source once the project is back on a release.
