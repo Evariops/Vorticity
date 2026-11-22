@@ -26,6 +26,11 @@ internal static class VortexTypeFormatter
         }
 
         AppendFields(text, "struct{", schema.FieldArray);
+        if (schema.RootIsNullable)
+        {
+            text.Append('?');
+        }
+
         return text.ToString();
     }
 

@@ -482,7 +482,10 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// other throws, rather than handing its caller a dataset of another's schema and settings.
     /// </remarks>
     /// <exception cref="ObjectStoreException">The store already holds a dataset, or another creation made it first.</exception>
-    /// <exception cref="ArgumentException">A sort key column is not in the schema, or may hold a null.</exception>
+    /// <exception cref="ArgumentException">
+    /// A sort key column is not in the schema, or may hold a null; or the schema's root is a nullable struct, as that of a
+    /// file another writer made can be.
+    /// </exception>
     /// <exception cref="NotSupportedException">
     /// The store's listing is not in ordinal order (<see cref="ObjectStoreCapabilities.ListsInOrder"/>), the store does
     /// not create a key only while it is free (<see cref="ObjectStoreCapabilities.CreatesConditionally"/>), or the
@@ -2195,6 +2198,7 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         DatasetSnapshot version = Snapshot;
         DatasetSchema current = version.Schema;
         DType next = VortexTypes.ToDType(schema, new DTypeArena());
+        RequireRecordRoot(next);
         byte[] bytes = DTypeProtobuf.Serialize(next);
         if (bytes.AsSpan().SequenceEqual(current.Bytes.Span))
         {
@@ -2654,6 +2658,21 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         CreateAtAsync(store, schema, options, null, cancellationToken);
 
     /// <summary>
+    /// Refuses a schema whose root is a nullable struct, as a schema read from a file another writer made can be: a dataset's
+    /// rows are records, never absent, and its objects' statistics, zone maps and indexes describe their columns whole.
+    /// </summary>
+    /// <exception cref="ArgumentException">The root is a nullable struct.</exception>
+    private static void RequireRecordRoot(DType schema)
+    {
+        if (schema.Kind == DTypeKind.Struct && schema.IsNullable)
+        {
+            throw new ArgumentException(
+                "The schema's root is a nullable struct, whose rows may be absent, and a dataset's rows are records: its schema's root is not nullable.",
+                nameof(schema));
+        }
+    }
+
+    /// <summary>
     /// <see cref="CreateAsync(IObjectStore, DType, DatasetOptions?, CancellationToken)"/>, the
     /// creation's commit tagged with the location the caller named, when it named one.
     /// </summary>
@@ -2665,6 +2684,7 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(store);
+        RequireRecordRoot(schema);
         RequireOrderedListing(store);
         RequireConditionalCreation(store);
         options ??= new DatasetOptions();

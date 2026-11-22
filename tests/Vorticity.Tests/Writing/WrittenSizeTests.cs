@@ -64,8 +64,15 @@ public sealed class WrittenSizeTests
     /// reference (0.6344, 0.6341 under 0.90.0), and the whole corpus moved to 0.6375. The headroom is
     /// the 0.0025 the last raise left.
     /// </para>
+    /// <para>
+    /// Raised from 0.640 when the corpus took the sixteen files whose root is a nullable struct, once
+    /// this writer could write such a root back: 405 224 bytes the reference wrote, which this writer
+    /// rewrites in 332 936, 0.82x, neither with statistics nor zone maps beneath the nullable root.
+    /// The 878 files before them rewrite in the same 10 325 296 bytes, and the whole corpus moved to
+    /// 0.6420. The headroom is the same 0.0025.
+    /// </para>
     /// </remarks>
-    private const double CorpusCeiling = 0.640;
+    private const double CorpusCeiling = 0.6445;
 
     /// <summary>How many of the worst offenders to name, so the number is actionable.</summary>
     private const int Worst = 12;

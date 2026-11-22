@@ -75,6 +75,15 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private readonly int[] _fieldNodes;
 
     private readonly bool _isTabular;
+
+    /// <summary>
+    /// The validity of a root that is a nullable struct, whose rows may each be absent, taken as the rows come and written at
+    /// completion as the root struct's first child, before the columns; null for any other root. No column of such a root
+    /// carries statistics, zone maps or indexes, which its values beneath an absent row would falsify. One reference, which
+    /// every other writer pays as eight bytes.
+    /// </summary>
+    private readonly RootValidity? _rootValidity;
+
     private readonly bool _compress;
     private readonly VortexEdition _target;
 
@@ -824,6 +833,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         _arrayEncodings = new EncodingDictionary(ComponentKind.Array, target);
         _layoutEncodings = new EncodingDictionary(ComponentKind.Layout, target);
         _isTabular = schema.Kind == DTypeKind.Struct;
+        _rootValidity = _isTabular && schema.IsNullable ? new RootValidity(account) : null;
         _blockRows = rowBlock;
 
         // A non-struct root is one column whose layout IS the root, with no struct level above it.
@@ -1067,9 +1077,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         ArgumentOutOfRangeException.ThrowIfNegative(options.IndexBudgetPerMille, nameof(options));
         ArgumentOutOfRangeException.ThrowIfNegative(options.StringBoundBytes, nameof(options));
         VortexSession owner = session ?? VortexSession.Default;
+
+        // Beneath an absent row of a nullable root, each column holds some value of a row that is not there: statistics
+        // and zone maps of those values would answer for it, so the columns of such a root carry none, as the reference's
+        // do (vortex-layout-0.93.0/src/layouts/file_stats.rs:814, zoned/writer.rs:127).
+        bool rootNullable = schema.Kind == DTypeKind.Struct && schema.IsNullable;
         VortexFileWriter writer = new VortexFileWriter(
             owner, account ?? AccountFor(owner), sink, schema, options.Compress, options.TargetEdition, rowBlock, blockBytes,
-            options.FileStatistics, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
+            options.FileStatistics && !rootNullable, indexes, options.IndexBudgetPerMille, options.KeyEncoder,
             options.StringBoundBytes, options.Identity, options.ScratchDirectory, options.ScratchMemoryBytes,
             options.WideRowsAbove, options.Fences, options.ElementStatistics, options.EncodingHints, options.BudgetSparesRequired,
             options.SealScratch,
@@ -1085,7 +1100,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _budget = session?.Lanes,
             _core = session?.Core ?? FlowCore.Process,
             _located = options.Located,
-            _zones = options.Zones,
+            _zones = options.Zones && !rootNullable,
             _zoneMapsOfOneZone = options.ZoneMapsOfOneZone,
             _marksOfOneGranule = options.MarksOfOneGranule,
             _contentsInFile = options.ContentsInFile,
@@ -1232,6 +1247,30 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
+    /// Refuses what a file whose root is a nullable struct cannot hold: an index, whose values beneath an absent row would
+    /// answer for a row that is absent, and what a dataset's object carries, whose rows are records and never absent.
+    /// </summary>
+    /// <exception cref="ArgumentException">The options ask for one of them.</exception>
+    private static void RequireNullableRootOptions(VortexWriteOptions options)
+    {
+        if (IndexWriter.Asks(options.WritePolicy))
+        {
+            throw new ArgumentException(
+                "The schema's root is a nullable struct, whose columns hold no index: their values beneath an absent row " +
+                "would answer for a row that is not there.",
+                nameof(options));
+        }
+
+        if (options.CarriesContents || options.ColumnSheetBytes is not null || options.ShreddedVariants is { Count: > 0 }
+            || options.VariantDirectories is { Count: > 0 } || options.Granulated || options.CountsPaths)
+        {
+            throw new ArgumentException(
+                "The schema's root is a nullable struct, and a dataset's object is a struct of records, never absent.",
+                nameof(options));
+        }
+    }
+
+    /// <summary>
     /// Refuses options that cannot describe a file of <paramref name="schema"/>, before anything is
     /// opened or written: a component the target edition lacks, a hint or an index naming no
     /// column, metadata the postscript cannot carry.
@@ -1246,6 +1285,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         RequireSchemaInTarget(schema, options.TargetEdition, extensions);
         bool tabular = schema.Kind == DTypeKind.Struct;
+        if (tabular && schema.IsNullable)
+        {
+            RequireNullableRootOptions(options);
+        }
+
         // The entries rather than Keys, whose enumerator is an allocated iterator.
         foreach (KeyValuePair<string, EncodingHint> hint in options.Hints)
         {
@@ -1489,6 +1533,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // Rows delivered encoded are decoded here, once, so that the statistics, the distinct
         // tables, the indexes and the blob writer behind this line only ever meet canonical nodes.
         root = arena.DecodedTree(root);
+
+        // Every call's rows reach the file in the order of the calls, whatever waits or flies after this line.
+        TakeRootValidity(arena, root, 0, rows);
 
         // A batch that waits with the ones after it has its paths counted with them, as they go through together
         // (UnstageAsync): a compaction's merge hands its writer a run of a few rows at a time, each of which was counted on a
@@ -2286,6 +2333,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         {
             MapRun run = runs[i];
             staging.Parts.Add(new StagedPart(run.Source, run.Root, run.Row, run.Rows, -1));
+            TakeRootValidity(run.Source, run.Root, run.Row, run.Rows);
         }
 
         staging.Rows += map.Rows;
@@ -5164,6 +5212,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             }
         }
 
+        // A nullable root's validity is data, the root struct's first child, written after the columns' chunks.
+        await WriteRootValidityAsync(cancellationToken).ConfigureAwait(false);
+
         long indexStart = _sink.Position;
 
         // The zones arrays are segments like any other, so they precede the footer recording them.
@@ -5368,8 +5419,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         // An edition without `vortex.zoned` has nowhere to put a zone map. Omitted rather than
-        // approximated with the legacy `vortex.stats`, which no reference release emits: pruning is
-        // an optimization, so dropping it costs correctness nothing.
+        // approximated with the legacy `vortex.stats`, which the reference falls back to there from
+        // 0.93 on and this library's reader takes as structure only: pruning is an optimization, so
+        // dropping it costs correctness nothing.
         if (!EditionRegistry.Contains(_target, ComponentKind.Layout, "vortex.zoned"))
         {
             return;
@@ -5570,11 +5622,25 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 fieldLayouts[field] = Zone(builder, field, data, ref zoned);
             }
 
-            // A non-struct root has no struct level: its single chunked layout IS the root.
-            int root = _isTabular
-                ? LayoutWriter.Write(
-                    builder, structural, (ulong)_rowCount, default, fieldLayouts.AsSpan(0, _fieldCount), [])
-                : fieldLayouts[0];
+            // A non-struct root has no struct level: its single chunked layout IS the root. A nullable struct's validity is
+            // its first child, before the columns.
+            int root;
+            if (!_isTabular)
+            {
+                root = fieldLayouts[0];
+            }
+            else if (_rootValidity is not null)
+            {
+                int[] children = new int[_fieldCount + 1];
+                children[0] = RootValidityLayout(builder, flat, chunked, chunkedMetadata[..metadataLength]);
+                fieldLayouts.AsSpan(0, _fieldCount).CopyTo(children.AsSpan(1));
+                root = LayoutWriter.Write(builder, structural, (ulong)_rowCount, default, children, []);
+            }
+            else
+            {
+                root = LayoutWriter.Write(
+                    builder, structural, (ulong)_rowCount, default, fieldLayouts.AsSpan(0, _fieldCount), []);
+            }
 
             return builder.FinishMemory(root);
         }

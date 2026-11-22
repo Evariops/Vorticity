@@ -587,6 +587,7 @@ public sealed partial class VortexFileWriter
 
         _chunkRows.Release();
         _flatMetadata.Release();
+        _rootValidity?.Release();
         ReleaseSegments();
         _segmentCount = 0;
 
