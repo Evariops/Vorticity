@@ -5,14 +5,7 @@ append, and how it stays invisible to every other reader. What a caller can ask 
 cursor, a count, key-ordered rows) is covered in [12-index-reads.md](12-index-reads.md), and how the
 writer builds one in its single pass in [11-write-strategy.md](11-write-strategy.md).
 
-An index is an optional accelerator. A reader that ignores it returns the same rows as a reader that
-uses it, and the pruning invariant (pruning never removes a row a full scan returns, see [statistic
-precision](08-semantics.md#1-statistic-precision-what-inexact-licenses)) holds for every kind. It is
-also ahead of upstream. Vortex 0.90.0 ships a Bloom filter aggregate its authors call unstable and no
-edition declares, and its index designs are still proposals. This design takes their structure and
-adds one rule they have not fixed: a file with an index stays readable by a strict Rust 0.90.0
-reader, with the index simply invisible to it. That rule decides [where an index
-lives](#2-where-an-index-lives), and the rest follows.
+An index is an optional accelerator. A reader that ignores it returns the same rows as a reader that uses it, and the pruning invariant (pruning never removes a row a full scan returns, see [statistic precision](08-semantics.md#1-statistic-precision-what-inexact-licenses)) holds for every kind. It is also ahead of upstream. Vortex 0.93.0 ships a Bloom filter aggregate its authors call unstable and only their `UNSTABLE` draft edition declares, and its index designs are still proposals. This design takes their structure and adds one rule they have not fixed: a file with an index stays readable by a strict Rust 0.93.0 reader, with the index simply invisible to it. That rule decides [where an index lives](#2-where-an-index-lives), and the rest follows.
 
 ## 1. Terms
 
@@ -30,9 +23,7 @@ directory entry, and everything it needs to probe it is in the runs.
 
 ## 2. Where an index lives
 
-The rule is that a file with an index opens and scans, with no configuration, in Rust 0.90.0 with a
-strict session (the default, and what DuckDB, DataFusion, Spark and the Python bindings use), in any
-earlier Vorticity, and in this one, which then uses the index.
+The rule is that a file with an index opens and scans, with no configuration, in Rust 0.93.0 with a strict session (the default, and what DuckDB, DataFusion, Spark and the Python bindings use), in any earlier Vorticity, and in this one, which then uses the index.
 
 The carrier is a postscript metadata entry. The postscript already carries up to sixteen
 `(key, segment)` pairs that every reader only loads on request (see [the
@@ -127,13 +118,7 @@ built without a filter, and the descent starts below it.
 
 ### 4.1 `vorticity.bloom.sbbf.v1`: a split-block Bloom filter per block
 
-A filter is `n` blocks of 256 bits (eight 32-bit words). To insert, compute `h = XXH3-64(bytes, seed
-0)`, pick block `((h >> 32) × n) >> 32`, and in it set one bit per word using the eight Parquet salts
-applied to `(uint)h`. A probe checks that the same eight bits are all set. The layout and salts are
-Parquet's and the hash is upstream's, so a filter is bit-identical to Rust's `BloomPartial` of
-0.86.1 and of 0.90.0, tested against vectors each built, and becomes upstream's by a change of id the day they freeze
-it. A variant using Parquet's xxHash64 is bit-identical to a Parquet SBBF, tested against the
-`parquet` crate's own filters, for a caller who exchanges filters with Parquet tooling.
+A filter is `n` blocks of 256 bits (eight 32-bit words). To insert, compute `h = XXH3-64(bytes, seed 0)`, pick block `((h >> 32) × n) >> 32`, and in it set one bit per word using the eight Parquet salts applied to `(uint)h`. A probe checks that the same eight bits are all set. The layout and salts are Parquet's and the hash is upstream's, so a filter is bit-identical to Rust's `BloomPartial` of 0.86.1, of 0.90.0 and of 0.93.0, tested against vectors each built, and becomes upstream's by a change of id the day they freeze it. A variant using Parquet's xxHash64 is bit-identical to a Parquet SBBF, tested against the `parquet` crate's own filters, for a caller who exchanges filters with Parquet tooling.
 
 What is hashed is chosen so that equal values hash equal whatever encoding they came from:
 

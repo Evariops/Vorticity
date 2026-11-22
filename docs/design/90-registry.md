@@ -97,7 +97,7 @@ there.
 | `vortex.chunked` | a row-wise partition | `core2025.05.0` | yes |
 | `vortex.struct` | a child per field | `core2025.05.0` | yes |
 | `vortex.zoned` | a zone map for pruning | `core2026.08.0` | yes, one zone per block |
-| `vortex.stats` | the zone map's predecessor | `core2025.05.0` | no, since no Vortex release ever emitted one |
+| `vortex.stats` | the zone map's predecessor | `core2025.05.0` | no: Vortex writes one from 0.93.0 under the editions before `vortex.zoned`, and this writer omits the zone map there instead (see below) |
 | `vortex.dict` | a dictionary shared across a child layout | `core2025.05.0` | an [object dictionary](23-query-architecture.md#54-ordered-object-dictionaries) a dataset's writer declares, its values before the column's first chunk; no other (see [determinism and its limit](11-write-strategy.md#7-determinism-and-its-limit)) |
 | `vortex.list` | elements, offsets and validity stored apart | none, experimental upstream | no |
 
@@ -140,15 +140,7 @@ The writer's schemes are named after algorithms, and editions constrain the ids:
 | pco, under the size-first profile or a hint | `vortex.pco` |
 | the plain form | `vortex.primitive`, `vortex.bool`, `vortex.decimal`, and for text `vortex.varbin` or `vortex.varbinview`, whichever is smaller |
 
-A compression reaches every child: a list's elements, offsets and sizes, a struct's fields, an
-extension's storage, a dictionary's or a run's values, a sparse chunk's positions and values, a
-decimal's integers and a timestamp's parts. Validity bitmaps are one bit per row and stay plain,
-except in a shredded variant's tree, where a path's rows often hold it in stretches: there a validity
-is compressed as any column, runs where it has few. How
-the chooser prices each scheme is described in [choosing
-encodings](11-write-strategy.md#34-choose-exact-verdicts-then-bounded-trials). Over the 876 files of
-the conformance corpus, the writer's files are smaller than the reference's, held under a ceiling by
-`WrittenSizeTests`, which prints the ratio and the files that lose the most bytes.
+A compression reaches every child: a list's elements, offsets and sizes, a struct's fields, an extension's storage, a dictionary's or a run's values, a sparse chunk's positions and values, a decimal's integers and a timestamp's parts. Validity bitmaps are one bit per row and stay plain, except in a shredded variant's tree, where a path's rows often hold it in stretches: there a validity is compressed as any column, runs where it has few. How the chooser prices each scheme is described in [choosing encodings](11-write-strategy.md#34-choose-exact-verdicts-then-bounded-trials). Over the 878 files of the conformance corpus, the writer's files are smaller than the reference's, held under a ceiling by `WrittenSizeTests`, which prints the ratio and the files that lose the most bytes.
 
 ## 6. Edition targeting
 
@@ -170,7 +162,7 @@ to, and the first one with `vortex.uuid`. Lower targets are honoured, not approx
 | target | what changes |
 |---|---|
 | `core2026.08.0` and later | nothing, this is what the writer emits |
-| below `core2026.08.0` | the zone map is omitted, since `vortex.zoned` and its aggregates arrived then. `vortex.stats` is not written instead, since no release ever emitted it, and the absence of pruning costs no correctness |
+| below `core2026.08.0` | the zone map is omitted, since `vortex.zoned` and its aggregates arrived then. `vortex.stats` is not written instead: no release emitted it before 0.93.0, which falls back to it there, this library's reader takes it as structure only and never prunes with it, and the absence of pruning costs no correctness |
 | below `core2025.10.0` | a fixed-size list column fails the write, and so does a list whose rows do not abut, since their forms, `vortex.fixed_size_list` and `vortex.listview`, arrived then. A list whose rows abut, which is every list a builder fills, goes out as `vortex.list` |
 | below `core2026.08.2`, `core2026.08.3` | a map, a variant or a uuid column fails the write |
 | below `core2025.06.0` | progressions, zstd and pco are not candidates |

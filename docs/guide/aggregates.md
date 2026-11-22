@@ -682,9 +682,7 @@ and run-end blocks included.
   `SumAsync(v => v.DurationNs.AsInt128())` returns the exact total as an `Int128`, and `AsUInt128()`
   does the same for a `ulong`. Internally the engine keeps 64 bits per group when the file
   statistics prove the rows times the column's largest value fit, and 128 bits otherwise.
-* The file carries no sum. `MinAsync`, `MaxAsync` and `CountAsync` without a filter are answered
-  from the file statistics, while `SumAsync` and `AverageAsync` read the column
-  ([scan-a-table.md](scan-a-table.md)).
+* The file carries no sum. `MinAsync`, `MaxAsync` and `CountAsync` without a filter are answered from the file statistics when they hold the value exactly, while `SumAsync` and `AverageAsync` read the column ([scan-a-table.md](scan-a-table.md)). A string column written by Vortex Rust 0.93 or later holds bounds there, not values, so its minimum and maximum read the column too.
 * NaN is skipped by a float sum, mean, minimum and maximum, and counts as one value in a distinct
   count. An aggregation ignores the scan's `OrderBy`.
 * A float sum gives the same bits at every degree, in every order of the rows and however the data
