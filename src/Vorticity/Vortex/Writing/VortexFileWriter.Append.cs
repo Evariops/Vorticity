@@ -538,6 +538,13 @@ public sealed partial class VortexFileWriter
                 throw Refused("its root is not a struct of columns");
             }
 
+            // The root's validity is a layout of its own beside the columns, which an append would have to carry on as it
+            // carries the columns' chunks.
+            if (schema.IsNullable)
+            {
+                throw Refused("its root is a nullable struct, whose rows' validity an append does not carry on");
+            }
+
             // An append keeps the columns chunked alike, which is what it can append to.
             if (options is { ColumnChunkTargetBytes.IsEmpty: false })
             {

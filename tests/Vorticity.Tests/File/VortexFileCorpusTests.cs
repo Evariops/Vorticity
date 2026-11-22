@@ -21,7 +21,7 @@ public sealed class VortexFileCorpusTests
     public async Task OpensEveryCorpusFileAndAgreesWithTheManifest()
     {
         CorpusEntry[] entries = CorpusManifest.Entries;
-        Assert.Equal(878, entries.Length);
+        Assert.Equal(894, entries.Length);
 
         List<string> failures = new List<string>();
         HashSet<long> rowCounts = new HashSet<long>();
@@ -145,7 +145,7 @@ public sealed class VortexFileCorpusTests
             }
         }
 
-        Assert.Equal(577, filesWithStatistics);
+        Assert.Equal(593, filesWithStatistics);
         Assert.Equal(2, filesWithMetadata);
         Assert.Equal(1, filesWithoutDTypeSegment);
 

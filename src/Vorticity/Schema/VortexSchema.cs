@@ -11,7 +11,10 @@ namespace Vorticity;
 /// <remarks>
 /// A schema is a value: two schemas with the same fields are equal. It is written as a collection
 /// expression, <c>VortexSchema schema = [("day", VortexType.Int32), ("city", VortexType.Utf8)];</c>.
-/// A file whose root is not a struct has a schema of one field with an empty name.
+/// A file whose root is not a struct has a schema of one field with an empty name. A file another
+/// writer made may have a root that is a nullable struct, whose rows may each be absent: its schema
+/// prints with a trailing <c>?</c>, is equal to no schema a caller builds, and a writer made from it
+/// keeps the absent rows.
 /// </remarks>
 [CollectionBuilder(typeof(VortexSchema), nameof(Create))]
 public sealed class VortexSchema : IReadOnlyList<VortexField>, IEquatable<VortexSchema>, ISpanFormattable, IUtf8SpanFormattable
@@ -22,12 +25,14 @@ public sealed class VortexSchema : IReadOnlyList<VortexField>, IEquatable<Vortex
     private VortexType? _root;
     private Dictionary<string, int>? _names;
 
-    private VortexSchema(VortexField[] fields, bool rootIsStruct)
+    private VortexSchema(VortexField[] fields, bool rootIsStruct, bool rootIsNullable = false)
     {
         _fields = fields;
         RootIsStruct = rootIsStruct;
+        RootIsNullable = rootIsNullable;
         HashCode hash = default;
         hash.Add(rootIsStruct);
+        hash.Add(rootIsNullable);
         foreach (VortexField field in fields)
         {
             hash.Add(field.Name);
@@ -55,13 +60,28 @@ public sealed class VortexSchema : IReadOnlyList<VortexField>, IEquatable<Vortex
     /// <summary>The schema of a file whose root is a single column of <paramref name="type"/>.</summary>
     internal static VortexSchema Single(VortexType type) => new VortexSchema([new VortexField(string.Empty, type)], rootIsStruct: false);
 
+    /// <summary>
+    /// The schema of a file whose root is a struct of <paramref name="fields"/>, a nullable one when
+    /// <paramref name="rootIsNullable"/>: the schema of a file another writer made, read back.
+    /// </summary>
+    internal static VortexSchema Of(VortexField[] fields, bool rootIsNullable) =>
+        new VortexSchema(fields, rootIsStruct: true, rootIsNullable);
+
     /// <summary>Whether the file's root is a struct, which is every schema a caller builds.</summary>
     internal bool RootIsStruct { get; }
 
+    /// <summary>
+    /// Whether the root is a nullable struct, whose rows may each be absent: the root of no schema a caller builds, but of a
+    /// file another writer made, as Vortex Rust 0.93 can. The columns hold some value beneath an absent row.
+    /// </summary>
+    internal bool RootIsNullable { get; }
+
     internal VortexField[] FieldArray => _fields;
 
-    /// <summary>The root type: a non-nullable struct of the fields, or the single column's type.</summary>
-    internal VortexType Root => _root ??= RootIsStruct ? VortexType.Struct(_fields) : _fields[0].Type;
+    /// <summary>The root type: a struct of the fields, nullable when the root is, or the single column's type.</summary>
+    internal VortexType Root => _root ??= RootIsStruct
+        ? RootIsNullable ? VortexType.Struct(_fields).Nullable : VortexType.Struct(_fields)
+        : _fields[0].Type;
 
     /// <summary>Field <paramref name="index"/>.</summary>
     /// <param name="index">0-based, below <see cref="Count"/>.</param>
@@ -153,7 +173,8 @@ public sealed class VortexSchema : IReadOnlyList<VortexField>, IEquatable<Vortex
             return true;
         }
 
-        if (other is null || other._hash != _hash || other.RootIsStruct != RootIsStruct || other._fields.Length != _fields.Length)
+        if (other is null || other._hash != _hash || other.RootIsStruct != RootIsStruct || other.RootIsNullable != RootIsNullable
+            || other._fields.Length != _fields.Length)
         {
             return false;
         }

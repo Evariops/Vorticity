@@ -251,6 +251,8 @@ reads back as a struct of the one column. Its rows come as the bare column from 
 builder's struct of it, which builds the column alone, as the core's writer does; a record's
 columns are refused.
 
+A schema whose root is a nullable struct, that of a Vortex file whose rows may each be absent, as Vortex Rust writes from 0.93.0 on, is refused when the writer is created, by a `VortexSchemaException` naming the root: a Parquet file's rows are those of its root group, which is required, so no row can be absent from it.
+
 ## 5. Reading
 
 ### 5.1 The open

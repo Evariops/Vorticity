@@ -29,7 +29,7 @@ anchored in the Rust reference, in both directions. Tests use xUnit v3 on Micros
 
 ## 3. The golden corpus
 
-`tools/conformance-gen`, a Rust crate pinned to `vortex = "=0.93.0"`, writes the corpus under `tests/Vorticity.Conformance/corpus`: 878 files, deterministic from a fixed seed, across the seven core editions from `core2025.05.0` to `core2026.08.3`. It was first written with 0.86.1 and regenerated with 0.90.0, then 0.93.0, to the same array, layout, extension and aggregate ids. 0.93.0 adds two files no earlier release writes: the legacy `vortex.stats` zone map, which closes the last layout the corpus lacked, and a footer carrying nested file statistics. The matrix is deliberate:
+`tools/conformance-gen`, a Rust crate pinned to `vortex = "=0.93.0"`, writes the corpus under `tests/Vorticity.Conformance/corpus`: 894 files, deterministic from a fixed seed, across the seven core editions from `core2025.05.0` to `core2026.08.3`. It was first written with 0.86.1 and regenerated with 0.90.0, then 0.93.0, to the same array, layout, extension and aggregate ids. 0.93.0 adds files no earlier release writes: the legacy `vortex.stats` zone map, which closes the last layout the corpus lacked, a footer carrying nested file statistics, and sixteen whose root is a nullable struct. The matrix is deliberate:
 
 - every dtype × nullability × row counts of 0, 1, 1 023, 1 024, 1 025, 8 191, 8 192 and 8 193,
   because the block edges at 1 024 (FastLanes) and 8 192 (the default block) are where bugs live

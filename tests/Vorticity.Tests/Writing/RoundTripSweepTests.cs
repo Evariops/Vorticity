@@ -95,6 +95,7 @@ public sealed class RoundTripSweepTests
         int tables = 0;
         int compacted = 0;
         int apart = 0;
+        int nullableRoots = 0;
         Dictionary<string, int> built = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (CorpusEntry entry in CorpusManifest.InScope())
         {
@@ -137,11 +138,20 @@ public sealed class RoundTripSweepTests
                 }
             }
 
+            // A NULLABLE ROOT IS WRITTEN ONCE AND WITHOUT AN INDEX, which its columns cannot hold, and it is neither
+            // appended to nor a dataset's object: what Rust reads is its validity, beside the columns.
+            bool nullableRoot = source.DType.Kind == DTypeKind.Struct && source.DType.IsNullable;
+            if (nullableRoot)
+            {
+                policy = WritePolicy.None;
+                nullableRoots++;
+            }
+
             // ONE TABLE IN THREE IS APPENDED, AND ONE IN THREE INDEXED AFTER THE FACT, so that
             // Rust reads appended files back too: the first half written, closed, and the
             // rest appended -- inside a block, so the last chunk is re-opened -- or the whole file
             // written without indexes and the runs appended with a new directory and footer.
-            bool tabular = source.DType.Kind == DTypeKind.Struct && source.DType.FieldCount > 0 && source.RowCount > 1;
+            bool tabular = source.DType.Kind == DTypeKind.Struct && source.DType.FieldCount > 0 && source.RowCount > 1 && !nullableRoot;
             int mode = tabular ? (tables++ % 3) switch { 1 => 1, 2 => 3, _ => 0 } : 0;
             // STRING ZONE BOUNDS ON HALF THE FILES: the reference's 64 bytes on one in
             // four, and 5 on another, so that values are cut, characters straddle the cut and some
@@ -162,7 +172,7 @@ public sealed class RoundTripSweepTests
             // appended as three objects of an unclustered dataset, which compacts tiered -- a
             // concatenation, so the rows keep the order the verifier compares them in -- and the one
             // object the compaction wrote is what Rust reads.
-            if (mode == 0 && source.RowCount >= 3 && PlainColumns(source.DType))
+            if (mode == 0 && source.RowCount >= 3 && PlainColumns(source.DType) && !nullableRoot)
             {
                 await System.IO.File.WriteAllBytesAsync(
                     destination, await CompactedAsync(source, options), TestContext.Current.CancellationToken);
@@ -229,8 +239,8 @@ public sealed class RoundTripSweepTests
             appended += mode == 1 ? 1 : 0;
             afterTheFact += mode == 3 ? 1 : 0;
 
-            // A struct with no field has no column to index, and so no directory.
-            if (indexes.Count > 0 || columns == 0)
+            // A struct with no field has no column to index, and so no directory; nor has a nullable root.
+            if (indexes.Count > 0 || columns == 0 || nullableRoot)
             {
                 indexed++;
             }
@@ -254,7 +264,8 @@ public sealed class RoundTripSweepTests
             .Append(afterTheFact.ToString(CultureInfo.InvariantCulture)).Append(" indexed after the fact, ")
             .Append(stringBounded.ToString(CultureInfo.InvariantCulture)).Append(" with string zone bounds, ")
             .Append(compacted.ToString(CultureInfo.InvariantCulture)).Append(" compacted from three dataset objects, ")
-            .Append(apart.ToString(CultureInfo.InvariantCulture)).Append(" with columns chunked apart;");
+            .Append(apart.ToString(CultureInfo.InvariantCulture)).Append(" with columns chunked apart, ")
+            .Append(nullableRoots.ToString(CultureInfo.InvariantCulture)).Append(" under a nullable root;");
         foreach ((string kind, int files) in built)
         {
             line.Append(' ').Append(kind).Append(": ").Append(files.ToString(CultureInfo.InvariantCulture)).Append(';');
@@ -267,6 +278,7 @@ public sealed class RoundTripSweepTests
         Assert.True(stringBounded > 50, $"only {stringBounded} files carry string zone bounds");
         Assert.True(compacted > 10, $"only {compacted} files are compacted dataset objects");
         Assert.True(apart > 10, $"only {apart} files chunk their columns apart");
+        Assert.Equal(16, nullableRoots);
 
         // Enough files with payload regions between their chunks that the rule is tested, not assumed.
         foreach (string kind in new[] { IndexKinds.BloomSbbf, IndexKinds.PostingsBlocks, IndexKinds.SortedRuns })

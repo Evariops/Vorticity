@@ -19,7 +19,7 @@ corpus](../../docs/design/04-conformance.md#3-the-golden-corpus)), not a depende
 bump is a corpus regeneration, and the version that produced a corpus is recorded in `manifest.json`
 and in every file record. `build.rs` reads it from `Cargo.lock`, so no copy of the pin can drift.
 
-0.86.1 is the release [docs/design/99-sources.md](../../docs/design/99-sources.md) derived the specification against, and the corpus was first written with it. 0.90.0 regenerated it to the same array, layout, extension and aggregate ids, and so did 0.93.0, which adds two files only it writes: a legacy `vortex.stats` zone map and a footer carrying nested file statistics. It can target every frozen core edition up to `core2026.08.3`, so the corpus reaches every component in scope. It needs rustc 1.95 or later (built here with 1.98.1).
+0.86.1 is the release [docs/design/99-sources.md](../../docs/design/99-sources.md) derived the specification against, and the corpus was first written with it. 0.90.0 regenerated it to the same array, layout, extension and aggregate ids, and so did 0.93.0, which adds files only it writes: a legacy `vortex.stats` zone map, a footer carrying nested file statistics, and sixteen whose root is a nullable struct. It can target every frozen core edition up to `core2026.08.3`, so the corpus reaches every component in scope. It needs rustc 1.95 or later (built here with 1.98.1).
 
 The citations in this crate's comments and notes, a crate and release then a path and line such as
 `vortex-file-0.86.1/src/writer.rs:387`, name the source each fact was first verified against. A
@@ -76,14 +76,14 @@ therefore a corpus version bump, not a tuning knob.
 
 ## What the corpus is
 
-878 `.vortex` files and 878 sidecars, about 127 MiB on disk (15.4 MiB of Vortex files, the rest mostly sidecars, plus the manifest and the sidecar grammar), 2 592 259 rows in all. That fits the CI artifact budget of about 200 MB, so nothing has been trimmed. A small forged-fixture directory sits next to it and is not part of the corpus (see [below](#the-forged-fixture-set)).
+894 `.vortex` files and 894 sidecars, about 131 MiB on disk (15.8 MiB of Vortex files, the rest mostly sidecars, plus the manifest and the sidecar grammar), 2 647 557 rows in all. That fits the CI artifact budget of about 200 MB, so nothing has been trimmed. A small forged-fixture directory sits next to it and is not part of the corpus (see [below](#the-forged-fixture-set)).
 
 ```
 tests/Vorticity.Conformance/
   corpus/
     manifest.json        per-file record, coverage gate, shape gate, caveats, list of gaps
     SIDECAR.md           the sidecar line grammar, so the artifact describes itself
-    types/        509    the type matrix: dtype x nullability x row count
+    types/        525    the type matrix: dtype x nullability x row count
     encodings/    292    one file per array encoding x length, that encoding forced, plus shapes
     distributions/ 51    adversarial value distributions
     containers/    19    layout and container variations
@@ -96,13 +96,7 @@ tests/Vorticity.Conformance/
 
 ### The type matrix
 
-Every logical dtype × nullability × `{0, 1, 1023, 1024, 1025, 8191, 8192, 8193}` rows: 1024 is the
-FastLanes block, 8192 the default row block, and the ±1 neighbours are where bugs live. Files are
-written with default write options, the production path. Nullability is independent of the value:
-the per-dtype factory always produces a non-null value and the harness injects nulls on a fixed
-pattern, so a nullable file and its non-nullable twin differ in exactly one dimension.
-Representation extremes (`i64::MIN`, `u64::MAX`, `-0.0`, NaN, subnormals, the decimal precision
-limits) sit at rows 0–2, so every file with three or more rows carries them.
+Every logical dtype × nullability × `{0, 1, 1023, 1024, 1025, 8191, 8192, 8193}` rows: 1024 is the FastLanes block, 8192 the default row block, and the ±1 neighbours are where bugs live. Files are written with default write options, the production path. Nullability is independent of the value: the per-dtype factory always produces a non-null value and the harness injects nulls on a fixed pattern, so a nullable file and its non-nullable twin differ in exactly one dimension. A struct type is the file's root itself, so its nullable files have a root that is a nullable struct, whose rows the same pattern makes absent: 0.93.0 writes one, and no release before it could. Representation extremes (`i64::MIN`, `u64::MAX`, `-0.0`, NaN, subnormals, the decimal precision limits) sit at rows 0–2, so every file with three or more rows carries them.
 
 All six decimal storage widths are present (`decimal(2,1)` → i8, `(4,2)` → i16, `(9,2)` → i32,
 `(18,4)` → i64, `(38,10)` → i128, `(40,10)` → i256), matching
@@ -350,7 +344,6 @@ and each one is a `SkipRecord` in `manifest.json` with the source reference that
 | `vortex.chunked` layout with one chunk | `ChunkedLayoutStrategy::write_stream` collapses a single-child layout into that child, `if child_layouts.len() == 1 { return child }` (`layouts/chunked/writer.rs:86`). The equivalent array shape is in the corpus as `encodings/chunked_one_chunk` |
 | `vortex.chunked` layout with a zero-row chunk | The file writer filters empty chunks out of the write stream before any layout strategy sees them, `.try_filter(\|chunk\| ready(!chunk.is_empty()))` (`vortex-file-0.86.1/src/writer.rs:270`), as a 100/0/100 stream confirms by producing a two-child layout. The equivalent array shape is in the corpus as `encodings/chunked_empty_chunks` |
 | unknown encoding id | Not producible by any writer by definition: the per-kind allowlist rejects an unregistered id, and `disable_editions()` only widens it to ids the session has registered. It is produced by byte-patching instead, and shipped in the forged-fixture set |
-| nullable top-level struct | Unwritable by 0.86.1 and 0.90.0: `write_internal` always calls `accumulate_stats`, whose `FileStatsAccumulator` panicked on a nullable top-level struct (`vortex-layout-0.86.1/src/layouts/file_stats.rs:461`). 0.93.0 writes one, recording no statistics under it (`vortex-layout-0.93.0/src/layouts/file_stats.rs:814`), and Vorticity reads all sixteen files value for value. They stay out until Vorticity writes such a root back: its writer lays the root struct out without the validity child its reader asks for, and its Parquet rewrite refuses the root's nullability. Nullable structs are still covered as non-root columns |
 | `DType::Union` | `vortex.union` is in no core edition, and the generic builder refuses it outright (`todo!("TODO(connor)[Union]: unimplemented")`, `builders/mod.rs:462`) |
 | `preview2026.08.0` edition | Preview editions are not frozen, so a file written against one carries no read-forever guarantee and has no place in a corpus for interoperability regressions |
 | Vortex 0.36.0 floor files | This crate is pinned to exactly 0.93.0. Floor files would need a separately pinned generator, and `editions/core2025.05.0` is as close as this one gets |

@@ -36,6 +36,7 @@ public static class ParquetSessionExtensions
         /// <returns>The writer; the caller completes and disposes it. Disposed without completing, it deletes what it wrote.</returns>
         /// <exception cref="ArgumentException">The options are out of range.</exception>
         /// <exception cref="ParquetUnsupportedException">A column is of a type this writer does not write yet.</exception>
+        /// <exception cref="VortexSchemaException">The schema's root is a nullable struct, as that of a file another writer made can be, which Parquet has no form for.</exception>
         public ParquetFileWriter CreateParquetWriter(string path, VortexSchema schema, ParquetWriteOptions? options = null)
         {
             ArgumentNullException.ThrowIfNull(session);

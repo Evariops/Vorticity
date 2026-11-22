@@ -303,6 +303,10 @@ end-of-file record, reports the tear in `VortexFile.TornTail`, and reads the pre
 to it. An append, and an indexing pass, refuse a torn file until it is repaired. `Abandon()` on an
 append truncates the file back to the length it had.
 
+### 3.9 A root that is a nullable struct
+
+A file another writer made can have a root that is a nullable struct, whose rows may each be absent: Vortex Rust writes one from 0.93.0 on. Its schema says so (`VortexFile.Schema` prints with a trailing `?` and equals no schema a caller builds), and a writer made from that schema writes such a root back. The root's validity is the root struct's first child, before the columns, a layout of its own whose chunks need not follow theirs: the writer takes a bit a row at the two doors every row goes through, in the file's order, keeps no bitmap while every row is present, and writes flats of up to 16 Mi rows after the columns' chunks, as the reference writes one flat. Beneath an absent row each column holds some value of a row that is not there, so no column of such a root carries statistics, zone maps or indexes, which those values would falsify, as the reference's carry none. An index asked for is refused when the writer is made, as an append and an indexing pass refuse such a file, a dataset such a schema, and a Parquet writer such a root, since a Parquet file's rows are its root group's, which no row is absent from. The one cost to every other writer is a reference, eight bytes a file.
+
 ## 4. Kernels
 
 `Vector128` is used everywhere, wider vectors where the hardware has them, plus a scalar twin whose

@@ -30,7 +30,7 @@ internal static class VortexTypes
             fields[i] = new VortexField(budget.Name(root, i), Convert(root.GetField(i), ref budget));
         }
 
-        return VortexSchema.Create(fields);
+        return VortexSchema.Of(fields, root.IsNullable);
     }
 
     internal static VortexType FromDType(DType d)
@@ -144,7 +144,7 @@ internal static class VortexTypes
             fields[i] = ToDType(schema[i].Type, arena);
         }
 
-        return arena.Struct(names, fields, Nullability.NonNullable);
+        return arena.Struct(names, fields, schema.RootIsNullable ? Nullability.Nullable : Nullability.NonNullable);
     }
 
     internal static DType ToDType(VortexType type, DTypeArena arena)

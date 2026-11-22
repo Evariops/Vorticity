@@ -66,9 +66,9 @@ internal static class ToolPaths
         return type;
     }
 
-    /// <summary>The schema of a batch projected by <paramref name="mask"/>: the kept fields, in file order.</summary>
+    /// <summary>The schema of a batch projected by <paramref name="mask"/>: the kept fields, in file order, under a root as nullable as the file's.</summary>
     internal static VortexSchema Project(VortexSchema schema, FieldMask mask) =>
-        mask.IsAll ? schema : VortexSchema.Create(ProjectFields(schema.FieldArray, mask));
+        mask.IsAll ? schema : VortexSchema.Of(ProjectFields(schema.FieldArray, mask), schema.RootIsNullable);
 
     private static VortexField[] ProjectFields(ReadOnlySpan<VortexField> fields, FieldMask mask)
     {

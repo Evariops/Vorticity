@@ -478,6 +478,15 @@ public static class VortexFileIndexer
             throw Refused("its root is not a struct of columns");
         }
 
+        // Beneath an absent row, each column holds some value of a row that is not there, which an index would answer for.
+        if (schema.IsNullable)
+        {
+            throw new VortexUnsupportedException(
+                "index",
+                ComponentKind.Feature,
+                "This file cannot be indexed: its root is a nullable struct, whose columns hold no index, written with the file or after.");
+        }
+
         // Each column's chunks, reached one by one from the layout that holds them; the first
         // column's give the rows every column's must start at.
         int fields = schema.FieldCount;

@@ -201,6 +201,13 @@ internal sealed class WriteSchema
     /// </remarks>
     internal static WriteSchema Map(VortexSchema schema)
     {
+        // A Parquet file's rows are its root group's, which is required: a row cannot be absent from it.
+        if (schema.RootIsNullable)
+        {
+            throw new VortexSchemaException(
+                $"The schema {schema} has a nullable root, whose rows may be absent, and Parquet has no form for it: a file's rows are those of its root group, which no row is absent from.");
+        }
+
         List<SchemaElement> elements = [];
         List<WriteColumn> columns = [];
         elements.Add(new SchemaElement

@@ -2,7 +2,7 @@
 
 ## What a fresh clone can run, and what it needs first
 
-A clone with nothing installed but the SDK that `global.json` asks for can build, test and publish. The conformance corpus is committed (878 files and their sidecars), so `dotnet test` runs on a bare clone with no toolchain beyond .NET.
+A clone with nothing installed but the SDK that `global.json` asks for can build, test and publish. The conformance corpus is committed (894 files and their sidecars), so `dotnet test` runs on a bare clone with no toolchain beyond .NET.
 
 ```
 dotnet build Vorticity.slnx -c Release
