@@ -9,6 +9,7 @@ using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Compute;
+using Vorticity.Execution;
 using Vorticity.Indexes;
 using Vorticity.Types;
 
@@ -521,6 +522,9 @@ internal sealed class KeyIndexBuilder : IndexBuilder
         _buckets?.CloseBlock();
     }
 
+    /// <summary>Its chunk's keys are cut, spilled and queued as the chunk closes.</summary>
+    internal override bool ClosesChunkLater => true;
+
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
     internal override async ValueTask CloseChunkAsync(
         int firstBlock, int blocks, long firstRow, long rows, CancellationToken cancellationToken)
@@ -727,19 +731,24 @@ internal sealed class KeyIndexBuilder : IndexBuilder
 
     /// <summary>
     /// Bucket <paramref name="bucket"/> read back and sorted into <paramref name="buffers"/>, on a lane of the session's of
-    /// its own when <paramref name="aside"/>, on the caller's thread otherwise.
+    /// its own when <paramref name="aside"/> and one is free now, on the caller's thread otherwise: the caller holds a lane
+    /// already, a job's or a block's in flight, and a wait for another could wait for the very lane it holds.
     /// </summary>
     private Task<int> SortAheadAsync(
         HashedBuckets buckets, int bucket, RunScratch scratch, BucketBuffers buffers, bool aside, CancellationToken cancellationToken)
     {
-        if (!aside)
+        LaneBudget? lanes = Lanes;
+        long entered = 0;
+        if (!aside || lanes is null || !Execution.LaneWorkers.TryTake(lanes, out entered))
         {
             return buckets.SortedAsync(bucket, scratch, buffers, cancellationToken).AsTask();
         }
 
-        LaneBudget lanes = Lanes!;
+        // Started whatever the token says, so that the lane it took is given back by the work and never left behind.
         Func<int, Task>? held = BeforeSort;
-        return Task.Run(
+        return Execution.LaneWorkers.RunOnAsync(
+            lanes,
+            entered,
             async () =>
             {
                 if (held is not null)
@@ -747,17 +756,8 @@ internal sealed class KeyIndexBuilder : IndexBuilder
                     await held(bucket).ConfigureAwait(false);
                 }
 
-                long entered = await lanes.EnterAsync(cancellationToken).ConfigureAwait(false);
-                try
-                {
-                    return await buckets.SortedAsync(bucket, scratch, buffers, cancellationToken).ConfigureAwait(false);
-                }
-                finally
-                {
-                    lanes.Exit(entered);
-                }
-            },
-            cancellationToken);
+                return await buckets.SortedAsync(bucket, scratch, buffers, cancellationToken).ConfigureAwait(false);
+            });
     }
 
     /// <summary>

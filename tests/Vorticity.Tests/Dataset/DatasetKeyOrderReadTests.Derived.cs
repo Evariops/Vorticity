@@ -170,7 +170,7 @@ public sealed partial class DatasetKeyOrderReadTests
             {
                 Partition = LayoutValue.Column(nameof(KeyRow.Day)),
                 SortKey = [LayoutValue.Column(nameof(KeyRow.Service)), LayoutValue.Column(nameof(KeyRow.Sequence))],
-                ObjectBytes = 32 << 10,
+                ObjectBytes = 20 << 10,
                 MergeFanout = 4,
                 CalmAfter = null,
             },

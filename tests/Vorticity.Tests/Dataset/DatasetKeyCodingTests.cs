@@ -98,6 +98,9 @@ public sealed partial class DatasetKeyCodingTests
         // The tables of these small objects stay in their entries, where the tests read how their sparse indexes are coded.
         TableInFileBytes = 0,
         Write = new VortexWriteOptions { BlockRows = 512, UnpaddedKeyIndex = unpadded },
+
+        // Pieces of four objects' size, so that a consolidation of these few objects runs in pieces of ranges side by side.
+        PieceObjects = 4,
     };
 
     private static string Service(Random random) => $"service-{random.Next(0, 300):D3}";

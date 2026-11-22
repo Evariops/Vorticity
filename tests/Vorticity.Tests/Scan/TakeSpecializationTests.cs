@@ -271,8 +271,12 @@ public sealed class TakeSpecializationTests
             await WriteZstdAsync(path, rows);
             await using (VortexFile written = await VortexFile.OpenAsync(path, CancellationToken.None))
             {
+                // Every chunk of whole blocks is zstd's, which the hints offer every chunk; the last rows, short of a block, make
+                // a chunk of their own the chooser may write otherwise.
                 VortexLayout layout = await written.GetLayoutAsync(CancellationToken.None);
-                Assert.All(DataEncodings(layout), encoding => Assert.StartsWith("vortex.zstd", encoding, StringComparison.Ordinal));
+                List<(string Encoding, long Rows)> chunks = [.. DataChunks(layout)];
+                Assert.Contains(chunks, static chunk => chunk.Rows >= 8_192);
+                Assert.All(chunks.Where(static chunk => chunk.Rows >= 8_192), chunk => Assert.StartsWith("vortex.zstd", chunk.Encoding, StringComparison.Ordinal));
             }
 
             List<string> all = await ReadAll(path);
@@ -303,25 +307,26 @@ public sealed class TakeSpecializationTests
     }
 
     /// <summary>The array encoding of every chunk of data under <paramref name="node"/>, zone maps left out.</summary>
-    private static IEnumerable<string> DataEncodings(VortexLayout node)
+    /// <summary>Each data chunk of <paramref name="node"/>'s columns: its encoding and its rows.</summary>
+    private static IEnumerable<(string Encoding, long Rows)> DataChunks(VortexLayout node)
     {
         if (node.Encoding == "vortex.zoned")
         {
-            return DataEncodings(node.Children[0]);
+            return DataChunks(node.Children[0]);
         }
 
         if (node.ArrayEncoding is { } encoding)
         {
-            return [encoding];
+            return [(encoding, node.RowCount)];
         }
 
-        List<string> encodings = [];
+        List<(string, long)> chunks = [];
         foreach (VortexLayout child in node.Children)
         {
-            encodings.AddRange(DataEncodings(child));
+            chunks.AddRange(DataChunks(child));
         }
 
-        return encodings;
+        return chunks;
     }
 
     /// <summary>

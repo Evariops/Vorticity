@@ -272,33 +272,44 @@ internal sealed class EstimateRun
     {
         ScanSource source = _question.Host.Source;
         int degree = Math.Max(1, source.Session.Options.MaxDegreeOfParallelism);
-        ParallelOptions parallel = new ParallelOptions
-        {
-            CancellationToken = cancellationToken,
-            MaxDegreeOfParallelism = source.Cost?.ReadsRoundTrips == true ? Math.Max(degree, RoundTripRanges) : degree,
-        };
+        int workers = Math.Min(drawn.Count, source.Cost?.ReadsRoundTrips == true ? Math.Max(degree, RoundTripRanges) : degree);
 
-        await Parallel.ForEachAsync(drawn, parallel, async (draw, token) =>
-        {
-            AggregationQuery part = _question.Ranged(new RangeHost(_question.Host, draw.Range, _counters));
-            IAsyncEnumerator<RecordBatch> groups = part.Groups(token);
-            await using (groups.ConfigureAwait(false))
+        // The caller and workers beside it, each on a lane of the session's it holds, as many as are free, each taking the
+        // next range drawn as it finishes one.
+        int[] next = [-1];
+        using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        CancellationToken token = failed.Token;
+        await Execution.LaneWorkers.RunAsync(
+            source.Session.Lanes,
+            Math.Max(1, workers),
+            async _ =>
             {
-                while (await groups.MoveNextAsync().ConfigureAwait(false))
+                int at;
+                while ((at = Interlocked.Increment(ref next[0])) < drawn.Count)
                 {
+                    token.ThrowIfCancellationRequested();
+                    (int stratum, RowRange range) = drawn[at];
+                    AggregationQuery part = _question.Ranged(new RangeHost(_question.Host, range, _counters));
+                    IAsyncEnumerator<RecordBatch> groups = part.Groups(token);
+                    await using (groups.ConfigureAwait(false))
+                    {
+                        while (await groups.MoveNextAsync().ConfigureAwait(false))
+                        {
+                            lock (_gate)
+                            {
+                                Fold(groups.Current, stratum, range.Length);
+                            }
+                        }
+                    }
+
                     lock (_gate)
                     {
-                        Fold(groups.Current, draw.Stratum, draw.Range.Length);
+                        _read += range.Length;
+                        _ranges++;
                     }
                 }
-            }
-
-            lock (_gate)
-            {
-                _read += draw.Range.Length;
-                _ranges++;
-            }
-        }).ConfigureAwait(false);
+            },
+            failed).ConfigureAwait(false);
     }
 
     /// <summary>A batch of the states of a range of <paramref name="length"/> rows: merged into the sample's, and summed by stratum and group.</summary>

@@ -141,6 +141,15 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         _pool = new AccountMemoryPool(_account);
     }
 
+    /// <summary>
+    /// The lane of the flow that writes the object, a compaction job's, given back while the sink waits for the store: for a
+    /// pipe the put has not emptied, or for the put itself at the commit; null for a writer that holds none of the session's.
+    /// </summary>
+    internal Execution.HeldLane? Lane { get; set; }
+
+    /// <summary>Awaits <paramref name="wait"/>, the store's, the writer's lane given back meanwhile when it holds one (<see cref="Lane"/>).</summary>
+    private ValueTask<T> StoreAsync<T>(ValueTask<T> wait) => Lane is { } lane ? lane.WhileAsync(wait) : wait;
+
     /// <summary>Whether the object passed the threshold and goes to the store as it is written: its bytes are not held.</summary>
     public bool IsStreamed => _pipe is not null;
 
@@ -371,7 +380,7 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         }
 
         _unsent = 0;
-        FlushResult flushed = await _pipe.Writer.FlushAsync(cancellationToken).ConfigureAwait(false);
+        FlushResult flushed = await StoreAsync(_pipe.Writer.FlushAsync(cancellationToken)).ConfigureAwait(false);
         if (flushed.IsCompleted)
         {
             // The put stopped reading, which only its failure does: its failure is the write's.
@@ -439,9 +448,7 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         {
             // The last bytes are in the pipe: its end completes the put.
             await _pipe.Writer.CompleteAsync().ConfigureAwait(false);
-#pragma warning disable VSTHRD003
-            (outcome, long stored) = await _put!.ConfigureAwait(false);
-#pragma warning restore VSTHRD003
+            (outcome, long stored) = await StoreAsync(new ValueTask<(PutOutcome, long)>(_put!)).ConfigureAwait(false);
             StoredLength = stored >= 0 ? stored : _written;
             _committed = true;
             Release();
@@ -451,11 +458,11 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
         PutCondition condition = SealedObjectStore.TryUid(_key, out _) ? PutCondition.None : PutCondition.IfAbsent;
         if (_store is SealedObjectStore sealedStore)
         {
-            (outcome, StoredLength) = await sealedStore.PutSealedAsync(_key, Bytes(), condition, cancellationToken).ConfigureAwait(false);
+            (outcome, StoredLength) = await StoreAsync(sealedStore.PutSealedAsync(_key, Bytes(), condition, cancellationToken)).ConfigureAwait(false);
         }
         else
         {
-            outcome = await _store.PutAsync(_key, Bytes(), condition, cancellationToken).ConfigureAwait(false);
+            outcome = await StoreAsync(_store.PutAsync(_key, Bytes(), condition, cancellationToken)).ConfigureAwait(false);
             StoredLength = _written;
         }
 

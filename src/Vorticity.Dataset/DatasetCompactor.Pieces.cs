@@ -62,12 +62,35 @@ internal static partial class DatasetCompactor
     /// </summary>
     private static async ValueTask<Piece?> PieceAsync(VortexDataset dataset, DatasetSchema schema, CompactionJob job, CancellationToken cancellationToken)
     {
-        // As many objects' size as the piece's ranges merge side by side, the session's lanes, or less, so that a piece commits
-        // within its share of the window and its copies fit the scratch.
-        int lanes = Math.Max(1, Math.Min(MostRanges, dataset.Session.Options.MaxDegreeOfParallelism));
+        // As many objects' size as the piece has ranges, DatasetOptions.PieceObjects, or less, so that a piece commits within its
+        // share of the window and its copies fit the scratch. Fixed, never the session's lanes: a piece sized and cut by them
+        // wrote other objects at another degree. How many of its ranges run side by side, the budget decides.
+        int lanes = Math.Max(1, dataset.Options.PieceObjects);
         long pieceBytes = Math.Max(1, Math.Min(job.TargetBytes * lanes, JobBytesBound(dataset)));
-        if (job.Trigger != CompactionTrigger.Consolidation || job.Moves || !schema.Keyed || job.Bytes <= pieceBytes
+
+        // A consolidation of inputs a job before it took the first rows of, a piece or a merge ended short of room at a key
+        // (StoppedAt), runs as a piece whatever it reads: what level 0 still holds starts past those rows, and the objects
+        // of level 1 that end below it, the ones that job wrote, are left as they are. Run in one piece, a consolidation of
+        // 8 million rows left in level 0 read again the 52 million a merge ended short of room had just written beside
+        // them, 38 s of a backlog's 102 (2026-11-21).
+        if (job.Trigger != CompactionTrigger.Consolidation || job.Moves || !schema.Keyed
             || dataset.ConsolidatesWhole(CompactionPolicy.PartitionOf(dataset, job)))
+        {
+            return null;
+        }
+
+        bool begun = false;
+        foreach (CompactionInput input in job.Inputs)
+        {
+            if (input.Level == 0 && input.Entry.HasDeletions)
+            {
+                // Its marks may lie out of line, in a commit object: read before they are asked for.
+                await input.Entry.ResolveAsync(dataset.Snapshot.Pages, cancellationToken).ConfigureAwait(false);
+                begun |= input.Entry.Deletions.LeadingRun > 0;
+            }
+        }
+
+        if (job.Bytes <= pieceBytes && !begun)
         {
             return null;
         }
@@ -100,7 +123,14 @@ internal static partial class DatasetCompactor
             // Where the rows level 0 still holds start, about: the first key of the granule each input's earlier pieces stopped
             // in. The objects of level 1 the earlier pieces wrote end below it, and stay out of this one, which would rewrite
             // them every piece.
+            // An input's sparse index tells where its rows left start to a granule. The handle that took its first rows knows
+            // a key past which every row left lies: the last key of the objects its commit wrote at their size
+            // (VortexDataset.NoteTakenThrough). An object of level 1 is below what level 0 still holds when it ends before
+            // the granule of every input (low); or, with such keys, before the granule of each input that has none (below)
+            // and at or before the key of each that has one (through).
             byte[]? low = null;
+            byte[]? below = null;
+            byte[]? through = null;
             bool marked = false;
             for (int i = 0; i < indexes.Length; i++)
             {
@@ -115,6 +145,14 @@ internal static partial class DatasetCompactor
 
                 byte[] key = Led(partition, decoded[i][(int)(from / keys.GranuleRows)]);
                 low = low is null || key.AsSpan().SequenceCompareTo(low) < 0 ? key : low;
+                if (from > 0 && dataset.TakenThrough(input.Entry.Key, from) is { } written)
+                {
+                    through = through is null || written.AsSpan().SequenceCompareTo(through) < 0 ? written : through;
+                }
+                else
+                {
+                    below = below is null || key.AsSpan().SequenceCompareTo(below) < 0 ? key : below;
+                }
             }
 
             // The cut: the first key past the live granules of an object's size, moved up so that no object of level 1 lies
@@ -139,8 +177,11 @@ internal static partial class DatasetCompactor
                 {
                     // An object of level 1 lies below the cut whole, or past it whole; one that ends below what level 0 still
                     // holds is left as it is.
-                    bool below = low is not null && !input.Entry.LastKey.IsEmpty && input.Entry.LastKey.Span.SequenceCompareTo(low) < 0;
-                    if ((cut is null || FirstKeyOf(input).SequenceCompareTo(cut) < 0) && !below)
+                    ReadOnlySpan<byte> last = input.Entry.LastKey.Span;
+                    bool left = low is not null && !last.IsEmpty
+                        && (last.SequenceCompareTo(low) < 0
+                            || (through is not null && last.SequenceCompareTo(through) <= 0 && (below is null || last.SequenceCompareTo(below) < 0)));
+                    if ((cut is null || FirstKeyOf(input).SequenceCompareTo(cut) < 0) && !left)
                     {
                         taken.Add(i);
                         starts.Add(0);
@@ -165,7 +206,8 @@ internal static partial class DatasetCompactor
                 return null;
             }
 
-            // The piece's ranges side by side, below its cut, as the session's lanes merge them; with a cut, one more past it.
+            // The piece's ranges below its cut, merged as the slices of one stream, those after the one taken ahead on the lanes
+            // the budget admits; with a cut, one more past it.
             List<byte[]> cuts = SubCuts(job, indexes, decoded, taken, starts, ends, partition, lanes, cut);
             if (cut is not null)
             {

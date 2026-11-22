@@ -5,6 +5,7 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Execution;
 using Vorticity.Layouts;
 using Vorticity.Writing;
 
@@ -364,11 +365,14 @@ public sealed partial class VortexFileWriter
             }
             else if (root.Committed >= _rowBlock)
             {
-                await HandOffAsync(root.Committed / _rowBlock * _rowBlock, seal: true, cancellationToken).ConfigureAwait(false);
+                await HandOffAsync(root.Committed / _rowBlock * _rowBlock, seal: !_blocksExactly, cancellationToken).ConfigureAwait(false);
             }
         }
 
         await SealAsync(cancellationToken).ConfigureAwait(false);
+
+        // A flush ends the group of rows: the next one is counted from here.
+        _groupTaken = 0;
         await EmitGatheredAsync(cancellationToken).ConfigureAwait(false);
         await FlushSinkAsync(cancellationToken).ConfigureAwait(false);
     }
@@ -395,6 +399,7 @@ public sealed partial class VortexFileWriter
     public async ValueTask<WriteReport> CompleteAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDone();
+        RequireNoPartPending();
         Carry();
         if (_root is { } builder && builder.Rows > builder.Committed)
         {
@@ -404,7 +409,7 @@ public sealed partial class VortexFileWriter
         _completed = true;
         if (_root is { Committed: > 0 } whole && _rowBlock > 0 && whole.Committed >= _rowBlock)
         {
-            await HandOffAsync(whole.Committed / _rowBlock * _rowBlock, seal: true, cancellationToken).ConfigureAwait(false);
+            await HandOffAsync(whole.Committed / _rowBlock * _rowBlock, seal: !_blocksExactly, cancellationToken).ConfigureAwait(false);
         }
 
         CanonicalArena? tail = null;
@@ -466,6 +471,8 @@ public sealed partial class VortexFileWriter
             return;
         }
 
+        // Only a merge's writer sends rows through on a lane of their own, and its owner settles them before it abandons it.
+        System.Diagnostics.Debug.Assert(_flight is null, "Rows in flight land (SettleAsync) before their writer is abandoned.");
         _completed = true;
         _abandoned = true;
         VortexTelemetry.WriteEnded(_activity, _acceptedRows, _sink.Position, completed: false);
@@ -490,6 +497,8 @@ public sealed partial class VortexFileWriter
     /// <returns>A task that completes when everything is released.</returns>
     public async ValueTask DisposeAsync()
     {
+        // Rows in flight write with what the abandon releases: they land first.
+        await SettleAsync().ConfigureAwait(false);
         if (!_finished)
         {
             Abandon();
@@ -511,11 +520,25 @@ public sealed partial class VortexFileWriter
             }
         }
 
+        // A staging that still keeps runs where they lie in a merge's inputs reads them no more: the merge may give them back.
         if (_staging is { } staging)
         {
+            Ledger?.Release(staging, ref staging.FirstRun);
             TransitContexts.Return(staging.Context);
             _staging = null;
         }
+
+        if (_landed is { } landed)
+        {
+            Ledger?.Release(landed, ref landed.FirstRun);
+            TransitContexts.Return(landed.Context);
+            _landed = null;
+        }
+
+        // The stagings and counted rows the line's flights left, and the passes over the keys they kept, and the rows its
+        // shredded columns' chains took of chunks not compressed.
+        ReleaseLine();
+        ReleaseChains();
 
         if (_gathering is { } gathering)
         {
@@ -531,8 +554,13 @@ public sealed partial class VortexFileWriter
             }
         }
 
-        // The index builders hold pooled hash sets and a payload arena; their results survive.
+        // The index builders hold pooled hash sets and a payload arena; their results survive. The batches' counted rows hold
+        // the wide columns' hashes in blocks of the pool.
         _indexes?.Dispose();
+        _counted?.Dispose();
+        _counted = null;
+        _across?.Release();
+        _across = null;
         ReleaseBuilders();
 
         // The blob workspace's builder and metadata writer rent from the shared pool, and the threads
@@ -544,7 +572,7 @@ public sealed partial class VortexFileWriter
         if (_fan is { } fan)
         {
             _fan = null;
-            WorkFan.Return(fan);
+            CoreBatch.Return(fan);
         }
 
         // What the columns kept per block, which the zone maps and the statistics have read, and
@@ -628,9 +656,11 @@ public sealed partial class VortexFileWriter
 
         if (_automaticChunks)
         {
+            // A writer that takes its rows a block at a time takes the builder's whole blocks, a chunk's worth at least, not
+            // sealed: they go through its line as any caller's rows, several blocks at once.
             long chunk = ChunkRows(root);
             return committed >= chunk
-                ? HandOffAsync((int)(committed / chunk * chunk), seal: true, cancellationToken)
+                ? HandOffAsync((int)(_blocksExactly ? committed / _rowBlock * _rowBlock : committed / chunk * chunk), seal: !_blocksExactly, cancellationToken)
                 : ValueTask.CompletedTask;
         }
 

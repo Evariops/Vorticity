@@ -336,7 +336,7 @@ internal abstract class AggregateSlot
     /// spilled: their runs read back part by part with what each holds still, under
     /// <paramref name="memory"/>, the answer left in this slot and the others emptied.
     /// </summary>
-    internal virtual Task MergeSpilledAsync(AggregateSlot[] lanes, SpillScope scope, int degree, QueryMemory memory, CancellationToken cancellationToken) =>
+    internal virtual Task MergeSpilledAsync(AggregateSlot[] lanes, SpillScope scope, Execution.Spread spread, QueryMemory memory, CancellationToken cancellationToken) =>
         throw new NotSupportedException("This aggregate does not spill on its own.");
 
     /// <summary>The bytes <paramref name="slots"/> hold, the records they share counted once.</summary>
@@ -607,7 +607,7 @@ internal interface IPairedSlot
     /// here; the pairs, counted, are let go. A part's table is reserved in <paramref name="memory"/> for
     /// as long as it lives.
     /// </summary>
-    Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken);
+    Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, Execution.Spread degree, QueryMemory? memory, CancellationToken cancellationToken);
 }
 
 /// <summary>How a distinct count's merge in parts (<see cref="IPairedSlot.MergeInPartsAsync"/>) cuts its pairs.</summary>
@@ -624,7 +624,7 @@ internal static class PairedParts
     /// </summary>
     /// <returns>Each lane's pairs' numbers part after part and where each part starts, and whether they are cut by group.</returns>
     internal static async Task<((int[] Placed, int[] Starts)[] Cuts, bool ByGroup)> CutAsync(
-        int[] pairs, Func<int, bool, int[], int[]> partsOf, int groups, int parts, int degree, CancellationToken cancellationToken)
+        int[] pairs, Func<int, bool, int[], int[]> partsOf, int groups, int parts, Execution.Spread degree, CancellationToken cancellationToken)
     {
         int lanes = pairs.Length;
         bool byGroup = groups >= parts * GroupsPerPart;
@@ -683,59 +683,37 @@ internal static class PairedParts
     }
 }
 
-/// <summary>Work items run side by side, a worker taking the next item as it finishes one.</summary>
+/// <summary>Work items run side by side on the lanes of the session's core, the caller's among them.</summary>
 internal static class SideBySide
 {
-    /// <summary>Runs <paramref name="work"/> on items 0 to <paramref name="count"/> − 1, on up to <paramref name="degree"/> workers; one failure cancels the others.</summary>
-    internal static async Task RunAsync(int count, Action<int> work, int degree, CancellationToken cancellationToken)
+    /// <summary>Runs <paramref name="work"/> on items 0 to <paramref name="count"/> − 1, on up to <paramref name="spread"/>'s degree of lanes of its core.</summary>
+    internal static async Task RunAsync(int count, Action<int> work, Execution.Spread spread, CancellationToken cancellationToken) =>
+        await Execution.CoreFor.RunAsync(spread.Core, Math.Clamp(spread.Degree, 1, Math.Max(1, count)), count, work, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// As <see cref="RunAsync(int, Action{int}, Execution.Spread, CancellationToken)"/>, for work that waits on reads: the
+    /// caller and workers beside it, each on a lane of the session's it holds, a worker taking the next item as it finishes
+    /// one; one failure cancels the others.
+    /// </summary>
+    internal static async Task RunAsync(int count, Func<int, CancellationToken, ValueTask> work, Execution.Spread spread, CancellationToken cancellationToken)
     {
-        int workers = Math.Clamp(degree, 1, Math.Max(1, count));
+        int workers = Math.Clamp(spread.Degree, 1, Math.Max(1, count));
         int[] next = [-1];
         using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         CancellationToken token = failed.Token;
-        Task[] tasks = new Task[workers];
-        for (int w = 0; w < workers; w++)
-        {
-            tasks[w] = Task.Run(
-                () =>
+        await Execution.LaneWorkers.RunAsync(
+            spread.Core.Lanes,
+            workers,
+            async _ =>
+            {
+                int item;
+                while ((item = Interlocked.Increment(ref next[0])) < count)
                 {
-                    int item;
-                    while ((item = Interlocked.Increment(ref next[0])) < count)
-                    {
-                        token.ThrowIfCancellationRequested();
-                        work(item);
-                    }
-                },
-                token);
-        }
-
-        await AggregationEngine.GuardedAsync(tasks, failed).ConfigureAwait(false);
-    }
-
-    /// <summary>As <see cref="RunAsync(int, Action{int}, int, CancellationToken)"/>, for work that waits on reads: on tasks, never a thread.</summary>
-    internal static async Task RunAsync(int count, Func<int, CancellationToken, ValueTask> work, int degree, CancellationToken cancellationToken)
-    {
-        int workers = Math.Clamp(degree, 1, Math.Max(1, count));
-        int[] next = [-1];
-        using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        CancellationToken token = failed.Token;
-        Task[] tasks = new Task[workers];
-        for (int w = 0; w < workers; w++)
-        {
-            tasks[w] = Task.Run(
-                async () =>
-                {
-                    int item;
-                    while ((item = Interlocked.Increment(ref next[0])) < count)
-                    {
-                        token.ThrowIfCancellationRequested();
-                        await work(item, token).ConfigureAwait(false);
-                    }
-                },
-                token);
-        }
-
-        await AggregationEngine.GuardedAsync(tasks, failed).ConfigureAwait(false);
+                    token.ThrowIfCancellationRequested();
+                    await work(item, token).ConfigureAwait(false);
+                }
+            },
+            failed).ConfigureAwait(false);
     }
 }
 

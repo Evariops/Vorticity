@@ -146,8 +146,14 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         ReadOnlySpan<int> ids = _sheet.RowIds;
         _values &= !ids.IsEmpty;
         _measured = _measured && (_own is not null || _plan.Measures[_measure].Live);
-        _granuleNulls += Nulls(arena, nodeIndex, start, count);
-        if (_values)
+        long nulls = Nulls(arena, nodeIndex, start, count);
+        _granuleNulls += nulls;
+        if (_values && nulls * 2 > count && ValidityMask.OneBitmap(arena, nodeIndex, out ReadOnlySpan<byte> bits, out int bitOffset))
+        {
+            // Most rows hold no value, a shredded key's: the rows that do, found a word of the bitmap at a time.
+            CountValid(ids[..count], bits, bitOffset + start);
+        }
+        else if (_values)
         {
             Count(ids[..count]);
         }
@@ -171,17 +177,25 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     /// The nulls among rows <c>[start, start + count)</c> of the batch's column node <paramref name="nodeIndex"/>: by its
     /// validity and that of the extension around it, as the sheet reads them.
     /// </summary>
+    /// <remarks>
+    /// A bitmap is counted eight bytes at a time (<see cref="BitmapKernels.CountSet"/>) when the other validity holds every
+    /// row, as it does for any column but an extension, whose two are the same. Tested a row at a time, the nulls of the
+    /// hundreds of shredded keys of a log's attributes, absent from most rows, made this builder the first of a tier merge's
+    /// profile at degree 14, 11.2 % of its samples (2026-11-17).
+    /// </remarks>
     private static long Nulls(CanonicalArena arena, int nodeIndex, int start, int count)
     {
         CanonicalNode outer = arena.GetNode(nodeIndex);
         CanonicalNode node = outer;
+        bool extension = false;
         while (node.Kind == CanonicalKind.Extension)
         {
             node = arena.GetNode(node.StorageIndex);
+            extension = true;
         }
 
         ValidityMask own = ValidityMask.From(arena, node.Validity);
-        ValidityMask wrapper = ValidityMask.From(arena, outer.Validity);
+        ValidityMask wrapper = extension ? ValidityMask.From(arena, outer.Validity) : own;
         if (own.AllInvalid || wrapper.AllInvalid)
         {
             return count;
@@ -190,6 +204,16 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         if (own.AllValid && wrapper.AllValid)
         {
             return 0;
+        }
+
+        if (!extension || wrapper.AllValid)
+        {
+            return count - BitmapKernels.CountSet(own.Bits, own.BitOffset + start, count);
+        }
+
+        if (own.AllValid)
+        {
+            return count - BitmapKernels.CountSet(wrapper.Bits, wrapper.BitOffset + start, count);
         }
 
         long nulls = 0;
@@ -202,13 +226,29 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     }
 
     /// <summary>Counts the rows' values in the open granule, each by its number, a null's -1 aside.</summary>
+    /// <remarks>
+    /// A run of rows of one value is counted at once, its end found a vector at a time: a block's rows come in the order of
+    /// their keys, and a series' rows hold its attributes row after row. Counted a row at a time, the keys of a consolidation
+    /// of metric records' attributes took 2.7 % of its processor (2026-11-18).
+    /// </remarks>
     private void Count(ReadOnlySpan<int> ids)
     {
         int mark = _granules + 1;
         Span<int> rowsOf = _rowsOf;
         Span<int> seenIn = _seenIn;
-        foreach (int id in ids)
+        int at = 0;
+        while (at < ids.Length)
         {
+            // A value the next row does not repeat is counted without looking for its run's end.
+            int id = ids[at];
+            int run = 1;
+            if (at + 1 < ids.Length && ids[at + 1] == id)
+            {
+                int past = ids[(at + 2)..].IndexOfAnyExcept(id);
+                run = past < 0 ? ids.Length - at : past + 2;
+            }
+
+            at += run;
             if (id < 0)
             {
                 continue;
@@ -232,7 +272,24 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
                 _met[_metCount++] = id;
             }
 
-            rowsOf[id]++;
+            rowsOf[id] += run;
+        }
+    }
+
+    /// <summary>
+    /// <see cref="Count"/> over the rows <paramref name="bits"/> says hold a value, from bit <paramref name="bitOffset"/>,
+    /// sixty-four rows a word: the rows without one, most of a shredded key's, skipped a word at a time.
+    /// </summary>
+    private void CountValid(ReadOnlySpan<int> ids, ReadOnlySpan<byte> bits, int bitOffset)
+    {
+        for (int at = 0; at < ids.Length; at += 64)
+        {
+            ulong word = BitmapKernels.Word(bits, bitOffset + at, Math.Min(64, ids.Length - at));
+            while (word != 0)
+            {
+                Count(ids.Slice(at + BitOperations.TrailingZeroCount(word), 1));
+                word &= word - 1;
+            }
         }
     }
 
@@ -277,27 +334,28 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     /// <summary>Folds the measure's values of the batch's rows <c>[start, start + count)</c> into the open granule's record.</summary>
     private void Fold(int start, int count)
     {
-        // A batch whose values are all null leaves the plan's arrays as they were, perhaps shorter, and holds no value.
-        CountedMeasure measure = _plan.Measures[_measure];
-        if ((measure.Kind == MeasureKind.Float ? measure.Floats.Length : measure.Integers.Length) < start + count)
+        // A batch whose values are all null leaves the batch's arrays as they were, perhaps shorter, and holds no value.
+        MeasureKind kind = _plan.Measures[_measure].Kind;
+        MeasureRows measure = Counted?.Measure(_measure) ?? throw new InvalidOperationException("The statistics were fed a batch without its counted rows.");
+        if ((kind == MeasureKind.Float ? measure.Floats.Length : measure.Integers.Length) < start + count)
         {
             return;
         }
 
-        ReadOnlySpan<byte> valid = measure.Valid is { } flags ? flags.AsSpan(start, count) : default;
+        ReadOnlySpan<byte> valid = measure.ValidOf(start, count);
         ref long state = ref MemoryMarshal.GetArrayDataReference(_state);
-        if (measure.Kind == MeasureKind.Float)
+        if (kind == MeasureKind.Float)
         {
             ColumnCountsBuilder.FoldFloats(ref state, Zeros(count), measure.Splits.AsSpan(start, count), measure.Floats.AsSpan(start, count), valid);
         }
         else
         {
-            ColumnCountsBuilder.Reduce(ref state, measure.Integers.AsSpan(start, count), valid, measure.Kind == MeasureKind.Signed);
+            ColumnCountsBuilder.Reduce(ref state, measure.Integers.AsSpan(start, count), valid, kind == MeasureKind.Signed);
         }
 
         if (_histogram is { } histogram)
         {
-            Sketch(histogram, measure, start, count, valid);
+            Sketch(histogram, kind, measure, start, count, valid);
         }
     }
 
@@ -305,7 +363,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
     /// Adds the measure's values of the rows <c>[start, start + count)</c>, those <paramref name="valid"/> keeps, to the
     /// granule's histogram, each run of valid rows in one call: every row at once when none is null.
     /// </summary>
-    private static void Sketch(QuantileSketch histogram, CountedMeasure measure, int start, int count, ReadOnlySpan<byte> valid)
+    private static void Sketch(QuantileSketch histogram, MeasureKind kind, MeasureRows measure, int start, int count, ReadOnlySpan<byte> valid)
     {
         int from = 0;
         while (from < count)
@@ -324,7 +382,7 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
                 to = run < 0 ? count : from + run;
             }
 
-            switch (measure.Kind)
+            switch (kind)
             {
                 case MeasureKind.Float:
                     histogram.AddAll<double>(measure.Floats.AsSpan(start + from, to - from));
@@ -411,7 +469,12 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         _state[MeasureLayout.IntegerGreatest] = greatest;
     }
 
-    /// <summary>Ends the open granule: its rows and nulls, its values, its measure.</summary>
+    /// <summary>
+    /// Ends the open granule: its rows and nulls, its values, its measure. The listing on the stack is written before it is
+    /// read, so it is not zeroed first: zeroing its 2 KiB at every granule of every column and shredded key took 4.9 s of a
+    /// backlog's compaction at degree 14.
+    /// </summary>
+    [System.Runtime.CompilerServices.SkipLocalsInit]
     private void End()
     {
         long rows = _row - _granuleStart;

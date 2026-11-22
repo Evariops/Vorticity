@@ -213,38 +213,6 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     }
 
     /// <summary>
-    /// What an input of the last job this handle ran to its end held at most, the blocks of its inputs over their count, at
-    /// the rows of a batch it read them in (<see cref="JobBatchRows"/>); 0 before any job measured it.
-    /// </summary>
-    internal long InputJobBytes => Volatile.Read(ref _inputJobBytes);
-
-    /// <summary>The rows of an input's batch in that job: what <see cref="InputJobBytes"/> was measured at.</summary>
-    internal int JobBatchRows => Volatile.Read(ref _jobBatchRows);
-
-    /// <summary>What the writer of that job held at most, the blocks of its objects' writers and sinks; 0 before any job.</summary>
-    internal long WriterJobBytes => Volatile.Read(ref _writerJobBytes);
-
-    /// <summary>
-    /// The most inputs a job of the handle takes after one was refused its blocks: half those of the refused one, until a job
-    /// runs to its end and measures what an input holds; 0 for none.
-    /// </summary>
-    internal int JobWidthCap => Volatile.Read(ref _jobWidthCap);
-
-    /// <summary>
-    /// The most rows an input's batch holds in a job of the handle after one was refused its blocks, and the most inputs it
-    /// holds open at once: half the rows and as many inputs as the refused one, until a job runs to its end; 0 for none.
-    /// Each refusal narrows the next job, by its inputs, its batches or both, until one fits or none can be narrower.
-    /// </summary>
-    internal (int BatchRows, int Open) JobSizingCap => (Volatile.Read(ref _jobBatchCap), Volatile.Read(ref _jobOpenCap));
-
-    private long _inputJobBytes;
-    private long _writerJobBytes;
-    private int _jobBatchRows;
-    private int _jobWidthCap;
-    private int _jobBatchCap;
-    private int _jobOpenCap;
-
-    /// <summary>
     /// The bytes a second the last job of this handle that ran to its end read and wrote, its inputs' bytes over its time:
     /// what the next plan bounds a job's bytes by, so that it commits within its share of the retention window; 0 before any.
     /// </summary>
@@ -329,88 +297,150 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     }
 
     /// <summary>
-    /// Keeps what a job that ran to its end measured: <paramref name="inputBytes"/> an input held at most, at batches of
-    /// <paramref name="batchRows"/> rows, and <paramref name="writerBytes"/> its writer. A job is no longer capped, its width,
-    /// its batches and its inputs open at once, once a job of <paramref name="width"/> inputs of level 0, as wide as the cap
-    /// at least, ran to its end.
+    /// How many times the writer of the next job gathers half its share of the jobs' budget
+    /// (<see cref="DatasetCompactor.GatherCeiling"/>): once each time a job ended short of room with nothing it could
+    /// commit and nothing learned of its inputs (<see cref="NarrowWriter"/>), until a job of as many inputs commits
+    /// (<see cref="JobCommitted"/>); 0 before any.
     /// </summary>
     /// <remarks>
-    /// A narrower job that ran proves nothing of the width a refusal capped: lifted by it, the next plan took the width again,
-    /// was refused again, and a backlog under 2 GiB ran 13 jobs, one refused in two, in 86 s (2026-11-16). Kept, the merges
-    /// after a refusal stay narrower, 17 jobs in 56 s, which read and write what 6 jobs did. Lifting the caps on batches and
-    /// inputs open at once on any job had the merges refused one in two again, 96 s.
+    /// What is left of the narrowing a job refused a block went through, for the one part of a job that does not reserve
+    /// what it takes yet, its writer: a bound it gathers within, searched by halves, never a price. A job's inputs
+    /// reserve, and are narrowed by nothing.
     /// </remarks>
-    internal void LearnJobCosts(long inputBytes, int batchRows, long writerBytes, int width)
+    internal int JobGatherHalvings => Volatile.Read(ref _jobGatherHalvings);
+
+    private int _jobGatherHalvings;
+    private int _gatherHalvedAt;
+
+    /// <summary>
+    /// Has the writer of the next job gather half as much, which a writer that holds less writes its chunks early for: what
+    /// a job of <paramref name="inputs"/> inputs that ended short of room, nothing committed and nothing learned of its
+    /// inputs, has left to change before it is run again. False when its writer gathers a mebibyte already.
+    /// </summary>
+    internal bool NarrowWriter(int inputs)
     {
-        if (inputBytes > 0)
+        if (DatasetCompactor.GatherCeiling(this) <= DatasetCompactor.LeastGatherCeiling)
         {
-            Volatile.Write(ref _inputJobBytes, inputBytes);
-            Volatile.Write(ref _jobBatchRows, Math.Max(batchRows, 1));
+            return false;
         }
 
-        if (writerBytes > 0)
-        {
-            Volatile.Write(ref _writerJobBytes, writerBytes);
-        }
-
-        if (width >= Volatile.Read(ref _jobWidthCap))
-        {
-            Volatile.Write(ref _jobWidthCap, 0);
-            Volatile.Write(ref _jobBatchCap, 0);
-            Volatile.Write(ref _jobOpenCap, 0);
-        }
+        Volatile.Write(ref _gatherHalvedAt, Math.Max(Volatile.Read(ref _gatherHalvedAt), inputs));
+        Interlocked.Increment(ref _jobGatherHalvings);
+        return true;
     }
 
     /// <summary>
-    /// Keeps what an input measured before the handle's first job held, <paramref name="inputBytes"/> at batches of
-    /// <paramref name="batchRows"/> rows, as a job's would be kept; the caps a refusal set stay, no job having run since.
+    /// A job of <paramref name="inputs"/> inputs committed: its writer gathers its whole share again once the job is as
+    /// wide as the one it was halved for. Kept for every job as wide, a merge of three hundred small appends gathered as
+    /// little as a consolidation of thirty-five objects that no writer made fit.
     /// </summary>
-    internal void LearnInputCost(long inputBytes, int batchRows)
+    internal void JobCommitted(int inputs)
     {
-        if (inputBytes > 0)
+        if (Volatile.Read(ref _jobGatherHalvings) != 0 && inputs >= Volatile.Read(ref _gatherHalvedAt))
         {
-            Volatile.Write(ref _inputJobBytes, inputBytes);
-            Volatile.Write(ref _jobBatchRows, Math.Max(batchRows, 1));
+            Volatile.Write(ref _jobGatherHalvings, 0);
+            Volatile.Write(ref _gatherHalvedAt, 0);
         }
     }
 
-    /// <summary>
-    /// A job was given up before it read anything, its first input's measure fitting <paramref name="inputs"/> of them in
-    /// the jobs' budget: the next takes that many at most, below the fan-out if need be, as one refused would.
-    /// </summary>
-    internal void CapJobWidth(int inputs) => Volatile.Write(ref _jobWidthCap, Math.Max(1, inputs));
+    // What the scans of objects held open in jobs of the handle that ended short of room, as they read it in the objects'
+    // files, by object key.
+    private readonly Dictionary<string, long> _measuredOpenBytes = new Dictionary<string, long>(StringComparer.Ordinal);
 
     /// <summary>
-    /// A job of <paramref name="inputs"/> inputs was refused its blocks: the next takes half as many, until one runs to its end.
-    /// What its inputs and its writer held when refused, <paramref name="inputBytes"/> and <paramref name="writerBytes"/>, is
-    /// less than they needed, and is kept as what they need at least: an input's share of it, at the rows of its batch, when
-    /// it holds more a row than the handle knew (<paramref name="sizing"/>, the batches' rows and the inputs open at once).
-    /// Kept without the rows of its batch, it was read as held by a batch of one row: 4.3 MB a row for a job of 300 inputs
-    /// refused under 1 344 MiB, and the next took the fan-out, 8, where half, 150, held (2026-11-15).
+    /// What the scan of the object <paramref name="key"/> held open besides its batches in a job of the handle that ended
+    /// short of room, reserved as the job read it in the object's file and taken, when that is more than the handle
+    /// counted it at; 0 for none. A plan counts the object at that when it is more than its entry says
+    /// (<see cref="DatasetCompactor.OpenBytes"/>).
     /// </summary>
-    internal void NarrowJobs(int inputs, long inputBytes, (int BatchRows, int Open) sizing, long writerBytes)
+    internal long MeasuredOpenBytes(string key)
     {
-        Volatile.Write(ref _jobWidthCap, Math.Max(1, inputs / 2));
-        if (sizing is { BatchRows: > 0, Open: > 0 })
+        lock (_measuredOpenBytes)
         {
-            // The next job's batches half as long, and no more of its inputs open at once: what a job of as many inputs, a
-            // consolidation with no merge due before it, narrows by.
-            Volatile.Write(ref _jobBatchCap, Math.Max(DatasetCompactor.LeastBatchRows, sizing.BatchRows / 2));
-            Volatile.Write(ref _jobOpenCap, sizing.Open);
+            return _measuredOpenBytes.GetValueOrDefault(key);
+        }
+    }
 
-            long perInput = inputBytes / sizing.Open;
-            long perRow = (perInput - DatasetCompactor.InputFloorBytes) / sizing.BatchRows;
-            long known = InputJobBytes > 0 ? (InputJobBytes - DatasetCompactor.InputFloorBytes) / Math.Max(JobBatchRows, 1) : 0;
-            if (perRow > known)
+    /// <summary>Keeps <paramref name="bytes"/> as what the scan of the object <paramref name="key"/> holds open, when it is more than was kept.</summary>
+    internal void LearnOpenBytes(string key, long bytes)
+    {
+        lock (_measuredOpenBytes)
+        {
+            if (bytes > _measuredOpenBytes.GetValueOrDefault(key))
             {
-                Volatile.Write(ref _inputJobBytes, perInput);
-                Volatile.Write(ref _jobBatchRows, sizing.BatchRows);
+                _measuredOpenBytes[key] = bytes;
             }
         }
+    }
 
-        if (writerBytes > WriterJobBytes)
+    /// <summary>Forgets what was kept of the objects of <paramref name="keys"/>, which a job took out of the dataset.</summary>
+    internal void ForgetOpenBytes(IReadOnlyList<string> keys)
+    {
+        lock (_measuredOpenBytes)
         {
-            Volatile.Write(ref _writerJobBytes, writerBytes);
+            if (_measuredOpenBytes.Count == 0)
+            {
+                return;
+            }
+
+            foreach (string key in keys)
+            {
+                _measuredOpenBytes.Remove(key);
+            }
+        }
+    }
+
+    // For each object of level 0 a job of this handle took the first rows of and left there, the run of rows it marked and
+    // the last key its commit wrote.
+    private readonly Dictionary<string, (long Run, byte[] Key)> _takenThrough = new Dictionary<string, (long Run, byte[] Key)>(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Keeps, for the object <paramref name="key"/> a job of the handle took the first rows of and left in level 0 with
+    /// <paramref name="run"/> rows marked, the last key its commit wrote, <paramref name="lastKey"/>: every row left of the
+    /// object lies past that key, the job's objects ending where a key does. The object's sparse index tells where its
+    /// rows left start to a granule only (<see cref="DatasetCompactor"/>, a consolidation's pieces): the consolidation of
+    /// what is left then leaves the objects the job wrote, the last of them too, which ends in that granule.
+    /// </summary>
+    /// <remarks>
+    /// A fact the handle read as it wrote, lost with it: another handle, or this one opened again, knows where the rows
+    /// left start to a granule, and reads the last object the job wrote once more. Without it, the consolidation after a
+    /// merge ended short of room read again the 27 million rows the merge had just committed (2026-11-21).
+    /// </remarks>
+    internal void NoteTakenThrough(string key, long run, ReadOnlySpan<byte> lastKey)
+    {
+        lock (_takenThrough)
+        {
+            _takenThrough[key] = (run, lastKey.ToArray());
+        }
+    }
+
+    /// <summary>
+    /// The last key written by the commit that left the object <paramref name="key"/> in level 0 with <paramref name="run"/>
+    /// rows marked (<see cref="NoteTakenThrough"/>); null when the handle made no such commit, or the object was marked
+    /// further since.
+    /// </summary>
+    internal byte[]? TakenThrough(string key, long run)
+    {
+        lock (_takenThrough)
+        {
+            return _takenThrough.TryGetValue(key, out (long Run, byte[] Key) taken) && taken.Run == run ? taken.Key : null;
+        }
+    }
+
+    /// <summary>Forgets what <see cref="NoteTakenThrough"/> kept of the objects of <paramref name="keys"/>, which a job took out of the dataset.</summary>
+    internal void ForgetTakenThrough(IReadOnlyList<string> keys)
+    {
+        lock (_takenThrough)
+        {
+            if (_takenThrough.Count == 0)
+            {
+                return;
+            }
+
+            foreach (string key in keys)
+            {
+                _takenThrough.Remove(key);
+            }
         }
     }
 
@@ -1188,7 +1218,8 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         DatasetSchema schema, bool inKeyOrder = false, long rowBound = 0, bool contents = false, bool synopses = false,
         IReadOnlyDictionary<string, Types.Variants.VariantShredding>? shredded = null, IReadOnlyDictionary<string, int>? variantChunks = null,
         IReadOnlyDictionary<string, Indexes.VariantDirectory>? directories = null, long byteBound = -1, PartitionPostings? postings = null,
-        bool countsPaths = false, QueryMemoryBudget? budget = null)
+        bool countsPaths = false, QueryMemoryBudget? budget = null, Execution.HeldLane? lane = null, Writing.WriteRoom? room = null,
+        MemoryReserve? reserve = null)
     {
         RequireConditionalCreation(_store);
         DateTimeOffset started = _options.TimeProvider.GetUtcNow();
@@ -1197,8 +1228,12 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         string key = CommitKey.ForData(identity.ToString("N", CultureInfo.InvariantCulture));
 
         // A job's object holds its blocks under the job's writer's budget, which never passes the jobs' (JobMemory).
+        // A job's object gives the job's lane back while it waits for the store.
         ObjectSegmentSink sink = new ObjectSegmentSink(
-            _store, key, budget ?? QueryMemoryBudget.JobsOf(_options.Session), _options.MaxObjectBytes, _options.StreamedObjectBytes, byteBound);
+            _store, key, budget ?? QueryMemoryBudget.JobsOf(_options.Session), _options.MaxObjectBytes, _options.StreamedObjectBytes, byteBound)
+        {
+            Lane = lane,
+        };
 
         VortexWriteOptions write = _options.Write.WithIdentity(identity) with
         {
@@ -1228,8 +1263,14 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             // Such an object, which a job writes in its key's order, in blocks, keeps each column's statistics over them.
             Granulated = contents && synopses,
 
-            // A job's writer gathers its columns within its share of the jobs' budget, writing a chunk early past it.
+            // A job's writer gathers its columns within its share of the jobs' budget, writing a chunk early past it; the job
+            // after one refused at its narrowest within less (GatherCeiling).
             GatheredBytesCeiling = budget is null ? 0 : DatasetCompactor.GatherCeiling(this),
+
+            // And takes its merge's runs a block at a time, which its ingest then spreads over its lanes, as many blocks in
+            // flight as the job's memory admits.
+            StagedRows = budget is null ? 0 : Math.Max(_options.Write.BlockRows, 1),
+            Room = room,
         };
 
         // The variant columns a job shreds, each in long chunks of its own; an append shreds the declared paths when its
@@ -1300,7 +1341,10 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         write = write with { HashedUnitBytes = HashedUnitBytes };
 
         // The session's degree and its lanes, which every writer of the session shares.
-        Buffers.WorkAccount? account = budget is null ? null : new Buffers.WorkAccount(budget, "writer");
+        // A job's writer takes first from what it reserved on the job's flow (JobMemory.WriterReserve).
+        Buffers.WorkAccount? account = budget is null ? null
+            : reserve is null ? new Buffers.WorkAccount(budget, "writer")
+            : new Buffers.ReservingAccount(budget, "writer", reserve);
         return new ObjectOutput(this, identity, key, sink, VortexFileWriter.Create(sink, schema.DType, write, _options.Session, account), started, generation);
     }
 
@@ -2283,25 +2327,27 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     }
 
     /// <summary>
-    /// Runs <paramref name="job"/>; when the jobs' budget refuses its blocks, plans again by <paramref name="replan"/>, which
-    /// narrows the next job since (<see cref="NarrowJobs"/>), and runs that job, until one runs to its end or a refusal
-    /// narrowed nothing (<see cref="Narrowed"/>). Null when the plan after a refusal has nothing due.
+    /// Runs <paramref name="job"/>; when it ends short of room with nothing it may commit, plans again by
+    /// <paramref name="replan"/>, which counts its inputs at what their files said as it read them, and runs that job,
+    /// until one commits or one ends so having taught the handle nothing (<see cref="StoppedShort"/>). Null when the plan
+    /// after such an end has nothing due. A job that ends short of room having merged rows it may commit commits them and
+    /// is returned, a piece of itself.
     /// </summary>
-    /// <exception cref="VortexMemoryException">A job refused narrowed nothing of the one refused before it: it needs more than the budget holds.</exception>
+    /// <exception cref="VortexMemoryException">A job ended short of room as the one before it had, nothing learned since: it needs more than the budget holds.</exception>
     internal async ValueTask<CompactionResult?> RunWithinBudgetAsync(
         CompactionJob job, Func<CancellationToken, ValueTask<CompactionJob?>> replan, CancellationToken cancellationToken)
     {
-        JobTooWideException? refused = null;
+        JobStoppedException? stopped = null;
         while (true)
         {
             try
             {
                 return await DatasetCompactor.RunAsync(this, job, cancellationToken).ConfigureAwait(false);
             }
-            catch (JobTooWideException tooWide)
+            catch (JobStoppedException now)
             {
-                Narrowed(refused, tooWide);
-                refused = tooWide;
+                StoppedShort(stopped, now);
+                stopped = now;
                 if (await replan(cancellationToken).ConfigureAwait(false) is not { } next)
                 {
                     return null;
@@ -2313,20 +2359,18 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     }
 
     /// <summary>
-    /// Whether the job refused, <paramref name="now"/>, narrowed something of the one of its kind refused <paramref name="before"/>
-    /// it: fewer inputs, shorter batches, or fewer inputs open at once; or <paramref name="before"/> was given up on a price
-    /// alone, before it read anything. A throw otherwise, which says what the job held and what the budget holds: every
-    /// refusal narrows the next job (<see cref="NarrowJobs"/>), so one that narrowed nothing has nothing left to narrow. The
-    /// rule was fewer inputs alone, and a consolidation refused with no merge due before it, as many inputs again however
-    /// short its batches, failed at its second refusal (2026-11-15).
+    /// Whether the job that ended short of room with nothing it may commit, <paramref name="now"/>, is run again another
+    /// than the one of its kind that ended so <paramref name="before"/> it: the handle kept, of one of its inputs, that it
+    /// holds more open than it was counted at, which the next plan counts; or it took fewer inputs; or, with neither, its
+    /// writer gathers half as much from now on (<see cref="NarrowWriter"/>). A throw otherwise, which says what the job
+    /// held and what the budget holds: a job that ends so again, its inputs counted at what their files say and its
+    /// writer gathering a mebibyte, holds no less the next time.
     /// </summary>
-    /// <exception cref="VortexMemoryException">The job narrowed nothing of the one before it.</exception>
-    internal static void Narrowed(JobTooWideException? before, JobTooWideException now)
+    /// <exception cref="VortexMemoryException">The job is the one that ended so before it, nothing learned of its inputs since and its writer gathering a mebibyte already.</exception>
+    internal void StoppedShort(JobStoppedException? before, JobStoppedException now)
     {
-        if (before is null || before.Job.Trigger != now.Job.Trigger || before.Priced
-            || now.Job.Inputs.Count < before.Job.Inputs.Count
-            || (now.Sizing.BatchRows > 0 && now.Sizing.BatchRows < before.Sizing.BatchRows)
-            || (now.Sizing.Open > 0 && now.Sizing.Open < before.Sizing.Open))
+        if (before is null || before.Job.Trigger != now.Job.Trigger || now.Learned || now.Job.Inputs.Count < before.Job.Inputs.Count
+            || NarrowWriter(now.Job.Inputs.Count))
         {
             return;
         }
@@ -2334,7 +2378,7 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         throw new VortexMemoryException(
             string.Create(
                 CultureInfo.InvariantCulture,
-                $"A compaction of {now.Job.Inputs.Count} objects, at its fewest inputs and shortest batches, needs more than the jobs' budget of {now.Budget:N0} bytes: its blocks held {now.Held:N0} when one was refused. Give the process more memory, or the session a larger JobMemoryBudget."),
+                $"A compaction of {now.Job.Inputs.Count} objects, at its fewest inputs, its shortest batches and its writer's least, needs more than the jobs' budget of {now.Budget:N0} bytes: its blocks held {now.Held:N0} at most when it ended short of room{(now.Reason is { } reason ? $", {reason}" : "")}. Give the process more memory, or the session a larger JobMemoryBudget."),
             now);
     }
 
@@ -2351,7 +2395,7 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     public async ValueTask<IReadOnlyList<CompactionResult>> ConsolidateAsync(CancellationToken cancellationToken = default)
     {
         List<CompactionResult> results = [];
-        JobTooWideException? refused = null;
+        JobStoppedException? stopped = null;
         while (true)
         {
             // A partition whose level 0 the jobs' budget does not hold at once is merged by size class first, a pass at a
@@ -2372,9 +2416,20 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
                 CompactionPlan tiers = await CompactionPolicy.PlanAsync(this, null, int.MaxValue, cancellationToken).ConfigureAwait(false);
                 foreach (CompactionJob merge in tiers.Jobs)
                 {
-                    if (merge.Trigger == CompactionTrigger.Tier && passes.Contains(CompactionPolicy.PartitionOf(this, merge)))
+                    if (merge.Trigger == CompactionTrigger.Tier && passes.Remove(CompactionPolicy.PartitionOf(this, merge)))
                     {
                         merges.Add(merge);
+                    }
+                }
+
+                // A pass with no merge of its classes due merges its smallest neighbours first, a merge's width of them at
+                // most (CompactionPolicy.NarrowingOf): it consolidated anyway, and was refused at its fewest inputs.
+                foreach (CompactionJob job in plan.Jobs)
+                {
+                    if (job.Trigger == CompactionTrigger.Consolidation && passes.Remove(CompactionPolicy.PartitionOf(this, job))
+                        && CompactionPolicy.NarrowingOf(this, job) is { } narrowing)
+                    {
+                        merges.Add(narrowing);
                     }
                 }
             }
@@ -2410,11 +2465,12 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
                     results.Add(await DatasetCompactor.RunAsync(this, merge, cancellationToken).ConfigureAwait(false));
                 }
             }
-            catch (JobTooWideException tooWide)
+            catch (JobStoppedException now)
             {
-                // Refused again with nothing narrower: the budget does not hold the least this job takes.
-                Narrowed(refused, tooWide);
-                refused = tooWide;
+                // Ended short of room with nothing it may commit: planned again by what its inputs' files said; ended so
+                // again with nothing learned, the budget does not hold the least this job takes.
+                StoppedShort(stopped, now);
+                stopped = now;
             }
         }
     }
@@ -2732,9 +2788,10 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         {
             // Cancelled by the caller, whose commit stands.
         }
-        catch (JobTooWideException)
+        catch (JobStoppedException)
         {
-            // Too wide for the jobs' budget: not a failure, the next commit plans a narrower merge by what this one learned.
+            // Ended short of room with nothing to commit: not a failure, the next commit plans a merge by what this one
+            // read of its inputs.
         }
         catch (Exception failed) when (failed is not OutOfMemoryException)
         {
@@ -4694,7 +4751,11 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             .WithFooterBytes(draft.Writer.TailBytes)
             .WithTableOfContents(TableOf(draft.Writer.TableOfContents, bytes, draft.Writer.TableInFile))
             .WithLastKey(last)
-            .WithArrival(draft.Arrival > 0 ? draft.Arrival : Math.Max(_options.TimeProvider.GetUtcNow().ToUnixTimeSeconds(), 1));
+            .WithArrival(draft.Arrival > 0 ? draft.Arrival : Math.Max(_options.TimeProvider.GetUtcNow().ToUnixTimeSeconds(), 1))
+
+            // What a reader holds of it open and what its rows weigh decoded, which only its writer knows: what a merge
+            // counts it at as an input, with no measure of it.
+            .WithWeights(draft.Writer.OpenBytes, draft.Writer.DecodedBytes);
         return new WrittenObject(entry, KeyOf(prefix, entry), draft.Writer.DataBytes, draft.StartedAt, draft.KeyGeneration);
     }
 

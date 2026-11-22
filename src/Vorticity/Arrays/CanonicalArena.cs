@@ -100,6 +100,29 @@ internal enum CanonicalKind : byte
     /// rather than keeping an offset. The validity is the row validity, as for a dictionary.
     /// </remarks>
     RunEnd = 11,
+
+    /// <summary>
+    /// The values of a shredded variant's rows not put back together: a view a row, of a value that is not written, and
+    /// what puts the values back.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Only produced for a scan whose consumer takes the rows as their shredding holds them and reads none, a job's
+    /// writer. A row's view holds its value's size and the offset it would lie at, and names a buffer that is none
+    /// (<see cref="Decoders.Canonical.CanonicalSupport.HollowBuffer"/>); a row whose value is taken as it is, or lies in
+    /// its view, holds an ordinary view over the node's data buffers. The node's one child is the metadata of the same
+    /// rows, which the values are put back under. What took the rows, and the first of them, is told beside the node by an
+    /// arena that keeps such things (<see cref="CanonicalArena.NoteTaken"/>); a node that reaches an arena that keeps
+    /// none has its values put back as it arrives.
+    /// </para>
+    /// <para>
+    /// What sizes a node by its views' lengths reads this one as any views. The accessors that promise bytes read through
+    /// a twin of ordinary views memoized on the record (<see cref="CanonicalArena.MaterializeShredded(int)"/>), the values
+    /// then put back to the byte as the rebuild of the shredding read writes them; a slice narrows the views and keeps
+    /// what puts them back.
+    /// </para>
+    /// </remarks>
+    Shredded = 12,
 }
 
 /// <summary>
@@ -285,6 +308,30 @@ internal readonly ref struct CanonicalNode
 
         return _arena.DataBufferAt(r.DataBufferStart + index);
     }
+
+    // ------------------------------------------------------------------------------ Shredded
+
+    /// <summary>
+    /// The views of a <see cref="CanonicalKind.Shredded"/> node as they lie, <c>Length * 16</c> bytes, those of the values
+    /// not written among them: read for the rows' sizes, or by what carries the node on. No value is put back.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Shredded"/>.</exception>
+    internal VortexBuffer HollowViews => Require(CanonicalKind.Shredded).BufferA;
+
+    /// <summary>The data buffers the views of a <see cref="CanonicalKind.Shredded"/> node that are not hollow name.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Shredded"/>.</exception>
+    internal ReadOnlySpan<VortexBuffer> HollowDataBuffers
+    {
+        get
+        {
+            ref readonly CanonicalRecord r = ref Require(CanonicalKind.Shredded);
+            return _arena.DataBufferRange(r.DataBufferStart, r.DataBufferCount);
+        }
+    }
+
+    /// <summary>The node of the metadata of a <see cref="CanonicalKind.Shredded"/> node's rows.</summary>
+    /// <exception cref="VortexFormatException">The kind is not <see cref="CanonicalKind.Shredded"/>.</exception>
+    internal int ShreddedMetadataIndex => _arena.ChildAt(Require(CanonicalKind.Shredded).ChildStart);
 
     // ------------------------------------------------------------------------------ ListView
 
@@ -488,6 +535,18 @@ internal readonly ref struct CanonicalNode
             if (r.Kind is CanonicalKind.Dictionary or CanonicalKind.RunEnd)
             {
                 return ref RequireDecoded(kind);
+            }
+
+            if (r.Kind == CanonicalKind.Shredded)
+            {
+                // Asking for the views of values not put back is asking for them to be: taken after, as below.
+                ref readonly CanonicalRecord put = ref _arena.RecordRef(_arena.MaterializeShredded(_index));
+                if (put.Kind != kind)
+                {
+                    ArraysThrow.Kind(put.Kind, kind.ToString());
+                }
+
+                return ref put;
             }
 
             if (r.Kind != kind)
@@ -1206,7 +1265,8 @@ internal partial class CanonicalArena
     /// <summary>
     /// <see cref="AddVarBinView(DType, int, Validity, VortexBuffer, ReadOnlySpan{VortexBuffer})"/>, saying
     /// whether this library's kernels wrote the views, every inline value zero past its bytes
-    /// (<see cref="CanonicalRecord.PaddedViews"/>).
+    /// (<see cref="CanonicalRecord.PaddedViews"/>), and, when its data buffers keep a run of repeated values' bytes once,
+    /// the data bytes it stands for (<see cref="CanonicalRecord.SharesBytes"/>), -1 for none.
     /// </summary>
     internal int AddVarBinView(
         DType dtype,
@@ -1214,12 +1274,18 @@ internal partial class CanonicalArena
         Validity validity,
         VortexBuffer views,
         ReadOnlySpan<VortexBuffer> dataBuffers,
-        bool padded)
+        bool padded,
+        long standsFor = -1)
     {
         RequireExactLength(views.Length, length, 16, "VarBinView");
         CanonicalRecord r = New(CanonicalKind.VarBinView, dtype, length, validity);
         r.BufferA = views;
         r.PaddedViews = padded;
+        if (standsFor >= 0)
+        {
+            r.SharesBytes = true;
+            r.SharedDataBytes = checked((uint)standsFor);
+        }
         r.DataBufferStart = _dataBufferCount;
         r.DataBufferCount = dataBuffers.Length;
         for (int i = 0; i < dataBuffers.Length; i++)
@@ -1550,6 +1616,52 @@ internal partial class CanonicalArena
     {
     }
 
+    /// <summary>
+    /// What was taken of the rows of node <paramref name="index"/> beside the node, and the row of it the node's first row
+    /// is: none, but for an arena that takes part in retention (<see cref="RetainingArena"/>), which keeps it until it is
+    /// reset.
+    /// </summary>
+    /// <param name="index">The node's index.</param>
+    /// <param name="taken">What was taken: a shredding of a variant column's rows.</param>
+    /// <param name="first">The row of what was taken that the node's row 0 is.</param>
+    internal virtual bool TryTaken(int index, out ITakenRows? taken, out int first)
+    {
+        taken = null;
+        first = 0;
+        return false;
+    }
+
+    /// <summary>
+    /// Records that <paramref name="taken"/> holds what was taken of the rows of node <paramref name="index"/>, the node's
+    /// row 0 its row <paramref name="first"/>, until the arena is reset, when the arena takes part in retention: see
+    /// <see cref="RetainingArena"/>. Whoever reads it owes the lifetime of what was taken, which is that of the arena whose
+    /// node it was taken of. With <paramref name="owned"/>, what was taken is carved from this arena, which tells it once
+    /// it is reset (<see cref="ITakenRows.Forgotten"/>); otherwise it is another arena's, told beside a node lent from it.
+    /// False when the arena keeps nothing of it.
+    /// </summary>
+    internal virtual bool NoteTaken(int index, ITakenRows taken, int first, bool owned = false) => false;
+
+    /// <summary>
+    /// What was taken of a node's rows beside the node, carved from the arena the node lies in, which tells it once it is
+    /// reset (<see cref="NoteTaken"/>): it then holds nothing, and may take other rows.
+    /// </summary>
+    internal interface ITakenRows
+    {
+        /// <summary>The arena that held what was taken is reset.</summary>
+        void Forgotten();
+
+        /// <summary>
+        /// Writes the values not written of the rows from <paramref name="first"/> on, <paramref name="count"/> of the rows
+        /// taken, each where its view of <paramref name="views"/> says it lies, <paramref name="origin"/> bytes before
+        /// <paramref name="into"/>, in the bytes it says it takes: what a <see cref="CanonicalKind.Shredded"/> node's values
+        /// are put back by (<see cref="MaterializeShredded(int, ITakenRows, int)"/>). The rows' metadata is in
+        /// <paramref name="metadataViews"/> over <paramref name="metadataBuffers"/>.
+        /// </summary>
+        void Rebuild(
+            int first, int count, ReadOnlySpan<byte> views, ReadOnlySpan<byte> metadataViews, ReadOnlySpan<VortexBuffer> metadataBuffers,
+            Span<byte> into, int origin);
+    }
+
     /// <summary>Drops what the arena kept of its first <paramref name="records"/> nodes beside the records, as it is reset.</summary>
     /// <param name="records">The nodes the arena held.</param>
     private protected virtual void Forget(int records)
@@ -1681,6 +1793,37 @@ internal partial class CanonicalArena
     /// <exception cref="VortexFormatException"><paramref name="nodeIndex"/> is out of range.</exception>
     internal long NamedBytes(int nodeIndex) => Size(nodeIndex, named: true);
 
+    /// <summary>
+    /// The bytes the views of <see cref="CanonicalKind.VarBinView"/> node <paramref name="nodeIndex"/> name in its data
+    /// buffers, those past an inline value's, however its buffers keep them: what a copy of each row's bytes holds.
+    /// </summary>
+    internal long NamedDataBytes(int nodeIndex)
+    {
+        ref readonly CanonicalRecord record = ref RecordRef(nodeIndex);
+        return ViewedBytes(record.BufferA.Span, record.Length);
+    }
+
+    /// <summary>
+    /// The data bytes <see cref="CanonicalKind.VarBinView"/> node <paramref name="nodeIndex"/> stands for when its buffers
+    /// keep a run of repeated values' bytes once (<see cref="CanonicalRecord.SharesBytes"/>); -1 when they hold what it holds.
+    /// </summary>
+    internal long StandsFor(int nodeIndex)
+    {
+        ref readonly CanonicalRecord record = ref RecordRef(nodeIndex);
+        return record.SharesBytes ? record.SharedDataBytes : -1;
+    }
+
+    /// <summary>
+    /// Marks <see cref="CanonicalKind.VarBinView"/> node <paramref name="nodeIndex"/>, whose buffers keep a run of repeated
+    /// values' bytes once, as standing for <paramref name="bytes"/> data bytes (<see cref="CanonicalRecord.SharesBytes"/>).
+    /// </summary>
+    internal void StandFor(int nodeIndex, long bytes)
+    {
+        ref CanonicalRecord record = ref RecordRefMutable(nodeIndex);
+        record.SharesBytes = true;
+        record.SharedDataBytes = checked((uint)bytes);
+    }
+
     private long Size(int nodeIndex, bool named)
     {
         if ((uint)nodeIndex >= (uint)_recordCount)
@@ -1691,7 +1834,8 @@ internal partial class CanonicalArena
         CanonicalRecord record = _records[nodeIndex];
         long total = record.BufferA.Length + record.BufferB.Length;
 
-        if (named && record.Kind == CanonicalKind.VarBinView)
+        // A view of a value not written tells the bytes it names as any view does.
+        if (named && record.Kind is CanonicalKind.VarBinView or CanonicalKind.Shredded)
         {
             total += ViewedBytes(record.BufferA.Span, record.Length);
         }
@@ -1708,12 +1852,57 @@ internal partial class CanonicalArena
             total += Size(record.Validity.CanonicalNodeIndex, named);
         }
 
-        for (int i = 0; i < record.ChildCount; i++)
+        // The child of values not put back is their rows' metadata, which the variant they are of holds and counts.
+        for (int i = 0; record.Kind != CanonicalKind.Shredded && i < record.ChildCount; i++)
         {
             total += Size(_children[record.ChildStart + i], named);
         }
 
         return total;
+    }
+
+    /// <summary>
+    /// The heap bytes a compact copy of <paramref name="rows"/> views keeps, and the last row it reads up to: the length of
+    /// each view that is not inline, the views read up to the last row. Sharing repeats, a view that names the bytes the one
+    /// before it that is not inline names counted once, as the copy keeps them once, and the views read up to the last that
+    /// is not inline, -1 for none (<see cref="CompactVarBinView"/>).
+    /// </summary>
+    private static (long Bytes, int Last) GatheredBytes(ReadOnlySpan<byte> views, int rows, bool shareRepeats)
+    {
+        if (!shareRepeats)
+        {
+            return (ViewedBytes(views, rows), rows - 1);
+        }
+
+        const uint MaxInline = Decoders.Canonical.CanonicalSupport.MaxInlineViewLength;
+        ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(views[..(rows * Decoders.Canonical.CanonicalSupport.ViewSize)]);
+        long bytes = 0;
+        int last = -1;
+        uint lastSize = 0;
+        uint lastIndex = uint.MaxValue;
+        uint lastOffset = 0;
+        for (int j = 0; j < rows; j++)
+        {
+            int w = j * 4;
+            uint size = words[w];
+            if (size <= MaxInline)
+            {
+                continue;
+            }
+
+            last = j;
+            if (size == lastSize && words[w + 2] == lastIndex && words[w + 3] == lastOffset)
+            {
+                continue;
+            }
+
+            bytes += size;
+            lastSize = size;
+            lastIndex = words[w + 2];
+            lastOffset = words[w + 3];
+        }
+
+        return (bytes, last);
     }
 
     /// <summary>The heap bytes <paramref name="rows"/> views name: the length of each that is not inline.</summary>
@@ -1830,6 +2019,12 @@ internal partial class CanonicalArena
         // may resize `_records`.
         CanonicalRecord src = source._records[sourceIndex];
 
+        // Values put back already are lent as they were put back.
+        if (src.Kind == CanonicalKind.Shredded && src.Materialized >= 0)
+        {
+            return ReferenceFrom(source, src.Materialized);
+        }
+
         Validity validity = src.Validity;
         if (validity.Kind == ValidityKind.Bitmap)
         {
@@ -1864,6 +2059,14 @@ internal partial class CanonicalArena
             {
                 AddDataBuffer(source._dataBuffers[src.DataBufferStart + i]);
             }
+        }
+
+        // Values not put back together are lent with what took their rows, told beside the node here as it is there. An
+        // arena that keeps no such thing has them put back at once: they could not be later.
+        if (src.Kind == CanonicalKind.Shredded && source.TryTaken(sourceIndex, out ITakenRows? rows, out int first) && rows is not null
+            && !NoteTaken(index, rows, first))
+        {
+            return MaterializeShredded(index, rows, first);
         }
 
         return index;
@@ -1904,7 +2107,18 @@ internal partial class CanonicalArena
     /// of them exists is how an interface becomes permanent by accident.
     /// </para>
     /// </remarks>
-    internal int CopyFrom(CanonicalArena source, int sourceIndex)
+    /// <param name="shareRepeats">
+    /// Whether a text whose view names the bytes the buffered view before it names views the copy made for that one
+    /// (<see cref="CompactVarBinView"/>). The copy then holds fewer bytes than its rows name, and only a reader that sizes
+    /// it by what its rows name, never by its buffers, takes it: a merge's runs waiting in its writer
+    /// (<c>VortexFileWriter.Stage</c>), whose rows the writer copies again, each row's bytes, before an encoder sizes them.
+    /// </param>
+    /// <param name="viewRepeats">
+    /// Whether such a text, its bytes copied again all the same, views the copy made for the one before, when
+    /// <paramref name="shareRepeats"/> is not: the copy holds the bytes its rows name, as encoders size it, and the rows of a
+    /// value repeated have equal views, which a search for runs passes over whole. The columns a writer gathers.
+    /// </param>
+    internal int CopyFrom(CanonicalArena source, int sourceIndex, bool shareRepeats = false, bool viewRepeats = false)
     {
         ArgumentNullException.ThrowIfNull(source);
         if ((uint)sourceIndex >= (uint)source._recordCount)
@@ -1917,11 +2131,18 @@ internal partial class CanonicalArena
         // source and destination are the same arena.
         CanonicalRecord src = source._records[sourceIndex];
 
+        // Values not put back are put back here, never in the source, which its readers only read, and copied from that:
+        // a copy outlives what its source names.
+        if (src.Kind == CanonicalKind.Shredded)
+        {
+            return CopyFrom(this, Decoded(ReferenceFrom(source, sourceIndex)), shareRepeats, viewRepeats);
+        }
+
         // Validity first: its bitmap is a node like any other, and the copy must name the new index.
         Validity validity = src.Validity;
         if (validity.Kind == ValidityKind.Bitmap)
         {
-            validity = Validity.Bitmap(CopyFrom(source, validity.CanonicalNodeIndex));
+            validity = Validity.Bitmap(CopyFrom(source, validity.CanonicalNodeIndex, shareRepeats, viewRepeats));
         }
 
         // A VarBinView is copied compact, and that is not an optimization but the difference
@@ -1932,7 +2153,7 @@ internal partial class CanonicalArena
         // block, would drag the whole heap of every block already emitted along with it.
         if (src.Kind == CanonicalKind.VarBinView)
         {
-            return CompactVarBinView(source, in src, validity);
+            return CompactVarBinView(source, in src, validity, shareRepeats, viewRepeats);
         }
 
         // Children next, gathered before anything is committed so the block stays contiguous: a
@@ -1942,7 +2163,7 @@ internal partial class CanonicalArena
         int childStart = ReserveChildren(childCount);
         for (int i = 0; i < childCount; i++)
         {
-            int child = CopyFrom(source, source._children[src.ChildStart + i]);
+            int child = CopyFrom(source, source._children[src.ChildStart + i], shareRepeats, viewRepeats);
             _children[childStart + i] = child;
         }
 
@@ -1998,7 +2219,7 @@ internal partial class CanonicalArena
     /// trusting them.
     /// </para>
     /// </remarks>
-    private int CompactVarBinView(CanonicalArena source, in CanonicalRecord src, Validity validity)
+    private int CompactVarBinView(CanonicalArena source, in CanonicalRecord src, Validity validity, bool shareRepeats, bool viewRepeats)
     {
         const int ViewSize = Decoders.Canonical.CanonicalSupport.ViewSize;
         const uint MaxInline = Decoders.Canonical.CanonicalSupport.MaxInlineViewLength;
@@ -2008,7 +2229,7 @@ internal partial class CanonicalArena
 
         // Sized before anything is written: one pass to learn how many bytes the rows name, so the
         // gather below writes into a buffer it never has to grow.
-        long referenced = ViewedBytes(src.BufferA.Span, rows);
+        (long referenced, int lastBuffered) = GatheredBytes(src.BufferA.Span, rows, shareRepeats);
 
         // The views start on a boundary of their own size, as a decoder puts them, whatever the
         // slab holds before them: see CopyBuffer.
@@ -2028,16 +2249,38 @@ internal partial class CanonicalArena
             : AllocateUninitialized(checked((int)referenced + GatherSlack), 1, out into).Slice(0, (int)referenced);
         bool wide = Vector256.IsHardwareAccelerated;
 
-        // The gather ends with the last buffered row, once the bytes counted above are all in:
-        // every view past it is inline, and a column of short strings has no buffered row at all.
+        // The gather ends with the last buffered row: every view past it is inline, and a column of
+        // short strings has no buffered row at all. Sharing repeats, a view that names the bytes the
+        // buffered view before it names views the copy made for that one: a series' rows repeat their
+        // attributes, which a reassembled input views once, and each copy of the merge's runs copied
+        // them again row by row, its comparisons downstream reading them whole where the same address
+        // ends one. A value that names other bytes but is the one copied last, as long, beginning alike and equal byte for
+        // byte, views that copy as well: a consolidation's series holds a row of each input in turn, each viewing its own
+        // input's bytes, and the take of the block's variant compared every row's value whole with the row before's.
+        // Viewing repeats, a view that names the bytes the one before names views that copy too, its own bytes copied all
+        // the same.
         Span<uint> words = MemoryMarshal.Cast<byte, uint>(writable);
         int at = 0;
-        for (int j = 0; at < referenced; j++)
+        uint lastSize = 0;
+        uint lastIndex = uint.MaxValue;
+        uint lastOffset = 0;
+        uint lastPrefix = 0;
+        int lastAt = 0;
+        bool repeats = shareRepeats || viewRepeats;
+        for (int j = 0; j <= lastBuffered && (shareRepeats || at < referenced); j++)
         {
             int w = j * 4;
             uint size = words[w];
             if (size <= MaxInline)
             {
+                continue;
+            }
+
+            bool repeat = repeats && size == lastSize && words[w + 2] == lastIndex && words[w + 3] == lastOffset;
+            if (repeat && shareRepeats)
+            {
+                words[w + 2] = 0;
+                words[w + 3] = (uint)lastAt;
                 continue;
             }
 
@@ -2054,6 +2297,25 @@ internal partial class CanonicalArena
             {
                 ArraysThrow.Format(
                     $"Row {j} names bytes {offset}..{offset + size} of a {from.Length}-byte buffer.");
+            }
+
+            if (shareRepeats && size == lastSize && words[w + 1] == lastPrefix
+                && from.Slice((int)offset, (int)size).SequenceEqual(into.Slice(lastAt, (int)size)))
+            {
+                lastIndex = index;
+                lastOffset = offset;
+                words[w + 2] = 0;
+                words[w + 3] = (uint)lastAt;
+                continue;
+            }
+
+            if (!repeat)
+            {
+                lastSize = size;
+                lastIndex = index;
+                lastOffset = offset;
+                lastPrefix = words[w + 1];
+                lastAt = at;
             }
 
             // A value a block of its buffer's bytes can be read past is copied in whole blocks, no
@@ -2083,8 +2345,14 @@ internal partial class CanonicalArena
             }
 
             words[w + 2] = 0;
-            words[w + 3] = (uint)at;
+            words[w + 3] = (uint)(repeat ? lastAt : at);
             at += (int)size;
+        }
+
+        // The repeats found equal by their bytes left room the sizing counted.
+        if (at < referenced)
+        {
+            data = data.Slice(0, at);
         }
 
         System.Threading.Interlocked.Add(ref BytesMaterialized, viewBytes + at);
@@ -2210,6 +2478,22 @@ internal struct CanonicalRecord
     /// as it lies; false for views read as they came, whose padding nothing promises.
     /// </summary>
     internal bool PaddedViews;
+
+    /// <summary>
+    /// For a <see cref="CanonicalKind.VarBinView"/>: whether its data buffers keep the bytes of a run of rows of one value
+    /// once, its rows' views naming the same bytes, so that an encoder sizes it by the data bytes it stands for
+    /// (<see cref="SharedDataBytes"/>), those of the buffers it held before it shared them, and writes the same bytes. A
+    /// window of it, or a filter, stands for the same bytes, as it kept those buffers whole; a concatenation, for its
+    /// chunks'.
+    /// </summary>
+    internal bool SharesBytes;
+
+    /// <summary>The data bytes a <see cref="CanonicalKind.VarBinView"/> that <see cref="SharesBytes"/> stands for, kept where a constant keeps its element's size.</summary>
+    internal uint SharedDataBytes
+    {
+        readonly get => FixedSize;
+        set => FixedSize = value;
+    }
 
     /// <summary>
     /// For a <see cref="CanonicalKind.Constant"/>, <see cref="CanonicalKind.Dictionary"/> or

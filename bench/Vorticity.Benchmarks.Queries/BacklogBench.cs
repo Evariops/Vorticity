@@ -25,12 +25,26 @@ namespace Vorticity.Benchmarks.Queries;
 /// (<see cref="VortexMemory.SetLimit"/>): the collector's heap to three quarters of it, the jobs' budget to its share. <c>--series</c> sets the series (20 000), <c>--store DIR</c> where the dataset lies, and
 /// <c>--compact-only</c> compacts the backlog an earlier run left there, copied first so that it stays whole. With
 /// <c>--bytes SIZE</c>, such as <c>25g</c>, the appends go on until the backlog weighs that much, whatever <c>--appends</c>
-/// says. The last line says the refusals, the bytes the jobs read and wrote, and the bytes written over the backlog's.
+/// says. <c>--degree N</c> sets the lanes the session lends a job, one a core without it. Each job's line says its time and
+/// the processor time the process spent meanwhile, which says how many cores the job held. The last line says the refusals,
+/// the bytes the jobs read and wrote, and the bytes written over the backlog's. <c>--takes-variants</c> has a job's inputs
+/// hand its writers what they took of a variant column's rows, not put back together
+/// (<see cref="DatasetOptions.TakesVariants"/>), which a job's line then counts: the same bytes written, with and without.
+/// </para>
+/// <para>
+/// <c>--object-bytes SIZE</c>, such as <c>64m</c>, builds the backlog with objects that aim at that size
+/// (<see cref="DatasetLayout.ObjectBytes"/>, the dataset's from then on) rather than 1 GiB. <c>--calm</c> runs the maintainer
+/// two hours ahead, every partition then calm and consolidated, as an hour without a row would have it.
+/// <c>--object-sizes</c> adds a line to each job: the data its objects aim at and, of each object it wrote, in the order of
+/// their rows, its data, their share of the aim and its bytes in all, which says how near its target a job ends an object.
+/// Each job's line counts the ends of groups of rows it asked its writers for.
 /// </para>
 /// <para>
 /// The records are a gauge's, as an ingestion of metrics writes them: a service, a metric, the hash of the series'
 /// attributes, an instant and a value, and two variant columns, the series' attributes and its service's resource
-/// attributes, constant along a series, which a job's decoders expand row by row.
+/// attributes, constant along a series, which a job's decoders expand row by row. With <c>--logs</c>, they are log records
+/// (<see cref="LogGeneratorV2"/>) in the order of their service and instant, whose attributes hardly repeat from one record
+/// to the next.
 /// </para>
 /// </remarks>
 internal static class BacklogBench
@@ -42,6 +56,54 @@ internal static class BacklogBench
     private static long s_refused;
 
     private static readonly MeterListener Refusals = Listen();
+
+    // The seconds of each pass of the job running, by its name (plan, unions, ranges, write, index): the activities the
+    // compactor starts for them, summed as they stop, and emptied for each job's line.
+    private static readonly Dictionary<string, double> s_passes = [];
+
+    private static readonly ActivityListener Passes = ListenToPasses();
+
+    private static ActivityListener ListenToPasses()
+    {
+        const string Job = "vortex.dataset.compaction";
+        const string Prefix = Job + ".";
+        ActivityListener listener = new ActivityListener
+        {
+            ShouldListenTo = static source => source.Name == VortexDiagnostics.ActivitySourceName,
+            Sample = static (ref ActivityCreationOptions<ActivityContext> created) =>
+                created.Name.StartsWith(Job, StringComparison.Ordinal) ? ActivitySamplingResult.AllData : ActivitySamplingResult.None,
+            ActivityStopped = static activity =>
+            {
+                lock (s_passes)
+                {
+                    if (activity.OperationName.Length > Prefix.Length)
+                    {
+                        string pass = activity.OperationName[Prefix.Length..];
+                        s_passes[pass] = s_passes.GetValueOrDefault(pass) + activity.Duration.TotalSeconds;
+                    }
+                    else if (activity.Status == ActivityStatusCode.Error)
+                    {
+                        // A job given up before its commit, its seconds lost: ended short of room with nothing it may commit.
+                        s_passes[$"given up ({activity.StatusDescription}, {activity.GetTagItem("vortex.objects_in")} inputs)"] =
+                            s_passes.GetValueOrDefault($"given up ({activity.StatusDescription}, {activity.GetTagItem("vortex.objects_in")} inputs)") + activity.Duration.TotalSeconds;
+                    }
+                }
+            },
+        };
+        ActivitySource.AddActivityListener(listener);
+        return listener;
+    }
+
+    /// <summary>The seconds of each pass of the job just ended, for its line, the passes then emptied for the next.</summary>
+    private static string PassesOfJob()
+    {
+        lock (s_passes)
+        {
+            string line = string.Join(", ", s_passes.Select(static pass => string.Create(CultureInfo.InvariantCulture, $"{pass.Key} {pass.Value:F1} s")));
+            s_passes.Clear();
+            return line;
+        }
+    }
 
     private static MeterListener Listen()
     {
@@ -69,7 +131,10 @@ internal static class BacklogBench
         return listener;
     }
 
-    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0)
+    // stopAfter: the jobs the maintainer runs at most, -1 for all of them (--jobs N). keep: where the store the jobs left is
+    // kept as a backlog of its own (--keep DIR), null for nowhere: a store a few jobs in, whose next job a run compacts alone
+    // (--store DIR --compact-only --jobs 1), in seconds rather than the minutes the whole backlog takes.
+    internal static async Task<int> RunAsync(string root, int appends, int rows, int series, long memoryLimit, bool compactOnly, int latency, int scans = 0, bool buildOnly = false, long bytes = 0, int degree = 0, bool digest = false, bool logs = false, int stopAfter = -1, string? keep = null, int repeat = 1, bool quickExit = false, bool bytesOf = false, string? memoryTimeline = null, string? segments = null, bool takes = false, long objectBytes = 0, bool calm = false, bool objectSizes = false)
     {
         if (memoryLimit > 0)
         {
@@ -79,23 +144,73 @@ internal static class BacklogBench
         string backlog = Path.Combine(root, "backlog");
         string work = Path.Combine(root, "work");
         using VortexKeyring keyring = VortexKeyring.FromKeys(new VortexKey("backlog", new byte[32]));
-        await using VortexSession session = VortexSession.Create(options => options.Keyring = keyring);
-        using Sampler sampler = new Sampler();
+
+        // --degree N: the lanes the session lends a job, as a host sets them; the session's default, one a core, without it.
+        await using VortexSession session = VortexSession.Create(options =>
+        {
+            options.Keyring = keyring;
+            if (degree > 0)
+            {
+                options.MaxDegreeOfParallelism = degree;
+            }
+        });
+        // --memory-timeline FILE: what the process and the library hold every 10 ms, written to FILE when the bench ends.
+        using Sampler sampler = new Sampler(memoryTimeline);
         Stopwatch clock = Stopwatch.StartNew();
 
         if (!compactOnly)
         {
             Fresh(backlog);
-            (long read, int made) = await BuildAsync(session, backlog, appends, rows, series, scans, bytes);
+            using Process builder = Process.GetCurrentProcess();
+            TimeSpan buildProcessor = builder.TotalProcessorTime;
+            long buildLanes = session.Lanes.HeldTicks;
+            (long read, int made) = logs
+                ? await BuildLogsAsync(session, backlog, appends, rows, bytes, objectBytes)
+                : await BuildAsync(session, backlog, appends, rows, series, scans, bytes, objectBytes);
+            builder.Refresh();
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"backlog of {made} appends of {rows} rows, {BytesOf(backlog) / 1e6:F0} MB, built in {clock.Elapsed.TotalSeconds:F0} s, {scans} scans reading {read:N0} rows meanwhile; {sampler.Peaks()}; {Sampler.Now()}"));
+                $"backlog of {made} appends of {rows} rows, {BytesOf(backlog) / 1e6:F0} MB, built in {clock.Elapsed.TotalSeconds:F1} s, {(builder.TotalProcessorTime - buildProcessor).TotalSeconds:F1} s of processor, {(double)(session.Lanes.HeldTicks - buildLanes) / Stopwatch.Frequency:F1} s of lanes, {(double)made * rows / Math.Max(clock.Elapsed.TotalSeconds, 1e-3):F0} rows a second, {scans} scans reading {read:N0} rows meanwhile; {sampler.Peaks()}; {Sampler.Now()}"));
             if (buildOnly)
             {
                 return 0;
             }
         }
 
+        // --repeat N: the same jobs N times over, each round on a fresh copy of the backlog, in this one process. The first
+        // round pays the JIT (a tenth of a twelve-second job), the last is what a maintainer that stays up pays; each round
+        // prints its jobs, tagged with its number. --quick-exit leaves as soon as the last round ends, for a profiler that
+        // samples it alone: the process says "round N starts" and waits a second and a half before the last round.
+        using Timer timeline = new Timer(
+            _ => Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[{clock.Elapsed.TotalSeconds,5:F0} s] {Sampler.Now()}")),
+            null,
+            10_000,
+            10_000);
+        for (int round = 1; round <= Math.Max(1, repeat); round++)
+        {
+            bool last = round == Math.Max(1, repeat);
+            if (repeat > 1)
+            {
+                Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"round {round} starts"));
+                if (last)
+                {
+                    await Task.Delay(1_500);
+                }
+            }
+
+            sampler.Round = round;
+            await RoundAsync(round, last);
+        }
+
+        if (quickExit)
+        {
+            return 0;
+        }
+
+        return await RestAsync();
+
+        async Task RoundAsync(int round, bool last)
+        {
         // The backlog stays whole: the maintainer compacts a copy of it.
         Fresh(work);
         foreach (string file in Directory.EnumerateFiles(backlog, "*", SearchOption.AllDirectories))
@@ -107,17 +222,25 @@ internal static class BacklogBench
 
         sampler.Reset();
         clock.Restart();
-        using Timer timeline = new Timer(
-            _ => Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"[{clock.Elapsed.TotalSeconds,5:F0} s] {Sampler.Now()}")),
-            null,
-            10_000,
-            10_000);
 
-        IObjectStore store = new LatencyObjectStore(new FileObjectStore(work)) { Latency = TimeSpan.FromMilliseconds(latency) };
-        await using VortexDataset maintainer = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, Encrypted = true });
+        await using IObjectStore store = new LatencyObjectStore(new FileObjectStore(work)) { Latency = TimeSpan.FromMilliseconds(latency) };
+        DatasetOptions opened = new DatasetOptions { Session = session, Encrypted = true, TakesVariants = takes, TimeProvider = calm ? new Ahead(TimeSpan.FromHours(2)) : TimeProvider.System };
+        await using VortexDataset maintainer = await VortexDataset.OpenAsync(store, opened);
+
+        // --object-sizes: the data objects before the first job, by their keys, so that each job's own are told apart.
+        HashSet<string> known = [];
+        if (objectSizes)
+        {
+            await foreach (DataObject entry in maintainer.ListObjectsAsync())
+            {
+                known.Add(entry.Key);
+            }
+        }
+
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
-            $"maintainer on {maintainer.RowCount:N0} rows in {maintainer.ObjectCount} objects, lag {maintainer.Lag}; jobs' budget {Mib(QueryMemoryBudget.JobsOf(session).CeilingBytes)} MiB of a limit of {Mib(VortexDiagnostics.GetMemoryReport().LimitBytes)} MiB"));
+            $"maintainer on {maintainer.RowCount:N0} rows in {maintainer.ObjectCount} objects, lag {maintainer.Lag}; jobs' budget {Mib(QueryMemoryBudget.JobsOf(session).CeilingBytes)} MiB of a limit of {Mib(VortexDiagnostics.GetMemoryReport().LimitBytes)} MiB; degree {session.Options.MaxDegreeOfParallelism}"));
+        using Process process = Process.GetCurrentProcess();
         int jobs = 0;
         long mostHeld = 0;
         long backlogBytes = BytesOf(work);
@@ -129,29 +252,70 @@ internal static class BacklogBench
             sampler.Reset();
             Interlocked.Exchange(ref s_refused, 0);
             Stopwatch job = Stopwatch.StartNew();
+            process.Refresh();
+            TimeSpan processor = process.TotalProcessorTime;
+            long lanes = session.Lanes.HeldTicks;
+            session.Lanes.ResetPeak();
             long slabsMade = Slabs.Slab.Made;
             int fullCollections = GC.CollectionCount(2);
+            long unitsRun = session.Core.UnitsRun;
+            long pumpsStarted = session.Core.PumpsStarted;
+            TimeSpan paused = GC.GetTotalPauseDuration();
             await maintainer.RefreshAsync();
-            CompactionResult? result = await maintainer.CompactAsync();
+            CompactionResult? result = jobs == stopAfter ? null : await maintainer.CompactAsync();
             if (result is null)
             {
                 break;
             }
 
             jobs++;
+            process.Refresh();
+            double processorSeconds = (process.TotalProcessorTime - processor).TotalSeconds;
+            double laneSeconds = (double)(session.Lanes.HeldTicks - lanes) / Stopwatch.Frequency;
             mostHeld = Math.Max(mostHeld, result.MemoryReserved);
             bytesRead += result.BytesIn;
             bytesWritten += result.BytesOut;
             refusals += Interlocked.Read(ref s_refused);
             Console.WriteLine(string.Create(
                 CultureInfo.InvariantCulture,
-                $"job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB, {result.RangesAtOnce} at once, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {GC.CollectionCount(2) - fullCollections} full collections, {Slabs.Slab.Made - slabsMade} slabs made; {sampler.Peaks()}"));
+                $"{(repeat > 1 ? $"round {round} " : "")}job {jobs}: {result.Trigger} L{result.FromLevel}->L{result.ToLevel}, {result.ObjectsIn} -> {result.ObjectsOut} objects ({result.ObjectsMoved} moved), {result.Rows:N0} rows, {result.BytesIn / 1e6:F1} -> {result.BytesOut / 1e6:F1} MB, blocks held {Mib(result.MemoryReserved)} MiB (inputs {Mib(result.MemoryReservedBy.Inputs)}, writer {Mib(result.MemoryReservedBy.Writer)}), inputs counted {Mib(result.InputsPlanned)} MiB a merge{Windows(result)}, {result.RangesAtOnce} at once, {result.MergeSlices} slices ({result.MergeSlicesAhead} ahead), {result.InputWindowsAhead} windows ahead, held back {result.AdvancesHeldBack}, {result.Reserves.Raised >> 20} MiB reserved by the inputs ({result.Reserves.HeldBack} not at once, room made {result.Reserves.MadeRoom} times){(result.StoppedShort ? $", ended short of room at a key ({result.StoppedHow}: {result.StoppedBy})" : "")}, {result.WriterArenasGivenBack} writer arenas given back, {result.PoolBlocksPastRoom.PastRoom} blocks of the pool taken past the process's room ({result.PoolBlocksPastRoom.PastMargin} past its margin),{result.BoundRestarts} restarts under a doubled bound, {result.GroupEnds} group ends asked, written {(double)result.BytesOut / Math.Max(1, result.BytesIn):F2} of read, {result.InputsToldByDirectories} inputs counted from their directories, {result.CensusParts.Inputs} in {result.CensusParts.Parts} parts, {Interlocked.Read(ref s_refused)} refused before, scratch {Mib(result.ScratchBytes)} MiB, {job.Elapsed.TotalSeconds:F1} s, {processorSeconds:F1} s of processor, {laneSeconds:F1} s of lanes, {session.Lanes.PeakHeld} of {session.Lanes.Lanes} lanes at most, {result.WriterBatches:N0} writer batches of {(double)result.Rows / Math.Max(1, result.WriterBatches):F0} rows, {result.WriterBatchesAcross:N0} across, {result.WriterBatchesFlown:N0} flown, {result.WriterBlocksOnLine:N0} on the line, {result.WriterChunksEndedOnLine:N0} chunks ended there, {result.WriterChunksCutOnLine:N0} cut column by column, {GC.CollectionCount(2) - fullCollections} full collections, {(GC.GetTotalPauseDuration() - paused).TotalSeconds:F2} s paused by the collector, {Slabs.Slab.Made - slabsMade} slabs made, {session.Core.UnitsRun - unitsRun:N0} units of the core on {session.Core.PumpsStarted - pumpsStarted:N0} pumps started, {result.WriterBlocksOfRunsTaken:N0} blocks took their runs of a variant ({result.WriterBlocksPutBack:N0} put back whole, {result.WriterColumnsPutBackApart:N0} columns apart), {result.InputVariantChunks.Held:N0} variant chunks handed over as shredded ({result.InputVariantChunks.Refused:N0} refused, {result.InputVariantChunks.Inexact:N0} of them inexact); passes: {PassesOfJob()}; {sampler.Peaks()}"));
+            if (objectSizes)
+            {
+                Console.WriteLine(await ObjectSizesAsync(maintainer, known, repeat > 1 ? $"round {round} job {jobs}" : $"job {jobs}", result));
+            }
         }
 
         Console.WriteLine(string.Create(
             CultureInfo.InvariantCulture,
             $"done: {jobs} jobs in {clock.Elapsed.TotalSeconds:F0} s, {maintainer.ObjectCount} objects left, the most a job's blocks held {Mib(mostHeld)} MiB, {refusals} refused; read {bytesRead / 1e6:F0} MB and wrote {bytesWritten / 1e6:F0} MB of a backlog of {backlogBytes / 1e6:F0} MB, amplification {(double)bytesWritten / Math.Max(1, backlogBytes):F2}; {Sampler.Now()}"));
+        if (keep is not null && last)
+        {
+            // The store as the jobs left it, a backlog of its own for a later run's --compact-only.
+            string kept = Path.Combine(keep, "backlog");
+            Fresh(kept);
+            foreach (string file in Directory.EnumerateFiles(work, "*", SearchOption.AllDirectories))
+            {
+                string target = Path.Combine(kept, Path.GetRelativePath(work, file));
+                Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+                System.IO.File.Copy(file, target);
+            }
 
+            Console.WriteLine(string.Create(CultureInfo.InvariantCulture, $"kept: {maintainer.ObjectCount} objects, {BytesOf(kept) / 1e6:F0} MB in {kept}"));
+        }
+
+        if (digest && last)
+        {
+            Console.WriteLine(logs ? await DigestLogsAsync(maintainer) : await DigestAsync(maintainer));
+        }
+
+        if (bytesOf && last)
+        {
+            Console.WriteLine(await BytesDigestAsync(maintainer, segments));
+        }
+        }
+
+        async Task<int> RestAsync()
+        {
         // At rest: two turns of the slow timer, which an idle process gets within a minute, then a full collection. What the
         // library keeps then, what the questions are left, and the holes of the pinned heap, which a hard limit counts.
         HeldMemory.LetGoUnused(collection: false);
@@ -171,6 +335,36 @@ internal static class BacklogBench
             CultureInfo.InvariantCulture,
             $"rest: {Sampler.Now()}; pinned heap {Mib(pinned.SizeAfterBytes)} MiB, {Mib(pinned.FragmentationAfterBytes)} of it free"));
         return 0;
+        }
+    }
+
+    /// <summary>
+    /// The objects a job just wrote, those <paramref name="known"/> does not hold yet, which it then does: the size the
+    /// dataset's objects aim at, and each new object's size in the order of the dataset's rows, with its share of that aim.
+    /// </summary>
+    private static async Task<string> ObjectSizesAsync(VortexDataset dataset, HashSet<string> known, string job, CompactionResult result)
+    {
+        long target = dataset.Layout?.ObjectBytes ?? new DatasetLayout().ObjectBytes;
+        List<string> sizes = [];
+        await foreach (DataObject entry in dataset.ListObjectsAsync())
+        {
+            if (known.Add(entry.Key) && await dataset.Store.HeadAsync(entry.Key, CancellationToken.None) is { } head)
+            {
+                long data = result.ObjectDataBytes.GetValueOrDefault(entry.Key, -1);
+                sizes.Add(string.Create(
+                    CultureInfo.InvariantCulture, $"{data / (1024.0 * 1024):F1} ({(double)data / target:P0}) of {head.Length / (1024.0 * 1024):F1}"));
+            }
+        }
+
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $"{job} objects: aim {target / (1024.0 * 1024):F0} MiB of data; {sizes.Count} written, MiB of data (share of the aim) of MiB in all: {string.Join(", ", sizes)}");
+    }
+
+    /// <summary>A clock ahead of the machine's: what a maintainer reads once a partition's rows are that old.</summary>
+    private sealed class Ahead(TimeSpan by) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => base.GetUtcNow() + by;
     }
 
     /// <summary>
@@ -178,22 +372,23 @@ internal static class BacklogBench
     /// readers scan the dataset in batches, each again and again from its latest version, as the readers of a pipeline's
     /// source would. The rows they read.
     /// </summary>
-    private static async Task<(long Read, int Appends)> BuildAsync(VortexSession session, string root, int appends, int rows, int series, int scans, long bytes)
+    private static async Task<(long Read, int Appends)> BuildAsync(VortexSession session, string root, int appends, int rows, int series, int scans, long bytes, long objectBytes)
     {
         IObjectStore store = new FileObjectStore(root);
+        DatasetLayout layout = new DatasetLayout
+        {
+            Partition = LayoutValue.Column(nameof(MetricRow.TimeUnix)).Truncate(CalendarUnit.Day),
+            SortKey =
+            [
+                LayoutValue.Column(nameof(MetricRow.ServiceName)), LayoutValue.Column(nameof(MetricRow.MetricName)),
+                LayoutValue.Column(nameof(MetricRow.AttributesHash)), LayoutValue.Column(nameof(MetricRow.TimeUnix)),
+            ],
+        };
         DatasetOptions options = new DatasetOptions
         {
             Session = session,
             Encrypted = true,
-            Layout = new DatasetLayout
-            {
-                Partition = LayoutValue.Column(nameof(MetricRow.TimeUnix)).Truncate(CalendarUnit.Day),
-                SortKey =
-                [
-                    LayoutValue.Column(nameof(MetricRow.ServiceName)), LayoutValue.Column(nameof(MetricRow.MetricName)),
-                    LayoutValue.Column(nameof(MetricRow.AttributesHash)), LayoutValue.Column(nameof(MetricRow.TimeUnix)),
-                ],
-            },
+            Layout = objectBytes > 0 ? layout with { ObjectBytes = objectBytes } : layout,
         };
         await using VortexDataset writer = await VortexDataset.CreateAsync(store, MetricRow.Schema, options);
 
@@ -247,6 +442,186 @@ internal static class BacklogBench
         return (Interlocked.Read(ref read), a);
     }
 
+    /// <summary>
+    /// A backlog of log records (<c>--logs</c>): <paramref name="appends"/> appends of <paramref name="rows"/> records each
+    /// (<see cref="LogGeneratorV2"/>), ten seconds apart, partitioned by day and in the order of their service and instant.
+    /// Their attributes hardly repeat from one record to the next, which a series' do: what the comparisons with the row
+    /// before cost where they find nothing.
+    /// </summary>
+    private static async Task<(long Read, int Appends)> BuildLogsAsync(VortexSession session, string root, int appends, int rows, long bytes, long objectBytes)
+    {
+        IObjectStore store = new FileObjectStore(root);
+        DatasetLayout layout = new DatasetLayout
+        {
+            Partition = LayoutValue.Column(nameof(LogRow.At)).Truncate(CalendarUnit.Day),
+            SortKey = [LayoutValue.Column(nameof(LogRow.ServiceName)), LayoutValue.Column(nameof(LogRow.At))],
+        };
+        DatasetOptions options = new DatasetOptions
+        {
+            Session = session,
+            Encrypted = true,
+            Layout = objectBytes > 0 ? layout with { ObjectBytes = objectBytes } : layout,
+        };
+        await using VortexDataset writer = await VortexDataset.CreateAsync(store, LogRow.Schema, options);
+        LogGeneratorV2 generator = new LogGeneratorV2(31);
+        LogRow[] batch = new LogRow[rows];
+        int a = 0;
+        for (; bytes > 0 || a < appends; a++)
+        {
+            if (bytes > 0 && a % 50 == 0 && a > 0 && BytesOf(root) >= bytes)
+            {
+                break;
+            }
+
+            DateTimeOffset at = Start.AddSeconds(a * 10.0);
+            for (int i = 0; i < rows; i++)
+            {
+                batch[i] = generator.Next(at.AddTicks(i % TimeSpan.TicksPerSecond));
+            }
+
+            await using ObjectDraft draft = writer.StartObject();
+            await draft.Writer.WriteAsync<LogRow>(batch);
+            await writer.AppendAsync(draft);
+        }
+
+        return (0, a);
+    }
+
+    /// <summary>
+    /// What the jobs wrote, byte for byte: each data object of the dataset's last version read through the dataset's own
+    /// store, decrypted, and the segments its footer lists hashed one after another, the footer left out, since it holds the
+    /// object's identity, drawn afresh at each write; the objects' hashes added and xored, since their keys change from one
+    /// run to the next and the walk's order with them. Two runs that wrote the same bytes print the same line, in a fraction
+    /// of the time the rows' digest takes. The bytes counted are the objects', footers included.
+    /// </summary>
+    private static async Task<string> BytesDigestAsync(VortexDataset dataset, string? segments)
+    {
+        ulong sum = 0;
+        ulong xor = 0;
+        long total = 0;
+        int objects = 0;
+        string copy = Path.Combine(Path.GetTempPath(), $"vorticity-digest-{Environment.ProcessId}.vortex");
+        await foreach (DataObject entry in dataset.ListObjectsAsync())
+        {
+            // Copied to a file as the store holds it, and opened in the dataset's session, whose keyring opens a sealed object:
+            // its segments are read decrypted, a segment at a time.
+            long length;
+            await using (FileStream file = new FileStream(copy, FileMode.Create, FileAccess.Write, FileShare.None, 1 << 20, FileOptions.Asynchronous))
+            {
+                length = await dataset.Store.CopyToAsync(entry.Key, 0, long.MaxValue, file, null, CancellationToken.None);
+            }
+
+            ulong running = 0;
+            await using (VortexFile file = await dataset.Session.OpenAsync(copy))
+            {
+                // --segments FILE: each segment's place in the layout, its length and its hash, for two runs to be told apart
+                // segment by segment where their digests differ.
+                string? dump = segments;
+                Dictionary<int, string> where = [];
+                if (dump is not null)
+                {
+                    void Walk(VortexLayout node, string path)
+                    {
+                        foreach (int s in node.Segments)
+                        {
+                            where[s] = path + "/" + node.Encoding;
+                        }
+
+                        for (int c = 0; c < node.Children.Length; c++)
+                        {
+                            Walk(node.Children[c], path + "." + c);
+                        }
+                    }
+
+                    Walk(await file.GetLayoutAsync(), "r");
+                }
+
+                List<string> lines = [];
+                ISegmentReader reader = file;
+                int index = 0;
+                foreach (VortexSegment segment in file.SegmentMap)
+                {
+                    using SegmentOwner owner = await reader.ReadRangeAsync((long)segment.Offset, (int)segment.Length, 1, CancellationToken.None);
+                    ulong hash = Vorticity.Aggregating.CardinalitySlot.Hash(owner.Buffer.Span);
+                    running = (running * 0x9E3779B97F4A7C15UL) ^ hash;
+                    lines.Add(string.Create(CultureInfo.InvariantCulture, $"{index}\t{segment.Length}\t{hash:x16}\t{where.GetValueOrDefault(index, "?")}"));
+                    index++;
+                }
+
+                if (dump is not null)
+                {
+                    await System.IO.File.WriteAllLinesAsync(dump, lines);
+                }
+            }
+
+            sum += running;
+            xor ^= running;
+            total += length;
+            objects++;
+        }
+
+        System.IO.File.Delete(copy);
+
+        return string.Create(CultureInfo.InvariantCulture, $"bytes: {objects} objects, {total:N0} bytes, sum {sum:x16}, xor {xor:x16}");
+    }
+
+    /// <summary>What a compacted backlog of log records holds, as <see cref="DigestAsync"/> says it of metric records.</summary>
+    private static async Task<string> DigestLogsAsync(VortexDataset dataset)
+    {
+        long rows = 0;
+        ulong sum = 0;
+        ulong xor = 0;
+        byte[] buffer = new byte[4096];
+        await foreach (LogRow row in dataset.Scan<LogRow>().ToRecordsAsync())
+        {
+            string text = string.Create(
+                CultureInfo.InvariantCulture,
+                $"{row.At.UtcTicks}\u0001{row.ServiceName}\u0001{row.SeverityNumber}\u0001{row.TraceId}\u0001{row.Attributes.ToJson()}");
+            int length = System.Text.Encoding.UTF8.GetMaxByteCount(text.Length);
+            if (length > buffer.Length)
+            {
+                buffer = new byte[length];
+            }
+
+            ulong hash = Vorticity.Aggregating.CardinalitySlot.Hash(buffer.AsSpan(0, System.Text.Encoding.UTF8.GetBytes(text, buffer)));
+            sum += hash;
+            xor ^= hash;
+            rows++;
+        }
+
+        return string.Create(CultureInfo.InvariantCulture, $"digest: {rows:N0} rows, sum {sum:x16}, xor {xor:x16}");
+    }
+
+    /// <summary>
+    /// What the compacted dataset holds, whatever order its rows come in: their count, and the sum and the exclusive or of a
+    /// hash of each, every field in it, the variants as their JSON. Two runs that wrote the same rows print the same line.
+    /// </summary>
+    private static async Task<string> DigestAsync(VortexDataset dataset)
+    {
+        long rows = 0;
+        ulong sum = 0;
+        ulong xor = 0;
+        byte[] buffer = new byte[4096];
+        await foreach (MetricRow row in dataset.Scan<MetricRow>().ToRecordsAsync())
+        {
+            string text = string.Create(
+                CultureInfo.InvariantCulture,
+                $"{row.TimeUnix.UtcTicks}\u0001{row.ServiceName}\u0001{row.MetricName}\u0001{row.AttributesHash}\u0001{BitConverter.DoubleToInt64Bits(row.Value)}\u0001{row.Attributes.ToJson()}\u0001{row.ResourceAttributes.ToJson()}");
+            int length = System.Text.Encoding.UTF8.GetMaxByteCount(text.Length);
+            if (length > buffer.Length)
+            {
+                buffer = new byte[length];
+            }
+
+            ulong hash = Vorticity.Aggregating.CardinalitySlot.Hash(buffer.AsSpan(0, System.Text.Encoding.UTF8.GetBytes(text, buffer)));
+            sum += hash;
+            xor ^= hash;
+            rows++;
+        }
+
+        return string.Create(CultureInfo.InvariantCulture, $"digest: {rows:N0} rows, sum {sum:x16}, xor {xor:x16}");
+    }
+
     /// <summary>The bytes of every file under <paramref name="root"/>.</summary>
     private static long BytesOf(string root) =>
         Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories).Sum(file => new FileInfo(file).Length);
@@ -264,12 +639,49 @@ internal static class BacklogBench
     private static string Mib(long bytes) => (bytes / (1024.0 * 1024)).ToString("F0", CultureInfo.InvariantCulture);
 
     /// <summary>
+    /// What the scans of a job's inputs held against the windows they were counted at: how many scans, what they were
+    /// counted to hold open and held at most in all, and the scan that held the most of its window. Nothing for a job
+    /// that merged nothing.
+    /// </summary>
+    private static string Windows(CompactionResult result)
+    {
+        if (result.InputWindows.Count == 0)
+        {
+            return "";
+        }
+
+        long open = 0;
+        long held = 0;
+        double worst = 0;
+        int past = 0;
+        foreach ((long window, long opened, long scan) in result.InputWindows)
+        {
+            open += opened;
+            held += scan;
+            worst = Math.Max(worst, (double)scan / Math.Max(1, window));
+            past += scan > window ? 1 : 0;
+        }
+
+        // The scans that held the most, each its window, of which what its object holds open, and what it held, in MiB.
+        string fullest = string.Join(
+            " ", result.InputWindows.OrderByDescending(static scan => scan.Held).Take(4).Select(static scan => $"{Mib(scan.Window)}/{Mib(scan.Open)}/{Mib(scan.Held)}"));
+        return string.Create(
+            CultureInfo.InvariantCulture,
+            $", {result.InputWindows.Count} scans counted {Mib(open)} MiB open and holding {Mib(held)} at their peaks, the fullest {worst:F2} of its window, {past} past theirs (window/open/held of the heaviest: {fullest})");
+    }
+
+    /// <summary>
     /// The process's resident bytes, the blocks alive, those the pool keeps, and the heap past the blocks, sampled every 50 ms,
-    /// and their peaks since the last reset.
+    /// and their peaks since the last reset; with a timeline file, the same and the governor's reservations every 10 ms, kept
+    /// in memory and written when the bench ends, so that no write to the disk lands inside a job.
     /// </summary>
     private sealed class Sampler : IDisposable
     {
         private readonly Timer _timer;
+        private readonly Timer? _fine;
+        private readonly string? _timeline;
+        private readonly List<string> _rows = [];
+        private readonly Stopwatch _since = Stopwatch.StartNew();
         private readonly LargeBlocks? _large;
         private long _resident;
         private long _blocks;
@@ -285,7 +697,7 @@ internal static class BacklogBench
         private readonly long[] _second = new long[20];
         private int _at;
 
-        internal Sampler()
+        internal Sampler(string? timeline = null)
         {
             if (BlockPool.Watch is null)
             {
@@ -294,6 +706,28 @@ internal static class BacklogBench
             }
 
             _timer = new Timer(_ => Sample(), null, 0, 50);
+            if (timeline is not null)
+            {
+                _timeline = timeline;
+                _rows.Add("ms\tround\tresident_MiB\tblocks_MiB\tpool_kept_MiB\tslabs_MiB\tslabs_free_MiB\theap_beside_MiB\treserved_MiB\theld_MiB\trest_MiB\trest_live_MiB\trest_uncertain_MiB\trest_reclaimable_MiB\trest_pending_MiB\trest_container_MiB\tmeasured_MiB\tmeasured_low_MiB\tmeasured_at_collection_MiB");
+                _fine = new Timer(_ => Line(), null, 0, 10);
+            }
+        }
+
+        /// <summary>The bench's round, a column of the timeline.</summary>
+        internal int Round { get; set; }
+
+        /// <summary>One row of the timeline, added under the rows' lock: two callbacks of a late timer may overlap.</summary>
+        private void Line()
+        {
+            (long live, long uncertain, long reclaimable, long pending, long container, long measured, long measuredLow, long measuredAtCollection) = QueryMemoryBudget.Process.RestParts;
+            string row = string.Create(
+                CultureInfo.InvariantCulture,
+                $"{_since.ElapsedMilliseconds}\t{Round}\t{Mib(MemoryPeaks.Read().Working)}\t{Mib(BlockOwner.LiveBytes)}\t{Mib(MemoryAccount.Pool.ParkedBytes)}\t{Mib(Slabs.HeldBytes)}\t{Mib(Slabs.FreeBytes)}\t{Mib(GC.GetTotalMemory(false) - Pinned())}\t{Mib(QueryMemoryBudget.Process.ReservedBytes)}\t{Mib(HeldMemory.TotalBytes())}\t{Mib(QueryMemoryBudget.Process.RestBytes)}\t{Mib(live)}\t{Mib(uncertain)}\t{Mib(reclaimable)}\t{Mib(pending)}\t{Mib(container)}\t{Mib(measured)}\t{Mib(measuredLow)}\t{Mib(measuredAtCollection)}");
+            lock (_rows)
+            {
+                _rows.Add(row);
+            }
         }
 
         internal void Reset()
@@ -330,6 +764,15 @@ internal static class BacklogBench
         public void Dispose()
         {
             _timer.Dispose();
+            _fine?.Dispose();
+            if (_timeline is not null)
+            {
+                lock (_rows)
+                {
+                    System.IO.File.WriteAllLines(_timeline, _rows);
+                }
+            }
+
             if (_large is not null && ReferenceEquals(BlockPool.Watch, _large))
             {
                 BlockPool.Watch = null;

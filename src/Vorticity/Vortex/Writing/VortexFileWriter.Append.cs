@@ -139,6 +139,10 @@ public sealed partial class VortexFileWriter
                 // The owned copy rented from the pool; the writer has taken what it keeps.
                 arena.Reset();
             }
+
+            // The chunks the reopened rows went out in are written before the writer is handed back, so that a write the
+            // sink refuses fails the append, which truncates the file back to what it was.
+            await writer.LandEmissionsAsync(cancellationToken).ConfigureAwait(false);
         }
         catch
         {

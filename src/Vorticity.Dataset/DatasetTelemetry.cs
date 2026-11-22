@@ -260,7 +260,7 @@ internal static class DatasetTelemetry
         if (activity is not null)
         {
             activity.SetTag("vortex.outcome", outcome);
-            activity.SetStatus(ActivityStatusCode.Error, failure.GetType().Name);
+            activity.SetStatus(ActivityStatusCode.Error, failure is JobStoppedException { Reason: { } reason } ? reason : failure.GetType().Name);
             activity.Dispose();
         }
     }

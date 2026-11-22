@@ -42,12 +42,15 @@ public sealed partial class RollupBudgetTests : IClassFixture<RollupBudgetTests.
     /// chunk, those 3 objects' counts and the two listings. Over days 3 to 26: 2 rollups so, and nothing listed, no object
     /// being weighed. Raised on 2026-11-14 by one request and 27,811 bytes, within the requests' ceilings for the first two:
     /// a header carries no page an earlier version wrote any more, and a cold question reads its tree's top where it lies.
+    /// Raised on 2026-11-21 by 240 bytes each, no request more: the entry of each of the 30 objects says what a reader
+    /// holds of it open and what its rows weigh decoded, 8 bytes an entry in the tree the question reads, which a
+    /// compaction counts its inputs by in place of a measure.
     /// </summary>
     private static readonly Dictionary<string, (long Requests, long Bytes)> Ceilings = new(StringComparer.Ordinal)
     {
-        ["count by route"] = (7, 352_065),
-        ["count by day, one route"] = (9, 255_897),
-        ["count by day, one route, days 3 to 26"] = (5, 62_865),
+        ["count by route"] = (7, 352_305),
+        ["count by day, one route"] = (9, 256_137),
+        ["count by day, one route, days 3 to 26"] = (5, 63_105),
     };
 
     private readonly Fixture _fixture;

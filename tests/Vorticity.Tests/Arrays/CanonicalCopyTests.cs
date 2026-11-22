@@ -289,6 +289,159 @@ public sealed class CanonicalCopyTests
             types.Primitive(ptype, nullable ? Nullability.Nullable : Nullability.NonNullable), rows, validity, ptype, values);
     }
 
+    /// <summary>
+    /// A copy that shares repeats keeps once a text whose view names the bytes the buffered view before it names, and every
+    /// row reads back once its source is refilled; a text met again after another is copied again, and a copy that does not
+    /// share copies each row's bytes.
+    /// </summary>
+    [Fact]
+    public void ACopyThatSharesRepeatsKeepsOnceATextTheRowBeforeNames()
+    {
+        DTypeArena types = new DTypeArena();
+        byte[] a = System.Text.Encoding.UTF8.GetBytes("a value of twenty b.");
+        byte[] b = System.Text.Encoding.UTF8.GetBytes("another value of twenty-seven");
+        string[] rows = ["A", "A", "A", "B", "B", "c", "A"];
+        CanonicalArena source = new CanonicalArena();
+        CanonicalArena shared = new CanonicalArena();
+        CanonicalArena whole = new CanonicalArena();
+        int original = Repeats(types, source, a, b, rows);
+        int kept = shared.CopyFrom(source, original, shareRepeats: true);
+        int copied = whole.CopyFrom(source, original);
+        source.Reset();
+        _ = Repeats(types, source, b, a, rows);
+
+        // A three times as one, B twice as one, A again after B: twenty, twenty-nine and twenty bytes.
+        Assert.Equal(a.Length + b.Length + a.Length, shared.GetNode(kept).GetDataBuffer(0).Length);
+        Assert.Equal((4 * a.Length) + (2 * b.Length), whole.GetNode(copied).GetDataBuffer(0).Length);
+        for (int row = 0; row < rows.Length; row++)
+        {
+            byte[] expected = rows[row] switch { "A" => a, "B" => b, _ => "c"u8.ToArray() };
+            Assert.Equal(expected, Vorticity.Compute.LiteralReader.ViewAt(shared.GetNode(kept), row).ToArray());
+            Assert.Equal(expected, Vorticity.Compute.LiteralReader.ViewAt(whole.GetNode(copied), row).ToArray());
+        }
+    }
+
+    /// <summary>
+    /// A copy that shares repeats keeps once a text equal to the one copied before it, though the two name different bytes, as
+    /// a merge's rows of a series name each its own input's; a text as long and beginning alike but differing past that is
+    /// copied, and every row reads back once its source is refilled.
+    /// </summary>
+    [Fact]
+    public void ACopyThatSharesRepeatsKeepsOnceATextEqualToTheOneBefore()
+    {
+        DTypeArena types = new DTypeArena();
+        byte[] a = System.Text.Encoding.UTF8.GetBytes("a value of twenty b.");
+        byte[] near = System.Text.Encoding.UTF8.GetBytes("a value of twenty c.");
+        CanonicalArena source = new CanonicalArena();
+        CanonicalArena shared = new CanonicalArena();
+
+        // Rows 0 to 2 name three copies of a, row 3 near, row 4 a fourth copy of a.
+        byte[][] copies = [a, a, a, near, a];
+        int original = Copies(types, source, copies);
+        int kept = shared.CopyFrom(source, original, shareRepeats: true);
+        source.Reset();
+        _ = Copies(types, source, [near, near, near, a, near]);
+
+        CanonicalNode node = shared.GetNode(kept);
+        Assert.Equal(a.Length + near.Length + a.Length, node.GetDataBuffer(0).Length);
+        ReadOnlySpan<Int128> views = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, Int128>(node.Views.Span);
+        Assert.Equal(views[0], views[2]);
+        Assert.NotEqual(views[0], views[4]);
+        for (int row = 0; row < copies.Length; row++)
+        {
+            Assert.Equal(copies[row], Vorticity.Compute.LiteralReader.ViewAt(node, row).ToArray());
+        }
+
+        static int Copies(DTypeArena types, CanonicalArena arena, byte[][] values)
+        {
+            int total = 0;
+            foreach (byte[] value in values)
+            {
+                total += value.Length;
+            }
+
+            VortexBuffer data = arena.Allocate(total, 1, out Span<byte> dataBytes);
+            VortexBuffer views = arena.Allocate(values.Length * 16, 16, out Span<byte> viewBytes);
+            int at = 0;
+            for (int row = 0; row < values.Length; row++)
+            {
+                values[row].CopyTo(dataBytes[at..]);
+                Span<byte> view = viewBytes.Slice(row * 16, 16);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(view, (uint)values[row].Length);
+                values[row].AsSpan(0, 4).CopyTo(view[4..]);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(view[12..], (uint)at);
+                at += values[row].Length;
+            }
+
+            return arena.AddVarBinView(types.Utf8(Nullability.NonNullable), values.Length, Validity.NonNullable, views, [data]);
+        }
+    }
+
+    /// <summary>
+    /// A copy that views repeats copies each row's bytes, as one that does not share them, but a text whose view names the
+    /// bytes the buffered view before it names views the copy made for that one: the repeats' views are equal, and every row
+    /// reads back once its source is refilled.
+    /// </summary>
+    [Fact]
+    public void ACopyThatViewsRepeatsCopiesEachRowAndViewsTheFirst()
+    {
+        DTypeArena types = new DTypeArena();
+        byte[] a = System.Text.Encoding.UTF8.GetBytes("a value of twenty b.");
+        byte[] b = System.Text.Encoding.UTF8.GetBytes("another value of twenty-seven");
+        string[] rows = ["A", "A", "A", "B", "B", "c", "A"];
+        CanonicalArena source = new CanonicalArena();
+        CanonicalArena viewed = new CanonicalArena();
+        int original = Repeats(types, source, a, b, rows);
+        int kept = viewed.CopyFrom(source, original, viewRepeats: true);
+        source.Reset();
+        _ = Repeats(types, source, b, a, rows);
+
+        CanonicalNode node = viewed.GetNode(kept);
+        Assert.Equal((4 * a.Length) + (2 * b.Length), node.GetDataBuffer(0).Length);
+        ReadOnlySpan<Int128> views = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, Int128>(node.Views.Span);
+        Assert.Equal(views[0], views[1]);
+        Assert.Equal(views[0], views[2]);
+        Assert.Equal(views[3], views[4]);
+        Assert.NotEqual(views[0], views[6]);
+        for (int row = 0; row < rows.Length; row++)
+        {
+            byte[] expected = rows[row] switch { "A" => a, "B" => b, _ => "c"u8.ToArray() };
+            Assert.Equal(expected, Vorticity.Compute.LiteralReader.ViewAt(node, row).ToArray());
+        }
+
+        // The bytes a repeat's own copy holds are its value's, as a copy that does not view repeats leaves them.
+        Assert.Equal(a, node.GetDataBuffer(0).Span.Slice(a.Length, a.Length).ToArray());
+    }
+
+    /// <summary>
+    /// Rows of two texts too long for their views, <paramref name="a"/> and <paramref name="b"/>, each held once in the data
+    /// buffer and viewed by every row that holds it, as a reassembled input views a series' repeated attributes; a "c" inline.
+    /// </summary>
+    private static int Repeats(DTypeArena types, CanonicalArena arena, byte[] a, byte[] b, string[] rows)
+    {
+        VortexBuffer data = arena.Allocate(a.Length + b.Length, 1, out Span<byte> dataBytes);
+        a.CopyTo(dataBytes);
+        b.CopyTo(dataBytes[a.Length..]);
+        VortexBuffer views = arena.Allocate(rows.Length * 16, 16, out Span<byte> viewBytes);
+        for (int row = 0; row < rows.Length; row++)
+        {
+            Span<byte> view = viewBytes.Slice(row * 16, 16);
+            if (rows[row] == "c")
+            {
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(view, 1);
+                view[4] = (byte)'c';
+                continue;
+            }
+
+            byte[] value = rows[row] == "A" ? a : b;
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(view, (uint)value.Length);
+            value.AsSpan(0, 4).CopyTo(view[4..]);
+            System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(view[12..], rows[row] == "A" ? 0u : (uint)a.Length);
+        }
+
+        return arena.AddVarBinView(types.Utf8(Nullability.NonNullable), rows.Length, Validity.NonNullable, views, [data]);
+    }
+
     /// <summary>Three strings, the first too long for its view, so that the copy gathers a data buffer.</summary>
     private static int Text(DTypeArena types, CanonicalArena arena)
     {

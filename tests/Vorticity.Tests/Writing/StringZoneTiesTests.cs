@@ -77,6 +77,37 @@ public sealed class StringZoneTiesTests
         }
     }
 
+    /// <summary>
+    /// A block whose rows all hold one value has the same bounds whether its rows come as views or as a constant: a merge's
+    /// block of one run kept the constant its input decoded, of several runs their views concatenated, as the degree cut the
+    /// runs, and the zone map of the constant block had no bounds at all.
+    /// </summary>
+    [Theory]
+    [InlineData("svc-30")]
+    [InlineData("svc-30-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")]
+    public void ABlockOfOneValueHasTheSameBoundsAsViewsAndAsAConstant(string text)
+    {
+        byte[] value = Encoding.ASCII.GetBytes(text);
+        CanonicalArena arena = new CanonicalArena(64);
+        int views = Node(arena, [.. Enumerable.Repeat<byte[]?>(value, 256)]);
+        int constant = arena.AddConstant(new DTypeArena().Utf8(Nullability.Nullable), 256, Validity.NonNullable, value);
+        ZoneString[] bounds = new ZoneString[2];
+        int[] nodes = [views, constant];
+        for (int i = 0; i < nodes.Length; i++)
+        {
+            StringZones zones = new StringZones(Limit);
+            zones.Accumulate(arena, arena.GetNode(nodes[i]), 0, 256);
+            zones.Close();
+            bounds[i] = Assert.Single(zones.All(1)!);
+            Assert.True(bounds[i].Present);
+        }
+
+        Assert.Equal(bounds[0].Min.ToArray(), bounds[1].Min.ToArray());
+        Assert.Equal(bounds[0].Max?.ToArray(), bounds[1].Max?.ToArray());
+        Assert.Equal(StringBounds.LowerBound(value, Limit, utf8: true), bounds[1].Min.ToArray());
+        GC.KeepAlive(arena);
+    }
+
     private static int Node(CanonicalArena arena, byte[]?[] values)
     {
         DTypeArena types = new DTypeArena();

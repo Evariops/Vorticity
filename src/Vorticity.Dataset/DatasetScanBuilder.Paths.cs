@@ -56,7 +56,10 @@ internal sealed partial class DatasetScanBuilder
 
                 await slots.WaitAsync(stop.Token).ConfigureAwait(false);
                 int place = answered.Place();
-                running.Add(Task.Run(
+
+                // The object's paths counted on a lane of the session's it holds, waited for holding none.
+                running.Add(Execution.LaneWorkers.RunHeldAsync(
+                    _dataset.Session.Lanes,
                     async () =>
                     {
                         try

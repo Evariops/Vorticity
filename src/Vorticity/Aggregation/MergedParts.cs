@@ -299,7 +299,8 @@ internal sealed class MergedParts : ResultParts
     /// back with the lanes' tables.
     /// </summary>
     internal MergedParts(
-        PartSource merge, PartBuilder builder, int workers, AggregationPlan plan, QueryMemory memory, long cut, long started, CancellationToken cancellationToken)
+        PartSource merge, PartBuilder builder, int workers, Execution.LaneBudget lanes, AggregationPlan plan, QueryMemory memory, long cut, long started,
+        CancellationToken cancellationToken)
     {
         _merge = merge;
         _builder = builder;
@@ -311,12 +312,10 @@ internal sealed class MergedParts : ResultParts
         Channel<Built> built = Channel.CreateBounded<Built>(new BoundedChannelOptions(Math.Max(1, workers)) { SingleReader = true });
         _built = built.Reader;
         CancellationToken token = _stopping.Token;
-        Task[] running = new Task[workers];
-        for (int w = 0; w < workers; w++)
-        {
-            running[w] = Task.Run(() => PublishAsync(built.Writer, token), token);
-        }
 
+        // Each worker on a lane of the session's it holds while it builds, as many as are free: the reader merges and builds
+        // the parts none took.
+        Task[] running = Execution.LaneWorkers.Start(lanes, workers, _ => PublishAsync(built.Writer, token));
         _ = CompleteAsync(running, built.Writer);
     }
 

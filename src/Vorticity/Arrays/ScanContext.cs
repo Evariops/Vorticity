@@ -585,6 +585,115 @@ internal sealed class ScanContext : IDisposable
     }
 
     /// <summary>
+    /// The chunks of variant columns the scan takes as their file's shredding holds them, beside the rows it puts back
+    /// together, for a consumer that writes them under a shredding of its own (<see cref="Types.Variants.VariantTake"/>);
+    /// null for none. Behind the pushed holder, as <see cref="ApartKeys"/>.
+    /// </summary>
+    internal Types.Variants.TakenVariants? TakenVariants
+    {
+        get => _pushed?.Taken;
+        set
+        {
+            if (value is not null || _pushed is not null)
+            {
+                (_pushed ??= new Pushed()).Taken = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// What the scan's consumer reserves its memory in before the scan takes it (<see cref="MemoryReserve"/>), a
+    /// compaction's input; null for a scan that reserves nothing. Behind the pushed holder, as <see cref="TakenVariants"/>.
+    /// </summary>
+    internal MemoryReserve? Reserve
+    {
+        get => _pushed?.Reserve;
+        set
+        {
+            if (value is not null || _pushed is not null)
+            {
+                (_pushed ??= new Pushed()).Reserve = value;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Reserves <paramref name="bytes"/> for what the decode under way is about to hold past its batch, a child it decodes
+    /// whole, at the size its header says: nothing for a scan that reserves nothing. Never waits: a reserve that does not
+    /// hold them stops the decode, which the split's loop runs again once they are reserved
+    /// (<see cref="VortexMemoryException.ShortOfRoom"/>), before a byte of the child was decoded.
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The reserve does not hold them now.</exception>
+    internal void RaiseFor(long bytes)
+    {
+        if (bytes <= 0 || _pushed is not { Reserve: { } reserve } pushed)
+        {
+            return;
+        }
+
+        if (!reserve.TryRaise(bytes))
+        {
+            VortexMemoryException refused = Account.Refused(bytes);
+            refused.ShortOfRoom = bytes;
+            throw refused;
+        }
+
+        pushed.Raised += bytes;
+    }
+
+    /// <summary>
+    /// The bytes of the blocks the context's batch holds, those its batch before left idle for the next among them
+    /// (<see cref="ResetBatch"/> keeps them): what a batch decoded here does not take anew.
+    /// </summary>
+    internal long BatchBlocksHeld => _batchCanonical.HeldBytes(out _);
+
+    /// <summary>
+    /// Gives the pool back the blocks the context kept of its batch before, once that batch is reset: what a job short of
+    /// room has its inputs' idle lanes do, a batch decoded here renting them anew.
+    /// </summary>
+    internal void LetBatchBlocksGo() => _batchCanonical.Reset();
+
+    /// <summary>What the split under way reserved through the context and has not closed (<see cref="RaiseFor"/>), taken to close it: 0 after.</summary>
+    internal long TakeRaised()
+    {
+        if (_pushed is not { Raised: > 0 } pushed)
+        {
+            return 0;
+        }
+
+        long raised = pushed.Raised;
+        pushed.Raised = 0;
+        return raised;
+    }
+
+    /// <summary>
+    /// What takes the variant of the chunk a flat layout decodes next as its shredding holds it; null clears it, which the
+    /// reader does after the decode.
+    /// </summary>
+    internal Types.Variants.VariantTake? TakeNext
+    {
+        set
+        {
+            if (value is not null || _pushed is not null)
+            {
+                (_pushed ??= new Pushed()).TakeNext = value;
+            }
+        }
+    }
+
+    /// <summary>Takes <see cref="TakeNext"/>, clearing it, so that no variant decoded below the one that takes it is taken so.</summary>
+    internal Types.Variants.VariantTake? TakeTaken()
+    {
+        if (_pushed is not { TakeNext: { } take } pushed)
+        {
+            return null;
+        }
+
+        pushed.TakeNext = null;
+        return take;
+    }
+
+    /// <summary>
     /// Whether the scan reads a few rows of each chunk it reads, a part of a file's rows read again: a decoder then decodes
     /// of a child that every range of its node reads whole the part the range reads, where a scan of many ranges of the node
     /// decodes the child once for all of them. Behind the pushed holder, as <see cref="ApartKeys"/>.
@@ -785,6 +894,10 @@ internal sealed class ScanContext : IDisposable
         internal ulong EncodedFields;
         internal Types.Variants.ApartKeys? ApartKeys;
         internal bool FewRowsOfChunks;
+        internal Types.Variants.TakenVariants? Taken;
+        internal Types.Variants.VariantTake? TakeNext;
+        internal MemoryReserve? Reserve;
+        internal long Raised;
     }
 
     private Pushed? _pushed;
@@ -1948,6 +2061,16 @@ internal sealed class ScanContext : IDisposable
         VariantsApart = false;
         ApartKeys = null;
         FewRowsOfChunks = false;
+        TakenVariants = null;
+        TakeNext = null;
+        if (_pushed is { Reserve: { } reserve } reserving)
+        {
+            // What a split given up reserved and never closed goes back with the context.
+            reserve.Close(reserving.Raised);
+            reserving.Raised = 0;
+            reserving.Reserve = null;
+        }
+
         Along?.Clear();
         ForgetNodeTables();
         if (_memory is { } memory)

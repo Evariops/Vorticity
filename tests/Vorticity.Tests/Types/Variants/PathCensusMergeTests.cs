@@ -130,6 +130,50 @@ public sealed class PathCensusMergeTests
         lane.Release();
     }
 
+    /// <summary>
+    /// Rows that repeat a value one after the other, as a metric's series holds its attributes, counted in order: the counts
+    /// and the spans are those of the same rows counted one by one, each by a census of its own merged in order, byte for byte
+    /// in the directory, whatever the runs' lengths, the null rows between them and a run that comes back after another.
+    /// </summary>
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(2, 4)]
+    [InlineData(3, 64)]
+    public void RowsThatRepeatAValueCountAsTheRowsOneByOne(int seed, int groupRows)
+    {
+        Random random = new Random(seed);
+        List<Variant> rows = [];
+        Variant[] values = [.. Enumerable.Range(0, 12).Select(_ => Row(random, keys: 20))];
+        while (rows.Count < 3_000)
+        {
+            Variant value = random.Next(15) == 0 ? Variant.Null : values[random.Next(values.Length)];
+            rows.AddRange(Enumerable.Repeat(value, 1 + random.Next(random.Next(3) == 0 ? 1 : 60)));
+        }
+
+        Variant[] all = [.. rows];
+        PathCensus whole = new PathCensus(stringBoundBytes: 8, groupRows: groupRows);
+        Count(whole, all, 0, all.Length);
+
+        PathCensus merged = new PathCensus(stringBoundBytes: 8, groupRows: groupRows);
+        PathCensus one = new PathCensus(stringBoundBytes: 8, groupRows: groupRows);
+        for (int row = 0; row < all.Length; row++)
+        {
+            one.Clear();
+            Count(one, all, row, row + 1);
+            merged.Merge(one);
+        }
+
+        Assert.Equal(whole.Rows, merged.Rows);
+        Assert.Equal(whole.ValueBytes, merged.ValueBytes);
+        Same(merged.Root, whole.Root, "$");
+        Assert.Equal(
+            Convert.ToHexString(Vorticity.Indexes.VariantDirectory.From(merged, null, groupRows).ToBytes()),
+            Convert.ToHexString(Vorticity.Indexes.VariantDirectory.From(whole, null, groupRows).ToBytes()));
+        whole.Release();
+        merged.Release();
+        one.Release();
+    }
+
     /// <summary>A row of a log's attributes: a few keys every row holds, nested objects, lists, texts past the bound, and a key that is data.</summary>
     private static Variant Row(Random random, int keys, string prefix = "k")
     {

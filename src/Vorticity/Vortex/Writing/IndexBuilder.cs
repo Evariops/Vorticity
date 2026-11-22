@@ -38,6 +38,17 @@ internal abstract class IndexBuilder : IDisposable
     /// <summary>Everything it costs: written payloads, queued estimates, and what is still open.</summary>
     internal long Bytes => WrittenBytes + _pending + OpenBytes;
 
+    /// <summary>
+    /// What `Auto`'s verdict weighs (<see cref="Judge"/>): <see cref="Bytes"/> as the last chunk closed or the data ended
+    /// (<see cref="Freeze"/>), whatever rows of the next chunk it took since. What is still open grows as rows come in, and a
+    /// writer's line may ingest a block of the next chunk before the verdict on the one before is taken: weighed then, the
+    /// verdict would depend on how far the lanes had gone.
+    /// </summary>
+    internal long JudgedBytes { get; private set; }
+
+    /// <summary>Takes <see cref="Bytes"/> as the verdict weighs them, as a chunk closes or the data ends.</summary>
+    internal void Freeze() => JudgedBytes = Bytes;
+
     internal long WrittenBytes { get; private set; }
 
     /// <summary>
@@ -48,6 +59,13 @@ internal abstract class IndexBuilder : IDisposable
 
     /// <summary>What the builder has built but still holds unqueued.</summary>
     protected virtual long OpenBytes => 0;
+
+    /// <summary>
+    /// What the batch being fed holds beside the column, which the counts, the statistics over the granules and a wide
+    /// column's sheet read or write (<see cref="CountedRows"/>): handed over by the writer before it feeds the builder the
+    /// batch, the batch's own. Null for a file that keeps no counts.
+    /// </summary>
+    internal CountedRows? Counted { get; set; }
 
     /// <summary>Feeds rows <c>[start, start + count)</c> of the column's node.</summary>
     internal abstract void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count);
@@ -71,9 +89,16 @@ internal abstract class IndexBuilder : IDisposable
     {
     }
 
-    /// <summary>A chunk went out: its blocks and its rows.</summary>
+    /// <summary>A chunk went out: its blocks and its rows. A builder that does anything here says so (<see cref="ClosesChunkLater"/>).</summary>
     internal virtual ValueTask CloseChunkAsync(int firstBlock, int blocks, long firstRow, long rows, CancellationToken cancellationToken) =>
         ValueTask.CompletedTask;
+
+    /// <summary>
+    /// Whether closing a chunk does work, <see cref="CloseChunkAsync"/> overridden: such a builder is closed by its writer's
+    /// owner, in the order of the slots, the payloads it queues as it closes written in that order; any other is closed at
+    /// once by its column's cut on the writer's line, which only freezes what the verdict weighs.
+    /// </summary>
+    internal virtual bool ClosesChunkLater => false;
 
     /// <summary>
     /// The verdict after a chunk: gives up when the builder costs more of the column than its share,
@@ -86,10 +111,10 @@ internal abstract class IndexBuilder : IDisposable
             return;
         }
 
-        if (Bytes * 1000 > facts.ColumnBytes * AutoShare)
+        if (JudgedBytes * 1000 > facts.ColumnBytes * AutoShare)
         {
             Abandon(
-                $"Auto gave it up: {Bytes} bytes against {facts.ColumnBytes} bytes of column, over " +
+                $"Auto gave it up: {JudgedBytes} bytes against {facts.ColumnBytes} bytes of column, over " +
                 $"its share of {AutoShare}‰. An explicit policy overrides the share");
         }
     }

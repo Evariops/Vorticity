@@ -1,8 +1,10 @@
-// The consolidation in ranges of the key (spec A, 6.4; A6): a partition consolidated by the lanes of a session side by
-// side, each a range of the key, as one lane consolidates it in one piece; and as many ranges side by side as the session's
-// jobs' budget holds, one at a time under a budget none fits in.
+// The consolidation of a partition on the lanes of a session (spec A, 6.4; A6): one stream of objects, its merge cut in
+// slices of the key past a slice's rows and its writer sending several blocks through at once, as one lane consolidates it.
+// A merge ran in ranges of the key side by side, as many as the lanes, each writing objects of its own; it runs as one
+// stream now, the same objects at any degree, and only a piece of a consolidation merges the ranges below its cut side by
+// side.
 //
-// THE ORACLE IS THE ONE PIECE AND THE INVARIANTS: the same appends and the same delete into a dataset of four lanes and one
+// THE ORACLE IS THE ONE LANE AND THE INVARIANTS: the same appends and the same delete into a dataset of four lanes and one
 // of one; both consolidate a day each, hold every live row and no deleted one, at level 1 alone, and verify (each object one
 // day's, sorted, the level of a day disjoint).
 using System;
@@ -21,11 +23,11 @@ public sealed partial class DatasetRangedConsolidationTests
 
     /// <summary>
     /// Eight appends of 15 000 rows, most of a first day, the rest of a second, merged, a status of the first day deleted,
-    /// then each day consolidated: on four lanes in ranges of the key, on one in one piece. Both run two consolidations,
-    /// keep the live rows alone at level 1, and hold the layout's invariants.
+    /// then each day consolidated, on four lanes and on one. Both run two consolidations, keep the live rows alone at level
+    /// 1, and hold the layout's invariants.
     /// </summary>
     [Fact]
-    public async Task ADayConsolidatedInRangesHoldsWhatOnePieceHolds()
+    public async Task ADayConsolidatedOnFourLanesHoldsWhatOneLaneHolds()
     {
         (List<Row> appended, List<Row> ranged, _) = await ConsolidateAsync(lanes: 4);
         (List<Row> appendedAgain, List<Row> single, _) = await ConsolidateAsync(lanes: 1);
@@ -36,45 +38,43 @@ public sealed partial class DatasetRangedConsolidationTests
     }
 
     /// <summary>
-    /// The same days consolidated on four lanes under a jobs' budget of 8 MiB, which holds fewer ranges than the lanes: the
-    /// ranges run fewer at a time, every job's blocks within the budget, and hold every live row as ranges side by side hold
-    /// them; the jobs say how many ran at once and what their blocks held.
+    /// The same days consolidated on four lanes under a jobs' budget of 10 MiB: every job's blocks within the budget, and
+    /// every live row held as under a roomy one; a job's merge is one stream whatever the budget.
     /// </summary>
     [Fact]
-    public async Task UnderABudgetNoRangeFitsTheRangesRunOneAtATimeAndHoldTheSame()
+    public async Task UnderABudgetAConsolidationHoldsItsBlocksWithinItAndTheSameRows()
     {
-        const long Budget = 8L << 20;
+        // 10 MiB: one range at a time held 7.98 MB, then 8.77 MB once an input's batch stays until the writers copied the
+        // runs they keep of it (2026-11-17); a consolidation's merge is one stream since.
+        const long Budget = 10L << 20;
         (List<Row> appended, List<Row> roomy, IReadOnlyList<CompactionResult> wide) = await ConsolidateAsync(lanes: 4);
         (_, List<Row> tight, IReadOnlyList<CompactionResult> narrow) = await ConsolidateAsync(lanes: 4, new QueryMemoryBudget(Budget));
         List<Row> live = [.. appended.Where(static row => !(row.Day == 0 && row.Status == 7))];
         Assert.Equal(live, roomy.OrderBy(static row => row.Sequence));
         Assert.Equal(live, tight.OrderBy(static row => row.Sequence));
-        Assert.True(wide.Any(static job => job.RangesAtOnce > 1 && job.MemoryReserved > 0), string.Join("; ", wide.Select(static job => $"{job.ObjectsIn} in, {job.BytesIn} B, {job.RangesAtOnce} at once, {job.MemoryReserved} B reserved")));
+        Assert.True(wide.Any(static job => job.MemoryReserved > 0), string.Join("; ", wide.Select(static job => $"{job.ObjectsIn} in, {job.BytesIn} B, {job.MemoryReserved} B reserved")));
         Assert.All(narrow, static job => Assert.InRange(job.MemoryReserved, 0, Budget));
-        Assert.True(narrow.Max(static job => job.RangesAtOnce) <= wide.Max(static job => job.RangesAtOnce));
+        Assert.All(wide.Concat(narrow).Where(static job => !job.Piece), static job => Assert.Equal(1, job.RangesAtOnce));
     }
 
     /// <summary>
-    /// A range's writer holds at most the rows it writes, whatever the chunks its columns gather: columns that gather chunks
-    /// of 64 MiB, sixteen times that each at most, priced every range at several gigabytes and ran them one at a time under
-    /// a budget of 3 GiB, though a range of some 30 000 rows holds a few megabytes. Priced by its rows, each range reserves
-    /// what it holds, and the ranges run side by side under that budget as under one of 64 GiB.
+    /// A job's writer holds at most the rows it writes, whatever the chunks its columns gather: columns that gather chunks
+    /// of 64 MiB, sixteen times that each at most, priced a writer at several gigabytes, though a day of some 100 000 rows
+    /// holds a few megabytes. Priced by its rows, a job reserves what it holds, under a budget of 3 GiB as under one of 64 GiB.
     /// </summary>
     /// <remarks>
     /// The roomy budget is one of its own, under a parent of a fixed ceiling standing for the process (2026-11-02).
     /// </remarks>
     [Fact]
-    public async Task ARangesWriterIsPricedByTheRowsItWrites()
+    public async Task AJobsWriterIsPricedByTheRowsItWrites()
     {
         QueryMemoryBudget roomyBudget = new QueryMemoryBudget(64L << 30, new QueryMemoryBudget(64L << 30, process: null));
-        (List<Row> appended, List<Row> roomy, IReadOnlyList<CompactionResult> wide) = await ConsolidateAsync(lanes: 4, roomyBudget, chunkBytes: 64 << 20);
+        (List<Row> appended, List<Row> roomy, _) = await ConsolidateAsync(lanes: 4, roomyBudget, chunkBytes: 64 << 20);
         (_, List<Row> tight, IReadOnlyList<CompactionResult> narrow) = await ConsolidateAsync(lanes: 4, new QueryMemoryBudget(3L << 30), chunkBytes: 64 << 20);
         List<Row> live = [.. appended.Where(static row => !(row.Day == 0 && row.Status == 7))];
         Assert.Equal(live, roomy.OrderBy(static row => row.Sequence));
         Assert.Equal(live, tight.OrderBy(static row => row.Sequence));
-        Assert.True(wide.Any(static job => job.RangesAtOnce > 1), string.Join("; ", wide.Select(static job => $"{job.RangesAtOnce} at once, {job.MemoryReserved} B reserved")));
-        Assert.True(narrow.Any(static job => job.RangesAtOnce > 1), string.Join("; ", narrow.Select(static job => $"{job.RangesAtOnce} at once, {job.MemoryReserved} B reserved")));
-        Assert.All(narrow.Where(static job => job.ObjectsMoved == 0), static job => Assert.InRange(job.MemoryReserved, 1, 3L << 30));
+        Assert.All(narrow.Where(static job => job.ObjectsMoved == 0 && job.Rows > 0), static job => Assert.InRange(job.MemoryReserved, 1, 3L << 30));
     }
 
     /// <summary>
@@ -130,19 +130,19 @@ public sealed partial class DatasetRangedConsolidationTests
 
     /// <summary>
     /// Sixteen appends of overlapping keys, with no partition, merged level by level on four lanes and on one: a merge of
-    /// several objects' worth runs in ranges of the key on four, and the levels hold the rows one lane leaves, sorted and
-    /// disjoint, as a verification finds them.
+    /// several objects' worth is one stream on four as on one, the jobs write the same objects, and the levels hold the rows,
+    /// sorted and disjoint, as a verification finds them.
     /// </summary>
     [Fact]
-    public async Task ALevelMergedInRangesHoldsWhatOnePieceHolds()
+    public async Task ALevelMergedOnFourLanesWritesWhatOneLaneWrites()
     {
-        (List<Row> appended, List<Row> ranged, IReadOnlyList<CompactionResult> rangedJobs) = await MergeLevelsAsync(lanes: 4);
-        (_, List<Row> single, IReadOnlyList<CompactionResult> singleJobs) = await MergeLevelsAsync(lanes: 1);
+        (List<Row> appended, List<Row> four, IReadOnlyList<CompactionResult> fourJobs) = await MergeLevelsAsync(lanes: 4);
+        (_, List<Row> one, IReadOnlyList<CompactionResult> oneJobs) = await MergeLevelsAsync(lanes: 1);
         List<Row> all = [.. appended.OrderBy(static row => row.Sequence)];
-        Assert.Equal(all, ranged.OrderBy(static row => row.Sequence));
-        Assert.Equal(all, single.OrderBy(static row => row.Sequence));
-        Assert.Contains(rangedJobs, static job => job.RangesAtOnce > 1);
-        Assert.All(singleJobs, static job => Assert.Equal(1, job.RangesAtOnce));
+        Assert.Equal(all, four.OrderBy(static row => row.Sequence));
+        Assert.Equal(all, one.OrderBy(static row => row.Sequence));
+        Assert.Equal(oneJobs.Select(static job => (job.ObjectsIn, job.ObjectsOut, job.BytesOut)), fourJobs.Select(static job => (job.ObjectsIn, job.ObjectsOut, job.BytesOut)));
+        Assert.All(fourJobs, static job => Assert.Equal(1, job.RangesAtOnce));
     }
 
     private static async Task<(List<Row> Appended, List<Row> Read, IReadOnlyList<CompactionResult> Merged)> MergeLevelsAsync(int lanes)

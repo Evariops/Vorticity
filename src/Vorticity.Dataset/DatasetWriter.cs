@@ -196,6 +196,21 @@ public sealed class DatasetWriter
         return AcceptAsync(cancellationToken);
     }
 
+    /// <summary>
+    /// Takes <paramref name="records"/>, already in memory: turned into columns a part of whole blocks at a time on the
+    /// session's lanes when the dataset keeps its rows in the order they come, into one object, as
+    /// <see cref="VortexFileWriter.WriteRecordsAsync{TRecord}"/> does; through one builder otherwise, as
+    /// <see cref="WriteAsync{TRecord}(ReadOnlySpan{TRecord}, CancellationToken)"/> does, its rows then sorted and cut by
+    /// partition.
+    /// </summary>
+    /// <typeparam name="TRecord">The record type.</typeparam>
+    /// <param name="records">The records, read before this returns.</param>
+    /// <param name="cancellationToken">Cancels the writes.</param>
+    /// <returns>A task that completes when every record is taken.</returns>
+    public ValueTask WriteRecordsAsync<TRecord>(ReadOnlyMemory<TRecord> records, CancellationToken cancellationToken = default)
+        where TRecord : IVortexRecord<TRecord> =>
+        _buffered ? WriteAsync(records.Span, cancellationToken) : Direct().Writer.WriteRecordsAsync(records, cancellationToken);
+
     /// <summary>Takes a stream of rows, a block of them at a time.</summary>
     /// <typeparam name="TRecord">The record type.</typeparam>
     public async ValueTask WriteAsync<TRecord>(IAsyncEnumerable<TRecord> rows, CancellationToken cancellationToken = default)

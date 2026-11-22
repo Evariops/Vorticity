@@ -383,7 +383,8 @@ public sealed class ColumnCountsTests
         DType dtype = VortexTypes.ToDType(schema, types);
         CountsPlan plan = CountsPlan.For(dtype)!;
         ColumnSheetBuilder sheet = new ColumnSheetBuilder();
-        ColumnCountsBuilder counts = new ColumnCountsBuilder(sheet, plan, field: 1, TestAccount.Shared, entryLimit);
+        using CountedRows batch = new CountedRows();
+        ColumnCountsBuilder counts = new ColumnCountsBuilder(sheet, plan, field: 1, TestAccount.Shared, entryLimit) { Counted = batch };
         DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
         DType f64 = types.Primitive(PType.F64, Nullability.NonNullable);
         const int Part = 1_000;
@@ -398,7 +399,7 @@ public sealed class ColumnCountsTests
                 Column(arena, i64, PType.I64, rows, start, count, r => r.Amount),
                 Column(arena, f64, PType.F64, rows, start, count, r => BitConverter.DoubleToInt64Bits(r.Price)),
             ];
-            plan.Prepare(arena, nodes, count);
+            plan.Prepare(batch, arena, nodes, count);
             sheet.Accumulate(arena, nodes[1], 0, count);
             counts.Accumulate(arena, nodes[1], 0, count);
         }

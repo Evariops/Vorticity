@@ -60,8 +60,11 @@ public sealed record DatasetLayout
     }
 
     /// <summary>
-    /// The bytes an object aims at once its partition is consolidated, past which a job starts another, never cutting a
-    /// key: an object goes past it by the rows of one key at most. 1 GiB by default.
+    /// The bytes of data an object aims at once its partition is consolidated, its columns' chunks, past which a job starts
+    /// another, never cutting a key. Its statistics, zone maps, indexes and footer are not counted, about a hundredth of an
+    /// object of a gibibyte. A job reads what an object holds at ends of groups of rows it asks for, and seals it at its
+    /// next key once its data reaches the size: an object goes past it by the rows of one key, or by what its rows weighed
+    /// past the weight the job placed its last reading by. 1 GiB by default.
     /// </summary>
     /// <exception cref="ArgumentOutOfRangeException">The bytes are not positive.</exception>
     public long ObjectBytes

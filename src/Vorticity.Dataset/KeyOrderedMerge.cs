@@ -4,6 +4,8 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.RowEncoding;
+using Vorticity.Scanning;
+using Vorticity.Writing;
 
 namespace Vorticity.Dataset;
 
@@ -23,11 +25,11 @@ internal readonly record struct MergeObject(ObjectEntry Entry, ReadOnlyMemory<by
 /// rank, so a run's input is the top and the key that ends its run is the smaller of the top's two
 /// children: a run costs the logarithm of the inputs open rather than passes over all of them.
 /// </summary>
-internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
+internal sealed class KeyOrderedMerge : IMergedRuns
 {
     private readonly DatasetSnapshot _version;
     private readonly IAsyncEnumerator<MergeObject> _objects;
-    private readonly Func<ObjectLease, ObjectEntry, IAsyncEnumerable<RecordBatch>> _batches;
+    private readonly Func<ObjectLease, ObjectEntry, BatchHandover?, IAsyncEnumerable<RecordBatch>> _batches;
     private readonly Action<ObjectLease>? _opened;
     private readonly SortKey _key;
     private readonly bool _rankedTies;
@@ -54,10 +56,12 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
     private RecordBatch? _current;
     private bool _disposed;
 
-    // The keys of the last input disposed, whose buffers the next input to open encodes its batches into: a level's
-    // objects, a batch or two each, rented, zeroed and gave back three arrays an object. The merge opens, steps and
-    // disposes its inputs one after another.
-    private RowKeys? _spareKeys;
+    // The windows the inputs moved past, in that order, each given back once the ledger says no writer reads it; the
+    // inputs done, disposed once their last window is given back; and the windows given back, with their keys' buffers,
+    // for the next batches: a level's objects, a batch or two each, rented, zeroed and gave back three arrays an object.
+    private readonly Queue<Window> _retired = new();
+    private readonly List<MergeInput> _ending = [];
+    private readonly Stack<Window> _spareWindows = new();
 
     /// <summary>
     /// A merge over <paramref name="objects"/>, which must arrive by ascending bound, and whose
@@ -74,7 +78,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         IAsyncEnumerable<MergeObject> objects,
         SortKey key,
         bool rankedTies,
-        Func<ObjectLease, ObjectEntry, IAsyncEnumerable<RecordBatch>> batches,
+        Func<ObjectLease, ObjectEntry, BatchHandover?, IAsyncEnumerable<RecordBatch>> batches,
         Action<ObjectLease>? opened,
         CancellationToken cancellationToken,
         ReadOnlyMemory<byte> low = default,
@@ -105,13 +109,84 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
 
     /// <summary>
     /// The rows emitted of each input, by its rank: what a piece of a consolidation took of each input, which it marks once
-    /// its objects are committed; null when nothing counts them.
+    /// its objects are committed; null when nothing counts them. This merge's alone: no other merge adds to it at once.
     /// </summary>
     internal long[]? Emitted { get; init; }
 
-    /// <summary>The run the merge is on: an input's batch, or a window of it.</summary>
+    /// <summary>
+    /// The runs the merge's writers keep where they lie in its inputs' batches (<see cref="CurrentRun"/>): with it, each
+    /// input's batch is a window the merge keeps past the input's next one, until every run noted on it is copied, and
+    /// its keys are encoded by the decode that made it. Null for a merge whose caller is done with a run at the next step.
+    /// </summary>
+    internal RunLedger? Ledger { get; init; }
+
+    /// <summary>
+    /// The windows the inputs decode ahead past their own two, shared by the job's merges (<see cref="Scanning.DecodeAhead"/>):
+    /// the input the merge drains decodes on several lanes. Null for none; it needs a <see cref="Ledger"/>, whose inputs hand
+    /// their batches over.
+    /// </summary>
+    internal Scanning.DecodeAhead? Ahead { get; init; }
+
+    /// <summary>The run the merge is on: an input's batch, or a window of it, cut when asked for.</summary>
     /// <exception cref="InvalidOperationException">The merge is not on a run.</exception>
-    internal RecordBatch Current => _current ?? throw new InvalidOperationException("The merge is not on a run.");
+    internal RecordBatch Current
+    {
+        get
+        {
+            if (_current is null && _emitting is { } chosen)
+            {
+                RecordBatch batch = chosen.Batch;
+                if (chosen.Row == 0 && _count == batch.RowCount)
+                {
+                    _current = batch;
+                }
+                else
+                {
+                    _windows ??= new Vorticity.Arrays.CanonicalArena(64, Account);
+                    _window = batch.Window(chosen.Row, _count, _windows, _window);
+                    _current = _window;
+                }
+            }
+
+            return _current ?? throw new InvalidOperationException("The merge is not on a run.");
+        }
+    }
+
+    /// <summary>The rows of the run the merge is on.</summary>
+    public int CurrentRows => _emitting is not null ? _count : throw new InvalidOperationException("The merge is not on a run.");
+
+    /// <summary>
+    /// Where the run the merge is on lies: the arena and the root of its input's batch, its first row there, and the bytes a
+    /// row of the batch names on average. Valid, under a <see cref="Ledger"/>, until the ledger says every run noted on the
+    /// batch is copied; else until the next step.
+    /// </summary>
+    public (Vorticity.Arrays.CanonicalArena Arena, int Root, int Row, double RowBytes) CurrentRun
+    {
+        get
+        {
+            MergeInput input = Emitting();
+            Window window = input.Current;
+            return (window.Batch!.Arena, window.Batch.RootIndex, input.Row, window.RowBytes());
+        }
+    }
+
+    /// <summary>The window of the input's batch the run lies in, and the run's first row there: what a slice hands on.</summary>
+    internal (Window Window, int Row) CurrentWindow
+    {
+        get
+        {
+            MergeInput input = Emitting();
+            return (input.Current, input.Row);
+        }
+    }
+
+    /// <summary>
+    /// What the merge calls as an input moves past a window it took runs of, for a merge whose runs another flow takes later
+    /// (<see cref="SlicedMerge"/>): that flow says when it has taken every run of the window, by setting the window's
+    /// <see cref="Window.CitedUpTo"/> to the runs the ledger had noted then; the merge gives the window back once those are
+    /// copied. Null for a merge whose caller takes each run as it comes.
+    /// </summary>
+    internal Action<Window>? Retiring { get; init; }
 
     /// <summary>The key of the run's row <paramref name="row"/>, row-encoded.</summary>
     public ReadOnlySpan<byte> KeyAt(int row)
@@ -122,6 +197,15 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
 
     /// <summary>The most inputs held open at once.</summary>
     internal int MostOpen { get; private set; }
+
+    /// <summary>The inputs' batches taken over from their scans, under a <see cref="Ledger"/>.</summary>
+    internal long WindowsTaken { get; private set; }
+
+    /// <summary>The inputs' batches copied to be kept, under a <see cref="Ledger"/>: not their scan's own.</summary>
+    internal long WindowsCopied { get; private set; }
+
+    /// <summary>The inputs' batches whose keys the merge's thread encoded, under a <see cref="Ledger"/>: none their decode did.</summary>
+    internal long WindowsKeyedHere { get; private set; }
 
     /// <summary>The key in the store of the object the run comes from.</summary>
     internal string CurrentObject => Emitting().Object;
@@ -138,10 +222,11 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         RowSortField.Ascending.WithNullsLast().WithDescending(descending);
 
     /// <summary>Moves to the next run, opening what could hold it.</summary>
-    internal async ValueTask<bool> MoveNextAsync()
+    public async ValueTask<bool> MoveNextAsync()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         await StepAsync().ConfigureAwait(false);
+        await GiveBackCopiedAsync().ConfigureAwait(false);
         if (!_started)
         {
             _started = true;
@@ -152,7 +237,26 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         {
             MergeObject next = _objects.Current;
             _pending = await _objects.MoveNextAsync().ConfigureAwait(false);
-            await OpenAsync(next).ConfigureAwait(false);
+
+            // Inputs done still wait for their windows, which a writer reads: the caller has its writers let go of them when
+            // the input to open does not hold beside them, and they go first.
+            if (_ending.Count > 0 && LetGo is { } letGo)
+            {
+                await letGo(next.Entry).ConfigureAwait(false);
+                await GiveBackCopiedAsync().ConfigureAwait(false);
+            }
+
+            try
+            {
+                await OpenAsync(next).ConfigureAwait(false);
+            }
+            catch (ReserveExhaustedException stop)
+            {
+                // The object that would not hold beside the inputs open: its rows lie at or past its bound, which says
+                // whether the merge ends on a whole key (Stopped).
+                stop.Opening = next.Bound;
+                throw;
+            }
         }
 
         if (_open.Count == 0)
@@ -163,23 +267,94 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         (MergeInput chosen, int count) = Choose();
         _emitting = chosen;
         _count = count;
+        // The merge's own count: a range of a piece counts into one of its own, added to the piece's once the range is written,
+        // and a merge in slices counts none, so no other merge adds to it, and a run costs no fence.
         if (Emitted is { } emitted && (ulong)chosen.Rank < (ulong)emitted.Length)
         {
-            Interlocked.Add(ref emitted[chosen.Rank], count);
+            emitted[chosen.Rank] += count;
         }
-        RecordBatch batch = chosen.Batch;
-        if (chosen.Row == 0 && count == batch.RowCount)
+        // The run's window is cut when a caller asks for it (Current): a writer that takes the run where it lies
+        // (CurrentRun) needs none.
+        _current = null;
+        return true;
+    }
+
+    /// <inheritdoc/>
+    public long CurrentInput => Emitting().Rank;
+
+    // The input that is taking its next batch, in a step: null outside one.
+    private MergeInput? _advancing;
+
+    /// <inheritdoc/>
+    public StopVerdict Stopped(ReserveExhaustedException stop, KeyTest below)
+    {
+        if (_disposed)
         {
-            _current = batch;
-        }
-        else
-        {
-            _windows ??= new CanonicalArena(64, Account);
-            _window = batch.Window(chosen.Row, count, _windows, _window);
-            _current = _window;
+            return StopVerdict.Not("its merge was gone");
         }
 
-        return true;
+        // An object being opened holds its rows at or past its bound, which may be a leading part of a key: one at or
+        // below the last key given says nothing of its first row.
+        if (stop.Opening is { } bound)
+        {
+            return !below(bound.Span)
+                ? StopVerdict.Not("the object being opened may hold the key the last run ended on")
+                : Others(null, below) ?? StopVerdict.Whole("an input could not be opened");
+        }
+
+        // An input that was taking its next batch: every row it gave is written, and its next key is in its file.
+        if (_advancing is { } advancing)
+        {
+            return Others(advancing, below)
+                ?? (advancing.NextRow < 0
+                    ? StopVerdict.Not("an input had given no batch")
+                    : StopVerdict.Read(advancing.Entry, advancing.NextRow, "an input's next batch found no room"));
+        }
+
+        // Anywhere else, nothing says where the row after the last one given lies.
+        return StopVerdict.Not("the merge was not taking a batch");
+    }
+
+    /// <summary>
+    /// Why the merge's outputs do not end on a whole key, by what the inputs open other than <paramref name="except"/>
+    /// hold next and by the next object not opened; null when each lies past the last key given. A run goes through the
+    /// rows that share the key another input holds, so one of them may still hold the key the last run ended on.
+    /// </summary>
+    private StopVerdict? Others(MergeInput? except, KeyTest below)
+    {
+        foreach (MergeInput input in _open)
+        {
+            if (!ReferenceEquals(input, except) && input.IsLive && !below(input.Key))
+            {
+                return StopVerdict.Not("another input holds the key the last run ended on");
+            }
+        }
+
+        // A bound is a leading part of its object's first key: one at or below the last key given says nothing.
+        return _pending && !below(_objects.Current.Bound.Span)
+            ? StopVerdict.Not("an object not opened yet may hold the key the last run ended on")
+            : null;
+    }
+
+    /// <inheritdoc/>
+    public async ValueTask GiveBackAsync(int level)
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        if (level == 0)
+        {
+            await GiveBackCopiedAsync().ConfigureAwait(false);
+        }
+        else if (level == 2)
+        {
+            foreach (MergeInput input in _open)
+            {
+                input.Handover?.Scan?.DropAhead();
+            }
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -196,40 +371,195 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         _window = null;
         _windows?.Reset();
         _windows = null;
+
+        // Every window goes back, read by no writer any more: the merge's caller has its writers let go of the inputs
+        // before it ends the merge, or has given them up.
+        while (_retired.TryDequeue(out Window? retired))
+        {
+            await GiveBackAsync(retired).ConfigureAwait(false);
+        }
+
         foreach (MergeInput input in _open)
+        {
+            input.Ended = true;
+            if (input.TakeCurrent() is { } current)
+            {
+                await GiveBackAsync(current).ConfigureAwait(false);
+            }
+
+            if (input.LiveWindows == 0)
+            {
+                await input.DisposeAsync().ConfigureAwait(false);
+            }
+        }
+
+        _open.Clear();
+        foreach (MergeInput input in _ending)
         {
             await input.DisposeAsync().ConfigureAwait(false);
         }
 
-        _open.Clear();
-        _spareKeys?.Dispose();
-        _spareKeys = null;
+        _ending.Clear();
+        while (_spareWindows.TryPop(out Window? spare))
+        {
+            spare.OwnKeys?.Dispose();
+        }
+
+        _shapeState?.Dispose();
+        _shapeState = null;
         await _objects.DisposeAsync().ConfigureAwait(false);
     }
 
-    /// <summary>The keys an input disposed gave back, for the next input to encode into; null for none.</summary>
-    private RowKeys? TakeKeys()
+    /// <summary>
+    /// The window of <paramref name="input"/>'s next batch, <paramref name="batch"/>: taken over from its scan, its keys
+    /// encoded by the decode that made it, under a <see cref="Ledger"/>; copied into a context of its own when the batch is
+    /// not the scan's, an input of deleted rows or of another schema; else the batch as it is, valid until the next one.
+    /// </summary>
+    private Window OpenWindow(MergeInput input, RecordBatch batch, ObjectLease lease)
     {
-        RowKeys? keys = _spareKeys;
-        _spareKeys = null;
-        return keys;
+        Window window = _spareWindows.TryPop(out Window? spare) ? spare : new Window();
+        window.Input = input;
+        input.LiveWindows++;
+        if (input.Handover is { } handover && handover.TryTake(batch, out object? prepared, out RecordBatch? taken))
+        {
+            WindowsTaken++;
+            window.Taken = taken;
+            if (ReferenceEquals(taken, batch) && prepared is WindowKeys made)
+            {
+                // Shaped, its keys encoded and its bytes counted, by its decode, on its lane: the lane's view is the window's
+                // until it is given back. No row left of it, it is an empty window.
+                window.Batch = made.View is { RowCount: > 0 } view ? view : null;
+                window.Keys = made.Keys;
+                window.Bytes = made.RowBytes;
+                return window;
+            }
+
+            // A view a wrapper made of the scan's batch in its arena: a view of the window's own, since the wrapper binds its
+            // own again at its next step.
+            window.Batch = window.View = RecordBatch.Over(batch.Arena, batch.RootIndex, batch.StartRow, window.View);
+        }
+        else if (Ledger is not null)
+        {
+            // Not its scan's own: shaped here, then copied to be kept.
+            WindowsCopied++;
+            RecordBatch? shaped = input.Handover?.State is InputShaping shaping ? shaping.Shape(batch, _shapeState ??= new InputShapeState()) : batch;
+            if (shaped is not { RowCount: > 0 })
+            {
+                return window;
+            }
+
+            Vorticity.Arrays.ScanContext copy = Vorticity.Arrays.ScanContexts.Shared.Rent(lease.File, Account);
+            window.Copy = copy;
+            window.Batch = new RecordBatch(copy, copy.Canonical.CopyFrom(shaped.Arena, shaped.RootIndex), shaped.StartRow);
+        }
+        else
+        {
+            window.Batch = batch;
+        }
+
+        if (Ledger is not null)
+        {
+            WindowsKeyedHere++;
+        }
+
+        window.Keys = window.OwnKeys = _key.Encode(window.Batch, window.OwnKeys);
+        return window;
     }
 
-    /// <summary>Keeps <paramref name="keys"/>, an input's, for the next input, or gives their buffers back when keys are kept already or the merge ended.</summary>
-    private void GiveKeys(RowKeys? keys)
+    // What the merge shapes an input's batch with when its scan did not, the batch not taken over.
+    private InputShapeState? _shapeState;
+
+    /// <summary>
+    /// What a merge's input adds to each batch its scan decodes, on the lane that decodes it (<see cref="BatchHandover"/>):
+    /// the batch shaped as <paramref name="shaping"/> says, its keys, and the bytes a row names, given what the lane's
+    /// batch before had.
+    /// </summary>
+    private object? Prepare(RecordBatch batch, object? previous, InputShaping? shaping)
     {
-        if (keys is null)
+        WindowKeys made = previous as WindowKeys ?? new WindowKeys();
+        RecordBatch? view = shaping is null ? batch : shaping.Shape(batch, made);
+        made.View = view;
+        if (view is null || view.RowCount == 0)
+        {
+            return made;
+        }
+
+        made.Keys = _key.Encode(view, made.Keys);
+        made.RowBytes = Window.BytesPerRow(view);
+        return made;
+    }
+
+    /// <summary>
+    /// Sets <paramref name="window"/>, which its input moved past, aside until the ledger says every run noted on it so far is
+    /// copied; given back at once without a ledger, or when it cites nothing.
+    /// </summary>
+    private ValueTask RetireAsync(Window window, bool cited)
+    {
+        if (Ledger is not { } ledger || !cited)
+        {
+            return GiveBackAsync(window);
+        }
+
+        // Its runs taken later by another flow, which dates them as it takes the last: until then, no number covers them.
+        if (Retiring is { } retiring)
+        {
+            window.CitedUpTo = long.MaxValue;
+            _retired.Enqueue(window);
+            retiring(window);
+            return ValueTask.CompletedTask;
+        }
+
+        window.CitedUpTo = ledger.Noted;
+        _retired.Enqueue(window);
+        return ValueTask.CompletedTask;
+    }
+
+    /// <summary>Gives back the windows set aside whose runs the writers have all copied, oldest first.</summary>
+    private async ValueTask GiveBackCopiedAsync()
+    {
+        if (Ledger is not { } ledger || _retired.Count == 0)
         {
             return;
         }
 
-        if (_spareKeys is null && !_disposed)
+        long copied = ledger.Copied;
+        while (_retired.TryPeek(out Window? oldest) && Volatile.Read(ref oldest.CitedUpTo) <= copied)
         {
-            _spareKeys = keys;
-            return;
+            _retired.Dequeue();
+            await GiveBackAsync(oldest).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// Gives <paramref name="window"/> back: its batch to its scan, or its copy's context to the pool; and disposes its input
+    /// once the input is done and holds no window any more.
+    /// </summary>
+    private async ValueTask GiveBackAsync(Window window)
+    {
+        MergeInput input = window.Input!;
+        if (window.Taken is { } taken)
+        {
+            // A view of the window's own goes; one its lane shaped is the lane's, bound again with its next batch.
+            if (window.Batch is not null && ReferenceEquals(window.Batch, window.View))
+            {
+                window.View.Dispose();
+            }
+
+            input.Handover!.GiveBack(taken);
+        }
+        else if (window.Copy is { } copy)
+        {
+            window.Batch!.Dispose();
+            Vorticity.Arrays.ScanContexts.Shared.Return(copy);
         }
 
-        keys.Dispose();
+        window.Clear();
+        _spareWindows.Push(window);
+        input.LiveWindows--;
+        if (input.Ended && input.LiveWindows == 0 && _ending.Remove(input))
+        {
+            await input.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     private async ValueTask StepAsync()
@@ -246,9 +576,13 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         _window?.Dispose();
         _windows?.Reset();
 
-        // Over the heap, the run's input is its top: it sinks to its new key, or leaves.
+        // Over the heap, the run's input is its top: it sinks to its new key, or leaves. Kept while it takes its next batch:
+        // a merge ended there, short of room, knows every other input's next key and not this one's (Stopped).
         bool heaped = Heaped;
-        if (await input.AdvanceAsync(count).ConfigureAwait(false))
+        _advancing = input;
+        bool live = await input.AdvanceAsync(count).ConfigureAwait(false);
+        _advancing = null;
+        if (live)
         {
             if (heaped)
             {
@@ -266,7 +600,16 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
                 _open.Remove(input);
             }
 
-            await input.DisposeAsync().ConfigureAwait(false);
+            // Done, it goes once its windows are back: a window a writer still reads holds its scan.
+            input.Ended = true;
+            if (input.LiveWindows == 0)
+            {
+                await input.DisposeAsync().ConfigureAwait(false);
+            }
+            else
+            {
+                _ending.Add(input);
+            }
         }
     }
 
@@ -313,10 +656,10 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
             ? await rent(next.Entry, _cancellationToken).ConfigureAwait(false)
             : await _version.RentAsync(next.Entry, _cancellationToken).ConfigureAwait(false);
         _opened?.Invoke(lease);
-        MergeInput input = new MergeInput(this, lease, next.Entry.Key, next.Rank, next.FirstRow, _key, _low, _high);
+        MergeInput input = new MergeInput(this, lease, next.Entry, next.Rank, next.FirstRow, _low, _high);
         try
         {
-            await input.StartAsync(_batches(lease, next.Entry), _cancellationToken).ConfigureAwait(false);
+            await input.StartAsync(_batches(lease, next.Entry, input.Handover), _cancellationToken).ConfigureAwait(false);
             if (input.IsLive && input.Key.SequenceCompareTo(next.Bound.Span) < 0)
             {
                 throw new VortexFormatException(
@@ -340,6 +683,21 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         Push(input);
         MostOpen = Math.Max(MostOpen, _open.Count);
     }
+
+    /// <summary>
+    /// What the merge calls before it opens the object of an entry while inputs it is done with still wait for their
+    /// windows to come back, runs noted on them not copied yet: the caller, which drives the writers, has them copy the
+    /// runs they keep when the object would not hold beside those inputs, and the merge gives the windows back and lets
+    /// the inputs go before it opens the object. Null for a merge whose caller does not drive the writers, a slice merged
+    /// ahead.
+    /// </summary>
+    /// <remarks>
+    /// Objects that follow one another along the keys, a level's or those one merge wrote, are open one at a time, and a
+    /// job counts them so (<see cref="DatasetCompactor.Peak"/>). An input done went only once the writers had copied its
+    /// last runs, a few blocks later, and the next one opened beside it meanwhile: two objects of a run held at once what
+    /// the job counted one to hold.
+    /// </remarks>
+    internal Func<ObjectEntry, ValueTask>? LetGo { get; init; }
 
     /// <summary>The input holding the smallest key, and how many of its rows go before any other's.</summary>
     private (MergeInput Chosen, int Count) Choose()
@@ -533,11 +891,10 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
     /// One input of the merge: an object's batches in key order, and their keys row-encoded; under a window, its rows from the
     /// low bound to before the high one.
     /// </summary>
-    private sealed class MergeInput : IAsyncDisposable
+    internal sealed class MergeInput : IAsyncDisposable
     {
         private readonly KeyOrderedMerge _merge;
         private readonly ObjectLease _lease;
-        private readonly SortKey _key;
         private readonly ReadOnlyMemory<byte> _high;
 
         // The low bound until a batch reaches it, past which every row does; the high one once a batch reached it, past
@@ -545,28 +902,61 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         private ReadOnlyMemory<byte> _low;
         private bool _ended;
         private IAsyncEnumerator<RecordBatch>? _batches;
-        private RecordBatch? _batch;
-        private RowKeys? _keys;
+        private Window? _window;
         private int _row;
+        private int _first;
 
         // Kept apart from the batch, which is handed out whole when a run is all of it: a consumer
         // may dispose what it was given, and stepping past it must not read it again.
         private int _rows;
 
-        internal MergeInput(KeyOrderedMerge merge, ObjectLease lease, string key, long rank, long firstRow, SortKey sortKey, ReadOnlyMemory<byte> low, ReadOnlyMemory<byte> high)
+        internal MergeInput(KeyOrderedMerge merge, ObjectLease lease, ObjectEntry entry, long rank, long firstRow, ReadOnlyMemory<byte> low, ReadOnlyMemory<byte> high)
         {
             _merge = merge;
             _lease = lease;
             _low = low;
             _high = high;
-            Object = key;
+            Entry = entry;
+            Object = entry.Key;
             Rank = rank;
             FirstRow = firstRow;
-            _key = sortKey;
+            Handover = merge.Ledger is null ? null : new BatchHandover(Prepare) { Ahead = merge.Ahead };
+        }
+
+        /// <summary>What its scan hands its batches over through, under a ledger; null otherwise.</summary>
+        internal BatchHandover? Handover { get; }
+
+        /// <summary>What the decode of each batch of its scan adds beside it: the batch shaped, its keys, the bytes a row names.</summary>
+        private object? Prepare(RecordBatch batch, object? previous) => _merge.Prepare(batch, previous, Handover!.State as InputShaping);
+
+        /// <summary>Its windows not given back yet: the current one and those set aside.</summary>
+        internal int LiveWindows { get; set; }
+
+        /// <summary>Whether it has no row left, and goes once its windows are back.</summary>
+        internal bool Ended { get; set; }
+
+        /// <summary>The window of its current batch.</summary>
+        internal Window Current => _window!;
+
+        /// <summary>Takes its current window from it, for the merge to give back as it ends; null when it has none.</summary>
+        internal Window? TakeCurrent()
+        {
+            Window? window = _window;
+            _window = null;
+            return window;
         }
 
         /// <summary>The object's key in the store, for a message.</summary>
         internal string Object { get; }
+
+        /// <summary>The object's entry: what a read of the key of its next row is made from, once the merge ended short of room (<see cref="Stopped"/>).</summary>
+        internal ObjectEntry Entry { get; }
+
+        /// <summary>
+        /// The row of the object's file that follows the last batch the input took, deleted rows counted; -1 before it
+        /// took one. Where its next row is read from when its next batch could not be.
+        /// </summary>
+        internal long NextRow { get; private set; } = -1;
 
         /// <summary>Where its ties go.</summary>
         internal long Rank { get; }
@@ -574,19 +964,19 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         /// <summary>Where the object's rows start among the dataset's.</summary>
         internal long FirstRow { get; }
 
-        internal bool IsLive => _batch is not null;
+        internal bool IsLive => _window is not null;
 
-        internal RecordBatch Batch => _batch!;
+        internal RecordBatch Batch => _window!.Batch!;
 
         internal int Row => _row;
 
         /// <summary>The rows left in its current batch.</summary>
-        internal int Remaining => _batch is null ? 0 : _rows - _row;
+        internal int Remaining => _window is null ? 0 : _rows - _row;
 
         /// <summary>Its current key, row-encoded.</summary>
-        internal ReadOnlySpan<byte> Key => _keys!.Row(_row);
+        internal ReadOnlySpan<byte> Key => _window!.Keys!.Row(_row);
 
-        internal ReadOnlySpan<byte> KeyAt(int row) => _keys!.Row(row);
+        internal ReadOnlySpan<byte> KeyAt(int row) => _window!.Keys!.Row(row);
 
         internal ValueTask StartAsync(IAsyncEnumerable<RecordBatch> batches, CancellationToken cancellationToken)
         {
@@ -605,7 +995,7 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         /// </remarks>
         internal int RunUpTo(ReadOnlySpan<byte> limit, bool inclusive)
         {
-            RowKeys keys = _keys!;
+            RowKeys keys = _window!.Keys!;
             if (Within(keys.Row(_rows - 1), limit, inclusive))
             {
                 return _rows - _row;
@@ -664,9 +1054,12 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
 
         public async ValueTask DisposeAsync()
         {
-            _merge.GiveKeys(_keys);
-            _keys = null;
-            _batch = null;
+            // A window still held goes with the input: its copy back to the pool, its scan's lane with the scan.
+            if (TakeCurrent() is { } window)
+            {
+                _merge.Drop(window);
+            }
+
             if (_batches is not null)
             {
                 await _batches.DisposeAsync().ConfigureAwait(false);
@@ -677,29 +1070,42 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
         }
 
         /// <summary>
-        /// Takes the next batch and row-encodes its keys: a key of several columns has no ordering
-        /// to compare in place, and the encoding gives one value per row that sorts as the key does.
-        /// Under a window, the batch's rows below its low bound and from its high one on are left out.
-        /// The keys of each batch go into the buffers of the one before, or of the last input disposed,
-        /// which an input disposed gives back to the merge: rented and given back a batch, a merge of 2M
-        /// rows spent 14 % of its samples renting, zeroing and returning them.
+        /// Takes the next batch as a window, its keys row-encoded: a key of several columns has no ordering to compare in
+        /// place, and the encoding gives one value per row that sorts as the key does. Under a range, the batch's rows below
+        /// its low bound and from its high one on are left out. The window of the batch before is set aside until no writer
+        /// reads it (<see cref="RetireAsync"/>). A window's keys go into the buffers of a window given back before: rented and
+        /// given back a batch, a merge of 2M rows spent 14 % of its samples renting, zeroing and returning them.
         /// </summary>
         private async ValueTask NextAsync()
         {
-            _batch = null;
+            if (TakeCurrent() is { } last)
+            {
+                await _merge.RetireAsync(last, cited: _row > _first).ConfigureAwait(false);
+            }
+
             _row = 0;
             _rows = 0;
+            _first = 0;
             while (!_ended && await _batches!.MoveNextAsync().ConfigureAwait(false))
             {
                 RecordBatch batch = _batches.Current;
+                NextRow = batch.StartRow + batch.RowCount;
                 if (batch.RowCount == 0)
                 {
                     continue;
                 }
 
-                RowKeys keys = _keys = _key.Encode(batch, _keys ?? _merge.TakeKeys());
+                // Its rows as shaped: its deleted rows left out, its columns reshaped. None left, it goes back at once.
+                Window window = _merge.OpenWindow(this, batch, _lease);
+                if (window.Batch is not { RowCount: > 0 } held)
+                {
+                    await _merge.GiveBackAsync(window).ConfigureAwait(false);
+                    continue;
+                }
+
+                RowKeys keys = window.Keys!;
                 int from = 0;
-                int to = batch.RowCount;
+                int to = held.RowCount;
                 if (!_low.IsEmpty)
                 {
                     from = FirstAtOrPast(keys, 0, to, _low.Span);
@@ -717,11 +1123,13 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
 
                 if (from == to)
                 {
+                    await _merge.GiveBackAsync(window).ConfigureAwait(false);
                     continue;
                 }
 
-                _batch = batch;
+                _window = window;
                 _row = from;
+                _first = from;
                 _rows = to;
                 return;
             }
@@ -744,6 +1152,110 @@ internal sealed class KeyOrderedMerge : IAsyncDisposable, IOrderedKeys
             }
 
             return from;
+        }
+    }
+
+    /// <summary>Lets <paramref name="window"/> go with its input, given up: its copy back to the pool, no writer reading it.</summary>
+    private void Drop(Window window)
+    {
+        if (window.Taken is { } taken)
+        {
+            if (window.Batch is not null && ReferenceEquals(window.Batch, window.View))
+            {
+                window.View.Dispose();
+            }
+
+            window.Input!.Handover!.GiveBack(taken);
+        }
+        else if (window.Copy is { } copy)
+        {
+            window.Batch!.Dispose();
+            Vorticity.Arrays.ScanContexts.Shared.Return(copy);
+        }
+
+        window.Input!.LiveWindows--;
+        window.Clear();
+        if (!_disposed)
+        {
+            _spareWindows.Push(window);
+        }
+        else
+        {
+            window.OwnKeys?.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// One batch of an input, which the merge keeps until no writer reads it: the batch, its rows' keys row-encoded, and
+    /// the runs noted on the ledger when the input moved past it.
+    /// </summary>
+    internal sealed class Window
+    {
+        /// <summary>The input it is a batch of.</summary>
+        internal MergeInput? Input;
+
+        /// <summary>The batch: its scan's, taken over; a copy in <see cref="Copy"/>; or the input's own, valid until its next.</summary>
+        internal RecordBatch? Batch;
+
+        /// <summary>Its rows' keys: those the decode encoded, the lane's, or <see cref="OwnKeys"/>.</summary>
+        internal RowKeys? Keys;
+
+        /// <summary>The keys' buffers the window keeps from one batch to the next, for a batch whose decode encoded none.</summary>
+        internal RowKeys? OwnKeys;
+
+        /// <summary>Its scan's batch, taken over, to give back to it; null for a batch not taken over.</summary>
+        internal RecordBatch? Taken;
+
+        /// <summary>The window's own view over its scan's arena, for a batch a wrapper reshaped there; kept from one batch to the next.</summary>
+        internal RecordBatch? View;
+
+        /// <summary>The context of a copy of the batch, when the batch was not its scan's.</summary>
+        internal Vorticity.Arrays.ScanContext? Copy;
+
+        /// <summary>The runs the ledger had noted when the input moved past it: given back once every one is copied.</summary>
+        internal long CitedUpTo;
+
+        /// <summary>The bytes a row of the batch names on average; negative until counted.</summary>
+        internal double Bytes = -1;
+
+        /// <summary>The bytes a row of the batch names on average, counted at the first run a writer keeps of it.</summary>
+        internal double RowBytes() => Bytes >= 0 ? Bytes : Bytes = BytesPerRow(Batch!);
+
+        /// <summary>The bytes a row of <paramref name="batch"/> names on average: what the rows a writer keeps of it are sized by.</summary>
+        internal static double BytesPerRow(RecordBatch batch) =>
+            (double)batch.Arena.NamedBytes(batch.RootIndex) / Math.Max(1, batch.RowCount);
+
+        /// <summary>Forgets its batch, keeping its keys' buffers.</summary>
+        internal void Clear()
+        {
+            Input = null;
+            Batch = null;
+            Keys = null;
+            Taken = null;
+            Copy = null;
+            CitedUpTo = 0;
+            Bytes = -1;
+        }
+    }
+
+    /// <summary>
+    /// What the decode of an input's batch makes beside it, on its lane: the batch shaped (<see cref="InputShaping"/>), its
+    /// keys, and the bytes a row names.
+    /// </summary>
+    private sealed class WindowKeys : InputShapeState
+    {
+        /// <summary>The batch the merge reads: the scan's, or a view of it shaped; null when no row of it is left.</summary>
+        internal RecordBatch? View;
+
+        internal RowKeys? Keys;
+        internal double RowBytes;
+
+        public override void Dispose()
+        {
+            Keys?.Dispose();
+            Keys = null;
+            View = null;
+            base.Dispose();
         }
     }
 }

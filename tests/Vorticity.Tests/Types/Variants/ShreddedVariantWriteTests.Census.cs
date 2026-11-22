@@ -149,7 +149,11 @@ public sealed partial class ShreddedVariantWriteTests
     {
         string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vorticity-counted-{Guid.NewGuid():N}.vortex");
         VortexWriteOptions options = new VortexWriteOptions { BlockRows = 1_024, ChunkTargetBytes = 1 << 28, CountsPaths = true, CarriesContents = true, DegreeOfParallelism = degree };
-        await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Doc>(path, options);
+
+        // A session of its own, whose lanes the census's slices take: the process's, shared with every test running, may
+        // have none free, and the rows are then counted on the writer's thread.
+        await using VortexSession session = VortexSession.Create(o => o.MaxDegreeOfParallelism = degree);
+        await using VortexFileWriter writer = session.CreateWriter<Doc>(path, options);
         await writer.WriteAsync<Doc>(rows, Ct);
         await writer.CompleteAsync(Ct);
         return path;

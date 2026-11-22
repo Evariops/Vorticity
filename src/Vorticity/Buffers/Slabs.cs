@@ -124,16 +124,9 @@ internal static class Slabs
         int order = BitOperations.Log2((uint)bytes) - PageShift;
         lock (Gate)
         {
-            // The oldest slab that holds one: the fullest instead was 6 to 10 % slower on a backlog's jobs, and left more
-            // slabs at rest under 4 and 8 GiB (2026-11-16).
-            foreach (Slab slab in s_slabs)
+            if (TakeHeld(order, bytes) is (Slab held, byte[] array, int offset))
             {
-                if (slab.Holds(order))
-                {
-                    int page = slab.TryTake(order);
-                    Interlocked.Add(ref s_pieceBytes, bytes);
-                    return (slab, slab.Array, slab.Base + (page << PageShift), false);
-                }
+                return (held, array, offset, false);
             }
 
             Slab made;
@@ -151,6 +144,43 @@ internal static class Slabs
             Interlocked.Add(ref s_pieceBytes, bytes);
             return (made, made.Array, made.Base + (made.TryTake(order) << PageShift), true);
         }
+    }
+
+    /// <summary>
+    /// A piece of <paramref name="bytes"/> (<see cref="Cuts"/>) of a slab alive, as <see cref="TryTake"/> gives it; null
+    /// when none holds one, and no slab is made: what a rent asks for first, bytes the heap holds already
+    /// (<see cref="BlockPool.Rent"/>).
+    /// </summary>
+    internal static (Slab Slab, byte[] Array, int Offset)? TryTakeHeld(int bytes)
+    {
+        int order = BitOperations.Log2((uint)bytes) - PageShift;
+        lock (Gate)
+        {
+            return TakeHeld(order, bytes);
+        }
+    }
+
+    /// <summary>
+    /// A piece of <paramref name="order"/>, <paramref name="bytes"/>, cut from the oldest slab alive that holds one, or
+    /// null when none does. Under the gate.
+    /// </summary>
+    /// <remarks>
+    /// The oldest slab that holds one: the fullest instead was 6 to 10 % slower on a backlog's jobs, and left more slabs
+    /// at rest under 4 and 8 GiB (2026-11-16).
+    /// </remarks>
+    private static (Slab Slab, byte[] Array, int Offset)? TakeHeld(int order, int bytes)
+    {
+        foreach (Slab slab in s_slabs)
+        {
+            if (slab.Holds(order))
+            {
+                int page = slab.TryTake(order);
+                Interlocked.Add(ref s_pieceBytes, bytes);
+                return (slab, slab.Array, slab.Base + (page << PageShift));
+            }
+        }
+
+        return null;
     }
 
     /// <summary>

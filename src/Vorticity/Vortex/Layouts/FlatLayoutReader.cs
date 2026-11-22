@@ -146,6 +146,21 @@ internal sealed class FlatLayoutReader : LayoutReader
             }
         }
 
+        // A chunk of a variant column the scan's consumer writes under a shredding of its own: its decode takes the rows as
+        // the chunk's shredding holds them and sizes them, not put back together, while the consumer wants them.
+        if (context.TakenVariants is { } taken && !node.Bufferless && taken.Find(SpecOf(in node, 0).Offset) is { Wanted: true } take)
+        {
+            context.TakeNext = take;
+            try
+            {
+                return ExecuteChunk(in node, rows, in fields, context, total, length);
+            }
+            finally
+            {
+                context.TakeNext = null;
+            }
+        }
+
         return ExecuteChunk(in node, rows, in fields, context, total, length);
     }
 

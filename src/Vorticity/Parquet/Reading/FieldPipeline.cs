@@ -53,6 +53,11 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IValueTaskSource<int>
     private readonly ColumnChunkReader[] _readers;
     private readonly PageLanes? _pages;
     private readonly int _lanes;
+    private readonly Execution.LaneBudget _session;
+
+    /// <summary>The entries of the session's lanes the runners hold, one per runner, the last taken on top.</summary>
+    private readonly long[] _entered;
+    private int _held;
     private readonly ScanContext[] _contexts;
     private readonly int[] _nodes;
     private readonly int[] _next;
@@ -93,13 +98,16 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IValueTaskSource<int>
     /// <summary>
     /// A pipeline of <paramref name="readers"/>, a field each, on <paramref name="lanes"/> lanes at most,
     /// which run the pages <paramref name="pages"/> queues ahead before each field, their contexts' blocks counted for
-    /// <paramref name="account"/>, the scan's.
+    /// <paramref name="account"/>, the scan's. Each runner holds a lane of <paramref name="session"/>'s, the session's, from
+    /// its queuing to its end.
     /// </summary>
-    internal FieldPipeline(ColumnChunkReader[] readers, VortexReadOptions options, int lanes, PageLanes? pages, Buffers.MemoryAccount account)
+    internal FieldPipeline(ColumnChunkReader[] readers, VortexReadOptions options, int lanes, PageLanes? pages, Execution.LaneBudget session, Buffers.MemoryAccount account)
     {
         _readers = readers;
         _pages = pages;
         _lanes = lanes;
+        _session = session;
+        _entered = new long[lanes];
         _contexts = new ScanContext[readers.Length * Slots];
         for (int i = 0; i < _contexts.Length; i++)
         {
@@ -171,6 +179,13 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IValueTaskSource<int>
         {
             if (_pending[slot] > 0 && _failed is null)
             {
+                // Fields to decode and no runner, the session's lanes all held when they became runnable: the read waits
+                // for one, holding none, and starts a runner on it.
+                if (_runners == 0 && _runnable.Count > 0)
+                {
+                    return RunnerThenWaitAsync(batch);
+                }
+
                 _ready.Reset();
                 _awaited = slot;
                 return new ValueTask<int>(this, _ready.Version);
@@ -184,6 +199,34 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IValueTaskSource<int>
             _errors[slot]?.Throw();
             return new ValueTask<int>(slot);
         }
+    }
+
+    /// <summary>Waits for a lane of the session's, starts a runner on it unless one started meanwhile, then waits for <paramref name="batch"/>.</summary>
+    private async ValueTask<int> RunnerThenWaitAsync(int batch)
+    {
+        long entered = await _session.EnterAsync(CancellationToken.None).ConfigureAwait(false);
+        bool start;
+        lock (_gate)
+        {
+            start = _runners == 0 && _runnable.Count > 0;
+            if (start)
+            {
+                _entered[_held++] = entered;
+                _runners++;
+                _starting++;
+            }
+        }
+
+        if (start)
+        {
+            Queue(1);
+        }
+        else
+        {
+            _session.Exit(entered);
+        }
+
+        return await WaitAsync(batch).ConfigureAwait(false);
     }
 
     /// <summary>Field <paramref name="field"/>'s node in slot <paramref name="slot"/>, and the context whose arena holds it.</summary>
@@ -399,6 +442,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IValueTaskSource<int>
                 bool due = false;
                 int slot = 0;
                 ExceptionDispatchInfo? error = null;
+                long entered = 0;
                 lock (_gate)
                 {
                     if (fresh)
@@ -411,12 +455,15 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IValueTaskSource<int>
                     if (field < 0)
                     {
                         _runners--;
+                        entered = _entered[--_held];
                         due = Due(out slot, out error);
                     }
                 }
 
                 if (field < 0)
                 {
+                    // The runner's lane of the session's given back past the gate: it may start a pump of the core.
+                    _session.Exit(entered);
                     if (due)
                     {
                         Complete(slot, error);
@@ -562,12 +609,17 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IValueTaskSource<int>
         return field;
     }
 
-    /// <summary>The lanes to queue for the runnable fields, as many as the lanes allow, counted as running; under the gate.</summary>
+    /// <summary>
+    /// The lanes to queue for the runnable fields, as many as the lanes allow and the session has free, each holding one of
+    /// the session's, counted as running; under the gate. None when the session has none free: the read takes one as it
+    /// waits for a batch no runner decodes (<see cref="WaitAsync"/>).
+    /// </summary>
     private int Wake()
     {
         int wake = 0;
-        while (_runners < _lanes && _starting < _runnable.Count)
+        while (_runners < _lanes && _starting < _runnable.Count && Execution.LaneWorkers.TryTake(_session, out long entered))
         {
+            _entered[_held++] = entered;
             _runners++;
             _starting++;
             wake++;
@@ -585,7 +637,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IValueTaskSource<int>
     {
         for (int i = 0; i < lanes; i++)
         {
-            ThreadPool.UnsafeQueueUserWorkItem(this, preferLocal: here);
+            Execution.LaneWorkers.Queue(this, here);
         }
     }
 }

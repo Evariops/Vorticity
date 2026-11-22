@@ -49,6 +49,12 @@ public sealed partial class DatasetKeyPruningTests
             // Columns of several chunks, so that the sparse index spares chunks and is read (VortexDataset.ReadsKeyIndex).
             ChunkBytes = 64 << 10,
             Write = new VortexWriteOptions { BlockRows = 1_024 },
+
+            // A day consolidated in pieces of one object, as a session of one lane cut them before pieces had a size of
+            // their own: several objects a day. In one job of the whole day, one object, the key passed nothing over one
+            // run in three, as the store each run builds afresh, its objects' identities new, laid the day out
+            // (2026-11-17); one store's copies consolidate to the same bytes.
+            PieceObjects = 1,
         }, Ct);
         List<Row> all = [];
         for (int a = 0; a < 8; a++)
@@ -122,7 +128,10 @@ public sealed partial class DatasetKeyPruningTests
             {
                 SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.At)).Truncate(CalendarUnit.Hour)],
                 IndexedPrefix = 1,
-                ObjectBytes = 256 << 10,
+
+                // Objects of an eighth of the rows or so, so that some hold one service's rows alone wherever the writer
+                // rolls them: at a quarter, one service's rows held no object whole when the rolls moved by a few rows.
+                ObjectBytes = 128 << 10,
             },
             ContentsObjectBytes = 0,
             ChunkBytes = 64 << 10,

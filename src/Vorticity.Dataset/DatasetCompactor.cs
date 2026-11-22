@@ -64,7 +64,33 @@ public sealed record CompactionResult
     /// </summary>
     public long MemoryReserved { get; init; }
 
-    /// <summary>The most ranges of the key it ran side by side, as many as the budget held; 1 for a job in one piece.</summary>
+    /// <summary>Of <see cref="MemoryReserved"/>, the most its inputs' blocks held, and its writer's, each at its own moment.</summary>
+    internal (long Inputs, long Writer) MemoryReservedBy { get; init; }
+
+    /// <summary>
+    /// What the inputs a merge of the job holds open at once were counted to hold together at most
+    /// (<see cref="DatasetCompactor.Peak"/>), at the rows of the batches it read them in; 0 for a job that merged nothing.
+    /// </summary>
+    internal long InputsPlanned { get; init; }
+
+    /// <summary>
+    /// Each scan of an input the job's merges opened: the window it was counted at (<see cref="DatasetCompactor.Window"/>),
+    /// of which what the object holds open, and what its account held at most. What tells a window that counts too little,
+    /// or far too much.
+    /// </summary>
+    internal IReadOnlyList<(long Window, long Open, long Held)> InputWindows { get; init; } = [];
+
+    /// <summary>
+    /// The times the job began its objects again under a doubled bound, an object having passed its inputs' bytes times the
+    /// bound (<see cref="ObjectPastBoundException"/>): each the whole of its writing done again.
+    /// </summary>
+    internal int BoundRestarts { get; init; }
+
+    /// <summary>
+    /// The most ranges of the key the job merged at once, as many as the budget admitted and the lanes free let run: a piece
+    /// of a consolidation, the ranges below its cut the slices of its one stream; 1 for any other job, which writes one
+    /// stream of objects.
+    /// </summary>
     public int RangesAtOnce { get; init; } = 1;
 
     /// <summary>
@@ -82,6 +108,139 @@ public sealed record CompactionResult
 
     /// <summary>Whether it was a piece of a consolidation, which leaves the partition's next keys in level 0 for the next job.</summary>
     internal bool Piece { get; init; }
+
+    /// <summary>
+    /// Whether its merge ended short of room, at the key it reached, and it committed what it had merged, a piece of
+    /// itself: the rows it left in its inputs are the next job's.
+    /// </summary>
+    internal bool StoppedShort { get; init; }
+
+    /// <summary>What ended its merge short of room, the reservation not granted or the refusal of a block no reserve covers, which names what asked for it; null for a job that ran to its end.</summary>
+    internal string? StoppedBy { get; init; }
+
+    /// <summary>
+    /// How the end of the object its merge was writing was judged when it ended short of room: on a whole key, by the
+    /// bound of the input being opened or by the next key of the input whose batch found no room, read in its file, and
+    /// the object sealed; or not, and why, the object dropped. Null for a job that ran to its end.
+    /// </summary>
+    internal string? StoppedHow { get; init; }
+
+    /// <summary>
+    /// The times an arena of its writers gave back the blocks it keeps from one use to the next, the job not holding what
+    /// its writer held then (<see cref="JobMemory.HoldsWriter"/>); 0 for a job whose writer stayed within its share.
+    /// </summary>
+    internal long WriterArenasGivenBack { get; init; }
+
+    /// <summary>
+    /// The blocks the pool kept that the process's work took while the job ran and the process's limit left its work no
+    /// room for them, and those of them taken past the sixteenth a block may count past
+    /// (<see cref="JobMemory.PoolBlocksPastRoom"/>): refused, when a block the heap held already was asked as new memory.
+    /// </summary>
+    internal (long PastRoom, long PastMargin) PoolBlocksPastRoom { get; init; }
+
+    /// <summary>
+    /// What its writer was counted to hold, which its inputs left it as they reserved (<see cref="JobMemory.WriterPrice"/>):
+    /// what its blocks held may pass the jobs' budget by what its writer held past it, and by no more.
+    /// </summary>
+    internal long WriterCounted { get; init; }
+
+    /// <summary>
+    /// What its parts' reserves did (<see cref="MemoryReserve"/>): the reservations not granted at once, work not started
+    /// ahead among them, the times one had the job give back what it had started ahead, and the bytes reserved.
+    /// </summary>
+    internal (long HeldBack, long MadeRoom, long Raised) Reserves { get; init; }
+
+    /// <summary>
+    /// The calls its rows reached the writers of its objects in: a block's map each, a run of a block or more cut in maps too,
+    /// or a batch of a concatenation. A diagnostic of how its merge cuts them.
+    /// </summary>
+    internal long WriterBatches { get; init; }
+
+    /// <summary>Of <see cref="WriterBatches"/>, those the writers ingested on their lanes rather than on the job's thread.</summary>
+    internal long WriterBatchesAcross { get; init; }
+
+    /// <summary>The batches the writers staged and sent through on a lane of their own while the merge went on.</summary>
+    internal long WriterBatchesFlown { get; init; }
+
+    /// <summary>Of <see cref="WriterBatchesFlown"/>, the blocks the writers sent through their line, several at once, each column's work on them in order.</summary>
+    internal long WriterBlocksOnLine { get; init; }
+
+    /// <summary>The chunks of the file the blocks on the writers' lines ended, each emitted before the next block ingested.</summary>
+    internal long WriterChunksEndedOnLine { get; init; }
+
+    /// <summary>Of <see cref="WriterChunksEndedOnLine"/>, those cut column by column, each column emitted once cut while the blocks after it went through.</summary>
+    internal long WriterChunksCutOnLine { get; init; }
+
+    /// <summary>The ends of groups of rows the job asked its writers for, each to read what an object held (<see cref="VortexFileWriter.EndGroupAsync"/>).</summary>
+    internal int GroupEnds { get; init; }
+
+    /// <summary>
+    /// The bytes of data of each object it wrote, by its key: what the object's size counts (<see cref="DatasetLayout.ObjectBytes"/>),
+    /// its statistics, zone maps, indexes and footer apart.
+    /// </summary>
+    internal ImmutableDictionary<string, long> ObjectDataBytes { get; init; } = ImmutableDictionary<string, long>.Empty;
+
+    /// <summary>
+    /// Of <see cref="WriterBlocksOnLine"/>, those that took their rows of a variant column from what the inputs took of
+    /// them as their own shreddings hold them (<see cref="DatasetOptions.TakesVariants"/>), and read none.
+    /// </summary>
+    internal long WriterBlocksOfRunsTaken { get; init; }
+
+    /// <summary>
+    /// Of <see cref="WriterBlocksOfRunsTaken"/>, those whose values of the column, gathered not put back together, were put
+    /// back whole before the block was read: a block the writer's line did not cut column by column, or whose column no
+    /// chain took, or whose keys are read from its rows.
+    /// </summary>
+    internal long WriterBlocksPutBack { get; init; }
+
+    /// <summary>
+    /// The times an item of a block counted in <see cref="WriterBlocksOfRunsTaken"/> put the column's values back together
+    /// in an arena of its own: a census near its most keys, a gathering whose chain a cut left broken.
+    /// </summary>
+    internal long WriterColumnsPutBackApart { get; init; }
+
+    /// <summary>
+    /// The chunks of a variant column the job's inputs handed over as their shreddings hold them, their rows not put back
+    /// together; those they set out to take and put back together after all, each decoded twice, after which the input's
+    /// scan takes no chunk more; and, of those, the ones taken whole but not byte for byte.
+    /// </summary>
+    internal (long Held, long Refused, long Inexact) InputVariantChunks { get; init; }
+
+    /// <summary>The inputs' batches its merge took over from their scans and kept until its writers copied their runs.</summary>
+    internal long InputWindowsTaken { get; init; }
+
+    /// <summary>The inputs' batches its merge copied to keep, not taken over from their scans.</summary>
+    internal long InputWindowsCopied { get; init; }
+
+    /// <summary>The inputs' batches whose keys its merge's thread encoded, rather than the decode that made them.</summary>
+    internal long InputWindowsKeyedByMerge { get; init; }
+
+    /// <summary>The slices of the key its merge was cut in (<see cref="SlicedMerge"/>), 0 for a merge in one piece.</summary>
+    internal int MergeSlices { get; init; }
+
+    /// <summary>Of <see cref="MergeSlices"/>, those merged ahead on lanes of their own rather than by the job's flow.</summary>
+    internal int MergeSlicesAhead { get; init; }
+
+    /// <summary>
+    /// The windows its inputs decoded ahead past their own two, shared by its merges' inputs and taken by those it read
+    /// (<see cref="Scanning.DecodeAhead"/>): the input it drains decoded on several lanes.
+    /// </summary>
+    internal long InputWindowsAhead { get; init; }
+
+    /// <summary>The waits for the store its objects made with the job's lane given back (<see cref="Execution.HeldLane"/>).</summary>
+    internal int StoreWaitsWithoutLane { get; init; }
+
+    /// <summary>
+    /// The units its flows did not start ahead for want of room in its memory (<see cref="JobMemory.HeldBack"/>): windows its
+    /// inputs did not decode ahead, slices its merge did not merge ahead, blocks its writers did not send through at once.
+    /// </summary>
+    internal (int Reads, int Slices, int Flights) AdvancesHeldBack { get; init; }
+
+    /// <summary>The inputs its first pass counted from their path directories alone, reading none of their rows (<see cref="Indexes.VariantDirectory.ValueBytes"/>).</summary>
+    internal int InputsToldByDirectories { get; init; }
+
+    /// <summary>The inputs its first pass counted in parts of their rows side by side, and the parts (<see cref="DatasetOptions.CensusPartRows"/>).</summary>
+    internal (int Inputs, int Parts) CensusParts { get; init; }
 }
 
 /// <summary>Runs one compaction: a k-way merge of the inputs on the sort key when there is
@@ -107,17 +266,9 @@ internal static partial class DatasetCompactor
             throw new ArgumentException("A compaction reads at least one object.", nameof(job));
         }
 
-        // Its reads keep nothing in the session's segment cache, its measure's included: each object once, which questions
-        // would not find there again.
+        // Its reads keep nothing in the session's segment cache: each object once, which questions would not find there
+        // again.
         using SegmentCache.PassingScope passing = SegmentCache.Pass();
-
-        // A handle that has measured no input yet measures one before its first merge, an input and a row; a tier merge
-        // wider than the measure lets the budget hold is given up before it starts, counted as no compaction, and the next
-        // plan prices its inputs by the measure, where the guess before it took them all and was refused twice.
-        if (job.Trigger != CompactionTrigger.Fragments)
-        {
-            await PriceAsync(dataset, job, cancellationToken).ConfigureAwait(false);
-        }
 
         // One activity over the job, its commit's as a child; a job counted however it ends.
         Activity? activity = DatasetTelemetry.StartCompaction(job, dataset.Location);
@@ -140,43 +291,127 @@ internal static partial class DatasetCompactor
 
     /// <summary>
     /// The job's rows read, merged or concatenated, written, and its replacement committed, every block it rents under its
-    /// own memory (<see cref="JobMemory"/>). A job whose memory was refused a block throws <see cref="JobTooWideException"/>
-    /// once its outputs are given up and its blocks given back: the handle's next plan takes fewer inputs.
+    /// own memory (<see cref="JobMemory"/>). A merge short of room it cannot go on without ends at the key it reached and
+    /// the job commits what it merged, a piece of itself. One that may commit nothing of what it took, an object of a
+    /// level past 0 taken in part, or nothing taken yet, throws <see cref="JobStoppedException"/> once its objects are
+    /// gone and its blocks given back: the handle keeps what each of its inputs held open as its file said it
+    /// (<see cref="KeepOpen"/>), and its next plan counts them at that.
     /// </summary>
-    /// <summary>
-    /// Measures an input before the handle's first merge (<see cref="MeasureInputAsync"/>), and gives up a tier merge wider
-    /// than the measure lets the jobs' budget hold: <see cref="JobTooWideException"/>, before the job starts.
-    /// </summary>
-    private static async ValueTask PriceAsync(VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
-    {
-        bool merge = job.Style is CompactionStyle.Leveled || (job.Style is CompactionStyle.Tiered && dataset.Snapshot.Schema.Keyed);
-        if (merge && (dataset.InputJobBytes == 0 || dataset.DecodedRowBytes == 0)
-            && await MeasureInputAsync(dataset, job, cancellationToken).ConfigureAwait(false)
-            && job.Trigger == CompactionTrigger.Tier
-            && MemoryWidth(dataset, job.Inputs) is int fits && fits < job.Inputs.Count)
-        {
-            dataset.CapJobWidth(fits);
-            throw new JobTooWideException(job, fits, JobBudget(dataset));
-        }
-    }
-
     private static async ValueTask<CompactionResult> RewriteAsync(
         VortexDataset dataset, CompactionJob job, CancellationToken cancellationToken)
     {
-        JobMemory memory = new JobMemory(dataset);
+        // What the job holds at least, reserved before it reads anything, while it holds nothing: when another job, a table's
+        // of the same process, holds the memory, it waits for it, and runs at its width, where a block refused at its start
+        // gave it up and the next plan narrowed it. Nothing reserved when nothing under the jobs' budget holds what would
+        // make room: the job starts all the same, and its inputs reserve as they read.
+        QueryMemoryBudget jobs = QueryMemoryBudget.JobsOf(dataset.Session);
+        MemoryGrant? grant = await jobs.ReserveAsync(Math.Min(LeastBytes(dataset, job), JobBudget(dataset)), cancellationToken).ConfigureAwait(false);
+        JobMemory memory;
+        try
+        {
+            memory = new JobMemory(dataset, grant);
+        }
+        catch
+        {
+            grant?.Release();
+            throw;
+        }
+
+        // The job's own flow computes, its merge first: it holds a lane of the session's for as long as it runs, taken once
+        // its memory is, so that a job waiting for memory holds no lane. Everything it starts beside it takes a lane free now
+        // or runs on this one, and never waits for one, which this lane, held by the waiter, would never free.
+        // Its objects' sinks give the lane back while they wait for the store, and take it again after (HeldLane).
+        Execution.LaneBudget lanes = dataset.Session.Lanes;
+        Execution.HeldLane lane;
+        try
+        {
+            lane = new Execution.HeldLane(lanes, await lanes.EnterAsync(cancellationToken).ConfigureAwait(false));
+        }
+        catch
+        {
+            await memory.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        memory.Lane = lane;
         try
         {
             return await RewriteUnderAsync(dataset, job, memory, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception failure) when (memory.Refused && failure is not JobTooWideException && !cancellationToken.IsCancellationRequested)
+        catch (Exception failure) when (failure is ReserveExhaustedException or VortexMemoryException && !cancellationToken.IsCancellationRequested)
         {
-            dataset.NarrowJobs(job.Inputs.Count, memory.InputsPeak, memory.Sizing, memory.WriterPeak);
-            throw new JobTooWideException(job, memory.Peak, memory.Jobs.CeilingBytes, failure) { Sizing = memory.Sizing };
+            // Ended short of room with nothing it may commit, a reservation not granted or a block no reserve covers
+            // refused, in its merge or in a pass before it: what its inputs held open, read in their files as it went, is
+            // what the next plan counts them at.
+            ReserveExhaustedException? stop = failure as ReserveExhaustedException;
+            bool learned = KeepOpen(dataset, memory, stop);
+            (long heldBack, long madeRoom, _) = memory.Reserves;
+
+            // A refusal says itself what its budget, the process and the process's pool held then.
+            string refusal = (stop?.InnerException ?? failure).Message;
+            (long pastRoom, long pastMargin) = memory.PoolBlocksPastRoom;
+            throw new JobStoppedException(job, memory.Peak, memory.Jobs.CeilingBytes, failure)
+            {
+                Learned = learned,
+                Reason = string.Create(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    $"{(stop is { InnerException: null } ? $"a reservation of {stop.Bytes >> 10} KiB not granted" : $"a block no reservation covers refused [{refusal}]")}, inputs {memory.InputsPeak >> 20} MiB, writer {memory.WriterPeak >> 20} MiB, {heldBack} reservations held back, room made {madeRoom} times, {pastRoom} blocks of the pool taken past the process's room and {pastMargin} past its margin{(memory.Slices?.Invoke() is { } slices ? ", " + slices : "")}"),
+            };
         }
         finally
         {
+            memory.Lane = null;
+            lane.Exit();
             await memory.DisposeAsync().ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Each scan of an input the job's merges opened, for its result: the window it was counted at, of which what its
+    /// object holds open, and what its account held at most (<see cref="CompactionResult.InputWindows"/>).
+    /// </summary>
+    private static (long Window, long Open, long Held)[] WindowsOf(VortexDataset dataset, DatasetSchema schema, JobMemory memory)
+    {
+        (ObjectEntry Entry, long Peak, int BatchRows, MemoryReserve? Reserve)[] opened = memory.OpenedInputs();
+        (long, long, long)[] windows = new (long, long, long)[opened.Length];
+        for (int i = 0; i < windows.Length; i++)
+        {
+            (ObjectEntry entry, long peak, int rows, _) = opened[i];
+            windows[i] = (Window(dataset, schema, entry, Math.Max(rows, 1)), OpenBytes(dataset, schema, entry), peak);
+        }
+
+        return windows;
+    }
+
+    /// <summary>
+    /// Keeps, for each input a job opened, what its scan held open when that is more than the handle counted it at
+    /// (<see cref="OpenBytes"/>): what it reserved as it read it in the object's file and took, its account's peak, less
+    /// the batches its window counts; and, for the input whose reservation ended the job short of room,
+    /// <paramref name="stop"/>'s, what it asked for past what it held. The next plan counts the object at that
+    /// (<see cref="VortexDataset.MeasuredOpenBytes"/>), which chooses a job that holds: an object whose entry says nothing,
+    /// written before entries said what a reader holds, is counted at what its file says once a job read it.
+    /// </summary>
+    /// <returns>Whether an input held more than it was counted at.</returns>
+    private static bool KeepOpen(VortexDataset dataset, JobMemory memory, ReserveExhaustedException? stop)
+    {
+        DatasetSchema schema = dataset.Snapshot.Schema;
+        bool learned = false;
+        foreach ((ObjectEntry entry, long peak, int rows, MemoryReserve? reserve) in memory.OpenedInputs())
+        {
+            long open = peak - (BatchesHeld * Math.Min(entry.PhysicalRows, Math.Max(rows, 1)) * DecodedRowBytes(dataset, entry));
+            if (stop is not null && reserve is not null && ReferenceEquals(stop.Reserve, reserve))
+            {
+                open = Math.Max(open, peak + stop.Bytes);
+            }
+
+            if (open > OpenBytes(dataset, schema, entry))
+            {
+                dataset.LearnOpenBytes(entry.Key, open);
+                learned = true;
+            }
+        }
+
+        return learned;
     }
 
     /// <summary>The job's rows read, merged or concatenated, written, and its replacement committed, under <paramref name="memory"/>.</summary>
@@ -267,12 +502,18 @@ internal static partial class DatasetCompactor
             : null;
 
         // Each object it streams is announced to the store as at most what the job reads, times what a job
-        // writes a byte at worst; one that runs past it starts the job again under a bound twice as large.
-        ObjectStream OutputsOf(CompactionJob ran, int doublings) => new ObjectStream(
+        // writes a byte at worst; one that runs past it starts the job again under a bound twice as large. The objects the
+        // job's own flow writes give its lane back while they wait for the store.
+        ObjectStream OutputsOf(CompactionJob ran, int doublings, Execution.HeldLane? lane) => new ObjectStream(
             dataset, schema, ran.TargetBytes, ran.FirstRow, inKeyOrder: merge, rowBound: ran.Rows,
-            ran.ToLevel, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn))
+            ran.ToLevel, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn), endsBySize: !ran.OneObject || doublings > 0)
         {
+            Lane = lane,
+            FirstBytesPerRow = (double)ran.Bytes / Math.Max(ran.Rows, 1),
+            RowsByValue = merge ? RowsByValueOf(schema.Cut, ran) : null,
+            Room = memory.WriterRoom,
             Budget = memory.Writer,
+            Reserve = memory.WriterReserve,
             Keys = indexed ? schema.Tree : null,
             Prefix = Math.Min(schema.Layout?.Layout.Prefix ?? 0, schema.Layout?.Components.Count ?? 0),
             Skip = schema.Partitioned ? 1 : 0,
@@ -284,101 +525,161 @@ internal static partial class DatasetCompactor
             Postings = postings,
         };
 
-        // A merge of several objects' worth runs in ranges of the key side by side, on the session's lanes, each reading of
-        // its inputs the granules of its range alone (KeyRanges): a consolidation's, and a level's, which ran on one lane
-        // whatever the session gave it, 336 ms for level 0's sixteen objects of 2 M rows at eight lanes, 93 ms in ranges.
-        // Not one of a value, since each object of a range shreds the paths of the first.
-        KeyRanges? ranges = null;
-        if (late is null && merge && shreddings is not { Count: > 1 } && piece is null)
-        {
-            using Activity? cutting = DatasetTelemetry.StartCompactionPass("ranges");
-            ranges = await KeyRangesAsync(dataset, schema, job, cancellationToken).ConfigureAwait(false);
-        }
-
-        // The destination's objects, in the key's order: those of one stream, or of one a range.
+        // A merge of several objects' worth, a consolidation's or a level's, runs as one stream of objects cut in slices of the
+        // key, merged ahead on the lanes free (SlicedMerge), its writer sending several blocks through at once: the same
+        // objects at any degree. It ran in ranges of the key side by side, as many as the session's lanes, each writing
+        // objects of its own, so that one consolidation wrote 12 objects on one lane and 14 on four (2026-11-17).
+        // The destination's objects, in the key's order: those of its one stream.
         ObjectStream[] streams;
         ObjectStream? lateOutputs = null;
         long rows;
         int atOnce = 1;
+        int openAtOnce = 0;
+        int boundRestarts = 0;
         int batchRows = 0;
         long writer = WriterCost(dataset, schema, job, shreddings);
+        memory.WriterPrice = writer;
+        Handed? handed = null;
+        bool stopped = false;
 
         // What the inputs' batches weigh decoded, which the handle keeps for the next job's plan.
         RowMeter meter = new RowMeter();
 
+        // A job writes one stream of objects, each ended where its data reaches the size it aims at. Ranges of the key, each
+        // writing objects of its own side by side, were given up on 2026-11-21: on an M4 Pro at degree 14 they gave no time
+        // back, took up to 15 % more processor, and each range ended its last object where its rows ended, at 61 to 66 % of
+        // the size aimed at.
         Activity? writing = DatasetTelemetry.StartCompactionPass("write");
         try
         {
-            if (ranges is not null)
+            // A job's inputs reserve what they hold as they read it (JobMemory), and its merge ends at a key when a reservation
+            // it cannot go on without is not granted. Its inputs' batches are sized here to what the budget leaves once its
+            // writer and its open inputs are counted: a choice of rows that has every chance to hold, not what keeps it.
+            // A merge of slices' worth is cut in slices of the key, merged side by side on lanes free and taken in order into
+            // one stream (SlicedMerge): its batches priced for the slices ahead it may merge, whatever the degree. A piece of
+            // several ranges below its cut takes them as its slices, each counting what it takes of each input.
+            KeyRanges? slices = null;
+            int sliceCount = 0;
+            if (piece is { Merged: > 1 })
             {
-                (streams, rows, atOnce, batchRows) =
-                    await RangesAsync(dataset, schema, job, ranges, writer, meter, memory, doublings => OutputsOf(job, doublings), cancellationToken).ConfigureAwait(false);
+                slices = piece.Ranges;
+                sliceCount = piece.Merged;
             }
-            else if (piece is { Merged: > 1 })
+            else if (merge && piece is null && KeyRanges.SlicesOf(dataset, ran) >= 2)
             {
-                // A piece of several ranges below its cut merges them side by side, and counts what each took of each input.
-                (streams, rows, atOnce, batchRows) = await RangesAsync(
-                    dataset, schema, job, piece.Ranges, writer, meter, memory, doublings => OutputsOf(job, doublings), cancellationToken,
-                    piece.Merged, piece.Emitted).ConfigureAwait(false);
+                using Activity? cutting = DatasetTelemetry.StartCompactionPass("slices");
+                slices = await KeyRangesAsync(dataset, schema, ran, KeyRanges.SlicesOf(dataset, ran), cancellationToken).ConfigureAwait(false);
             }
-            else
+
+            // The inputs' batches, from what the inputs open at once hold of the room the writer leaves: for the slice taken
+            // and as many of those priced ahead of it as that room holds at the shortest batches, so that slices merge ahead
+            // where there is room and the batches are not cut short for slices that will not.
+            long share = JobBudget(dataset) - writer;
+            (long least, _) = Peak(dataset, schema, ran.Inputs, merge, LeastBatchRows);
+            int merges = slices is null ? 1 : (int)Math.Clamp(share / Math.Max(least, 1), 1, 1 + SlicesAheadPriced);
+            batchRows = InputBatchRows(dataset, schema, ran, merge, merges, share);
+            memory.InputsPlanned = Peak(dataset, schema, ran.Inputs, merge, batchRows).Bytes;
+
+            // A merge of a tiered dataset that ends short of room commits what it took of each input, a piece of itself
+            // (StoppedAt): its flow counts what it hands its outputs of each. A leveled exit, whose commit moves its
+            // level's pointer and keeps its late rows apart, commits whole or not at all.
+            handed = merge && late is null && job.Style is CompactionStyle.Tiered ? new Handed(ran.Inputs.Count) : null;
+            for (int doublings = 0; ; doublings++)
             {
-                // A job in one piece takes what its blocks hold, never past the jobs' budget: a block refused gives the job up,
-                // and the handle's next plan takes fewer inputs. Its inputs' batches take what the budget leaves of it once its
-                // writer and its open inputs are counted.
-                int open = merge ? ran.Inputs.Count : 1;
-                batchRows = InputBatchRows(dataset, schema, ran, open, JobBudget(dataset), writer);
-                memory.Sizing = (batchRows, open);
-                for (int doublings = 0; ; doublings++)
+                lateOutputs = late is null ? null : new ObjectStream(
+                    dataset, schema, ran.Bytes, ran.FirstRow, inKeyOrder: true, rowBound: ran.Rows,
+                    0, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn), endsBySize: false)
                 {
-                    lateOutputs = late is null ? null : new ObjectStream(
-                        dataset, schema, ran.Bytes, ran.FirstRow, inKeyOrder: true, rowBound: ran.Rows,
-                        0, ObjectBound.Of(ran.Bytes, doublings, dataset.Options.BoundOutPerIn))
+                    Arrival = Latest(ran),
+                    Budget = memory.Writer,
+                    Reserve = memory.WriterReserve,
+                    Lane = memory.Lane,
+                    Room = memory.WriterRoom,
+                };
+                ObjectStream outputs = OutputsOf(ran, doublings, memory.Lane);
+                try
+                {
+                    // A piece reads its first range alone, below its cut, and counts what it takes of each input.
+                    if (piece is not null)
                     {
-                        Arrival = Latest(ran),
-                        Budget = memory.Writer,
-                    };
-                    ObjectStream outputs = OutputsOf(ran, doublings);
-                    try
+                        Array.Clear(piece.Emitted);
+                    }
+
+                    handed?.Reset();
+
+                    rows = merge
+                        ? await MergeAsync(
+                            dataset, schema, ran, outputs, late, lateOutputs, batchRows, meter, memory, cancellationToken,
+                            slices is null ? piece?.Ranges : null, 0, piece?.Emitted, writer, slices, sliceCount, handed).ConfigureAwait(false)
+                        : await ConcatenateAsync(dataset, schema, ran, outputs, memory, cancellationToken).ConfigureAwait(false);
+                    if (handed is { Stop: { } stop })
                     {
-                        // A piece reads its first range alone, below its cut, and counts what it takes of each input.
-                        if (piece is not null)
+                        // Ended short of room: the object being written is sealed when it ends on a whole key, the rows
+                        // left in the inputs starting at another; dropped otherwise, the job committing what its sealed
+                        // objects hold, each ended where its key did. What it took of an object of a level past 0 in
+                        // part, or nothing it may commit, leaves the job nothing to commit: its objects go, and the
+                        // handle's next plan counts its inputs at what their files said as they were read.
+                        long[]? took = handed.Clean && Commits(ran, handed.Rows) ? handed.Rows : null;
+                        if (took is not null)
                         {
-                            Array.Clear(piece.Emitted);
+                            await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
+                        }
+                        else
+                        {
+                            await outputs.AbandonAsync().ConfigureAwait(false);
+                            took = Commits(ran, handed.AtRoll) ? handed.AtRoll : null;
                         }
 
-                        rows = merge
-                            ? await MergeAsync(
-                                dataset, schema, ran, outputs, late, lateOutputs, batchRows, meter, memory, cancellationToken,
-                                piece?.Ranges, 0, piece?.Emitted).ConfigureAwait(false)
-                            : await ConcatenateAsync(dataset, schema, ran, outputs, memory, cancellationToken).ConfigureAwait(false);
+                        if (took is null)
+                        {
+                            List<string> unnamed = [];
+                            foreach (WrittenObject made in outputs.Written)
+                            {
+                                unnamed.Add(made.Entry.Key);
+                            }
+
+                            await dataset.DeleteUnnamedAsync(unnamed, cancellationToken).ConfigureAwait(false);
+                            throw stop;
+                        }
+
+                        piece = StoppedAt(ran, piece, took);
+                        job = ran = piece.Job;
+                        rows = Sum(piece.Emitted);
+                        stopped = true;
+                    }
+                    else
+                    {
                         await outputs.FinishAsync(cancellationToken).ConfigureAwait(false);
-                        if (lateOutputs is not null)
-                        {
-                            await lateOutputs.FinishAsync(cancellationToken).ConfigureAwait(false);
-                        }
+                    }
 
-                        streams = [outputs];
-                        break;
-                    }
-                    catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
+                    if (lateOutputs is not null)
                     {
-                        await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
+                        await lateOutputs.FinishAsync(cancellationToken).ConfigureAwait(false);
                     }
-                    catch (LateRows.Overflow)
-                    {
-                        // The late rows weigh too much to stand apart: the exit as planned, merged with the objects they meet.
-                        await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
-                        late = null;
-                        lateOutputs = null;
-                        ran = job;
-                        doublings = -1;
-                    }
-                    catch
-                    {
-                        await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
-                        throw;
-                    }
+
+                    streams = [outputs];
+                    atOnce = piece is not null ? outputs.SlicesAtOnce : 1;
+                    openAtOnce = slices is null ? 0 : slices.MostInputs * outputs.SlicesAtOnce;
+                    break;
+                }
+                catch (ObjectPastBoundException) when (doublings < ObjectBound.MostDoublings)
+                {
+                    await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
+                    boundRestarts++;
+                }
+                catch (LateRows.Overflow)
+                {
+                    // The late rows weigh too much to stand apart: the exit as planned, merged with the objects they meet.
+                    await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
+                    late = null;
+                    lateOutputs = null;
+                    ran = job;
+                    doublings = -1;
+                }
+                catch
+                {
+                    await AbandonAsync(outputs, lateOutputs).ConfigureAwait(false);
+                    throw;
                 }
             }
         }
@@ -390,7 +691,7 @@ internal static partial class DatasetCompactor
         // A piece that took no row of level 0, its cut where none lies: it would rewrite the objects of level 1 below the cut
         // and leave level 0 as it was, piece after piece, a loop that never ends. The partition is consolidated in one piece,
         // now and after.
-        if (piece is not null && TookOfLevelZero(piece) == 0)
+        if (piece is not null && !stopped && TookOfLevelZero(piece) == 0)
         {
             // What it wrote of level 1, which no version names, goes now.
             List<string> written = [];
@@ -418,21 +719,16 @@ internal static partial class DatasetCompactor
                 $"{rows}: a rewrite that loses rows is the one failure it must not have.");
         }
 
-        // What the job measured, which the handle's next plan sizes a job by: what an input and the writer held at most.
+        // What the job read of its inputs as it went, which the handle's next plan counts them at: what a decoded row
+        // weighs, the bytes a second it reads and writes, and, for a job ended short of room, what each object it opened
+        // held open, those it leaves in the dataset with a part of their rows taken. A job that ran to its end keeps none:
+        // what an input the merge drained held at most counts the batches it decoded ahead, which a plan must not.
         long reserved = memory.Peak;
         dataset.LearnDecodedRowBytes(meter.BytesPerRow);
         dataset.LearnJobRate(ran.Bytes, dataset.Options.TimeProvider.GetUtcNow() - started);
-        if (merge)
+        if (handed?.Stop is { } shortOf)
         {
-            KeyRanges? sideBySide = ranges ?? (piece is { Merged: > 1 } ? piece.Ranges : null);
-            int open = sideBySide is null ? ran.Inputs.Count : Math.Max(1, sideBySide.MostInputs * atOnce);
-            int width = 0;
-            foreach (CompactionInput input in ran.Inputs)
-            {
-                width += input.Level == 0 ? 1 : 0;
-            }
-
-            dataset.LearnJobCosts(memory.InputsPeak / open, batchRows, memory.WriterPeak / atOnce, width);
+            KeepOpen(dataset, memory, shortOf);
         }
 
         // A piece takes out the objects of level 1 it read and those of level 0 it emptied, and puts back at level 0 those it
@@ -496,7 +792,8 @@ internal static partial class DatasetCompactor
                 }
             }
 
-            pieceRange = span.Count == 0 ? null : LevelRange.Of(job.ToLevel, span, key);
+            // A merge ended short of room whose objects stay in level 0, a merge of a size class, takes over no part of it.
+            pieceRange = span.Count == 0 || job.ToLevel == 0 ? null : LevelRange.Of(job.ToLevel, span, key);
         }
 
         DatasetOperation.PartitionIndexChange? partitionIndex = null;
@@ -545,6 +842,50 @@ internal static partial class DatasetCompactor
                 }
             }
 
+            // What the handle kept of what these objects hold open goes with them; an object a piece marked and left in
+            // level 0 keeps it, which the plan of what is left of it counts it at. And a writer halved for a job as wide
+            // gathers its whole share again.
+            dataset.ForgetOpenBytes(replaced);
+            dataset.ForgetTakenThrough(replaced);
+            dataset.JobCommitted(ran.Inputs.Count);
+
+            // The rows a piece left in level 0 lie past the last key it wrote, its objects ending where a key does: kept for
+            // the plan of what is left, which then leaves the objects this one wrote at their size (PieceAsync). The last
+            // object of a piece that ran to its cut, or of a merge that sealed it as it ended short of room, is what was
+            // left of its rows, short of its size: the next piece takes it with its own, as it did. A merge ended short
+            // of room that dropped the object it was writing committed objects ended by their size alone, the last too.
+            if (taken is { Marked.Count: > 0 } left && job.ToLevel >= 1)
+            {
+                bool allAtSize = stopped && handed is { Clean: false };
+                ReadOnlyMemory<byte> last = default;
+                ReadOnlyMemory<byte> before = default;
+                foreach (ObjectStream outputs in streams)
+                {
+                    foreach (WrittenObject written in outputs.Written)
+                    {
+                        ReadOnlyMemory<byte> ends = written.Entry.LastKey;
+                        if (last.IsEmpty || ends.Span.SequenceCompareTo(last.Span) > 0)
+                        {
+                            before = last;
+                            last = ends;
+                        }
+                        else if (before.IsEmpty || ends.Span.SequenceCompareTo(before.Span) > 0)
+                        {
+                            before = ends;
+                        }
+                    }
+                }
+
+                ReadOnlyMemory<byte> atSize = allAtSize ? last : before;
+                foreach ((_, _, ObjectEntry entry) in left.Marked)
+                {
+                    if (!atSize.IsEmpty)
+                    {
+                        dataset.NoteTakenThrough(entry.Key, entry.Deletions.LeadingRun, atSize.Span);
+                    }
+                }
+            }
+
             if (partitionIndex?.Previous is { } previousIndex)
             {
                 replaced.Add(previousIndex);
@@ -574,11 +915,56 @@ internal static partial class DatasetCompactor
         int objectsOut = lateOutputs?.Written.Count ?? 0;
         long bytesOut = lateOutputs?.Bytes ?? 0;
         long scratch = (lateOutputs?.ScratchBytes ?? 0) + (postings?.ScratchBytes ?? 0) + memory.CopiedBytes;
+        long batches = lateOutputs?.Batches ?? 0;
+        long across = lateOutputs?.BatchesAcross ?? 0;
+        long flown = lateOutputs?.BatchesFlown ?? 0;
+        long onLine = lateOutputs?.BlocksOnLine ?? 0;
+        long chunksOnLine = lateOutputs?.ChunksEndedOnLine ?? 0;
+        long chunksCut = lateOutputs?.ChunksCutOnLine ?? 0;
+        long runsTaken = lateOutputs?.BlocksOfRunsTaken ?? 0;
+        long putBack = lateOutputs?.BlocksPutBack ?? 0;
+        long putBackApart = lateOutputs?.ColumnsPutBackApart ?? 0;
+        (long Held, long Refused, long Inexact) variantChunks = lateOutputs?.VariantChunks ?? default;
+        long windowsTaken = 0;
+        long windowsCopied = 0;
+        long windowsKeyed = 0;
+        int slicesCut = 0;
+        int slicesAhead = 0;
+        int groupEnds = lateOutputs?.GroupEnds ?? 0;
+        ImmutableDictionary<string, long>.Builder dataBytes = ImmutableDictionary.CreateBuilder<string, long>(StringComparer.Ordinal);
+        foreach (WrittenObject made in lateOutputs?.Written ?? [])
+        {
+            dataBytes[made.Entry.Key] = made.DataBytes;
+        }
+
+        long windowsAhead = lateOutputs?.InputWindowsAhead ?? 0;
         foreach (ObjectStream outputs in streams)
         {
+            groupEnds += outputs.GroupEnds;
+            foreach (WrittenObject made in outputs.Written)
+            {
+                dataBytes[made.Entry.Key] = made.DataBytes;
+            }
+
+            windowsAhead += outputs.InputWindowsAhead;
             objectsOut += outputs.Written.Count;
             bytesOut += outputs.Bytes;
             scratch += outputs.ScratchBytes;
+            batches += outputs.Batches;
+            across += outputs.BatchesAcross;
+            flown += outputs.BatchesFlown;
+            onLine += outputs.BlocksOnLine;
+            chunksOnLine += outputs.ChunksEndedOnLine;
+            chunksCut += outputs.ChunksCutOnLine;
+            runsTaken += outputs.BlocksOfRunsTaken;
+            putBack += outputs.BlocksPutBack;
+            putBackApart += outputs.ColumnsPutBackApart;
+            variantChunks = (variantChunks.Held + outputs.VariantChunks.Held, variantChunks.Refused + outputs.VariantChunks.Refused, variantChunks.Inexact + outputs.VariantChunks.Inexact);
+            windowsTaken += outputs.WindowsTaken;
+            windowsCopied += outputs.WindowsCopied;
+            windowsKeyed += outputs.WindowsKeyedHere;
+            slicesCut += outputs.Slices;
+            slicesAhead += outputs.SlicesAhead;
         }
 
         return new CompactionResult
@@ -594,10 +980,43 @@ internal static partial class DatasetCompactor
             BytesIn = ran.Bytes,
             BytesOut = bytesOut,
             MemoryReserved = reserved,
+            MemoryReservedBy = (memory.InputsPeak, memory.WriterPeak),
+            InputsPlanned = memory.InputsPlanned,
+            InputWindows = WindowsOf(dataset, schema, memory),
+            BoundRestarts = boundRestarts,
             RangesAtOnce = atOnce,
             ScratchBytes = scratch,
             Outcome = outcome,
             Piece = piece is { ToTheEnd: false },
+            StoppedShort = stopped,
+            StoppedBy = handed?.Stop?.Message,
+            StoppedHow = handed?.Stop is null ? null : handed.Why,
+            WriterArenasGivenBack = memory.ArenasGivenBack,
+            PoolBlocksPastRoom = memory.PoolBlocksPastRoom,
+            WriterCounted = memory.WriterPrice,
+            Reserves = memory.Reserves,
+            WriterBatches = batches,
+            WriterBatchesAcross = across,
+            WriterBatchesFlown = flown,
+            WriterBlocksOnLine = onLine,
+            WriterChunksEndedOnLine = chunksOnLine,
+            WriterChunksCutOnLine = chunksCut,
+            GroupEnds = groupEnds,
+            ObjectDataBytes = dataBytes.ToImmutable(),
+            WriterBlocksOfRunsTaken = runsTaken,
+            WriterBlocksPutBack = putBack,
+            WriterColumnsPutBackApart = putBackApart,
+            InputVariantChunks = variantChunks,
+            InputWindowsTaken = windowsTaken,
+            InputWindowsCopied = windowsCopied,
+            InputWindowsKeyedByMerge = windowsKeyed,
+            MergeSlices = slicesCut,
+            MergeSlicesAhead = slicesAhead,
+            InputWindowsAhead = windowsAhead,
+            StoreWaitsWithoutLane = memory.Lane?.GivenBack ?? 0,
+            AdvancesHeldBack = memory.HeldBack,
+            InputsToldByDirectories = memory.InputsToldByDirectories,
+            CensusParts = memory.CensusParts,
         };
     }
 
@@ -915,7 +1334,8 @@ internal static partial class DatasetCompactor
     /// </summary>
     private static IAsyncEnumerable<RecordBatch> RowsOfAsync(
         ObjectLease lease, ObjectEntry entry, DatasetSchema schema, CancellationToken cancellationToken, int[]? fields = null, RowRange? rows = null,
-        int batchRows = 0, Buffers.MemoryAccount? account = null)
+        int batchRows = 0, Buffers.MemoryAccount? account = null, int prefetch = 0, Scanning.BatchHandover? handover = null,
+        (string Column, VariantTake Take)[]? takes = null)
     {
         // A job's input reads and decodes under the job's inputs' account (JobMemory), which never passes the jobs' budget.
         // Its batches hold its rows at most: an input of 1 924 rows in a merge of batches of 16 384 held 566 KB, a batch's
@@ -923,20 +1343,61 @@ internal static partial class DatasetCompactor
         batchRows = batchRows > 0 ? (int)Math.Clamp(rows?.Length ?? entry.PhysicalRows, 1, batchRows) : batchRows;
         VortexFile file = lease.File;
         FieldMask projection = fields is null ? FieldMask.All : Layouts.FieldMasks.Of(fields);
-        if (schema.ColumnsOf(file.DType, entry.Key) is not { } columns)
+
+        // Every reader of a job's input runs on a lane of the session's, the job's or one its census took: the batches it
+        // asks ahead decode on lanes free now beside it, and on its own flow when none is.
+        ObjectColumns? columns = schema.ColumnsOf(file.DType, entry.Key);
+        ObjectReadPlan? read = columns?.Read(null, projection);
+        ScanBuilder scan = Ranged(Batched(file.ScanBuilder().WithAccount(account).WithPrefetch(prefetch).WithConsumerLane(), batchRows), rows);
+        if (read is { } plan)
         {
-            ScanBuilder whole = file.ScanBuilder().WithAccount(account);
-            return LiveRowsAsync(Ranged(Batched(fields is null ? whole : whole.ProjectMask(projection), batchRows), rows), entry, cancellationToken);
+            scan.ProjectMask(plan.Shape.Source).WithEncodings(false, false);
+        }
+        else if (fields is not null)
+        {
+            scan.ProjectMask(projection);
         }
 
-        ObjectReadPlan read = columns.Read(null, projection);
-        return ObjectColumns.ReshapeAsync(
-            LiveRowsAsync(Ranged(Batched(file.ScanBuilder().WithAccount(account).ProjectMask(read.Shape.Source).WithEncodings(false, false), batchRows), rows), entry, cancellationToken),
-            read.Shape,
-            null,
-            0,
-            compact: true,
-            cancellationToken);
+        // A merge's input hands its batches over, each shaped by its decode, on the lane that decoded it: its deleted rows
+        // left out, its columns reshaped as the version holds them. Wrappers did both on the merge's thread.
+        if (handover is not null)
+        {
+            if (entry.HasDeletions)
+            {
+                scan.WithCompaction(false).WithEncodings(false, false);
+            }
+
+            if (entry.HasDeletions || read is not null)
+            {
+                handover.State = new InputShaping(entry.HasDeletions ? entry.Deletions : null, read?.Shape);
+            }
+            else if (takes is not null)
+            {
+                // Batches handed over as their decode made them: what it took of a variant column's rows stays beside them.
+                handover.Taken = TakenOf(file, takes);
+            }
+
+            return scan.WithHandover(handover).ExecuteAsync();
+        }
+
+        IAsyncEnumerable<RecordBatch> live = LiveRowsAsync(scan, entry, cancellationToken);
+        return read is { } reshaped ? ObjectColumns.ReshapeAsync(live, reshaped.Shape, null, 0, compact: true, cancellationToken) : live;
+    }
+
+    /// <summary>The chunks of <paramref name="file"/>'s columns <paramref name="takes"/> names that a scan of it takes as their shredding holds them; null for none.</summary>
+    private static TakenVariants? TakenOf(VortexFile file, (string Column, VariantTake Take)[] takes)
+    {
+        (int Field, VariantTake Take)[] columns = new (int, VariantTake)[takes.Length];
+        int count = 0;
+        foreach ((string column, VariantTake take) in takes)
+        {
+            if (file.DType.IndexOfField(column) is >= 0 and int field)
+            {
+                columns[count++] = (field, take);
+            }
+        }
+
+        return count == 0 ? null : TakenVariants.Of(file, columns.AsSpan(0, count));
     }
 
     /// <summary>The scan of <paramref name="rows"/> alone, or of every row.</summary>
@@ -963,13 +1424,12 @@ internal static partial class DatasetCompactor
             InputLeases opened = new InputLeases(new ObjectLease?[job.Inputs.Count < 2 ? 0 : job.Inputs.Count]);
             try
             {
-                ParallelOptions lanes = new ParallelOptions
-                {
-                    MaxDegreeOfParallelism = Math.Max(1, dataset.Session.Options.MaxConcurrentReads),
-                    CancellationToken = cancellationToken,
-                };
-                await Parallel.ForAsync(0, opened._leases.Length, lanes, async (i, token) =>
-                    opened._leases[i] = await memory.RentAsync(job.Inputs[i].Entry, token).ConfigureAwait(false)).ConfigureAwait(false);
+                // Opens, which wait on the store: beside the session's degree, as many at once as it reads.
+                await Execution.Waits.ForAsync(
+                    opened._leases.Length,
+                    dataset.Session.Options.MaxConcurrentReads,
+                    async (i, token) => opened._leases[i] = await memory.RentAsync(job.Inputs[i].Entry, token).ConfigureAwait(false),
+                    cancellationToken).ConfigureAwait(false);
                 return opened;
             }
             catch
@@ -1089,21 +1549,304 @@ internal static partial class DatasetCompactor
         CancellationToken cancellationToken,
         KeyRanges? ranges = null,
         int range = 0,
-        long[]? emitted = null)
+        long[]? emitted = null,
+        long writer = 0,
+        KeyRanges? slices = null,
+        int sliceCount = 0,
+        Handed? handed = null)
     {
-        KeyOrderedMerge merge = InputsMerged(dataset, schema, job, batchRows, cancellationToken, ranges: ranges, range: range, meter: meter, memory: memory, emitted: emitted);
+        // The slices of the merge: the first sliceCount ranges of the cut, every one when it names none.
+        sliceCount = slices is null ? 0 : sliceCount > 0 ? sliceCount : slices.Count;
+        long[]?[]? sliceEmitted = slices is not null && emitted is not null ? new long[]?[sliceCount] : null;
+
+        // The writers keep the runs where they lie in the inputs' batches, and note them in one ledger, which the merge reads
+        // to give a batch back once every run on it is copied: the merge's thread neither copies runs nor waits for copies.
+        // The variant columns the job writes under one shredding: its inputs take their rows as their own shreddings hold
+        // them, which its writers take their blocks' runs from in place of reading the rows put back together, for a
+        // dataset that asks it (DatasetOptions.TakesVariants).
+        (string Column, VariantTake Take)[]? takes = dataset.Options.TakesVariants && outputs.Shreddings is [{ Shredded.Count: > 0 } only]
+            ? [.. only.Shredded.Select(static shredded => (shredded.Key, new VariantTake(shredded.Value)))]
+            : null;
+        Writing.RunLedger ledger = new Writing.RunLedger { Takes = takes is null ? null : [.. takes.Select(static held => held.Take)] };
+        List<KeyOrderedMerge> made = [];
+
+        // What the inputs a merge of the job holds open at once were counted to hold, at these batches: what a slice is
+        // admitted at, and what the work ahead leaves the inputs still to open.
+        long planned = Peak(dataset, schema, job.Inputs, merged: true, batchRows).Bytes;
+
+        // The windows the inputs the merge reads decode ahead past their own, on the session's lanes but the merge's: a
+        // window is admitted while the inputs' share holds it past what the inputs still to open may take, and what the
+        // jobs' budget leaves the job, less it, still holds what the writer was priced at past what it holds now
+        // (JobMemory.AdmitsRead). The batches stay those of the inputs' splits, so the bytes written are the same.
+        int lanes = dataset.Session.Lanes.Lanes - 1;
+        memory.WriterPrice = Math.Max(memory.WriterPrice, writer);
+        Scanning.DecodeAhead? ahead = lanes <= 0 ? null : new Scanning.DecodeAhead(lanes, memory.AdmitsRead);
+        SlicedMerge? sliced = null;
+        KeyOrderedMerge MergeOf(int slice, Action<KeyOrderedMerge.Window>? retiring, Buffers.MemoryAccount? account)
+        {
+            // A slice counts what it takes of each input apart, slices merging at once (KeyOrderedMerge.Emitted).
+            long[]? counts = sliceEmitted is null ? emitted : sliceEmitted[slice] = new long[emitted!.Length];
+
+            // The merge the job's flow drives, the only one or the slice taken in its turn, has the writers let go of the
+            // inputs it is done with before it opens one that would not hold beside them: what it holds with that input
+            // passes what its inputs open at once were counted to hold. A slice merged ahead does not drive the writers.
+            Buffers.CountedAccount? counted = account as Buffers.CountedAccount;
+            async ValueTask LetGoAsync(ObjectEntry next)
+            {
+                if ((counted?.Held ?? memory.Inputs.ReservedBytes) + Window(dataset, schema, next, batchRows) <= planned)
+                {
+                    return;
+                }
+
+                await outputs.LetGoOfInputsAsync(cancellationToken).ConfigureAwait(false);
+                if (lateOutputs is not null)
+                {
+                    await lateOutputs.LetGoOfInputsAsync(cancellationToken).ConfigureAwait(false);
+                }
+            }
+
+            // What an input of the merge asks when its reserve does not hold what it cannot go on without: the job gives back
+            // what it started ahead. The merge the job's flow drives asks it there; a slice merged ahead asks through its
+            // runs, and is answered once the flow takes it and comes to them (SlicedMerge.AskRoomAsync).
+            Func<int, ValueTask<bool>> makeRoom = retiring is null
+                ? memory.MakeRoomAsync
+                : level => sliced!.AskRoomAsync(slice, level);
+            KeyOrderedMerge one = InputsMerged(
+                dataset, schema, job, batchRows, cancellationToken, ranges: slices ?? ranges, range: slices is null ? range : slice, meter: meter,
+                memory: memory, emitted: counts, ledger: ledger, retiring: retiring, ahead: ahead, account: account, takes: takes,
+                letGo: retiring is null ? LetGoAsync : null, makeRoom: makeRoom);
+            lock (made)
+            {
+                made.Add(one);
+            }
+
+            return one;
+        }
+
+        // A slice merges ahead on a lane of its own while the room left holds its inputs open at once at their windows, or
+        // what the slice taken held at its first run when more, past what the writer may take (JobMemory.AdmitsMerge);
+        // otherwise the job's flow merges it in its turn, the same runs.
+        sliced = slices is null
+            ? null
+            : new SlicedMerge(sliceCount, MergeOf, ledger, dataset.Session.Lanes, cancellationToken)
+            {
+                MostAhead = SlicesAheadPriced,
+                Price = planned,
+                SliceInputs = slices.MostInputs,
+                Inputs = memory.InputsAccount,
+                Admits = memory.AdmitsMerge,
+                MakeRoom = memory.MakeRoomAsync,
+                OwnRuns = async () =>
+                {
+                    await outputs.OwnRunsAsync(cancellationToken).ConfigureAwait(false);
+                    if (lateOutputs is not null)
+                    {
+                        await lateOutputs.OwnRunsAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                },
+            };
+        IMergedRuns merge = sliced is null ? MergeOf(0, null, null) : sliced;
+        memory.Slices = sliced is null ? null : sliced.Report;
+
+        // What the job gives back when a reservation it cannot go on without is not granted, a level at a time, its
+        // writers' part then the merge's own: at 0, the writers copy the runs they keep of the inputs and the merge lets
+        // go of the windows and the inputs done; at 1, the blocks in flight on the writers' lines land; at 2, the slices
+        // merged ahead are given up and the batches decoded ahead given back; at 3, the writers end their group of rows,
+        // each column writing what it gathered. The first three change nothing of what the job writes; the last ends a
+        // group where the job, everything it started ahead given back, holds what its rows and its budget alone decide:
+        // a chunk more a column, the same rows. On the job's flow, between two runs.
+        memory.GiveBack = async level =>
+        {
+            switch (level)
+            {
+                case 0:
+                    await outputs.LetGoOfInputsAsync(cancellationToken).ConfigureAwait(false);
+                    if (lateOutputs is not null)
+                    {
+                        await lateOutputs.LetGoOfInputsAsync(cancellationToken).ConfigureAwait(false);
+                    }
+
+                    break;
+                case 1:
+                    await outputs.LandAsync().ConfigureAwait(false);
+                    if (lateOutputs is not null)
+                    {
+                        await lateOutputs.LandAsync().ConfigureAwait(false);
+                    }
+
+                    break;
+                case 2:
+                    break;
+                case 3:
+                    await outputs.EndGroupAsync(cancellationToken).ConfigureAwait(false);
+                    if (lateOutputs is not null)
+                    {
+                        await lateOutputs.EndGroupAsync(cancellationToken).ConfigureAwait(false);
+                    }
+
+                    break;
+                default:
+                    return false;
+            }
+
+            await merge.GiveBackAsync(level).ConfigureAwait(false);
+            return true;
+        };
+
+        // What the inputs give back ahead of the writer when a start of the writer's asks, on this flow, between two runs:
+        // the slices merged ahead and the batches decoded ahead.
+        memory.GiveBackAhead = () => merge.GiveBackAsync(2);
+
+        // What the work started ahead holds, which the inputs still to open are not counted to have taken yet.
+        memory.AheadHeld = () => (ahead?.Bytes ?? 0) + (sliced?.AheadHeld ?? 0);
         ValueCut? values = schema.Cut;
         long rows = 0;
-        await using (merge.ConfigureAwait(false))
+        outputs.Ledger = ledger;
+        if (lateOutputs is not null)
+        {
+            lateOutputs.Ledger = ledger;
+        }
+
+        try
+        {
+            await using (merge.ConfigureAwait(false))
+            {
+                try
+                {
+                    rows = await MergeRunsAsync(merge, outputs, late, lateOutputs, values, handed, cancellationToken).ConfigureAwait(false);
+
+                    // The merge ends: its writers copy what they still keep of its inputs, which then go.
+                    await outputs.LetGoOfInputsAsync(cancellationToken).ConfigureAwait(false);
+                    if (lateOutputs is not null)
+                    {
+                        await lateOutputs.LetGoOfInputsAsync(cancellationToken).ConfigureAwait(false);
+                    }
+                }
+                catch (ReserveExhaustedException stop) when (handed is not null)
+                {
+                    // Short of room it cannot go on without, everything started ahead given back: the merge ends at the
+                    // key it reached, every run it gave handed to the writers. Whether the object being written ends on a
+                    // whole key is read while the merge still holds its inputs, but for the next key of the one input
+                    // whose next batch found no room, read in its file once they are gone (NextKeyAsync). The writers
+                    // then copy what they keep of the inputs, which go with the merge, and stay whole for the job to
+                    // seal or drop the object.
+                    StopVerdict verdict = outputs.HoldsRows ? merge.Stopped(stop, outputs.EndsBelow) : StopVerdict.Whole("no object was being written");
+                    handed.Clean = verdict.Clean;
+                    handed.Why = verdict.Why;
+                    handed.ToRead = verdict.NextOf is null ? null : verdict;
+                    handed.Stop = stop;
+                    await outputs.LetGoOfInputsAsync(cancellationToken).ConfigureAwait(false);
+                    rows = 0;
+                    foreach (long taken in handed.Rows)
+                    {
+                        rows += taken;
+                    }
+                }
+                catch (VortexMemoryException refused) when (handed is not null && !cancellationToken.IsCancellationRequested)
+                {
+                    // A block no reserve covers was refused, the job's budget full: a merge's keys, a writer's arenas. The
+                    // merge ends there too, but nothing says the object being written is whole: the writers read the
+                    // inputs' batches no more once their rows in flight are through, and the job commits the objects it
+                    // had sealed, each ended where its key did.
+                    await outputs.SettleAsync().ConfigureAwait(false);
+                    handed.Clean = false;
+                    handed.Why = "a block no reservation covers was refused";
+                    handed.ToRead = null;
+                    handed.Stop = new ReserveExhaustedException(refused.ShortOfRoom, refused);
+                    rows = 0;
+                }
+                catch
+                {
+                    // Failed, the writers read the inputs' batches no more once their rows in flight are through.
+                    await outputs.SettleAsync().ConfigureAwait(false);
+                    if (lateOutputs is not null)
+                    {
+                        await lateOutputs.SettleAsync().ConfigureAwait(false);
+                    }
+
+                    throw;
+                }
+            }
+
+            // The merge gave its inputs back. One key was left to read: the next row's of the input whose next batch
+            // found no room, every other row left lying past the last key written. Past it too, the object being
+            // written ends on a whole key, and is sealed; at it, or unread, it is dropped as before.
+            if (handed is { Stop: not null, ToRead: { NextOf: { } entry } pending })
+            {
+                (bool read, byte[]? next) = await NextKeyAsync(dataset, schema, memory, entry, pending.NextRow, cancellationToken).ConfigureAwait(false);
+                handed.ToRead = null;
+                handed.Clean = read && (next is null || outputs.EndsBelow(next));
+                handed.Why = handed.Clean ? $"{pending.Why}, its next key read past the last one written"
+                    : read ? $"{pending.Why}, its next row holding the key the last run ended on"
+                    : $"{pending.Why}, its next key not read";
+            }
+        }
+        finally
+        {
+            memory.GiveBack = null;
+            memory.GiveBackAhead = null;
+            outputs.Ledger = null;
+            lock (made)
+            {
+                foreach (KeyOrderedMerge one in made)
+                {
+                    outputs.WindowsTaken += one.WindowsTaken;
+                    outputs.WindowsCopied += one.WindowsCopied;
+                    outputs.WindowsKeyedHere += one.WindowsKeyedHere;
+                }
+            }
+
+            foreach ((_, VariantTake take) in takes ?? [])
+            {
+                (long held, long refused, long inexact) = outputs.VariantChunks;
+                outputs.VariantChunks = (held + take.ChunksHeld, refused + take.ChunksRefused + take.ChunksInexact, inexact + take.ChunksInexact);
+            }
+
+            if (sliced is not null)
+            {
+                outputs.SlicesAhead += sliced.SlicesAhead;
+                outputs.Slices += sliceCount;
+                outputs.SlicesAtOnce = Math.Max(outputs.SlicesAtOnce, sliced.PeakAtOnce);
+            }
+
+            // What each slice took of each input, counted apart since slices merge at once, added up once every one is done.
+            for (int slice = 0; sliceEmitted is not null && slice < sliceEmitted.Length; slice++)
+            {
+                for (int input = 0; sliceEmitted[slice] is { } took && input < took.Length; input++)
+                {
+                    emitted![input] += took[input];
+                }
+            }
+
+            outputs.InputWindowsAhead += ahead?.Taken ?? 0;
+            if (lateOutputs is not null)
+            {
+                lateOutputs.Ledger = null;
+            }
+        }
+
+        return rows;
+    }
+
+    /// <summary>The merge's runs, one after another, into the objects they fall in: the rows that came late apart.</summary>
+    private static async ValueTask<long> MergeRunsAsync(
+        IMergedRuns merge, ObjectStream outputs, LateRows? late, ObjectStream? lateOutputs, ValueCut? values, Handed? handed,
+        CancellationToken cancellationToken)
+    {
+        long rows = 0;
         {
             while (await merge.MoveNextAsync().ConfigureAwait(false))
             {
-                RecordBatch run = merge.Current;
+                int count = merge.CurrentRows;
+
+                // What the flow hands of each input, for a merge that may end short of room and commit what it took.
+                long[]? took = handed?.Rows;
+                int input = took is null ? 0 : (int)merge.CurrentInput;
 
                 // The rows that came late lead the merge, keys ascending: those of the run go to level 0, kept apart.
                 // An object a partition value, so that each lies within the rows of its value, which a merge of neighbours
                 // there takes in with them.
-                int start = late?.End(merge, 0, run.RowCount) ?? 0;
+                int start = late?.End(merge, 0, count) ?? 0;
                 if (start > 0)
                 {
                     late!.Add(start);
@@ -1122,9 +1865,16 @@ internal static partial class DatasetCompactor
 
                 // An object holds the rows of one partition value: a run of several is written in parts, one a value,
                 // and a part of another value than the object's seals it. A key has one value, so no part splits a key.
-                for (int at = start, end; at < run.RowCount; at = end)
+                for (int at = start, end; at < count; at = end)
                 {
-                    end = values is null ? run.RowCount : values.EndOfValue(merge, at, run.RowCount);
+                    end = values is null ? count : values.EndOfValue(merge, at, count);
+
+                    // An object the rows handed over since its last reading may bring to its size is read: it is full or it goes
+                    // on, the next reading placed by what a row weighed since this one.
+                    if (outputs.AsksReading)
+                    {
+                        await outputs.ReadSizeAsync(cancellationToken).ConfigureAwait(false);
+                    }
 
                     // A run that goes on with the key the object ends on, past its size: the rows of that key stay with it,
                     // and the next part starts where the key changes. An input runs through the rows of a key it shares
@@ -1134,19 +1884,32 @@ internal static partial class DatasetCompactor
                     {
                         end = EndOfKey(merge, at, end);
                     }
-
-                    if ((outputs.WantsRoll && !outputs.HoldsKey(merge.KeyAt(at)))
-                        || (values is not null && outputs.HoldsOtherValue(values, merge.KeyAt(at))))
+                    else if (outputs.WantsRoll || (values is not null && outputs.HoldsOtherValue(values, merge.KeyAt(at))))
                     {
                         // Never split a key across two objects: two outputs sharing a boundary value
                         // would overlap, and a level wants key-disjoint objects.
                         await outputs.RollAsync(cancellationToken).ConfigureAwait(false);
+                        handed?.Rolled();
+                    }
+
+                    // The runs are cut where the next reading of the object they go to is asked, so that it falls there whatever
+                    // runs the merge hands, that object started first. A run that started an object went in whole, to where the
+                    // merge's run ended, which the inputs' batches decide: an object of a line's blocks was read at 20 blocks
+                    // where its writer had landed what 8 named (2026-11-21).
+                    outputs.Opens(merge.KeyAt(at));
+                    if (outputs.RowsToReading < end - at)
+                    {
+                        end = at + (int)outputs.RowsToReading;
                     }
 
                     await outputs.WriteAsync(merge, at, end, cancellationToken).ConfigureAwait(false);
+                    if (took is not null)
+                    {
+                        took[input] += end - at;
+                    }
                 }
 
-                rows += run.RowCount;
+                rows += count;
             }
         }
 
@@ -1154,10 +1917,50 @@ internal static partial class DatasetCompactor
     }
 
     /// <summary>
+    /// The rows the inputs of <paramref name="job"/> hold of each partition value of <paramref name="cut"/>, by the first key
+    /// of the value's first input, in the keys' order: what the objects of one value can take at most, their deleted rows
+    /// counted. Null without a cut, or when an input holds several values, whose rows no one value can be told.
+    /// </summary>
+    internal static IReadOnlyList<(byte[] Key, long Rows)>? RowsByValueOf(ValueCut? cut, CompactionJob job)
+    {
+        if (cut is null)
+        {
+            return null;
+        }
+
+        List<(byte[] Key, long Rows)> inputs = new List<(byte[] Key, long Rows)>(job.Inputs.Count);
+        foreach (CompactionInput input in job.Inputs)
+        {
+            if (!cut.HoldsOne(input))
+            {
+                return null;
+            }
+
+            inputs.Add((input.Key.Span[..^VortexDataset.UidBytes].ToArray(), input.Entry.Rows));
+        }
+
+        inputs.Sort(static (left, right) => left.Key.AsSpan().SequenceCompareTo(right.Key));
+        List<(byte[] Key, long Rows)> values = [];
+        foreach ((byte[] key, long rows) in inputs)
+        {
+            if (values.Count > 0 && cut.Same(values[^1].Key, key))
+            {
+                values[^1] = (values[^1].Key, values[^1].Rows + rows);
+            }
+            else
+            {
+                values.Add((key, rows));
+            }
+        }
+
+        return values;
+    }
+
+    /// <summary>
     /// The first row from <paramref name="from"/> to <paramref name="to"/> of the merge's run whose key is not the key of
     /// row <paramref name="from"/>, or <paramref name="to"/>: found by halves, the run's keys ascending.
     /// </summary>
-    private static int EndOfKey(KeyOrderedMerge merge, int from, int to)
+    private static int EndOfKey(IMergedRun merge, int from, int to)
     {
         if (merge.KeyAt(from).SequenceEqual(merge.KeyAt(to - 1)))
         {
@@ -1184,6 +1987,14 @@ internal static partial class DatasetCompactor
     }
 
     /// <summary>
+    /// The batches a merge's input decodes ahead of the one the merge reads: one, decoded on a lane of its scan while the merge
+    /// takes the runs of the batch before, so that the merge's thread chooses runs rather than decodes them. A merge's thread
+    /// decoded every input's columns, their variants rebuilt, a tenth of a consolidation's processor on the chain every
+    /// lane of the writer waited for (2026-11-16). An input then holds two batches, which its measured price counts.
+    /// </summary>
+    private const int InputPrefetch = 1;
+
+    /// <summary>
     /// The k-way merge of a job's inputs on the tree's order, the partition leading the key (<see cref="DatasetSchema.Tree"/>).
     /// Offered by leaf key, an exact lower bound, so an input opens only once it could hold the next row; the job's own
     /// order breaks ties among inputs holding the same key.
@@ -1194,7 +2005,10 @@ internal static partial class DatasetCompactor
     /// merge holds the rows of range <paramref name="range"/> alone: each input its keys meet reads the rows the range
     /// names of it, and leaves out those outside the range. With <paramref name="only"/>, it holds that input's rows alone,
     /// their keys beside them. Each input reads batches of <paramref name="batchRows"/>, which <paramref name="meter"/>
-    /// counts when given.
+    /// counts when given, and decodes <see cref="InputPrefetch"/> of them ahead of the merge, under an account of its own
+    /// that counts in <paramref name="account"/>, a slice's, or in the job's inputs' when none is given: what each input
+    /// holds is measured apart (<see cref="JobMemory.OpenInput"/>). <paramref name="letGo"/> is what the merge calls before
+    /// it opens an input beside inputs done whose windows the writers still read (<see cref="KeyOrderedMerge.LetGo"/>).
     /// </remarks>
     private static KeyOrderedMerge InputsMerged(
         VortexDataset dataset,
@@ -1208,9 +2022,16 @@ internal static partial class DatasetCompactor
         int only = -1,
         RowMeter? meter = null,
         JobMemory? memory = null,
-        long[]? emitted = null)
+        long[]? emitted = null,
+        Writing.RunLedger? ledger = null,
+        Action<KeyOrderedMerge.Window>? retiring = null,
+        Scanning.DecodeAhead? ahead = null,
+        Buffers.MemoryAccount? account = null,
+        (string Column, VariantTake Take)[]? takes = null,
+        Func<ObjectEntry, ValueTask>? letGo = null,
+        Func<int, ValueTask<bool>>? makeRoom = null)
     {
-        Buffers.MemoryAccount? account = memory?.InputsAccount;
+        account ??= memory?.InputsAccount;
         List<(ReadOnlyMemory<byte> Key, MergeObject Object)> inputs = new(job.Inputs.Count);
         Dictionary<string, RowRange>? rows = ranges is null ? null : new Dictionary<string, RowRange>(StringComparer.Ordinal);
         for (int i = 0; i < job.Inputs.Count; i++)
@@ -1240,10 +2061,39 @@ internal static partial class DatasetCompactor
             dataset.Snapshot,
             inputs.Select(static held => held.Object).ToAsyncEnumerable(),
             schema.Tree!,
-            rankedTies: false,
-            (lease, entry) => meter is null
-                ? RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], batchRows, account)
-                : MeteredAsync(RowsOfAsync(lease, entry, schema, cancellationToken, fields, rows?[entry.Key], batchRows, account), meter, cancellationToken),
+
+            // Equal keys in the order of the job's inputs, as a read promises: an input that ran through the keys equal to
+            // another's put its rows first or not depending on where its batch ended, and the batches' rows follow what the
+            // job measured, so the same rows compacted twice wrote objects whose rows of one key came in another order.
+            rankedTies: true,
+            // An input's batches, of the rows the job counted from its inputs' entries, under an account of the input's own.
+            // Under a ledger, its scan hands its batches over, their keys encoded by their decode.
+            (lease, entry, handover) =>
+            {
+                // Its scan reserves what it is about to hold before it takes it, a chunk's segments, what a read of the chunk
+                // decodes whole, a batch, when it hands its batches over: a step of such a scan can be run again. A first
+                // pass's scan counts what it holds and reserves nothing.
+                Buffers.MemoryAccount? own = account;
+                if (memory is not null && account is not null)
+                {
+                    (own, MemoryReserve? reserve) = memory.OpenInput(entry, account, batchRows, handover is null ? null : makeRoom);
+                    if (handover is not null)
+                    {
+                        handover.Reserve = reserve;
+                    }
+                }
+
+                // What a batch of its scan is reserved at before one was measured: its rows at what its entry says a row
+                // weighs decoded, its key encoded beside it; nothing for an object whose entry says nothing, whose first
+                // batch takes what the budget holds.
+                if (handover is not null && batchRows > 0 && entry is { DecodedBytes: > 0, PhysicalRows: > 0 })
+                {
+                    handover.WindowBytes = Math.Min(entry.PhysicalRows, batchRows) * (DecodedRowBytes(dataset, entry) + entry.LastKey.Length);
+                }
+                IAsyncEnumerable<RecordBatch> batches = RowsOfAsync(
+                    lease, entry, schema, cancellationToken, fields, rows?[entry.Key], batchRows, own, InputPrefetch, handover, takes);
+                return meter is null ? batches : MeteredAsync(batches, meter, cancellationToken);
+            },
             opened: null,
             cancellationToken,
             ranges?.Low(range) ?? default,
@@ -1252,7 +2102,171 @@ internal static partial class DatasetCompactor
             Account = account ?? QueryMemoryBudget.JobsOf(dataset.Session).Account,
             Rent = memory is null ? null : memory.RentAsync,
             Emitted = emitted,
+            Ledger = ledger,
+            Retiring = retiring,
+            Ahead = ledger is null ? null : ahead,
+            LetGo = letGo,
         };
+    }
+
+    /// <summary>
+    /// The rows a merge's flow handed its outputs of each input of the job, by its place among them, and the same as its
+    /// last object was sealed: what a merge ended short of room commits of each input (<see cref="StoppedAt"/>). Counted
+    /// by the flow that takes the runs, a run at a time: a slice merged ahead counts what it merged, not what was taken.
+    /// </summary>
+    private sealed class Handed(int inputs)
+    {
+        /// <summary>The rows handed over of each input so far.</summary>
+        internal long[] Rows { get; } = new long[inputs];
+
+        /// <summary>The rows handed over of each input when the outputs last sealed an object; null before one was.</summary>
+        internal long[]? AtRoll { get; private set; }
+
+        /// <summary>What ended the merge short of room; null for a merge that ran to its end.</summary>
+        internal ReserveExhaustedException? Stop { get; set; }
+
+        /// <summary>Whether, ended short of room, the merge's outputs end on a whole key (<see cref="IMergedRuns.Stopped"/>, <see cref="NextKeyAsync"/>).</summary>
+        internal bool Clean { get; set; }
+
+        /// <summary>What ended the merge and how its outputs' end was judged, for the job's result.</summary>
+        internal string? Why { get; set; }
+
+        /// <summary>The input whose next key is still to read once the merge gave its inputs back, every other row left lying past the last key written; null for none.</summary>
+        internal StopVerdict? ToRead { get; set; }
+
+        /// <summary>The outputs seal the object they write: what was handed over so far is in sealed objects.</summary>
+        internal void Rolled() => Array.Copy(Rows, AtRoll ??= new long[Rows.Length], Rows.Length);
+
+        /// <summary>Nothing handed over yet: the job's write starts, or starts again.</summary>
+        internal void Reset()
+        {
+            Array.Clear(Rows);
+            AtRoll = null;
+            Stop = null;
+            Clean = false;
+            Why = null;
+            ToRead = null;
+        }
+    }
+
+    /// <summary>
+    /// The key of the first row left of <paramref name="entry"/>'s object from row <paramref name="row"/> of its file
+    /// on, deleted rows passed over: what tells a merge ended short of room, the next batch of that input not read,
+    /// whether the object it was writing ends on a whole key. Read through the columns of the key alone
+    /// (<see cref="SortKey.ColumnsOf"/>), once the merge gave its inputs back: the batch that found no room held every
+    /// column, a variant's dictionary decoded whole among them, where the key's hold a chunk of each of theirs.
+    /// </summary>
+    /// <returns>
+    /// Whether the key could be read, and the key, null when no row is left. Not read when a value of the key is a key of
+    /// a variant column, whose read takes the column's chunk, or when the read itself found no room.
+    /// </returns>
+    private static async ValueTask<(bool Read, byte[]? Key)> NextKeyAsync(
+        VortexDataset dataset, DatasetSchema schema, JobMemory memory, ObjectEntry entry, long row, CancellationToken cancellationToken)
+    {
+        if (schema.Tree is not { } key || key.ColumnsOf(schema.DType) is not { } columns)
+        {
+            return (false, null);
+        }
+
+        if (row >= entry.PhysicalRows)
+        {
+            return (true, null);
+        }
+
+        try
+        {
+            ObjectLease lease = await memory.RentAsync(entry, cancellationToken).ConfigureAwait(false);
+            await using (lease.ConfigureAwait(false))
+            {
+                IAsyncEnumerable<RecordBatch> left = RowsOfAsync(
+                    lease, entry, schema, cancellationToken, columns, RowRange.FromLength(row, entry.PhysicalRows - row), LeastBatchRows,
+                    memory.InputsAccount);
+                await foreach (RecordBatch batch in left.WithCancellation(cancellationToken).ConfigureAwait(false))
+                {
+                    if (batch.RowCount == 0)
+                    {
+                        continue;
+                    }
+
+                    using RowKeys keys = key.Encode(batch);
+                    return (true, keys.Row(0).ToArray());
+                }
+            }
+
+            return (true, null);
+        }
+        catch (VortexMemoryException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // The read found no room either: nothing says where the next row's key lies.
+            return (false, null);
+        }
+    }
+
+    /// <summary>
+    /// Whether a job ended short of room may commit what it took of its inputs, <paramref name="took"/> rows of each: it
+    /// took rows, some of level 0 when it reads some; each object of a level past 0 whole or not at all, a level's objects
+    /// being disjoint by key; and it took part of no input that carries the counts of rows a delete marked, which the marks
+    /// of a part taken would leave behind (<see cref="PieceCommit"/>).
+    /// </summary>
+    private static bool Commits(CompactionJob job, long[]? took)
+    {
+        if (took is null)
+        {
+            return false;
+        }
+
+        long ofLevelZero = 0;
+        long any = 0;
+        bool readsLevelZero = false;
+        for (int i = 0; i < job.Inputs.Count; i++)
+        {
+            CompactionInput input = job.Inputs[i];
+            any += took[i];
+            if (input.Level >= 1)
+            {
+                if (took[i] != 0 && took[i] != input.Entry.Rows)
+                {
+                    return false;
+                }
+
+                continue;
+            }
+
+            readsLevelZero = true;
+            ofLevelZero += took[i];
+            if (took[i] > 0 && took[i] < input.Entry.Rows && input.Entry.HasNegatives)
+            {
+                return false;
+            }
+        }
+
+        return any > 0 && (!readsLevelZero || ofLevelZero > 0);
+    }
+
+    /// <summary>
+    /// What a job ended short of room commits as a piece of itself: the inputs it took rows of, each read from where the
+    /// job read it, and what it took of each (<see cref="Piece"/>). The inputs it took nothing of stay out of the commit,
+    /// as they were.
+    /// </summary>
+    private static Piece StoppedAt(CompactionJob job, Piece? piece, long[] took)
+    {
+        List<CompactionInput> inputs = [];
+        List<long> starts = [];
+        List<long> emitted = [];
+        for (int i = 0; i < job.Inputs.Count; i++)
+        {
+            if (took[i] > 0)
+            {
+                inputs.Add(job.Inputs[i]);
+                starts.Add(piece?.StartOf(i) ?? 0);
+                emitted.Add(took[i]);
+            }
+        }
+
+        Piece stopped = new Piece(
+            new CompactionJob(job.FromLevel, job.ToLevel, job.Style, job.Trigger, inputs, job.TargetBytes, job.FirstRow), null!, [.. starts], toTheEnd: false);
+        emitted.CopyTo(stopped.Emitted);
+        return stopped;
     }
 
     /// <summary>
@@ -1267,7 +2281,9 @@ internal static partial class DatasetCompactor
     /// inputs counted every row on one thread, and took a fifth of a tier merge of log records. An input's counts are added
     /// to its values' once it and the inputs before it are counted, in the inputs' order whatever the lanes' pace, and its
     /// censuses go back to <see cref="Censuses"/> for the next input to count in: what the job holds is its values' keys,
-    /// where every input's census, kept to the end, made the job's keys as many times over as it has inputs.
+    /// where every input's census, kept to the end, made the job's keys as many times over as it has inputs. A large input
+    /// that no directory tells is counted in parts of its rows (<see cref="CensusPartsAsync"/>), side by side as the inputs
+    /// are and added in their order, which makes the census the input's rows counted one after the other make.
     /// </remarks>
     private static async ValueTask<IReadOnlyList<ValueShredding>> PlanValuesAsync(
         VortexDataset dataset, DatasetSchema schema, CompactionJob job, JobMemory memory, KeyRanges? piece, CancellationToken cancellationToken)
@@ -1275,9 +2291,15 @@ internal static partial class DatasetCompactor
         int[] variants = VariantColumns(schema.DType);
         ValueCut? values = schema.Cut;
         int textBound = dataset.Options.Write.StringBoundBytes;
-        List<ValueCount>?[] counts = new List<ValueCount>?[job.Inputs.Count];
+
+        // What the lanes count, in the inputs' order: each input whole, or a large one in parts of its rows (CensusPartsAsync).
+        using CensusParts plan = await CensusPartsAsync(dataset, schema, job, variants, memory, piece, cancellationToken).ConfigureAwait(false);
+        List<CensusPart> parts = plan.Parts;
+        List<ValueCount>?[] counts = new List<ValueCount>?[parts.Count];
         List<(byte[] First, PathCensus[] Paths)> added = [];
+        List<int> refused = [];
         int next = 0;
+        ValueCount? pending = null;
         Lock gate = new Lock();
 
         // As many lanes as the room the jobs' budget leaves holds what a lane holds as it counts an input: the input open,
@@ -1286,32 +2308,54 @@ internal static partial class DatasetCompactor
         long perLane = File.VortexReadOptions.DefaultVariantSliceBytes;
         foreach (CompactionInput input in job.Inputs)
         {
-            perLane = Math.Max(perLane, InputCost(dataset, schema, input.Entry, censusRows) + File.VortexReadOptions.DefaultVariantSliceBytes);
+            perLane = Math.Max(perLane, Window(dataset, schema, input.Entry, censusRows) + File.VortexReadOptions.DefaultVariantSliceBytes);
         }
 
-        int most = Math.Min(Math.Max(1, dataset.Session.Options.MaxDegreeOfParallelism), job.Inputs.Count);
-        int admitted = (int)Math.Clamp(JobRoom(dataset) / perLane, 1, most);
+        int most = Math.Min(Math.Max(1, dataset.Session.Options.MaxDegreeOfParallelism), parts.Count);
+        int admitted = (int)Math.Clamp(memory.Room / perLane, 1, most);
 
-        ParallelOptions lanes = new ParallelOptions
-        {
-            MaxDegreeOfParallelism = admitted,
-            CancellationToken = cancellationToken,
-        };
-        await Parallel.ForAsync(0, job.Inputs.Count, lanes, async (input, token) =>
-        {
-            List<ValueCount> counted = await CountAsync(dataset, schema, job, input, variants, memory, piece, token).ConfigureAwait(false);
-            lock (gate)
+        // The job's own lane, and beside it the lanes of the session's that are free now (LaneBudget), as many as the room
+        // admits: the job holds the session's degree with its writers' helpers and every other job's, where the census took
+        // its own threads past it. Each lane given back as it finds no part left.
+        await Execution.LaneWorkers.ForAsync(
+            dataset.Session.Lanes,
+            parts.Count,
+            admitted,
+            async (part, token) =>
             {
-                counts[input] = counted;
-                for (; next < counts.Length && counts[next] is { } ready; counts[next++] = null)
+                List<ValueCount> counted;
+                try
                 {
-                    foreach (ValueCount count in ready)
-                    {
-                        Add(count);
-                    }
+                    counted = await CountAsync(dataset, schema, job, parts[part].Input, variants, memory, piece, token, parts[part].Rows, parts[part].Told).ConfigureAwait(false);
                 }
-            }
-        }).ConfigureAwait(false);
+                catch (VortexMemoryException) when (!token.IsCancellationRequested)
+                {
+                    // Refused a block by the process beside the inputs the other lanes hold: counted again alone once they
+                    // are done, rather than the job failed (raph, 2026-11-16: short of memory, a work waits). The blocks
+                    // the count held went back as it unwound.
+                    lock (gate)
+                    {
+                        refused.Add(part);
+                    }
+
+                    return;
+                }
+
+                lock (gate)
+                {
+                    counts[part] = counted;
+                    Drain();
+                }
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        // The parts refused beside the others, each counted alone on the job's thread, in their order.
+        refused.Sort();
+        foreach (int part in refused)
+        {
+            counts[part] = await CountAsync(dataset, schema, job, parts[part].Input, variants, memory, piece, cancellationToken, parts[part].Rows, parts[part].Told).ConfigureAwait(false);
+            Drain();
+        }
 
         // The values in the key's order, the partition leading it: each a range of keys, which any of its first keys places.
         added.Sort(static (left, right) => left.First.AsSpan().SequenceCompareTo(right.First));
@@ -1337,6 +2381,60 @@ internal static partial class DatasetCompactor
 
         return shreddings;
 
+        // The parts counted, added to their values in the parts' order up to the first not counted yet. The parts of an input
+        // counted in parts make its census first, each added after the one before, then the paths its directories tell, as a
+        // count of the whole input adds them after its rows; the input's census then goes to its value.
+        void Drain()
+        {
+            for (; next < counts.Length && counts[next] is { } ready; counts[next++] = null)
+            {
+                CensusPart part = parts[next];
+                if (part.Rows is null)
+                {
+                    foreach (ValueCount count in ready)
+                    {
+                        Add(count);
+                    }
+
+                    continue;
+                }
+
+                foreach (ValueCount count in ready)
+                {
+                    if (pending is null)
+                    {
+                        pending = count;
+                        continue;
+                    }
+
+                    for (int v = 0; v < variants.Length; v++)
+                    {
+                        pending.Paths[v].Merge(count.Paths[v]);
+                    }
+
+                    Censuses.Return(count.Paths);
+                }
+
+                if (part.Last && pending is not null)
+                {
+                    if (plan.Take(next) is { } directories)
+                    {
+                        for (int v = 0; v < variants.Length; v++)
+                        {
+                            if (directories[v] is { } directory)
+                            {
+                                pending.Paths[v].AddPaths(directory);
+                                directory.Dispose();
+                            }
+                        }
+                    }
+
+                    Add(pending);
+                    pending = null;
+                }
+            }
+        }
+
         // An input's counts of a value added to its value's, censuses of their own, and given back for the next input.
         void Add(ValueCount count)
         {
@@ -1358,6 +2456,129 @@ internal static partial class DatasetCompactor
             }
 
             Censuses.Return(count.Paths);
+        }
+    }
+
+    /// <summary>
+    /// A unit of the first pass: an input whole, or <see cref="Rows"/> of it, with the variant columns its directories tell,
+    /// whose rows are then counted alone (<see cref="PathCensus.AddRows"/>); <see cref="Last"/> for an input's last part.
+    /// </summary>
+    private readonly record struct CensusPart(int Input, RowRange? Rows, bool[]? Told, bool Last);
+
+    /// <summary>
+    /// The units of the first pass (<see cref="CensusPart"/>), and the directories of each input counted in parts, held by its
+    /// last part until its census adds the paths they tell; those not taken go back as it is disposed.
+    /// </summary>
+    private sealed class CensusParts : IDisposable
+    {
+        private readonly Dictionary<int, VariantDirectory.DirectoryBody?[]> _directories = [];
+
+        internal List<CensusPart> Parts { get; } = [];
+
+        /// <summary>Holds <paramref name="directories"/> for part <paramref name="part"/>.</summary>
+        internal void Hold(int part, VariantDirectory.DirectoryBody?[] directories) => _directories[part] = directories;
+
+        /// <summary>The directories part <paramref name="part"/> holds, now the caller's to dispose; null for none.</summary>
+        internal VariantDirectory.DirectoryBody?[]? Take(int part) => _directories.Remove(part, out VariantDirectory.DirectoryBody?[]? taken) ? taken : null;
+
+        public void Dispose()
+        {
+            foreach (VariantDirectory.DirectoryBody?[] directories in _directories.Values)
+            {
+                foreach (VariantDirectory.DirectoryBody? directory in directories)
+                {
+                    directory?.Dispose();
+                }
+            }
+
+            _directories.Clear();
+        }
+    }
+
+    /// <summary>
+    /// What the first pass counts on its lanes, in the inputs' order: each input whole, or in parts of its rows when it holds
+    /// <see cref="DatasetOptions.CensusPartRows"/> twice or more, a single value, no deleted row, and a variant column its
+    /// directories do not tell; an input they tell whole is counted from them alone. Each part is whole chunks of its first
+    /// variant column and at least <see cref="DatasetOptions.CensusPartRows"/> rows, so that no chunk is decoded twice, and the
+    /// cuts are the file's and the options' alone, the same at any degree. The parts' censuses added in their order, then the paths the directories tell, are the input's while its
+    /// paths hold fewer than <see cref="PathCensus.MaxKeys"/> keys, and past them the same at any degree
+    /// (<see cref="PathCensus.Merge"/>).
+    /// </summary>
+    private static async ValueTask<CensusParts> CensusPartsAsync(
+        VortexDataset dataset, DatasetSchema schema, CompactionJob job, int[] variants, JobMemory memory, KeyRanges? piece, CancellationToken cancellationToken)
+    {
+        CensusParts plan = new CensusParts();
+        List<CensusPart> parts = plan.Parts;
+        long least = Math.Max(1, dataset.Options.CensusPartRows);
+        try
+        {
+            for (int input = 0; input < job.Inputs.Count; input++)
+            {
+                CompactionInput held = job.Inputs[input];
+                long rows = held.Entry.PhysicalRows;
+                if (piece is not null || variants.Length == 0 || rows < 2 * least || held.Entry.HasDeletions
+                    || (schema.Cut is { } values && !values.HoldsOne(held)))
+                {
+                    parts.Add(new CensusPart(input, null, null, true));
+                    continue;
+                }
+
+                long[] starts;
+                VariantDirectory.DirectoryBody?[] directories = new VariantDirectory.DirectoryBody?[variants.Length];
+                ObjectLease lease = await memory.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
+                await using (lease.ConfigureAwait(false))
+                {
+                    if (schema.Holds(held.Entry))
+                    {
+                        directories = await DirectoriesAsync(lease, held.Entry, variants, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    // Told whole when every column's directory keeps its values' bytes too, as the count decides.
+                    starts = Array.TrueForAll(directories, static directory => directory is { ValueBytes: >= 0 })
+                        ? []
+                        : lease.File.ChunkStartsOf(schema.DType.GetFieldName(variants[0]));
+                }
+
+                int first = parts.Count;
+                long begin = 0;
+                for (int chunk = 1; chunk < starts.Length - 1; chunk++)
+                {
+                    if (starts[chunk] - begin >= least && rows - starts[chunk] >= least)
+                    {
+                        parts.Add(new CensusPart(input, new RowRange(begin, starts[chunk]), null, false));
+                        begin = starts[chunk];
+                    }
+                }
+
+                if (parts.Count == first)
+                {
+                    // Told whole, or of one part: counted whole, its directories read again by its count.
+                    foreach (VariantDirectory.DirectoryBody? directory in directories)
+                    {
+                        directory?.Dispose();
+                    }
+
+                    parts.Add(new CensusPart(input, null, null, true));
+                    continue;
+                }
+
+                parts.Add(new CensusPart(input, new RowRange(begin, rows), null, true));
+                memory.CensusParts = (memory.CensusParts.Inputs + 1, memory.CensusParts.Parts + parts.Count - first);
+                bool[] told = [.. directories.Select(static directory => directory is not null)];
+                for (int part = first; part < parts.Count; part++)
+                {
+                    parts[part] = parts[part] with { Told = told };
+                }
+
+                plan.Hold(parts.Count - 1, directories);
+            }
+
+            return plan;
+        }
+        catch
+        {
+            plan.Dispose();
+            throw;
         }
     }
 
@@ -1419,11 +2640,13 @@ internal static partial class DatasetCompactor
     /// <summary>
     /// The paths of input <paramref name="input"/>'s rows counted for <see cref="PlanValuesAsync"/>, a value at a time in the
     /// key's order: of an input that holds one value, or of a dataset with none, its variant columns alone, read through; of
-    /// one that holds several, the key's columns too, the input merged alone so that its keys tell its values apart.
+    /// one that holds several, the key's columns too, the input merged alone so that its keys tell its values apart. With
+    /// <paramref name="rows"/>, a part of an input of one value (<see cref="CensusPartsAsync"/>), those rows alone, the columns
+    /// <paramref name="toldColumns"/> marks counted by their rows and bytes only, their paths left to its directories.
     /// </summary>
     private static async ValueTask<List<ValueCount>> CountAsync(
         VortexDataset dataset, DatasetSchema schema, CompactionJob job, int input, int[] variants, JobMemory memory, KeyRanges? piece,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, RowRange? rows = null, bool[]? toldColumns = null)
     {
         int textBound = dataset.Options.Write.StringBoundBytes;
         CompactionInput held = job.Inputs[input];
@@ -1435,12 +2658,65 @@ internal static partial class DatasetCompactor
             ObjectLease lease = await memory.RentAsync(held.Entry, cancellationToken).ConfigureAwait(false);
             await using (lease.ConfigureAwait(false))
             {
-                await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants, piece?.RowsOf(input, 0), account: memory.InputsAccount)
-                    .WithCancellation(cancellationToken).ConfigureAwait(false))
+                // A column whose directory tells its paths is not parsed: its rows give their count and their values' bytes
+                // alone, and the directory the rest. A piece reads a part of its inputs, which their directories do not tell.
+                VariantDirectory.DirectoryBody?[] directories = piece is null && rows is null && schema.Holds(held.Entry)
+                    ? await DirectoriesAsync(lease, held.Entry, variants, cancellationToken).ConfigureAwait(false)
+                    : new VariantDirectory.DirectoryBody?[variants.Length];
+                try
                 {
+                    // Every column's directory keeps its rows' value bytes too: none of the input is read, its rows put back
+                    // together from their shredding only to be sized, a log's attributes from some four hundred keys a row.
+                    bool told = true;
+                    foreach (VariantDirectory.DirectoryBody? directory in directories)
+                    {
+                        told &= directory is { ValueBytes: >= 0 };
+                    }
+
+                    if (told)
+                    {
+                        for (int v = 0; v < variants.Length; v++)
+                        {
+                            paths[v].AddCounts(directories[v]!.Rows, directories[v]!.ValueBytes);
+                        }
+
+                        memory.ToldByDirectories();
+                    }
+                    else
+                    {
+                        // In batches of the rows its lane was priced at (CensusRows): read at the scan's own size, a lane of
+                        // log records held a window of their attributes rebuilt, and the census of a tier merge of 23 inputs was
+                        // refused at 671 MiB of 672, twice, before a job of 5 ran (2026-11-16).
+                        await foreach (RecordBatch batch in RowsOfAsync(lease, held.Entry, schema, cancellationToken, variants, rows ?? piece?.RowsOf(input, 0), CensusRows(dataset, job), memory.InputsAccount)
+                            .WithCancellation(cancellationToken).ConfigureAwait(false))
+                        {
+                            for (int v = 0; v < variants.Length; v++)
+                            {
+                                if (directories[v] is null && toldColumns?[v] != true)
+                                {
+                                    paths[v].Add(batch, v);
+                                }
+                                else
+                                {
+                                    paths[v].AddRows(batch, v);
+                                }
+                            }
+                        }
+                    }
+
                     for (int v = 0; v < variants.Length; v++)
                     {
-                        paths[v].Add(batch, v);
+                        if (directories[v] is { } directory)
+                        {
+                            paths[v].AddPaths(directory);
+                        }
+                    }
+                }
+                finally
+                {
+                    foreach (VariantDirectory.DirectoryBody? directory in directories)
+                    {
+                        directory?.Dispose();
                     }
                 }
             }
@@ -1491,6 +2767,69 @@ internal static partial class DatasetCompactor
 
     /// <summary>The paths of one input's rows of one partition value, counted: the value's first key there, the input, and each variant column's census.</summary>
     private sealed record ValueCount(byte[] First, int Input, PathCensus[] Paths);
+
+    /// <summary>
+    /// The path directory of each of the <paramref name="variants"/> columns of the input <paramref name="entry"/> names, read
+    /// from <paramref name="lease"/>, the job's own copy of it or its read of the store, when it tells every count a shredding
+    /// is chosen from (<see cref="PathCensus.Tells"/>); null for a column whose directory does not, or that has none. Counting
+    /// the rows of a merge of 66 appends of metric records again took a seventh of its processor, for what each append's
+    /// directory says (2026-11-16).
+    /// </summary>
+    private static async ValueTask<VariantDirectory.DirectoryBody?[]> DirectoriesAsync(
+        ObjectLease lease, ObjectEntry entry, int[] variants, CancellationToken cancellationToken)
+    {
+        VariantDirectory.DirectoryBody?[] directories = new VariantDirectory.DirectoryBody?[variants.Length];
+
+        // A copy written again lays its chunks its own way, where the regions of the object's table of contents are not.
+        if (entry.Contents?.PathDirectories is not { Count: > 0 } regions || lease.IsCopy)
+        {
+            return directories;
+        }
+
+        IO.ISegmentReader file = lease.File;
+
+        try
+        {
+            for (int v = 0; v < variants.Length; v++)
+            {
+                foreach ((int column, IndexSegment region) in regions)
+                {
+                    if (column != variants[v])
+                    {
+                        continue;
+                    }
+
+                    using Buffers.SegmentOwner bytes = await file
+                        .ReadAsync(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken)
+                        .ConfigureAwait(false);
+                    if (region.Holds(bytes.Buffer.Span) && VariantDirectory.Open(bytes.Buffer.Span) is { } body)
+                    {
+                        if (PathCensus.Tells(body))
+                        {
+                            directories[v] = body;
+                        }
+                        else
+                        {
+                            body.Dispose();
+                        }
+                    }
+
+                    break;
+                }
+            }
+        }
+        catch
+        {
+            foreach (VariantDirectory.DirectoryBody? directory in directories)
+            {
+                directory?.Dispose();
+            }
+
+            throw;
+        }
+
+        return directories;
+    }
 
     /// <summary>
     /// The fields of <paramref name="schema"/> a first pass counts, ascending: those the partition and the key read and the
@@ -1586,8 +2925,10 @@ internal static partial class DatasetCompactor
         private readonly int _level;
 
         // The rows the job reads, `rowBound`, bound every object it writes, and so the length of their chunks;
-        // its bytes, `byteBound`, bound what the store sizes the parts of one it streams from.
-        internal ObjectStream(VortexDataset dataset, DatasetSchema schema, long target, long firstRow, bool inKeyOrder, long rowBound, int level, long byteBound)
+        // its bytes, `byteBound`, bound what the store sizes the parts of one it streams from. An object ends at `target`
+        // bytes of data when `endsBySize`.
+        internal ObjectStream(
+            VortexDataset dataset, DatasetSchema schema, long target, long firstRow, bool inKeyOrder, long rowBound, int level, long byteBound, bool endsBySize)
         {
             _dataset = dataset;
             _schema = schema;
@@ -1597,7 +2938,15 @@ internal static partial class DatasetCompactor
             _rowBound = rowBound;
             _level = level;
             _byteBound = byteBound;
+            _endsBySize = endsBySize;
+            _startRow = firstRow;
+            _slack = (long)(target * dataset.Options.ObjectEndSlack);
+            _drift = dataset.Options.RowWeightDrift;
         }
+
+        // Whether the job ends an object as it reaches the size: not when its plan chose its inputs to make one object
+        // (CompactionJob.OneObject), unless its objects ran past the bound of its inputs, which it then starts again under.
+        private readonly bool _endsBySize;
 
         /// <summary>The objects it has sealed.</summary>
         internal IReadOnlyList<WrittenObject> Written => _written;
@@ -1622,8 +2971,422 @@ internal static partial class DatasetCompactor
         /// <summary>The bytes the writers of the objects it has sealed spilled to disk, their indexes' runs past their memory.</summary>
         internal long ScratchBytes { get; private set; }
 
-        /// <summary>Whether the object being written has reached the destination's size.</summary>
-        internal bool WantsRoll => _output is not null && _output.Sink.Position + _output.Writer.HeldBytes >= _target;
+        /// <summary>The batches it handed its writers, one a call: what a merge cuts its rows into before they are written.</summary>
+        internal long Batches { get; private set; }
+
+        /// <summary>Of <see cref="Batches"/>, those the writers of the objects it sealed ingested on their lanes.</summary>
+        internal long BatchesAcross { get; private set; }
+
+        /// <summary>The batches the writers of the objects it sealed sent through on a lane of their own while it went on.</summary>
+        internal long BatchesFlown { get; private set; }
+
+        /// <summary>Of <see cref="BatchesFlown"/>, the blocks those writers sent through their line, several at once.</summary>
+        internal long BlocksOnLine { get; private set; }
+
+        /// <summary>The chunks of the file the blocks on those writers' lines ended.</summary>
+        internal long ChunksEndedOnLine { get; private set; }
+
+        /// <summary>Of <see cref="ChunksEndedOnLine"/>, those cut column by column, the flights after them going through meanwhile.</summary>
+        internal long ChunksCutOnLine { get; private set; }
+
+        /// <summary>Of <see cref="BlocksOnLine"/>, those that took their rows of a variant column from what the inputs took of them.</summary>
+        internal long BlocksOfRunsTaken { get; private set; }
+
+        /// <summary>Of <see cref="BlocksOfRunsTaken"/>, those whose values of the column were put back together whole before the block was read.</summary>
+        internal long BlocksPutBack { get; private set; }
+
+        /// <summary>The times an item of such a block put the column's values back together in an arena of its own.</summary>
+        internal long ColumnsPutBackApart { get; private set; }
+
+        /// <summary>
+        /// The chunks of a variant column the inputs of the merges into this stream handed over as their shreddings hold
+        /// them, those they set out to take and put back together after all, and, of those, the ones taken whole but not
+        /// byte for byte (<see cref="VariantTake"/>).
+        /// </summary>
+        internal (long Held, long Refused, long Inexact) VariantChunks { get; set; }
+
+        /// <summary>The inputs' batches the merges into this stream took over, and those they copied to keep.</summary>
+        internal long WindowsTaken { get; set; }
+
+        /// <inheritdoc cref="WindowsTaken"/>
+        internal long WindowsCopied { get; set; }
+
+        /// <summary>The inputs' batches whose keys the merges' thread encoded rather than their decode.</summary>
+        internal long WindowsKeyedHere { get; set; }
+
+        /// <summary>The slices the merges into this stream were cut in, and those merged ahead on lanes of their own.</summary>
+        internal int Slices { get; set; }
+
+        /// <inheritdoc cref="Slices"/>
+        internal int SlicesAhead { get; set; }
+
+        /// <summary>The most slices of its merges merging at once, the one taken and those ahead (<see cref="SlicedMerge.PeakAtOnce"/>); 1 for none.</summary>
+        internal int SlicesAtOnce { get; set; } = 1;
+
+        /// <summary>The windows the merges' inputs decoded ahead past their own two (<see cref="Scanning.DecodeAhead"/>).</summary>
+        internal long InputWindowsAhead { get; set; }
+
+        /// <summary>
+        /// Whether the object being written holds its size, as the job last read it (<see cref="ReadSizeAsync"/>): within the
+        /// size less its slack (<see cref="DatasetOptions.ObjectEndSlack"/>). Never for a job whose plan chose its inputs to
+        /// make one object (<see cref="CompactionJob.OneObject"/>), which then weighs what the merge writes of them.
+        /// </summary>
+        /// <remarks>
+        /// No estimate ends an object: a tier merge of five objects of 370 KB, 1.85 MB together under a size of 2 MiB, wrote
+        /// five objects of 370 KB again when an object was ended on its writer's estimate of its size, each at 2 MiB of a
+        /// variant column's rows that encoded to a sixth, and the plan took them again without end (2026-11-20).
+        /// </remarks>
+        internal bool WantsRoll => _output is not null && _full;
+
+        /// <summary>
+        /// Whether the rows handed over reach where the object's next reading is asked (<see cref="NextReading"/>): the job
+        /// then reads what the object holds (<see cref="ReadSizeAsync"/>).
+        /// </summary>
+        /// <remarks>
+        /// A reading is aimed at the object's size, at what a row weighed in the stream's last object read, or at what a row
+        /// of the job's inputs weighs for its first: one reading an object as a rule, which ends every column's chunk there,
+        /// and another when the rows weighed less than that. Readings aimed short of the size by a quarter of the gap left,
+        /// to be sure of landing under it, left every column two chunks more an object, which a question on one value read
+        /// 1.7 times the bytes of (2026-11-21).
+        /// <para>
+        /// Where what a row weighs moves along the keys, no aim by the rows follows it: log records sorted by service went
+        /// from 3.7 to 33.8 bytes a row, and objects aimed at 64 MiB ended at 125 and 211 % of it; on appends of the same
+        /// records, four million steady rows came before rows of 31.6 bytes, and an object ended at 241 %. Read a quarter of
+        /// an object's rows apart at the latest, those objects ended at 97 to 106 %, and the questions of a bench read 3 002
+        /// requests cold where they read 2 632. An object of a line's blocks is read by what its blocks name instead
+        /// (<see cref="ReadsNow"/>): those log objects end at 99 to 107 % in 15 ends where the quarters asked 27, and the
+        /// questions read 2 644 requests, every answer the same (2026-11-21).
+        /// </para>
+        /// </remarks>
+        internal bool AsksReading => _rows >= NextReading;
+
+        /// <summary>
+        /// The rows the object being written takes before its next reading (<see cref="AsksReading"/>), which the job cuts its
+        /// runs at, so that the reading is asked there whatever runs its merge hands the rows in; <see cref="long.MaxValue"/>
+        /// for none.
+        /// </summary>
+        /// <remarks>
+        /// A reading due within the object's first block, for a size a block outweighs, cuts no run: it falls where the run it
+        /// is due in ends, as an object of such a size ended at the first run past its size.
+        /// </remarks>
+        internal long RowsToReading =>
+            NextReading is long next && next != long.MaxValue && _output is { } output && next >= output.Writer.BlockRows ? next - _rows : long.MaxValue;
+
+        /// <summary>
+        /// The rows of the object being written its next reading is asked at: where its writer's grid ends a group
+        /// (<see cref="VortexFileWriter.GroupRows"/>), or before, in an object of a line's blocks at the end of the first
+        /// flight where what its blocks name says it is due (<see cref="ReadsNow"/>), looked at on each, and in a smaller one
+        /// where the rows at what a row weighs reach the object's size; on a block's boundary. <see cref="long.MaxValue"/>
+        /// for an object that does not end by its size or is full.
+        /// </summary>
+        /// <remarks>
+        /// Asked as the merge's runs came, a reading fell at rows that hung on where an input's batch ended, which the job's
+        /// memory decides, and the objects ended at other rows (2026-11-21).
+        /// </remarks>
+        private long NextReading
+        {
+            get
+            {
+                if (_output is not { } output || !_endsBySize || _full)
+                {
+                    return long.MaxValue;
+                }
+
+                // Read on the writer's grid of groups at least, so that no estimate spans more than a group of rows.
+                long block = Math.Max(1, output.Writer.BlockRows);
+                long grid = output.Writer.GroupRows;
+                long next = grid > 0 ? ((_rowsRead / grid) + 1) * grid : long.MaxValue;
+
+                // In an object of a line's blocks, at the end of the first flight where what its blocks name says it is due
+                // (ReadsNow), looked at on each, which follows a weight that moves along the keys with no chunk ended before.
+                if (output.Writer.Weights is { } weights)
+                {
+                    long boundary = (_rows + block - 1) / block * block;
+                    return Math.Min(next, boundary > _rows ? boundary : ReadsNow(output.Writer, weights, block, next) ? _rows : _rows + block);
+                }
+
+                // None by the weight of the rows when those the object can take at most, the job's left or its partition
+                // value's, a drift heavier than the last reading says, leave it short of its size: it closes before it fills.
+                if (_bytesPerRow <= 0 || (_dataRead + ((_rows - _rowsRead + RowsLeft) * _bytesPerRow * (1 + _drift))) < _target - _slack)
+                {
+                    return next;
+                }
+
+                // On a block's boundary, where every row handed over is in the file; within an object's first block for a size a
+                // block outweighs, where the rows past the file's whole blocks count at what a row weighs. At the object's mean:
+                // a stretch of a few blocks weighs its chunks' fixed cost, which read objects short of their size again and
+                // again.
+                double rows = (_target - _dataRead) / _bytesPerRow;
+                if (rows < (long.MaxValue >> 2))
+                {
+                    long byWeight = _rowsRead + Math.Max((long)Math.Ceiling(rows), 1);
+                    next = Math.Min(next, byWeight < block ? byWeight : (byWeight + block - 1) / block * block);
+                }
+
+                return next;
+            }
+        }
+
+        /// <summary>
+        /// Reads what the object being written holds, exact: a group of rows ends there, every column writing what it holds
+        /// (<see cref="VortexFileWriter.EndGroupAsync"/>), on a block's boundary, where every row handed over is in the file.
+        /// Full once its data reaches its size less its slack, and sealed when its next row starts another key, its last
+        /// chunks the ones that end wrote; otherwise what a row weighs in it places the next reading. The size counts the
+        /// object's data, never its end: its statistics, zone maps, indexes and footer, which its index budget keeps or gives
+        /// up whole at its end (<see cref="DatasetLayout.ObjectBytes"/>).
+        /// </summary>
+        /// <remarks>
+        /// A reading without ending a chunk counted at their columns' rates what the columns still gathered, which no chunk
+        /// had measured: a column's chunk aimed at a mebibyte holds an object of a few hundred kilobytes whole, and light rows
+        /// read at the rate of heavier ones before them ended objects at a third of their size (2026-11-21).
+        /// </remarks>
+        internal async ValueTask ReadSizeAsync(CancellationToken cancellationToken)
+        {
+            if (_output is not { } output)
+            {
+                return;
+            }
+
+            // Every row handed over, the block's map's among them, which stays where it is.
+            // What the object holds, exact: what a row weighs in it from here is its own mean, which no estimate enters.
+            GroupEnd end = await output.Writer.EndGroupAsync(cancellationToken).ConfigureAwait(false);
+            if (end.Rows > 0)
+            {
+                _bytesPerRow = (double)end.DataBytes / end.Rows;
+            }
+
+            // The rows past the file's whole blocks, which wait for the chunks after, at what a row weighs.
+            long data = end.DataBytes + (long)((_rows - end.Rows) * _bytesPerRow);
+
+            // What the blocks named, every flight landed. A reading asked where what a row named drifted starts a window there,
+            // whose rows the next reading measures (ReadsNow); any other measures the data a byte named takes over the window,
+            // which places the readings after, and the bytes a row named, which counts the rows flown since the last flight
+            // known (NamedNow). Over a window, an object's stretches count what ending their groups wrote past their rows: over
+            // the stretch since the last reading alone, the last stretch of objects of steady rows took 0.30 bytes of data a
+            // byte named where their whole took 0.264, and the next object was read at 87 % of its size, then again
+            // (2026-11-21).
+            if (output.Writer.Weights is { } weights)
+            {
+                long named = weights.Through(output.Writer.Flown - 1);
+                long block = Math.Max(1, output.Writer.BlockRows);
+                if (_dataPerNamed > 0 && Drifts(output.Writer, weights, block))
+                {
+                    _windowData = data;
+                    _windowNamed = named;
+                    _windowRows = _rows;
+                    _measuring = true;
+                    _firstWindow = false;
+                }
+                else if (named > _windowNamed && data > _windowData && _rows > _windowRows)
+                {
+                    _dataPerNamed = (double)(data - _windowData) / (named - _windowNamed);
+                    _namedPerRow = (double)(named - _windowNamed) / (_rows - _windowRows);
+                    _windowSpan = named - _windowNamed;
+                    _measuring = false;
+                }
+
+                _namedRead = named;
+            }
+
+            _rowsRead = _rows;
+            _dataRead = data;
+            _full = data >= _target - _slack;
+            GroupEnds++;
+        }
+
+        /// <summary>
+        /// Whether the object being written, on a flight's end, is read there (<see cref="NextReading"/>), the end of its
+        /// writer's next group at row <paramref name="grid"/>. Before the stream measured what its rows' data takes a byte
+        /// named, or past a drift, once its last <see cref="VortexFileWriter.FlightDepth"/> blocks known lie past the window's
+        /// start, which they measure. Otherwise once what it holds from its last reading, at what a byte named took over the
+        /// window measured, reaches its size; once what a row names drifts (<see cref="Drifts"/>); or, in the stream's first
+        /// window, once its blocks named since the window's start reach <see cref="WindowGrowth"/> times the window measured.
+        /// The first window's readings wait for the grid when they can (<see cref="WaitsForGrid"/>).
+        /// </summary>
+        /// <remarks>
+        /// What a byte named takes moves along the keys even where what a row names does not, which a window a few times
+        /// smaller than what it places says little of: rows of three keys took 0.084 bytes of data a byte named over the
+        /// first 4 % of an object and 0.096 over the whole, and an object placed from the first ended at 114 % of its size.
+        /// Past the stream's first window, a window spans an object or the rows a drift started, and a reading extrapolates
+        /// from it however far: grown four times at a time after every window, the readings of a consolidation of 60 million
+        /// log records rose from 24 to 30, each drift then read four times more. Such rows of a test, placed from 2 048 rows
+        /// past a drift, end an object at 124 % of its size (2026-11-21).
+        /// </remarks>
+        private bool ReadsNow(VortexFileWriter writer, Writing.BlockWeights weights, long flightRows, long grid)
+        {
+            if (_dataPerNamed <= 0)
+            {
+                return PastWindow(writer, flightRows) && !WaitsForGrid(grid);
+            }
+
+            if (_measuring)
+            {
+                return PastWindow(writer, flightRows);
+            }
+
+            double named = NamedNow(writer, weights, flightRows);
+            return _dataRead + ((named - _namedRead) * _dataPerNamed) >= _target
+                || Drifts(writer, weights, flightRows)
+                || (_firstWindow && named - _windowNamed >= WindowGrowth * (double)_windowSpan && !WaitsForGrid(grid));
+        }
+
+        /// <summary>
+        /// Whether a reading of the stream's first window waits for the writer's next end of a group at row
+        /// <paramref name="grid"/>, which writes nothing more: while the rows up to it, at what a row weighs and a drift more,
+        /// leave the object short of its size.
+        /// </summary>
+        /// <remarks>
+        /// Read from its eighth block, its first window cut every chunk of a consolidation of 200 million metric records
+        /// three times more in its first object, all before the writer's first end of a group, at four million rows.
+        /// </remarks>
+        private bool WaitsForGrid(long grid) =>
+            grid != long.MaxValue && _dataRead + ((grid - _rowsRead) * _bytesPerRow * (1 + _drift)) < _target - _slack;
+
+        // Whether the window measured is the stream's first, from its first row, no object sealed and no drift met.
+        private bool _firstWindow = true;
+
+        /// <summary>The times its window the bytes named a reading extrapolates to at most (<see cref="ReadsNow"/>).</summary>
+        private const int WindowGrowth = 4;
+
+        /// <summary>
+        /// What the blocks of the object being written name as its rows stand: counted through the flight
+        /// <see cref="VortexFileWriter.FlightDepth"/> behind the last flown, which its writer landed, as many at any degree;
+        /// the rows flown since, and those not flown, at what a row of the blocks known since the last reading named, or of
+        /// the window measured when none is.
+        /// </summary>
+        private double NamedNow(VortexFileWriter writer, Writing.BlockWeights weights, long flightRows)
+        {
+            long known = writer.Flown - writer.FlightDepth;
+            long rowsKnown = known * flightRows;
+            if (known > 0 && rowsKnown > _rowsRead)
+            {
+                long through = weights.Through(known - 1);
+                return through + ((_rows - rowsKnown) * ((double)(through - _namedRead) / (rowsKnown - _rowsRead)));
+            }
+
+            return _namedRead + ((_rows - _rowsRead) * _namedPerRow);
+        }
+
+        /// <summary>
+        /// Whether what a row names drifted by more than a drift from the window the data a byte named takes was measured over
+        /// (<see cref="ReadSizeAsync"/>): over the last <see cref="VortexFileWriter.FlightDepth"/> blocks known, all past the
+        /// last reading, which measured the window with those before them. The rows then are other rows, which a window
+        /// started at the reading measures.
+        /// </summary>
+        private bool Drifts(VortexFileWriter writer, Writing.BlockWeights weights, long flightRows)
+        {
+            if (_measuring || _namedPerRow <= 0 || !KnownPast(writer, flightRows, _rowsRead))
+            {
+                return false;
+            }
+
+            int window = writer.FlightDepth;
+            long known = writer.Flown - window;
+            double recent = (double)(weights.Through(known - 1) - weights.Through(known - 1 - window)) / (window * flightRows);
+            return Math.Abs((recent / _namedPerRow) - 1) > _drift;
+        }
+
+        /// <summary>
+        /// Whether the last <see cref="VortexFileWriter.FlightDepth"/> blocks known all lie past the start of the window, which
+        /// they measure.
+        /// </summary>
+        private bool PastWindow(VortexFileWriter writer, long flightRows) => KnownPast(writer, flightRows, _windowRows);
+
+        /// <summary>
+        /// Whether the last <see cref="VortexFileWriter.FlightDepth"/> blocks known all lie past row <paramref name="row"/> of
+        /// the object being written.
+        /// </summary>
+        private static bool KnownPast(VortexFileWriter writer, long flightRows, long row)
+        {
+            int window = writer.FlightDepth;
+            long known = writer.Flown - window;
+            return known >= window && (known - window) * flightRows >= row;
+        }
+
+        // The share of the size an object may hold less or more (DatasetOptions.ObjectEndSlack), in bytes; the share by which
+        // a row's weight may drift between two readings (DatasetOptions.RowWeightDrift).
+        private readonly long _slack;
+        private readonly double _drift;
+
+        // What the last reading found the object being written to hold, the rows handed over then, and whether it was full;
+        // none before a reading.
+        private long _dataRead;
+        private long _rowsRead;
+        private bool _full;
+
+        // What a row weighs in the object last read, its data over its rows at that reading, the stream's next object going
+        // by it until its own first reading; before any, what a row of the job's inputs weighs (FirstBytesPerRow).
+        private double _bytesPerRow;
+
+        // Where the writer of an object of a line's blocks counts what each of its blocks names (BlockWeights), the stream's
+        // own, given to each such object's writer; what its blocks named at the last reading, 0 before one. The data a byte
+        // named took and the bytes a row named, over the stream's last window measured, 0 before one: from the object's
+        // start, or from the reading where what a row named drifted, to the last reading; and the bytes named over it. The
+        // data, the bytes named and the rows at the window's start in the object being written; and whether the window
+        // started at a drift, its rows not measured yet.
+        private Writing.BlockWeights? _weights;
+        private long _namedRead;
+        private double _dataPerNamed;
+        private double _namedPerRow;
+        private long _windowSpan;
+        private long _windowData;
+        private long _windowNamed;
+        private long _windowRows;
+        private bool _measuring;
+
+        // The stream's first row, which the rows it handed over count from.
+        private readonly long _startRow;
+
+        /// <summary>
+        /// The rows the object being written takes at most before it closes whatever its size: the job's rows not handed over
+        /// yet, and those its partition value's inputs hold (<see cref="RowsByValue"/>), its own handed over apart.
+        /// </summary>
+        private long RowsLeft => Math.Min(Math.Max(0, _rowBound - (_firstRow - _startRow + _rows)), _valueRowsLeft);
+
+        /// <summary>
+        /// The rows the job's inputs hold of each partition value, by the first key of the value's first input, in the keys'
+        /// order: what the objects of one value take at most; null when the job is not cut by value or an input holds
+        /// several (<see cref="DatasetCompactor.RowsByValueOf"/>).
+        /// </summary>
+        internal IReadOnlyList<(byte[] Key, long Rows)>? RowsByValue { get; init; }
+
+        // The value of RowsByValue the rows being written hold, and its rows not yet handed over; long.MaxValue when unknown.
+        private int _valueAt = -1;
+        private long _valueRowsLeft = long.MaxValue;
+
+        /// <summary>Counts <paramref name="rows"/> rows of key <paramref name="key"/> against its partition value's (<see cref="RowsLeft"/>).</summary>
+        private void CountValue(ReadOnlySpan<byte> key, int rows)
+        {
+            if (Values is not { } values || RowsByValue is not { } byValue)
+            {
+                return;
+            }
+
+            if (_valueAt < 0 || !values.Same(byValue[_valueAt].Key, key))
+            {
+                // The values come in the keys' order: the next one past those done, or none known.
+                int at = Math.Max(_valueAt, 0);
+                while (at < byValue.Count && !values.Same(byValue[at].Key, key) && byValue[at].Key.AsSpan().SequenceCompareTo(key) < 0)
+                {
+                    at++;
+                }
+
+                bool found = at < byValue.Count && values.Same(byValue[at].Key, key);
+                _valueAt = found ? at : _valueAt;
+                _valueRowsLeft = found ? byValue[at].Rows : long.MaxValue;
+            }
+
+            _valueRowsLeft = _valueRowsLeft == long.MaxValue ? long.MaxValue : _valueRowsLeft - rows;
+        }
+
+        /// <summary>What a row of the job's inputs weighs: what places a stream's first reading.</summary>
+        internal double FirstBytesPerRow
+        {
+            init => _bytesPerRow = value;
+        }
+
+        /// <summary>The ends of groups of rows the job asked its objects' writers for, each to read what an object held (<see cref="ReadSizeAsync"/>).</summary>
+        internal int GroupEnds { get; private set; }
 
         /// <summary>Whether the last row written carries this key, which must not be split.</summary>
         internal bool HoldsKey(ReadOnlySpan<byte> key) =>
@@ -1686,14 +3449,72 @@ internal static partial class DatasetCompactor
         internal QueryMemoryBudget? Budget { get; init; }
 
         /// <summary>
+        /// What each object's writer reserves in before it takes a copy whose size it counted (<see cref="JobMemory.WriterReserve"/>);
+        /// null for a writer that reserves nothing.
+        /// </summary>
+        internal MemoryReserve? Reserve { get; init; }
+
+        /// <summary>
+        /// The lane of the flow that writes the objects, the job's own, which each object's sink gives back while it waits for
+        /// the store (<see cref="ObjectSegmentSink.Lane"/>); null for a flow that keeps its lane, a range's worker.
+        /// </summary>
+        internal Execution.HeldLane? Lane { get; init; }
+
+        /// <summary>
+        /// What the job tells each object's writer of its memory (<see cref="JobMemory.WriterRoom"/>): whether it admits a
+        /// block more in flight, a chunk more in emission, a leaf more laid out, and whether it holds what the writer
+        /// holds; null for a writer on its own.
+        /// </summary>
+        internal Writing.WriteRoom? Room { get; init; }
+
+        /// <summary>
+        /// Whether the last row written lies strictly below <paramref name="key"/>: what tells a merge ended short of room
+        /// that the rows it has yet to give start at another key than the one the object ends on
+        /// (<see cref="IMergedRuns.Stopped"/>). True for an object that holds no row.
+        /// </summary>
+        internal bool EndsBelow(ReadOnlySpan<byte> key) =>
+            _lastKeyLength < 0 || _lastKey.AsSpan(0, _lastKeyLength).SequenceCompareTo(key) < 0;
+
+        /// <summary>Whether an object is being written, which holds a row or more.</summary>
+        internal bool HoldsRows => _output is not null && _lastKeyLength >= 0;
+
+        /// <summary>
+        /// Has the object's writer land the blocks it has in flight, then end the chunks it has in emission, none written
+        /// before its place: what a job short of room gives back of its writer's work ahead.
+        /// </summary>
+        internal async ValueTask LandAsync()
+        {
+            if (_output is { } output)
+            {
+                await output.Writer.LandAsync().ConfigureAwait(false);
+                await output.Writer.EmissionsEndAsync().ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>
+        /// Has the object's writer end its group of rows where it is, every column writing what it gathered
+        /// (<see cref="VortexFileWriter.EndGroupAsync"/>): what a job short of room gives back last, once everything it
+        /// started ahead is given back, so that where the group ends follows from its rows and its budget alone. The
+        /// object holds a chunk more a column, and the same rows.
+        /// </summary>
+        internal async ValueTask EndGroupAsync(CancellationToken cancellationToken)
+        {
+            if (_output is { } output)
+            {
+                await output.Writer.EndGroupAsync(cancellationToken).ConfigureAwait(false);
+                GroupEnds++;
+            }
+        }
+
+        /// <summary>
         /// Writes rows <paramref name="from"/> to <paramref name="to"/> of the merge's run, which the object takes next in the
         /// key's order: the first starts the next partition value's shredding when they start an object of another value,
         /// and the object's sparse index and blocks take them.
         /// </summary>
-        internal async ValueTask WriteAsync(KeyOrderedMerge merge, int from, int to, CancellationToken cancellationToken)
+        internal async ValueTask WriteAsync(IMergedRun merge, int from, int to, CancellationToken cancellationToken)
         {
-            Starts(merge.KeyAt(from));
-            ObjectOutput output = Open();
+            Opens(merge.KeyAt(from));
+            ObjectOutput output = _output!;
             if (Keys is { } keys)
             {
                 (_sorted ??= new SortedRows(keys, Prefix, skip: Skip)).Take(merge, from, to, output.Writer.BlockRows);
@@ -1701,8 +3522,114 @@ internal static partial class DatasetCompactor
 
             _firstKey ??= merge.KeyAt(from).ToArray();
             _lastKeyLength = SortedRows.Keep(ref _lastKey, merge.KeyAt(to - 1));
-            RecordBatch run = merge.Current;
-            await WriteAsync(from == 0 && to == run.RowCount ? run : run.Window(from, to - from), cancellationToken).ConfigureAwait(false);
+
+            // The rows where they lie in the input's batch, into the map of the block they fall in, the run that crosses a block
+            // cut there: the writer takes a block's map at once, keeps a window on its runs and copies them as the block goes
+            // through its line; the merge keeps the batch until the ledger says every run on it is copied. A run of a block or
+            // more goes the same way, a block's map at a time: a level's objects, whose keys do not interleave, give runs of
+            // whole batches, which went to the writer whole, past its line, their chunks ingested in turns of its lanes.
+            (Vorticity.Arrays.CanonicalArena arena, int root, int row, double rowBytes) = merge.CurrentRun;
+            int rows = to - from;
+            int at = row + from;
+            _rows += rows;
+            CountValue(merge.KeyAt(from), rows);
+            VortexFileWriter writer = output.Writer;
+            int staged = writer.MapRows;
+            if (staged == 0)
+            {
+                await HandMapAsync(writer, cancellationToken).ConfigureAwait(false);
+                Batches++;
+                await writer.WriteRunAloneAsync(arena, root, at, rows, cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            // A map completes the block the writer stages: a slice's end hands it a short one (OwnRunsAsync).
+            while (rows > 0)
+            {
+                int take = Math.Min(rows, staged - writer.StagingRows - _map.Rows);
+                _map.Add(arena, root, at, take, rowBytes);
+                _ledger?.Note(_map, ref _map.FirstRun);
+                at += take;
+                rows -= take;
+                if (writer.StagingRows + _map.Rows >= staged)
+                {
+                    await HandMapAsync(writer, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Has the object's writer copy the runs it keeps of the merge's inputs and has not sent through yet, the block's map
+        /// handed to it short first: what a slice's end asks, so that the slice's merge and its inputs go before the next slice
+        /// opens its own (<see cref="SlicedMerge.OwnRuns"/>). The block's rows stay the same, the maps after completing it.
+        /// </summary>
+        internal async ValueTask OwnRunsAsync(CancellationToken cancellationToken)
+        {
+            if (_output is not { } output)
+            {
+                return;
+            }
+
+            await HandMapAsync(output.Writer, cancellationToken).ConfigureAwait(false);
+            output.Writer.OwnStaged();
+        }
+
+        /// <summary>Hands the block's map to <paramref name="writer"/>, full or short, when it holds rows.</summary>
+        private ValueTask HandMapAsync(VortexFileWriter writer, CancellationToken cancellationToken)
+        {
+            if (_map.Rows == 0)
+            {
+                return ValueTask.CompletedTask;
+            }
+
+            Batches++;
+            return writer.WriteBlockAsync(_map, cancellationToken);
+        }
+
+        // The runs of the block the merge fills, which the writer of the object being written takes once the block is full.
+        private readonly Writing.BlockMap _map = new Writing.BlockMap();
+
+        /// <summary>
+        /// The runs the merge's writers keep where they lie in its inputs: each object's writer notes its own there, which the
+        /// merge reads to give its inputs' batches back. Null for a stream whose rows are its own.
+        /// </summary>
+        internal Writing.RunLedger? Ledger
+        {
+            get => _ledger;
+            set
+            {
+                _ledger = value;
+                if (_output is { } output)
+                {
+                    output.Writer.Ledger = value;
+                }
+            }
+        }
+
+        private Writing.RunLedger? _ledger;
+
+        /// <summary>
+        /// Hands the writer of the object being written the block's map, short, and has it copy every row it keeps in the
+        /// merge's inputs, as the merge ends.
+        /// </summary>
+        internal async ValueTask LetGoOfInputsAsync(CancellationToken cancellationToken)
+        {
+            if (_output is { } output)
+            {
+                await HandMapAsync(output.Writer, cancellationToken).ConfigureAwait(false);
+                await output.Writer.LetGoOfInputsAsync().ConfigureAwait(false);
+            }
+        }
+
+        /// <summary>
+        /// Waits for the rows the object's writer has in flight, whatever becomes of them, as a failed merge ends; the block's
+        /// map, which reads the inputs, goes.
+        /// </summary>
+        internal ValueTask SettleAsync()
+        {
+            _map.Clear();
+            _map.FirstRun = -1;
+            return _output is { } output ? output.Writer.SettleAsync() : ValueTask.CompletedTask;
         }
 
         /// <summary>Writes <paramref name="batch"/>'s rows after those written: in no key's order, they index nothing.</summary>
@@ -1712,56 +3639,32 @@ internal static partial class DatasetCompactor
 
             // The blocks the rows before these and these themselves closed, declared before their rows are written.
             _rows += batch.RowCount;
-            if (_census is not { } census)
+            Batches++;
+            await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// The blocks an object's writer sends through its line at once (<see cref="VortexFileWriter.FlightDepth"/>):
+        /// <see cref="VortexFileWriter.FlightsAhead"/> for an object aimed at <see cref="VortexFileWriter.LineObjectBlocks"/>
+        /// blocks or more, at the bytes a row of the job's inputs holds; one block for a smaller one, which makes no line.
+        /// Read from the job alone, the same at any degree.
+        /// </summary>
+        private int FlightDepthOf(int blockRows)
+        {
+            if (_rowBound <= 0 || _byteBound <= 0 || blockRows <= 0)
             {
-                await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
-                return;
+                return 1;
             }
 
-            // Each row counted after the object's rows before it, at its place, which the groups of its rows tell apart: with
-            // lanes to spare, on another while the writer takes the same rows, the census reading them alone once their
-            // nodes are canonical; the census and its spans as counted in turn. Counted first, it held a merge of log
-            // records a fifth of its time.
-            // The stream's one array of countings, which each batch fills once the one before is counted; a run of a few rows,
-            // a merge of keys that interleave cutting one a row, counted in place, where a task a run cost more than it.
-            PathCensus.Counting[] ready = _ready ??= new PathCensus.Counting[census.Length];
-            for (int v = 0; v < census.Length; v++)
-            {
-                ready[v] = PathCensus.Prepare(batch, _variants![v]);
-            }
-
-            if (_dataset.Session.Options.MaxDegreeOfParallelism <= 1 || batch.RowCount < CountedApartRows)
-            {
-                Count(census, ready);
-                await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
-                return;
-            }
-
-            Task counting = Task.Run(() => Count(census, ready), cancellationToken);
-            try
-            {
-                await output.Writer.WriteBatchAsync(batch, cancellationToken).ConfigureAwait(false);
-            }
-            catch
-            {
-                await counting.ContinueWith(static _ => { }, TaskScheduler.Default).ConfigureAwait(false);
-                throw;
-            }
-
-            await counting.ConfigureAwait(false);
-
-            static void Count(PathCensus[] census, PathCensus.Counting[] ready)
-            {
-                for (int v = 0; v < census.Length; v++)
-                {
-                    census[v].Add(in ready[v]);
-                }
-            }
+            double blockBytes = (double)_byteBound / _rowBound * blockRows;
+            return _target / blockBytes >= VortexFileWriter.LineObjectBlocks ? VortexFileWriter.FlightsAhead : 1;
         }
 
         /// <summary>
         /// The object being written, started when none is: one with a sparse index keeps a table of contents, and in a
-        /// partition value's rows shreds what they pay for, counting its paths as its rows come.
+        /// partition value's rows shreds what they pay for, its writer counting its paths as it takes its rows, for its path
+        /// directory, at the grain of its granules: counted here run by run, they held a merge's thread a fortieth of its
+        /// time, beside a writer that counts them a block at a time on its lanes (2026-11-16).
         /// </summary>
         private ObjectOutput Open()
         {
@@ -1773,10 +3676,21 @@ internal static partial class DatasetCompactor
             ValueShredding? shredding = Shreddings is { } shreddings ? shreddings[Math.Clamp(_value, 0, shreddings.Count - 1)] : null;
             output = _dataset.StartObjectUnder(
                 _schema, _inKeyOrder, _rowBound, contents: Keys is not null, synopses: Keys is not null, shredded: shredding?.Shredded,
-                variantChunks: shredding?.VariantChunks, byteBound: _byteBound, postings: Postings, budget: Budget);
+                variantChunks: shredding?.VariantChunks, byteBound: _byteBound, countsPaths: shredding is not null, postings: Postings, budget: Budget,
+                lane: Lane, room: Room, reserve: Reserve);
             _output = output;
+            output.Writer.Ledger = Ledger;
+            output.Writer.FlightDepth = FlightDepthOf(output.Writer.BlockRows);
+
+            // An object of a line's blocks that ends by its size has its writer count what each block names, which places its
+            // readings (NextReading): its flights a block each, so that they end where its readings may fall.
+            if (_endsBySize && output.Writer.FlightDepth > 1 && output.Writer.MapRows == output.Writer.BlockRows)
+            {
+                (_weights ??= new Writing.BlockWeights()).Reset();
+                output.Writer.Weights = _weights;
+            }
+
             Postings?.BlocksOf(VortexDataset.Uid(output.Identity), output.Writer.BlockRows);
-            _census = shredding is null ? null : Census(output.Writer.BlockRows);
             foreach ((int field, ObjectDictionary dictionary, long rowBytes) in Dictionaries)
             {
                 output.Writer.TryDeclareDictionary(field, dictionary, _rowBound, rowBytes, sorted: field == SortedColumn);
@@ -1784,54 +3698,19 @@ internal static partial class DatasetCompactor
             return output;
         }
 
-        /// <summary>
-        /// A census for each variant column of the object about to be written, the columns found once a stream: each path
-        /// keeps the spans of rows its values lie in, at the grain of the groups its directory names.
-        /// </summary>
-        private PathCensus[] Census(int granuleRows)
-        {
-            _variants ??= VariantColumns(_schema.DType);
-            _groupRows = GroupRows(granuleRows);
-            PathCensus[] census = new PathCensus[_variants.Length];
-            for (int v = 0; v < census.Length; v++)
-            {
-                census[v] = new PathCensus(_dataset.Options.Write.StringBoundBytes, _groupRows);
-            }
-
-            return census;
-        }
-
-        /// <summary>
-        /// The rows of the groups an object's path directory names the paths of: a granule, so that the directory says the
-        /// granules each path has a value in, its presence (spec E, 3.1), which a question on the path reads alone.
-        /// </summary>
-        private static long GroupRows(int granuleRows) => Math.Max(granuleRows, 1);
-
-        /// <summary>
-        /// Declares to <paramref name="writer"/> each variant column's path directory, of what <paramref name="census"/>
-        /// counted, each path naming the groups of the object's rows that hold it.
-        /// </summary>
-        private void DeclareDirectories(VortexFileWriter writer, PathCensus[] census, ImmutableDictionary<string, VariantShredding> shredded)
-        {
-            for (int v = 0; v < census.Length; v++)
-            {
-                string name = _schema.DType.GetFieldName(_variants![v]);
-                writer.DeclareDirectory(name, VariantDirectory.From(census[v], shredded.GetValueOrDefault(name), _groupRows));
-            }
-        }
-
-        // The countings of a batch's variant columns, the stream's one array; the rows under which a batch is counted in
-        // place rather than beside its write.
-        private PathCensus.Counting[]? _ready;
-        private const int CountedApartRows = 64;
-
-        // The place among the shreddings of the value being written and its first key; the paths of the object being
-        // written, a census a variant column, the columns, and the rows of the groups its directory names.
+        // The place among the shreddings of the value being written and its first key.
         private int _value = -1;
         private byte[]? _valueKey;
-        private PathCensus[]? _census;
-        private int[]? _variants;
-        private long _groupRows;
+
+        /// <summary>
+        /// Starts the object the rows of key <paramref name="key"/> go to when none is: what the job cuts their run for
+        /// (<see cref="RowsToReading"/>) before it writes them.
+        /// </summary>
+        internal void Opens(ReadOnlySpan<byte> key)
+        {
+            Starts(key);
+            _ = Open();
+        }
 
         /// <summary>
         /// Records the first key of the rows written next, which starts the next partition value's shredding when they
@@ -1846,8 +3725,22 @@ internal static partial class DatasetCompactor
             }
         }
 
-        internal ValueTask RollIfFullAsync(CancellationToken cancellationToken) =>
-            WantsRoll ? RollAsync(cancellationToken) : ValueTask.CompletedTask;
+        /// <summary>
+        /// Seals the object being written once it holds its size, read first when the rows handed over since the last
+        /// reading may bring it there (<see cref="AsksReading"/>).
+        /// </summary>
+        internal async ValueTask RollIfFullAsync(CancellationToken cancellationToken)
+        {
+            if (AsksReading)
+            {
+                await ReadSizeAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            if (WantsRoll)
+            {
+                await RollAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
 
         /// <summary>Seals the object being written and starts the next one.</summary>
         internal async ValueTask RollAsync(CancellationToken cancellationToken)
@@ -1867,6 +3760,9 @@ internal static partial class DatasetCompactor
 
             output.Arrival = Arrival;
             output.Partition = _inKeyOrder ? null : Partition;
+
+            // The block's map goes to the object it falls in, short, before the object is sealed.
+            await HandMapAsync(output.Writer, cancellationToken).ConfigureAwait(false);
             _output = null;
             _firstKey = null;
             _lastKeyLength = -1;
@@ -1875,19 +3771,19 @@ internal static partial class DatasetCompactor
             {
                 await using (output.Writer.ConfigureAwait(false))
                 {
+                    // The rows in flight land before the key index is declared to the writer that takes them.
+                    await output.Writer.LandAsync().ConfigureAwait(false);
                     _sorted?.Finish(output.Writer);
-                    if (_census is { } census)
-                    {
-                        _census = null;
-                        DeclareDirectories(output.Writer, census, Shreddings![Math.Clamp(_value, 0, Shreddings.Count - 1)].Shredded);
-                        foreach (PathCensus counted in census)
-                        {
-                            counted.Release();
-                        }
-                    }
-
                     await output.Writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
                     ScratchBytes += output.Writer.ScratchBytes;
+                    BatchesAcross += output.Writer.BatchesIngestedAcross;
+                    BatchesFlown += output.Writer.BatchesFlown;
+                    BlocksOnLine += output.Writer.BlocksOnLine;
+                    ChunksEndedOnLine += output.Writer.ChunksEndedOnLine;
+                    ChunksCutOnLine += output.Writer.ChunksCutOnLine;
+                    BlocksOfRunsTaken += output.Writer.BlocksOfRunsTaken;
+                    BlocksPutBack += output.Writer.BlocksPutBack;
+                    ColumnsPutBackApart += output.Writer.ColumnsPutBackApart;
                 }
 
                 written = await _dataset.SealAsync(output, _rows, _firstRow, cancellationToken).ConfigureAwait(false);
@@ -1921,6 +3817,14 @@ internal static partial class DatasetCompactor
 
             _firstRow += _rows;
             _rows = 0;
+            _dataRead = 0;
+            _rowsRead = 0;
+            _namedRead = 0;
+            _windowData = 0;
+            _windowNamed = 0;
+            _windowRows = 0;
+            _firstWindow = false;
+            _full = false;
         }
 
         /// <summary>Seals whatever is left.</summary>

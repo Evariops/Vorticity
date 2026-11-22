@@ -114,6 +114,57 @@ internal static class LiveRows
     }
 
     /// <summary>
+    /// <paramref name="batch"/>, a batch of an object's own scan run without compaction, without the rows the object deleted
+    /// and those its filter left: a view of it in its arena, bound again from <paramref name="spare"/>, disposed, numbered
+    /// from its first live row's place among the live ones; null when no row is left. What
+    /// <see cref="WithoutDeletedAsync"/> does to each batch with compaction, for a caller that shapes each batch beside its
+    /// decode, on the lane that decoded it.
+    /// </summary>
+    /// <param name="batch">The scan's batch.</param>
+    /// <param name="deletions">The rows the object deleted.</param>
+    /// <param name="indices">Room for the rows kept, the caller's to keep from one batch to the next and give back.</param>
+    /// <param name="mask">Room for their mask, likewise.</param>
+    /// <param name="spare">The caller's view of its batch before, disposed, or null.</param>
+    internal static RecordBatch? Without(
+        RecordBatch batch, DeletionVector deletions, ref Block<int> indices, ref Block<ulong> mask, RecordBatch? spare)
+    {
+        int rows = batch.RowCount;
+        long start = batch.StartRow;
+        long logical = deletions.Logical(start);
+        ReadOnlySpan<ulong> selection = batch.SelectionWords;
+        if (deletions.DeletedIn(start, start + rows) == 0 && selection.IsEmpty)
+        {
+            return batch.Reshaped(batch.RootIndex, logical, spare);
+        }
+
+        int words = (rows + 63) >> 6;
+        Blocks.Ensure(ref mask, words);
+        Blocks.Ensure(ref indices, rows);
+        Span<ulong> kept = mask.AsSpan(0, words);
+        deletions.Live(start, rows, kept);
+        if (!selection.IsEmpty)
+        {
+            for (int word = 0; word < words; word++)
+            {
+                kept[word] &= selection[word];
+            }
+        }
+
+        int count = Indices(kept, rows, indices);
+        if (count == 0)
+        {
+            return null;
+        }
+
+        int root = count == rows
+            ? batch.RootIndex
+            : CanonicalFilter.Apply(batch.Arena, batch.RootIndex, indices.AsSpan(0, count), count * 2 > rows ? kept : default);
+        RecordBatch view = batch.Reshaped(root, logical, spare);
+        view.Select(default, count);
+        return view;
+    }
+
+    /// <summary>
     /// The batches of an object's own scan, run without compaction, with the deleted rows
     /// deselected where they lie rather than taken out: for a consumer that reads no row's place, an
     /// aggregation, to which a batch is the rows its selection names. Nothing is gathered, so every

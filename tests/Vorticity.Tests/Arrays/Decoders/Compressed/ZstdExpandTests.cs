@@ -73,6 +73,12 @@ public sealed class ZstdExpandTests
                             expected.SequenceEqual(destination.AsSpan(row * width, width)),
                             $"rows {rows}, {percent}% valid, offset {bitOffset}: row {row}");
                     }
+
+                    // The mask views the arena's slab by its address, which nothing else keeps alive. Once the loop is
+                    // optimized, the arena is dead past the mask's making: a collection then finalizes its slab's piece,
+                    // which goes back to the slab, and the arena of a case running beside this one cuts the same bytes
+                    // and writes its own bitmap over the one read here. Nine cases failed at once in a full run that way.
+                    GC.KeepAlive(arena);
                 }
             }
         }

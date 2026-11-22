@@ -272,6 +272,288 @@ public sealed partial class DatasetTiersTests
         await HoldsAsync(dataset, all);
     }
 
+    /// <summary>
+    /// Four appends of one day that weigh together 99 % of the size the day's objects aim at, merged by tiers: one object,
+    /// and no job after it. Their rows interleave in the key's order, each append's status and measure its own number,
+    /// which an append writes once and the merge a few bits a row, so that the merge writes more than it reads and its data
+    /// passes the size at a group's end of its writer. A job whose plan chose its inputs to make one object
+    /// (<see cref="CompactionJob.OneObject"/>) ends no object by its size: one that did ended the object there and wrote
+    /// others of its inputs' size class after it, which the plan took again.
+    /// </summary>
+    [Fact]
+    public async Task AMergeOfInputsThatWeighTheSizeAtMostWritesOneObject()
+    {
+        long top = await TopOfFourAppendsAsync(percent: 99, interleaved: true);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await FourAppendsAsync(store, top, ObjectBound.OutPerIn, ObjectSegmentSink.DefaultStreamedFromBytes, interleaved: true);
+
+        CompactionResult job = Assert.IsType<CompactionResult>(await dataset.CompactAsync(cancellationToken: Ct));
+        string ran = $"{job.Trigger} {job.ObjectsIn}->{job.ObjectsOut}, {job.BytesIn}->{job.BytesOut} B under a size of {top}";
+        Assert.True(job.Trigger == CompactionTrigger.Tier && job.ObjectsIn == 4, ran);
+
+        // Within the size, and past what the bound's margin leaves under it.
+        Assert.True(job.BytesIn <= top && job.BytesIn * ObjectBound.OutPerIn > top, ran);
+        Assert.True(job.ObjectsOut == 1, ran);
+        Assert.Null(await dataset.CompactAsync(cancellationToken: Ct));
+        Assert.Equal(4 * CompressibleRows, await dataset.Scan<Row>().CountAsync(Ct));
+    }
+
+    /// <summary>
+    /// Four appends that weigh 90 % of the size, merged into an object the store takes as it is written, announced at half
+    /// of what the merge reads: the object runs past that bound and the job starts again under twice as much, which passes
+    /// the bound of inputs of the size, so that it ends an object as it reaches the size. It has every column measured
+    /// before it ends one, finds its object under the size, and writes one. Ended on the rate a column is guessed to
+    /// encode at before its first chunk, four times what these do, it wrote several, as many as it read.
+    /// </summary>
+    [Fact]
+    public async Task AMergeStartedAgainUnderADoubledBoundEndsNoObjectOnAGuess()
+    {
+        long top = await TopOfFourAppendsAsync(percent: 90);
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await FourAppendsAsync(store, top, outPerIn: 0.5, streamedFrom: 64 << 10);
+
+        CompactionResult job = Assert.IsType<CompactionResult>(await dataset.CompactAsync(cancellationToken: Ct));
+        string ran = $"{job.Trigger} {job.ObjectsIn}->{job.ObjectsOut}, {job.BytesIn}->{job.BytesOut} B under a size of {top}, {job.BoundRestarts} restarts";
+        Assert.True(job.Trigger == CompactionTrigger.Tier && job.ObjectsIn == 4, ran);
+        Assert.True(job.BoundRestarts >= 1, ran);
+        Assert.True(job.ObjectsOut == 1 && job.BytesOut <= top, ran);
+        Assert.Null(await dataset.CompactAsync(cancellationToken: Ct));
+        Assert.Equal(4 * CompressibleRows, await dataset.Scan<Row>().CountAsync(Ct));
+    }
+
+    /// <summary>
+    /// Sixteen appends of one day consolidated into objects aimed at 512 KiB, in blocks of 256 rows, whose indexes and
+    /// zone maps weigh a fair share of an object: the data of every object but the last holds its size within a group of
+    /// rows, the first's as the others', whatever the object writes past its data, which its size does not count. An
+    /// object's size once counted what the objects before it wrote past their chunks, which the first had none of to go by,
+    /// and an index kept in one object and given up in the next moved that tenfold.
+    /// </summary>
+    [Fact]
+    public async Task AnObjectsDataReachesItsSizeWhateverItsEndWeighs()
+    {
+        const long Top = 512 << 10;
+        Random random = new Random(47);
+        List<(long Bytes, long Data, long Rows)> objects = await ConsolidatedAsync(Top, chunkBytes: 1 << 20, (first, count) => Rows(random, count, first, day: 0));
+        string sizes = string.Join(", ", objects);
+        Assert.True(objects.Count >= 5, sizes);
+        HoldsItsSizeWithinAGroup(objects, Top);
+        Assert.All(objects, held => Assert.True(held.Bytes > held.Data, sizes));
+    }
+
+    /// <summary>
+    /// A quarter of the rows under services of their own, each a name of 26 characters that encodes to some ten times what
+    /// the other rows do, and which sort first: an object of those rows, then one that holds the last of them and the first
+    /// of the light ones, then the light ones. The data of every object but the last holds its size within a group of rows:
+    /// no reading placed by what the rows before it weighed seals an object, which the light rows past the heavy ones would
+    /// leave short.
+    /// </summary>
+    [Fact]
+    public async Task AnObjectNeverEndsOnAnEstimate()
+    {
+        const long Top = 256 << 10;
+        List<(long Bytes, long Data, long Rows)> objects = await ConsolidatedAsync(
+            Top,
+            chunkBytes: 1 << 20,
+            static (first, count) => [.. Enumerable.Range(0, count).Select(i => (first + i) % 4 == 0
+                ? new Row(0, $"a-{(uint)((first + i) * 2_654_435_761L):x8}{(uint)((first + i) * 40_503L):x8}{first + i:x8}", first + i, 0, 0)
+                : new Row(0, $"b-{(first + i) % 3}", first + i, (int)((first + i) / 48), 0))]);
+        Assert.True(objects.Count >= 4, string.Join(", ", objects));
+        HoldsItsSizeWithinAGroup(objects, Top);
+    }
+
+    /// <summary>
+    /// Light rows first, then rows under services of their own that encode to some ten times what they do, in objects of
+    /// hundreds of blocks whose writer ends a group every four million rows: no reading in between but the job's. An end
+    /// aimed at what the light rows weighed falls deep in the heavy ones, where an object held 371 %. Read where what its
+    /// blocks name says it is full, an object of the heavy rows ends at 99 to 100 % of its size, read again where what a
+    /// row names drifts (<see cref="DatasetOptions.RowWeightDrift"/>); the light rows, whose data a byte named moves with
+    /// no such drift, end theirs at 115 and 124 %, within a quarter of their size past it (2026-11-21).
+    /// </summary>
+    [Fact]
+    public async Task HeavierRowsPastLightOnesEndTheirObjectNearItsSize()
+    {
+        const long Top = 256 << 10;
+        List<(long Bytes, long Data, long Rows)> objects = await ConsolidatedAsync(
+            Top,
+            chunkBytes: 1 << 20,
+            static (first, count) => [.. Enumerable.Range(0, count).Select(i => (first + i) % 4 == 0
+                ? new Row(0, $"b-{(uint)((first + i) * 2_654_435_761L):x8}{(uint)((first + i) * 40_503L):x8}{first + i:x8}", first + i, 0, 0)
+                : new Row(0, $"a-{(first + i) % 3}", first + i, (int)((first + i) / 48), 0))],
+            groupRows: 1L << 22);
+        string sizes = string.Join(", ", objects);
+        Console.WriteLine($"HEAVIER PAST LIGHT: {sizes}");
+        Assert.True(objects.Count >= 3, sizes);
+        Assert.All(objects.SkipLast(1), held => Assert.InRange(held.Data, Top * (1 - DatasetOptions.DefaultObjectEndSlack), Top * 5 / 4));
+    }
+
+    /// <summary>
+    /// Rows that weigh the same along the keys, in objects of a hundred blocks whose writer ends no group by itself: past the
+    /// stream's first object, which its readings measure the rows by, each object is read where what its blocks name says it
+    /// holds its size, once as a rule and twice when that finds it short, and holds it within a group of rows. Every
+    /// reading ends each column's chunk; read a quarter of an object apart, these objects were read five times each.
+    /// </summary>
+    [Fact]
+    public async Task AnObjectOfSteadyRowsIsReadOnceOrTwice()
+    {
+        const long Top = 256 << 10;
+        Random random = new Random(53);
+        List<CompactionResult> jobs = [];
+        List<(long Bytes, long Data, long Rows)> objects = await ConsolidatedAsync(
+            Top, chunkBytes: 1 << 20, (first, count) => Rows(random, count, first, day: 0), groupRows: 1L << 22, ran: jobs);
+        int groupEnds = jobs.Sum(job => job.GroupEnds);
+
+        // What each job did not start ahead and what its reserves were not granted at once: what tells a run whose cuts
+        // followed the memory the process left it from one that ran at its width.
+        string held = string.Join(" | ", jobs.Select(job => $"{job.GroupEnds} ends, ahead held back {job.AdvancesHeldBack}, reserves {job.Reserves}, {job.WriterArenasGivenBack} arenas given back"));
+        string sizes = $"{string.Join(", ", objects)}; {groupEnds} group ends; jobs: {held}";
+        Console.WriteLine($"STEADY: {sizes}");
+        Assert.True(objects.Count >= 8, sizes);
+        Assert.InRange(groupEnds, objects.Count - 1, (2 * (objects.Count - 1)) + 4);
+        Assert.All(objects.SkipLast(1), held => Assert.InRange(held.Data, Top * (1 - DatasetOptions.DefaultObjectEndSlack), Top * 21 / 20));
+    }
+
+    /// <summary>
+    /// The same over rows of some thousand keys whose day, status and measure encode to a hundredth of their bytes, in
+    /// chunks of 4 KiB, so that every column writes chunks within an object: the data of every object but the last holds
+    /// its size within a group of rows. A column counted at a sixteenth of its bytes at least, the rate its chunk is due by,
+    /// counted these several times over, and the objects ended short of their size. Its sequence, 19 bits a row, was
+    /// written as it was in a chunk of 256 rows an end of a group cut, and the column wrote every chunk after it so, 8.25
+    /// bytes a row where it wrote 2.4, the plan of that short chunk remembered: an object then passed its size by a half.
+    /// </summary>
+    [Fact]
+    public async Task AColumnThatEncodesToAlmostNothingCountsAtWhatItEncodesTo()
+    {
+        const long Top = 96 << 10;
+        List<(long Bytes, long Data, long Rows)> objects = await ConsolidatedAsync(
+            Top, chunkBytes: 4 << 10, static (first, count) => [.. Enumerable.Range(0, count).Select(i => new Row(0, $"svc-{i % 3}", first + i, i / 48, i / 4_096))]);
+        Assert.True(objects.Count >= 3, string.Join(", ", objects));
+        HoldsItsSizeWithinAGroup(objects, Top);
+    }
+
+    /// <summary>
+    /// The bytes and the bytes of data of the objects a consolidation of sixteen appends of 20 000 rows of one day writes,
+    /// in the order of their rows, into objects aimed at <paramref name="top"/> bytes of data, in blocks of 256 rows and
+    /// column chunks aimed at <paramref name="chunkBytes"/>; every row read back. The jobs run go to <paramref name="ran"/>.
+    /// </summary>
+    private static async Task<List<(long Bytes, long Data, long Rows)>> ConsolidatedAsync(
+        long top, int chunkBytes, Func<long, int, Row[]> rows, long groupRows = GroupRows, List<CompactionResult>? ran = null)
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+
+        // A jobs' budget of the test's own: the default one is what the process's limit leaves past the rest of its
+        // memory, and moves with what the tests beside this one hold. Under 16 MiB the job's writer gathers less and its
+        // objects end elsewhere, 23 group ends for 17: read under the default budget, an object ended 6 % past its size
+        // once in eleven runs of the whole namespace (2026-11-21).
+        await using VortexSession session = VortexSession.Create(static o => o.JobMemoryBudget = new QueryMemoryBudget(1L << 30));
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
+        {
+            Session = session,
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Row.Day)),
+                SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(nameof(Row.Status))],
+                ObjectBytes = top,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            Write = new VortexWriteOptions { BlockRows = 256 },
+            ChunkBytes = chunkBytes,
+            ContentsObjectBytes = 0,
+            GroupRows = groupRows,
+        }, Ct);
+        List<Row> all = [];
+        for (int a = 0; a < 16; a++)
+        {
+            await AppendAsync(dataset, all, rows(all.Count, 20_000));
+        }
+
+        IReadOnlyList<CompactionResult> jobs = await dataset.ConsolidateAsync(Ct);
+        Assert.NotEmpty(jobs);
+        ran?.AddRange(jobs);
+        List<(long Bytes, long Data, long Rows)> objects = [];
+        await foreach (PositionedObject written in dataset.ScanBuilder().ObjectsAsync(Ct))
+        {
+            objects.Add((written.Entry.Bytes, jobs.Select(job => job.ObjectDataBytes.GetValueOrDefault(written.Entry.Key, -1)).Max(), written.Entry.Rows));
+        }
+
+        await HoldsAsync(dataset, all);
+        return objects;
+    }
+
+    /// <summary>
+    /// The rows of a group a job's writer ends by itself (<see cref="DatasetOptions.GroupRows"/>): sixteen blocks of 256
+    /// rows, so that an object of these tests holds several, each where its job reads what the object holds.
+    /// </summary>
+    private const long GroupRows = 4_096;
+
+    /// <summary>
+    /// Asserts that every object but the last holds its size's data within a group of rows: at its size less the slack at
+    /// least, and past it by no more than a group of its rows weighs, which its job reads it at.
+    /// </summary>
+    private static void HoldsItsSizeWithinAGroup(List<(long Bytes, long Data, long Rows)> objects, long top)
+    {
+        string sizes = string.Join(", ", objects);
+        Assert.All(objects.SkipLast(1), held =>
+            Assert.True(held.Data >= top * (1 - DatasetOptions.DefaultObjectEndSlack) && held.Data <= top + (held.Data * GroupRows / held.Rows), sizes));
+    }
+
+    private const int CompressibleRows = 40_000;
+
+    /// <summary>
+    /// The size four appends of <see cref="CompressibleRows"/> rows weigh <paramref name="percent"/> % of together, each
+    /// then within a quarter of it, one size class under the top's.
+    /// </summary>
+    private static async Task<long> TopOfFourAppendsAsync(int percent, bool interleaved = false)
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset sized = await FourAppendsAsync(store, 1L << 30, ObjectBound.OutPerIn, ObjectSegmentSink.DefaultStreamedFromBytes, interleaved);
+        long largest = 0;
+        await foreach (PositionedObject appended in sized.ScanBuilder().ObjectsAsync(Ct))
+        {
+            largest = Math.Max(largest, appended.Entry.Bytes);
+        }
+
+        return largest * 4 * 100 / percent;
+    }
+
+    /// <summary>
+    /// A day of four appends of rows that encode to a small share of their bytes, far under the quarter a column is guessed
+    /// to encode at before its first chunk, in a dataset whose objects aim at <paramref name="top"/> bytes, go to the store
+    /// as they are written from <paramref name="streamedFrom"/> bytes, and whose rewrites announce
+    /// <paramref name="outPerIn"/> bytes a byte they read. <paramref name="interleaved"/> keys them by the service then the
+    /// sequence, which interleaves the appends' rows, each append's status and measure its own number, written once an
+    /// append and a few bits a row by a merge, whose writer ends a group each 4 096 rows.
+    /// </summary>
+    private static async Task<VortexDataset> FourAppendsAsync(IObjectStore store, long top, double outPerIn, long streamedFrom, bool interleaved = false)
+    {
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, new DatasetOptions
+        {
+            Layout = new DatasetLayout
+            {
+                Partition = LayoutValue.Column(nameof(Row.Day)),
+                SortKey = [LayoutValue.Column(nameof(Row.Service)), LayoutValue.Column(interleaved ? nameof(Row.Sequence) : nameof(Row.Status))],
+                ObjectBytes = top,
+                MergeFanout = 4,
+                CalmAfter = null,
+            },
+            ContentsObjectBytes = 0,
+            StreamedObjectBytes = streamedFrom,
+            BoundOutPerIn = outPerIn,
+            GroupRows = interleaved ? GroupRows : new DatasetOptions().GroupRows,
+        }, Ct);
+        for (int a = 0; a < 4; a++)
+        {
+            Row[] rows = [.. Enumerable.Range(0, CompressibleRows).Select(i => interleaved
+                ? new Row(0, $"svc-{i % 3}", ((long)i * 4) + a, a, a)
+                : new Row(0, $"svc-{i % 3}", ((long)a * CompressibleRows) + i, i % 5, i / 4_096))];
+            await using ObjectDraft draft = dataset.StartObject();
+            await draft.Writer.WriteAsync<Row>(rows, Ct);
+            await dataset.AppendAsync(draft, Ct);
+        }
+
+        return dataset;
+    }
+
     /// <summary>A store that holds the first put of a data object once armed, until released.</summary>
     private sealed class GatedStore(IObjectStore inner) : ForwardingStore(inner)
     {

@@ -180,6 +180,63 @@ public sealed partial class SharedBudgetTests
         Assert.True(process.CeilingBytes >= before / 2, $"{process.CeilingBytes:N0} bytes left to the queries, {before:N0} before");
     }
 
+    /// <summary>
+    /// The rest read from a collection is the heap less what the work measured when the collector ran. Blocks the work gave
+    /// back to the pool and took again before the collection, a merge's windows from one of its slices to the next, are the
+    /// work's when it runs: read less the fewest bytes measured since the reading before, they counted as the rest's too,
+    /// 201 MiB of them under 2 GiB, and a lane of a compaction's writer was refused a block by a process that held less
+    /// than its ceiling (2026-11-22). Whether the collection is noted by the reading itself, nothing having moved since,
+    /// or by the first move of the measure after it.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void WhatTheWorkGaveBackAndTookAgainBeforeACollectionIsNotReadAsTheRests(bool movesAfter)
+    {
+        const int held = 256 << 20;
+
+        // The block, measured, then a full blocking collection read with it: the collector knows the block from then on,
+        // and its allocation asks for no collection of its own, a background one whose numbers are those of its end.
+        QueryMemoryBudget process = new QueryMemoryBudget(64L << 30, process: null);
+        byte[] block = GC.AllocateUninitializedArray<byte>(held, pinned: true);
+        process.Measure(held);
+        Assert.True(process.CanReserve(1));
+        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+        Assert.True(process.CanReserve(1));
+
+        // Another collection of the process between the two readings leaves the second nothing to tell them apart by,
+        // and it falls back on the fewest bytes measured: the low is run again.
+        for (int attempt = 0; attempt < 8; attempt++)
+        {
+            GC.Collect(0, GCCollectionMode.Forced, blocking: true);
+            Assert.True(process.CanReserve(1));
+            long before = process.CeilingBytes;
+            int collections = GC.CollectionCount(0);
+
+            // The low: given back for the pool to keep, taken again from what it keeps; then the collection.
+            process.Returned(held);
+            process.Reuse(-held);
+            process.Measure(held);
+            process.Reuse(held);
+            GC.Collect(0, GCCollectionMode.Forced, blocking: true);
+            if (movesAfter)
+            {
+                process.Measure(4096);
+            }
+
+            Assert.True(process.CanReserve(1));
+            long after = process.CeilingBytes;
+            if (GC.CollectionCount(0) == collections + 1)
+            {
+                Assert.True(after >= before - (held / 2), $"{after:N0} bytes left to the work after the low, {before:N0} before it; the rest's parts {process.RestParts}");
+                GC.KeepAlive(block);
+                return;
+            }
+        }
+
+        Assert.Fail("Another collection ran beside each of eight runs of the low.");
+    }
+
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     [VortexRecord]

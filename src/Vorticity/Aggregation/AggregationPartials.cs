@@ -65,12 +65,19 @@ internal static class AggregationPartials
     /// chunks, a dataset's at its objects and inside a large one at its chunks, gathered into ranges of about as many rows
     /// each that follow one another. One part for a source that has no cut of its own.
     /// </summary>
-    internal static async ValueTask<RowRange[]> PartsAsync(AggregationQuery query, int count, CancellationToken cancellationToken)
+    internal static ValueTask<RowRange[]> PartsAsync(AggregationQuery query, int count, CancellationToken cancellationToken)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(count);
         Check(query.Plan);
-        ScanSource source = query.Host.Source;
-        ScanSpec spec = query.Host.Spec(query.RowFilter);
+        return RowPartsAsync(query.Host.Source, query.Host.Spec(query.RowFilter), count, cancellationToken);
+    }
+
+    /// <summary>
+    /// The rows <paramref name="spec"/> reads of <paramref name="source"/> cut into <paramref name="count"/> parts at most, as
+    /// <see cref="PartsAsync"/> cuts a question's: one part for a source that has no cut of its own.
+    /// </summary>
+    internal static async ValueTask<RowRange[]> RowPartsAsync(ScanSource source, ScanSpec spec, int count, CancellationToken cancellationToken)
+    {
         RowRange whole = spec.Rows ?? new RowRange(0, source.Statistics?.RowBound is long bound and >= 0 ? bound : long.MaxValue);
         RowRange[]? pieces = count == 1 || spec.MatchesNothing
             ? null

@@ -103,6 +103,34 @@ public sealed record DatasetOptions
     /// </summary>
     internal double BoundOutPerIn { get; init; } = ObjectBound.OutPerIn;
 
+    /// <summary>
+    /// The share of an object's size it may hold less or more, read at the end of a group of rows its job asked for
+    /// (<see cref="VortexFileWriter.EndGroupAsync"/>): an object that holds the size less this share is sealed at its next
+    /// key, and one that holds less asks for another end.
+    /// </summary>
+    /// <remarks>
+    /// Measured on consolidations aimed at 64 MiB at degree 14 (2026-11-21): the readings that sealed an object found 97.4
+    /// to 102.1 % of its size on log records, 99.9 to 100 % on metric records, and none fell between 90 % and the slack's
+    /// edge. A sixty-fourth would have asked two more ends on the logs, each a short chunk of every column, and a wider
+    /// slack would have sealed no object sooner.
+    /// </remarks>
+    internal double ObjectEndSlack { get; init; } = DefaultObjectEndSlack;
+
+    /// <summary>The default of <see cref="ObjectEndSlack"/>.</summary>
+    internal const double DefaultObjectEndSlack = 1.0 / 32;
+
+    /// <summary>
+    /// The share by which what a row weighs may grow over the rows a job's object can still take, the job's left and those
+    /// of its partition value: a job asks for no end of a group by the weight of the rows while those rows, at what a row
+    /// weighed and this share more, leave the object short of its size, which it then closes before it fills. And a reading
+    /// a job places every quarter of an object's rows waits for the writer's next end of a group when that end falls
+    /// within this share past it.
+    /// </summary>
+    internal double RowWeightDrift { get; init; } = DefaultRowWeightDrift;
+
+    /// <summary>The default of <see cref="RowWeightDrift"/>.</summary>
+    internal const double DefaultRowWeightDrift = 1.0 / 4;
+
     /// <summary>The columns an object's entry summarises, or null for the first <see cref="SummaryColumnLimit"/>.</summary>
     /// <remarks>The summaries are what a scan prunes whole objects by without opening them; the sort key's columns are always among them.</remarks>
     public IReadOnlyList<string>? SummaryColumns { get; init; }
@@ -223,6 +251,41 @@ public sealed record DatasetOptions
     /// allocated 4.7 MB, no faster. A test cuts its small objects with less.
     /// </summary>
     internal long LeastPieceRows { get; init; } = 1L << 20;
+
+    /// <summary>
+    /// The rows of a slice a compaction's merge is cut in, merged side by side and taken in order (<see cref="SlicedMerge"/>):
+    /// 2^18 by default, enough that the searches a slice makes in its inputs' indexes and the batches it starts are little
+    /// beside the rows it merges. A test cuts its small merges with less.
+    /// </summary>
+    internal long SliceRows { get; init; } = 1L << 18;
+
+    /// <summary>
+    /// The rows of a part of a large input a compaction's first pass counts on a lane of its own, about: 2^20 by default. The
+    /// first pass of a consolidation of 74 appends of metric records, written before their directories counted doubles, took
+    /// 1.3 s of its job's 6.3 s on one core: 72 of its inputs counted in 2 to 8 ms each, side by side, and the largest,
+    /// 21.4 M rows, in 1 336 ms alone, its variant rows rebuilt from their shredding (2026-11-18). A part of a million rows is
+    /// some 60 ms of counting, against a scan opened and a census merged a part, which are microseconds. A test cuts its
+    /// small inputs with less.
+    /// </summary>
+    internal long CensusPartRows { get; init; } = 1L << 20;
+
+    /// <summary>
+    /// Whether a job's inputs hand its writers what they took of a variant column's rows as their own shredding holds them,
+    /// which a block takes its runs from in place of reading its rows put back together; false by default. An input
+    /// that hands a chunk over so does not put its rows back together: it sizes them, and a reader that asks for their
+    /// bytes has them put back then (<see cref="Arrays.CanonicalKind.Shredded"/>). The objects written are the same either
+    /// way. It stays off: on the consolidation of log records it was made for, at degree 14 under 16 GiB, a job spent 13 %
+    /// less processor time and ran 1.4 to 4.8 % shorter, its inputs holding 11 % more, a window taken keeping more for
+    /// each of 400 sparse keys than its rows' binary held (2026-11-20).
+    /// </summary>
+    internal bool TakesVariants { get; init; }
+
+    /// <summary>
+    /// The objects' size a piece of a consolidation reads at most, and the ranges below its cut it merges: 8 by default,
+    /// whatever the session's degree, so that a consolidation commits the same pieces at any degree. A piece of eight
+    /// objects is what a degree of eight or more cut before; a test consolidates in pieces of one.
+    /// </summary>
+    internal int PieceObjects { get; init; } = 8;
 
     /// <summary>
     /// What reading the dataset costs, which its planners price their paths by before reading anything: the store's own

@@ -480,6 +480,11 @@ public sealed class BlockPoolTests
     {
         const int megabyte = 1024 * 1024;
         BlockPool pool = BlockPool.KeepingAll(8 * megabyte);
+
+        // Out of the registry, which asks every pool what it did not use after each collection of the oldest generation:
+        // its asking between two of the test's own counted as one of them. The test's first rent makes a slab when the
+        // process has none, 32 MiB, and so a collection, whose asking then came once its three blocks were parked.
+        HeldMemory.Unregister(pool);
         try
         {
             ReturnAll(pool, RentAll(pool, megabyte, 3));
@@ -627,6 +632,10 @@ public sealed class BlockPoolTests
     public void A_pool_that_keeps_all_keeps_one_outsized_block_for_the_next_read_it_fits()
     {
         BlockPool pool = BlockPool.KeepingAll(64 * 1024);
+
+        // Out of the registry, which asks every pool what it did not use after each collection of the oldest generation,
+        // and has it give back what it keeps when memory is short: either between two steps of the test empties the slot.
+        HeldMemory.Unregister(pool);
         try
         {
             // Past the classes, the block a read gets parks in the pool's one slot once given back.
@@ -695,6 +704,64 @@ public sealed class BlockPoolTests
         {
             pool.Trim();
         }
+    }
+
+    /// <summary>
+    /// A block the pool keeps is memory the heap holds already: its account takes it though the process's budget has no
+    /// room left for new memory, and the budget counts it among the blocks taken past its room, and past the sixteenth a
+    /// block may count past, which it refused when it was asked for them as new memory.
+    /// </summary>
+    [Fact]
+    public void A_block_the_pool_keeps_is_rented_when_the_process_budget_has_no_room()
+    {
+        const int megabyte = 1024 * 1024;
+        const long held = 1L << 40;
+        BlockPool pool = new BlockPool();
+        pool.Return(pool.Rent(TestAccount.Shared, megabyte, 64));
+        Assert.Equal(1, pool.ParkedCount(megabyte));
+
+        // A process's budget of its own, which holds far more than its limit leaves: no new memory fits.
+        QueryMemoryBudget process = new QueryMemoryBudget(megabyte, process: null);
+        Assert.True(process.TryReserve(held, kept: true));
+        Assert.False(process.CanReserve(megabyte));
+        long pastRoom = process.KeptPastRoom;
+        long pastMargin = process.KeptPastMargin;
+
+        using WorkAccount work = new WorkAccount(process, "test");
+        BlockOwner block = pool.Rent(work, megabyte, 64);
+
+        Assert.Equal(0, pool.ParkedCount(megabyte));
+        Assert.Equal(megabyte, work.Held);
+        Assert.Equal(held + megabyte, process.ReservedBytes);
+        Assert.Equal(pastRoom + 1, process.KeptPastRoom);
+        Assert.Equal(pastMargin + 1, process.KeptPastMargin);
+
+        pool.Return(block);
+        Assert.Equal(1, pool.ParkedCount(megabyte));
+        Assert.Equal(0, work.Held);
+        Assert.Equal(held, process.ReservedBytes);
+    }
+
+    /// <summary>
+    /// A block the pool keeps is counted by the budgets of its work as any other: one of them that is never passed and has
+    /// no room for it refuses it, and the block goes back to the pool, counted nowhere.
+    /// </summary>
+    [Fact]
+    public void A_block_the_pool_keeps_goes_back_to_it_when_a_budget_of_its_work_refuses_it()
+    {
+        const int megabyte = 1024 * 1024;
+        BlockPool pool = new BlockPool();
+        pool.Return(pool.Rent(TestAccount.Shared, megabyte, 64));
+        QueryMemoryBudget process = new QueryMemoryBudget(megabyte, process: null);
+        QueryMemoryBudget hard = process.HardChild(megabyte / 2);
+        using WorkAccount work = new WorkAccount(hard, "test");
+
+        Assert.Throws<VortexMemoryException>(() => pool.Rent(work, megabyte, 64));
+
+        Assert.Equal(1, pool.ParkedCount(megabyte));
+        Assert.Equal(0, work.Held);
+        Assert.Equal(0, hard.ReservedBytes);
+        Assert.Equal(0, process.ReservedBytes);
     }
 
     private static BlockOwner[] RentAll(BlockPool pool, int length, int count)

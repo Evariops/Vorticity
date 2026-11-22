@@ -1082,7 +1082,9 @@ public sealed class DatasetCompactionTests
         Assert.Equal(3, moved.ToLevel);
         Assert.Equal(150_000, moved.Rows);
 
-        Assert.Equal(1, dataset.Levels[1].Entries);
+        // The small commits stay in level 1, an object each at most: twenty rows of two columns already hold a kibibyte of
+        // data there, the chunks' own fixed cost, and an object of level 1 ends at that size.
+        Assert.InRange(dataset.Levels[1].Entries, 1, 3);
         Assert.Equal(0, dataset.Levels[2].Entries);
         await AssertInvariantAsync(dataset, options, appended);
         Console.Out.Write(FormattableString.Invariant(

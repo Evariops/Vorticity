@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+# bench/speed.sh: the short benches of the throughput work, each run once per source tree and kept in a ledger.
+#
+#   bench/speed.sh [--only B,B…] [--degree N,N…] [--profile|--allocations] [--memory SIZE] [--again] [--base REF|TREE] [--digest]
+#                  [--same-bytes] [--takes] [--note TEXT]
+#
+# Benches (default: logs,metrics):
+#   logs     one tier merge of 5 job outputs of log records, 7.6 M rows, 2 GiB        (~15 s a round)
+#   metrics  one consolidation of 74 appends of metric records, 51.84 M rows, 2 GiB    (~20 s a round)
+#   runs     one tier merge of 60 appends of 30 000 metric records, 1.8 M rows in 1.2 M runs of a row or two, the first
+#            merges of a backlog of appends, three quarters of the time the 25 GB backlog took at degree 14    (~2 s a round)
+#   append   24 appends of 65 536 metric records into a dataset with variants          (seconds)
+#   scan, filter, write   the report's scenarios on its 10 485 760-row file, in the framework-dependent runner, 12 rounds
+#   parts    the scan's reads done by the caller on the scan's parts (SplitAsync), a task a part, on the same file
+#
+# What a run brings back, all at once (the ledger's columns): the cold and the warm time (two rounds in one process, the
+# second compared), the passes, the processor and write-lane seconds, the occupancy (processor over wall over degree),
+# the rows, the inputs, the output and scratch sizes, a digest of the bytes written (decrypted, the same bytes at any
+# degree and on any run), the resident and block peaks, the full collections and the machine's load. --digest adds the
+# rows' digest, which takes four to five times the job and is for a change of what is written.
+#
+# --profile is a run of its own (mode x30): Instruments' CPU Profiler at its high frequency, a sample every 25 to 30 µs of
+# each running thread weighed in cycles, on the last round only, its JIT frames named by the runtime's perf map, folded by
+# bench/profile/jitcycles.py into the cores busy millisecond by millisecond, roles, functions, threads and spinners, a
+# timeline and folded stacks for speedscope (the run's .cycles directory beside its log). It slows the round by about a
+# quarter, and is never compared with plain runs. Without Xcode it falls back to `sample` at 10 ms (mode p10). EventPipe's
+# sampler is not used: it stops the runtime at every sample (a job at 10 kHz takes 3.4 times as long) and charges a thread
+# that waits to the frame it waits in.
+#
+# --allocations is a run of its own (mode alloc): dotnet-trace on the last round with the runtime's allocation sampling
+# (AllocationSampled, an allocation drawn every 100 KB on average, with its stack) and its collections, folded by
+# bench/Vorticity.Benchmarks.Traces into bytes by type and by the frames of ours that allocated them; and the bench's own
+# timeline of what the process and the library hold every 10 ms (resident, blocks, the pool, the slabs, the heap, the
+# governor's reservations), the run's .allocations directory beside its log.
+#
+# --memory SIZE runs the compactions under SIZE rather than 2 GiB, the mode then named after it (plain-16g): the work
+# measured with the memory left free, never compared with the 2 GiB runs.
+#
+# A run is keyed by the hash of the src/ tree it compiled, the working tree's changes included: a commit of the bench, the
+# docs or the tests alone keeps the key, and a tree measured is not measured again unless --again. The base it is compared
+# with is HEAD's src/ tree when the working tree changes it, else the first commit before HEAD whose src/ differs; the
+# base's figures come from the ledger and are never run again. The ledger and the kept stores live in
+# ~/.cache/vorticity/speed (VORTICITY_SPEED to move them).
+#
+# --takes runs the compactions with their inputs handing the writers what they took of a variant column's rows, not put
+# back together (DatasetOptions.TakesVariants, off by default), the mode then named after it (plain-takes, plain-takes-16g):
+# the same tree with and without, run in turn, and the same bytes written.
+#
+# --same-bytes is for a change that must not change what is written, a change of how the work runs alone: a run whose
+# bytes differ from those its base wrote at the same bench and degree is not written to the ledger, and the script exits
+# with 1 once every run is done.
+set -u
+repo=$(cd "$(dirname "$0")/.." && pwd)
+home=${VORTICITY_SPEED:-$HOME/.cache/vorticity/speed}
+ledger=$home/ledger.tsv
+mkdir -p "$home/logs"
+only="logs,metrics"; degrees="14"; profile=0; allocations=0; memory=2g; again=0; base=""; digest=0; note=""; same=0; refused=0; takes=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --only) only=$2; shift ;;
+    --degree) degrees=$2; shift ;;
+    --profile) profile=1 ;;
+    --allocations) allocations=1 ;;
+    --memory) memory=$2; shift ;;
+    --again) again=1 ;;
+    --base) base=$2; shift ;;
+    --digest) digest=1 ;;
+    --note) note=$2; shift ;;
+    --same-bytes) same=1 ;;
+    --takes) takes=1 ;;
+    *) echo "unknown argument $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+header="date	src	commit	bench	degree	mode	cold_s	job_s	write_s	plan_s	given_up_s	cpu_s	lanes_s	rows	inputs	out_MB	scratch_MiB	bytes	digest	resident_MiB	blocks_MiB	gc2	occupancy	load	cores	roles	log	note"
+[ -f "$ledger" ] || echo "$header" > "$ledger"
+
+index=$(mktemp); cp "$repo/.git/index" "$index"
+tree=$(GIT_INDEX_FILE=$index git -C "$repo" add -A src >/dev/null 2>&1; GIT_INDEX_FILE=$index git -C "$repo" write-tree --prefix=src/)
+rm -f "$index"
+head_src=$(git -C "$repo" rev-parse HEAD:src)
+if [ -z "$base" ]; then
+  if [ "$tree" != "$head_src" ]; then base=$head_src; else
+    for c in $(git -C "$repo" rev-list --max-count=80 HEAD~1); do t=$(git -C "$repo" rev-parse "$c:src"); [ "$t" != "$tree" ] && { base=$t; break; }; done
+  fi
+else
+  base=$(git -C "$repo" rev-parse "$base:src" 2>/dev/null || echo "$base")
+fi
+commit=$(git -C "$repo" rev-parse --short HEAD); [ "$tree" != "$head_src" ] && commit="$commit+"
+xctrace=${XCTRACE:-$(xcrun --find xctrace 2>/dev/null || echo /Applications/Xcode.app/Contents/Developer/usr/bin/xctrace)}
+[ -x "$xctrace" ] || xctrace=""
+mode=plain
+[ $profile = 1 ] && mode=$([ -n "$xctrace" ] && echo x30 || echo p10)
+[ $allocations = 1 ] && mode=alloc
+[ $profile = 1 ] && [ $allocations = 1 ] && { echo "--profile and --allocations are runs of their own: one at a time" >&2; exit 2; }
+[ $takes = 1 ] && mode="$mode-takes"
+[ "$memory" != 2g ] && mode="$mode-$memory"
+echo "tree ${tree:0:10} ($commit), base ${base:0:10}, mode $mode"
+
+queries=$repo/bench/Vorticity.Benchmarks.Queries/bin/Release/net11.0
+runner=$repo/bench/Vorticity.Benchmarks.Runner/bin/Release/net11.0/Vorticity.Benchmarks.Runner.dll
+fixture=$home/mixed-10485760.vortex
+built_queries=0; built_runner=0
+build() {
+  if (cd "$repo" && dotnet build "$1" -c Release 2>&1 | grep -E ' error |rr(o|eu)r\(s\)' | sort -u | grep -v ' 0 Err'); then echo "build of $1 failed" >&2; exit 1; fi
+}
+
+measured() { awk -F'\t' -v t="$tree" -v b="$1" -v d="$2" -v m="$mode" '$2==t && $4==b && $5==d && $6==m {f=1} END {exit !f}' "$ledger"; }
+
+# Everything the runs need is built before the first one, from the tree whose hash keys them: a build between two runs
+# would compile whatever the working tree became meanwhile.
+traces=$repo/bench/Vorticity.Benchmarks.Traces/bin/Release/net11.0/vortex-traces.dll
+[ $allocations = 1 ] && build bench/Vorticity.Benchmarks.Traces
+for bench in ${only//,/ }; do
+  case $bench in
+    logs|metrics|runs|append) [ $built_queries = 0 ] && { build bench/Vorticity.Benchmarks.Queries; built_queries=1; } ;;
+    scan|filter|write|parts)
+      [ $built_runner = 0 ] && { build bench/Vorticity.Benchmarks.Runner; built_runner=1; }
+      if [ ! -f "$fixture" ]; then
+        build bench/Vorticity.Benchmarks
+        (cd "$repo" && dotnet bench/Vorticity.Benchmarks/bin/Release/net11.0/Vorticity.Benchmarks.dll --fixture 10485760 "$fixture") || exit 1
+      fi ;;
+  esac
+done
+
+for bench in ${only//,/ }; do
+  for degree in ${degrees//,/ }; do
+    if [ $again = 0 ] && measured "$bench" "$degree"; then echo "$bench at $degree: tree already measured, not run again"; continue; fi
+    stamp=${tree:0:10}-$bench-d$degree-$(date +%H%M%S)
+    log=$home/logs/$stamp.log
+    kind=compact; cores="-"; roles="-"
+    case $bench in
+      logs) args=(--micro backlog --store "$home/logtier" --logs --jobs 1 --compact-only --memory-limit "$memory" --degree "$degree" --repeat 2 --bytes-digest) ;;
+      metrics) args=(--micro backlog --store "$home/metrictier" --jobs 1 --compact-only --memory-limit "$memory" --degree "$degree" --repeat 2 --bytes-digest) ;;
+      runs) args=(--micro backlog --store "$home/appends60" --jobs 1 --compact-only --memory-limit "$memory" --degree "$degree" --repeat 3 --bytes-digest) ;;
+      append) kind=append; args=(--micro backlog --store "$home/append" --build-only --appends 24 --rows 65536 --memory-limit "$memory" --degree "$degree") ;;
+      scan) kind=runner; args=(--scenario scan "$fixture" 10485760 --repeat 12 --threads "$degree") ;;
+      filter) kind=runner; args=(--scenario filter-wide "$fixture" 10485760 --repeat 12 --threads "$degree") ;;
+      write) kind=runner; args=(--scenario write "$fixture" 10485760 --repeat 12 --threads "$degree") ;;
+      parts) kind=runner; args=(--scenario scan-parts "$fixture" 10485760 --repeat 12 --threads "$degree") ;;
+      *) echo "no bench named $bench" >&2; exit 2 ;;
+    esac
+    [ $digest = 1 ] && [ $kind = compact ] && args+=(--digest)
+    [ $takes = 1 ] && [ $kind = compact ] && args+=(--takes-variants)
+    exe=("$queries/vortex-queries.dll"); [ $kind = runner ] && exe=("$runner")
+    # The last round alone: a compaction waits a second and a half after saying so, a runner is sampled from its start.
+    last_round() {
+      if [ $kind = compact ]; then
+        for _ in $(seq 1 600); do grep -q "^round $1 starts" "$log" 2>/dev/null && break; kill -0 $pid 2>/dev/null || break; sleep 0.1; done
+      else
+        sleep 0.5
+      fi
+    }
+    rounds_of=2; [ "$bench" = runs ] && rounds_of=3
+    if [ $profile = 1 ] && [ -n "$xctrace" ]; then
+      [ $kind = compact ] && args+=(--quick-exit)
+      out=$home/logs/$stamp.cycles; mkdir -p "$out"
+      "$xctrace" record --template 'CPU Profiler' --show-recording-options 2> /dev/null |
+        sed 's/"highFrequency" : false/"highFrequency" : true/' > "$out/options.json"
+      (cd "$repo" && DOTNET_PerfMapEnabled=1 exec dotnet "${exe[@]}" "${args[@]}" > "$log" 2>&1) &
+      pid=$!
+      last_round $rounds_of
+      "$xctrace" record --template 'CPU Profiler' --recording-options "$out/options.json" --no-prompt --attach $pid \
+        --output "$out/cpu.trace" > "$out/xctrace.txt" 2>&1
+      cp "/tmp/perf-$pid.map" "$out/perf.map" 2>/dev/null
+      wait $pid
+      "$xctrace" export --input "$out/cpu.trace" --xpath '/trace-toc/run[@number="1"]/data/table[@schema="cpu-profile"]' \
+        --output "$out/cpu-profile.xml" > /dev/null 2>&1
+      line=$(python3 -I "$repo/bench/profile/jitcycles.py" "$out/cpu-profile.xml" "$out/perf.map" "$out" --ledger 2>/dev/null || printf -- '-\t-')
+      cores=${line%%	*}; roles=${line#*	}
+      rm -rf "$out/cpu.trace" "$out/cpu-profile.xml"
+      gzip -f "$out/folded.txt" "$out/perf.map"
+      echo "$bench at $degree: $out/summary.md"
+    elif [ $profile = 1 ]; then
+      [ $kind = compact ] && args+=(--quick-exit)
+      sample_file=$home/logs/$stamp.sample; map=$home/logs/$stamp.map; summary=$home/logs/$stamp.profile.txt
+      (cd "$repo" && DOTNET_PerfMapEnabled=1 exec dotnet "${exe[@]}" "${args[@]}" > "$log" 2>&1) &
+      pid=$!
+      last_round $rounds_of
+      sample $pid 600 10 -mayDie -file "$sample_file" > /dev/null 2>&1
+      cp "/tmp/perf-$pid.map" "$map" 2>/dev/null
+      wait $pid
+      line=$(python3 -I "$repo/bench/profile/samples.py" "$sample_file" "$map" "$summary" 2>/dev/null || printf -- '-\t-')
+      cores=${line%%	*}; roles=${line#*	}
+      gzip -f "$sample_file"
+    elif [ $allocations = 1 ]; then
+      [ $kind = compact ] || { echo "$bench: --allocations is for the compaction benches" >&2; continue; }
+      out=$home/logs/$stamp.allocations; mkdir -p "$out"
+      args+=(--quick-exit --memory-timeline "$out/memory.tsv")
+      (cd "$repo" && exec dotnet "${exe[@]}" "${args[@]}" > "$log" 2>&1) &
+      pid=$!
+      last_round $rounds_of
+      # GC (0x1), loader and JIT (0x18) for the stacks' names, allocation sampling (0x80000000000), at the informational level.
+      dotnet-trace collect -p $pid --providers 'Microsoft-Windows-DotNETRuntime:0x80000000019:4' -o "$out/trace.nettrace" \
+        > "$out/dotnet-trace.txt" 2>&1
+      wait $pid
+      dotnet "$traces" allocations "$out/trace.nettrace" "$out" 40 > /dev/null 2>&1
+      gzip -f "$out/trace.nettrace"
+      echo "$bench at $degree: $out/allocations.md, $out/memory.tsv"
+    else
+      (cd "$repo" && dotnet "${exe[@]}" "${args[@]}" > "$log" 2>&1) || { echo "$bench at $degree failed, see $log" >&2; tail -5 "$log" >&2; continue; }
+    fi
+    fields=$(python3 -I "$repo/bench/profile/speed_line.py" $kind "$log")
+    load=$(uptime | sed -E 's/.*averages?: ([0-9.,]+).*/\1/' | tr -d ',')
+    if [ $same = 1 ]; then
+      written=$(echo "$fields" | cut -f12)
+      # The bytes depend on the memory limit (a writer gathers its chunks within its share of it): its base's at the same.
+      before=$(awk -F'\t' -v b="$base" -v n="$bench" -v d="$degree" -v m="$memory" \
+        '$2==b && $4==n && $5==d && $18!="-" && (m=="2g" ? $6 !~ /-/ : $6 ~ ("-" m "$")) {x=$18} END {print x}' "$ledger")
+      if [ -n "$before" ] && [ "$written" != "$before" ]; then
+        echo "$bench at $degree: bytes ${written:0:8} where the base wrote ${before:0:8}, not written to the ledger (--same-bytes)" >&2
+        refused=1; continue
+      fi
+    fi
+    occupancy=$(echo "$fields" | awk -F'\t' -v d="$degree" '{ if ($2 != "-" && $6 != "-" && $2 > 0) printf "%.3f", $6 / $2 / d; else print "-" }')
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date '+%m-%d %H:%M')" "$tree" "$commit" "$bench" "$degree" "$mode" \
+      "$fields" "$occupancy" "$load" "$cores" "$roles" "$(basename "$log")" "$note" >> "$ledger"
+    sleep 2
+  done
+done
+
+python3 -I "$repo/bench/profile/speed_compare.py" "$ledger" "$tree" "$base" "$mode" "$only" "$degrees"
+exit $refused

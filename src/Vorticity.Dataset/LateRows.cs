@@ -179,7 +179,7 @@ internal sealed class LateRows
     /// The first row from <paramref name="from"/> to <paramref name="to"/> of the merge's run that did not come late, or
     /// <paramref name="to"/>: found by halves, the run's keys ascending.
     /// </summary>
-    internal int End(KeyOrderedMerge merge, int from, int to)
+    internal int End(IMergedRun merge, int from, int to)
     {
         if (from >= to || !IsLate(merge.KeyAt(from)))
         {

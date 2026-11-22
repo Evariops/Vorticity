@@ -65,15 +65,19 @@ public sealed partial class PatternBudgetTests : IClassFixture<PatternBudgetTest
     /// each for fewer bytes. QP-2, QP-3 and QP-10 asked for nothing past the tail: they read that kilobyte of each of their
     /// four objects at the same requests, 4,096 bytes more, 1.6 %.
     /// </para>
+    /// <para>
+    /// The cold bytes raised on 2026-11-17 by 3 bytes an object, the requests the same: an object's path directory keeps the
+    /// bytes of its rows' values too (version 3), a varint, which a job's first pass reads in place of the column.
+    /// </para>
     /// </summary>
     private static readonly Dictionary<string, Budget> Ceilings = new(StringComparer.Ordinal)
     {
-        ["QP-1 a service's routes under 5xx, per hour"] = new(4, 266369, 0, 0, 86741),
-        ["QP-2 the pods of a route"] = new(4, 266369, 0, 0, 78260),
-        ["QP-3 the services under a shredded status of 500 or more"] = new(4, 266369, 0, 0, 101796),
-        ["QP-4 the spans of a trace"] = new(4, 266369, 0, 0, 81960),
-        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(1, 66528, 0, 0, 140948),
-        ["QP-10 the services of a residual key"] = new(4, 266369, 0, 0, 108692),
+        ["QP-1 a service's routes under 5xx, per hour"] = new(4, 266381, 0, 0, 86741),
+        ["QP-2 the pods of a route"] = new(4, 266381, 0, 0, 78260),
+        ["QP-3 the services under a shredded status of 500 or more"] = new(4, 266381, 0, 0, 101796),
+        ["QP-4 the spans of a trace"] = new(4, 266381, 0, 0, 81960),
+        ["QP-6 the 99th percentile per service, the last quarter of an hour"] = new(1, 66531, 0, 0, 140948),
+        ["QP-10 the services of a residual key"] = new(4, 266381, 0, 0, 108692),
     };
 
     private readonly Fixture _fixture;

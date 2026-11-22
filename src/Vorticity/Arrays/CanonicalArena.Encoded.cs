@@ -71,10 +71,14 @@ internal partial class CanonicalArena
     /// </summary>
     /// <param name="nodeIndex">Any node.</param>
     /// <returns>A node in a canonical form.</returns>
-    internal int Decoded(int nodeIndex) =>
-        RecordRef(nodeIndex).Kind is CanonicalKind.Dictionary or CanonicalKind.RunEnd
-            ? MaterializeEncoded(nodeIndex)
-            : nodeIndex;
+    internal int Decoded(int nodeIndex) => RecordRef(nodeIndex).Kind switch
+    {
+        CanonicalKind.Dictionary or CanonicalKind.RunEnd => MaterializeEncoded(nodeIndex),
+
+        // The values of a shredded variant's rows not put back together, put back.
+        CanonicalKind.Shredded => MaterializeShredded(nodeIndex),
+        _ => nodeIndex,
+    };
 
     /// <summary>
     /// The node with every dictionary or run-end node beneath it decoded: the node itself when there
@@ -99,6 +103,9 @@ internal partial class CanonicalArena
             case CanonicalKind.Dictionary:
             case CanonicalKind.RunEnd:
                 return MaterializeEncoded(nodeIndex);
+
+            case CanonicalKind.Shredded:
+                return MaterializeShredded(nodeIndex);
 
             case CanonicalKind.Struct:
                 return DecodedFields(nodeIndex, in record, depth);

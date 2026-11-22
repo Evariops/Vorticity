@@ -78,6 +78,91 @@ public sealed class ColumnSheetTests
         Assert.True(sheet.MayContain(FilterLiteral.From(-1L), new DTypeArena().Primitive(PType.I64, Nullability.NonNullable)));
     }
 
+    /// <summary>
+    /// Texts in runs among nulls, short and long, taken once with each repeat viewing the bytes of the row before, its rows
+    /// then counted a stretch at once, and once with each row viewing a copy of its own: the same sheet, the same numbers.
+    /// </summary>
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(0.3)]
+    [InlineData(0.7)]
+    public void TextsViewingTheRowBeforesBytesMakeTheSameSheet(double nulls)
+    {
+        Random random = new Random((int)(nulls * 10) + 5);
+        const int Rows = 9_000;
+        string?[] texts = new string?[Rows];
+        for (int row = 0; row < Rows;)
+        {
+            int stretch = random.Next(1, random.Next(2) == 0 ? 4 : 80);
+            int value = random.Next(3_000);
+            string? text = random.NextDouble() < nulls ? null : value % 2 == 0 ? "v" + value : "a longer value of its own " + value;
+            for (int i = 0; i < stretch && row < Rows; i++, row++)
+            {
+                texts[row] = text;
+            }
+        }
+
+        (byte[] Sheet, int[] Ids) shared = TextSheet(texts, share: true);
+        (byte[] Sheet, int[] Ids) own = TextSheet(texts, share: false);
+        Assert.Equal(own.Sheet, shared.Sheet);
+        Assert.Equal(own.Ids, shared.Ids);
+    }
+
+    private static (byte[] Sheet, int[] Ids) TextSheet(string?[] texts, bool share)
+    {
+        const int Batch = 2_048;
+        using ColumnSheetBuilder builder = new ColumnSheetBuilder();
+        builder.NumberRows();
+        List<int> ids = [];
+        DTypeArena types = new DTypeArena();
+        for (int from = 0; from < texts.Length; from += Batch)
+        {
+            int count = Math.Min(Batch, texts.Length - from);
+            CanonicalArena arena = new CanonicalArena();
+            byte[][] values = [.. texts.Skip(from).Take(count).Select(t => System.Text.Encoding.UTF8.GetBytes(t ?? ""))];
+            int heapBytes = Math.Max(1, values.Sum(v => v.Length));
+            VortexBuffer heap = arena.Allocate(heapBytes, 8, out Span<byte> heapSpan);
+            VortexBuffer views = arena.Allocate(count * 16, 16, out Span<byte> viewBytes);
+            VortexBuffer bits = arena.Allocate((count + 7) / 8, 8, out Span<byte> bitBytes);
+            int at = 0;
+            for (int row = 0; row < count; row++)
+            {
+                if (texts[from + row] is null)
+                {
+                    continue;
+                }
+
+                bitBytes[row >> 3] |= (byte)(1 << (row & 7));
+                Span<byte> view = viewBytes.Slice(row * 16, 16);
+                if (share && row > 0 && texts[from + row] == texts[from + row - 1])
+                {
+                    viewBytes.Slice((row - 1) * 16, 16).CopyTo(view);
+                    continue;
+                }
+
+                byte[] value = values[row];
+                MemoryMarshal.Write(view, value.Length);
+                if (value.Length <= 12)
+                {
+                    value.CopyTo(view[4..]);
+                    continue;
+                }
+
+                value.AsSpan(0, 4).CopyTo(view[4..]);
+                MemoryMarshal.Write(view[12..], at);
+                value.CopyTo(heapSpan[at..]);
+                at += value.Length;
+            }
+
+            Validity validity = Validity.Bitmap(arena.AddBool(types.Bool(Nullability.NonNullable), count, Validity.NonNullable, bits, 0));
+            int node = arena.AddVarBinView(types.Utf8(Nullability.Nullable), count, validity, views, [heap]);
+            builder.Accumulate(arena, node, 0, count);
+            ids.AddRange(builder.RowIds[..count].ToArray());
+        }
+
+        return (builder.Finish()!, [.. ids]);
+    }
+
     [Fact]
     public void NullsAreCountedAndNeverHashed()
     {

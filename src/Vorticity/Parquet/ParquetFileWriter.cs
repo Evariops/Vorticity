@@ -9,6 +9,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
+using Vorticity.Execution;
 using Vorticity.Parquet.Codecs;
 using Vorticity.Parquet.Metadata;
 using Vorticity.Parquet.Schema;
@@ -81,7 +82,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
 
     /// <summary>The threads the columns stage their rows and close their pages on, the writing one included.</summary>
     private readonly int _lanes;
-    private WorkFan? _fan;
+    private CoreBatch? _fan;
     private BlockWork? _blockWork;
     private readonly ColumnChunkWriter[] _columns;
 
@@ -150,7 +151,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         _columns = new ColumnChunkWriter[map.Columns.Length];
 
         // The lanes every column's pages compress on, while the columns encode the pages after them.
-        PageLanes? lanes = _lanes > 1 ? new PageLanes(_lanes) : null;
+        PageLanes? lanes = _lanes > 1 ? new PageLanes(_lanes, session.Lanes) : null;
         HashSet<string> blooms = options.BloomFilters is { } named ? new(named.Keys, StringComparer.Ordinal) : [];
         HashSet<string> codecs = options.ColumnCompression is { } own ? new(own.Keys, StringComparer.Ordinal) : [];
         HashSet<string> hints = options.Hints is { } pinned ? new(pinned.Keys, StringComparer.Ordinal) : [];
@@ -520,7 +521,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         _encryptor?.Dispose();
         if (_fan is { } fan)
         {
-            WorkFan.Return(fan);
+            CoreBatch.Return(fan);
             _fan = null;
         }
 
@@ -629,7 +630,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
 
         if (across || closes)
         {
-            WorkFan fan = _fan ??= WorkFan.Rent(Math.Min(_lanes, StageLanes));
+            CoreBatch fan = _fan ??= CoreBatch.Rent(_session.Core, Math.Min(_lanes, StageLanes));
             BlockWork work = _blockWork ??= new BlockWork(this);
             work.Start = start;
             work.Stages = across;
@@ -642,7 +643,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     }
 
     /// <summary>
-    /// A block's work for the work fan, a column an item, on whichever of the writer's threads claims
+    /// A block's work for the core's pumps, a column an item, on whichever of the writer's lanes claims
     /// it: the column's rows staged, but a nested column's, and its page closed when the rows end the
     /// block.
     /// </summary>
@@ -651,7 +652,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
     /// claims the first while the others wake, and a column that holds every block is not the one
     /// that waits for a thread.
     /// </remarks>
-    private sealed class BlockWork(ParquetFileWriter writer) : IFanWork
+    private sealed class BlockWork(ParquetFileWriter writer) : IBatchWork
     {
         /// <summary>Per column, the ticks its item took the last time it ran.</summary>
         private readonly long[] _took = new long[writer._columns.Length];
@@ -659,7 +660,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         /// <summary>The batch's first row the block takes.</summary>
         internal int Start { get; set; }
 
-        /// <summary>Whether the columns stage the rows here, the fan's state the batch's arena and its value their count.</summary>
+        /// <summary>Whether the columns stage the rows here, the batch's state the rows' arena and its value their count.</summary>
         internal bool Stages { get; set; }
 
         /// <summary>Whether the rows end the block, whose pages then close.</summary>
@@ -681,7 +682,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             }
         }
 
-        public void Run(WorkFan fan, int item)
+        public void Run(CoreBatch fan, int item)
         {
             int index = fan.Item(item);
             long began = Stopwatch.GetTimestamp();
@@ -689,7 +690,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
             _took[index] = Stopwatch.GetTimestamp() - began;
         }
 
-        private void RunColumn(WorkFan fan, int item)
+        private void RunColumn(CoreBatch fan, int item)
         {
             ColumnChunkWriter column = writer._columns[item];
             if (Stages && !column.Column.Nested)

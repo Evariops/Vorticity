@@ -40,6 +40,13 @@ internal sealed class EntrySketches(int bits) : IDisposable
     private Block<int> _starts;
     private Block<byte> _encoded;
 
+    // The key of the bucket the last value fell in, and the values since that fell in it, not yet counted: a series' rows
+    // come one after the other, its values mostly in the bucket of the one before, and each counted alone was a probe of
+    // the table, most of the sketches of a consolidation of metric records (2026-11-18). The buckets are sorted as they
+    // are sealed, so that counted together they make the same sketches.
+    private long _runKey = Free;
+    private long _runCount;
+
     /// <summary>Adds <paramref name="value"/> to entry <paramref name="entry"/>'s sketch, made at its first value: a NaN is counted in none of its buckets.</summary>
     internal void Add(int entry, double value)
     {
@@ -62,7 +69,27 @@ internal sealed class EntrySketches(int bits) : IDisposable
         }
 
         long bucket = value > 0 ? Positive | (uint)QuantileSketch.Index(value, _shift) : (uint)QuantileSketch.Index(-value, _shift);
-        Count(((long)entry << 32) | bucket, 1);
+        long key = ((long)entry << 32) | bucket;
+        if (key == _runKey)
+        {
+            _runCount++;
+            return;
+        }
+
+        Flush();
+        _runKey = key;
+        _runCount = 1;
+    }
+
+    /// <summary>Counts the values of the last run into their bucket.</summary>
+    private void Flush()
+    {
+        if (_runCount > 0)
+        {
+            Count(_runKey, _runCount);
+            _runCount = 0;
+            _runKey = Free;
+        }
     }
 
     /// <summary>
@@ -72,6 +99,7 @@ internal sealed class EntrySketches(int bits) : IDisposable
     /// </summary>
     internal void Remap(ReadOnlySpan<int> to)
     {
+        Flush();
         Block<long> keys = _keys;
         Block<long> counts = _counts;
         _keys = Blocks.Rent<long>(keys.Length);
@@ -106,6 +134,7 @@ internal sealed class EntrySketches(int bits) : IDisposable
     /// <summary>Puts the buckets in order, entry by entry, for <see cref="Encoded"/>: the sketches take no value after.</summary>
     internal void Seal(int entries)
     {
+        Flush();
         Span<long> keys = _keys;
         Span<long> counts = _counts;
         int held = 0;

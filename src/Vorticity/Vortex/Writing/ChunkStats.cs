@@ -36,55 +36,87 @@ internal readonly struct ChunkStats
     private readonly IChunkLedger? _ledger;
     private readonly bool _dry;
 
+    // Whether the chunk leaves the column's memory of its plans as it was: a chunk an end cut short of its target.
+    private readonly bool _keeps;
+
+    // What the ingest knew of the chunk as it left for an emission of its own, read in place of the column's state, which
+    // the blocks after the chunk change meanwhile; null for a chunk written while nothing ingests the column.
+    private readonly ChunkSnapshot? _frozen;
+
     /// <summary>Points at <paramref name="column"/> over the chunk's block range.</summary>
     /// <param name="column">The column's ingest state, or <see langword="null"/> for none.</param>
     /// <param name="firstBlock">The chunk's first block.</param>
     /// <param name="blockCount">How many blocks the chunk covers.</param>
     /// <param name="ledger">Where the misses of a list's elements are counted, or none.</param>
-    internal ChunkStats(ColumnWriter? column, int firstBlock, int blockCount, IChunkLedger? ledger = null)
-        : this(column, firstBlock, blockCount, ledger, dry: false)
+    /// <param name="keeps">Whether the chunk leaves the column's memory of its plans as it was (<see cref="ColumnWriter.RememberPlan"/>).</param>
+    internal ChunkStats(ColumnWriter? column, int firstBlock, int blockCount, IChunkLedger? ledger = null, bool keeps = false)
+        : this(column, firstBlock, blockCount, ledger, dry: false, frozen: null, keeps)
     {
     }
 
-    private ChunkStats(ColumnWriter? column, int firstBlock, int blockCount, IChunkLedger? ledger, bool dry)
+    /// <summary>Points at what <paramref name="frozen"/> took of a chunk's column (<see cref="ColumnWriter.Freeze"/>).</summary>
+    /// <param name="frozen">The chunk's snapshot.</param>
+    /// <param name="ledger">Where the misses of a list's elements are counted, or none.</param>
+    /// <param name="keeps">Whether the chunk leaves the column's memory of its plans as it was (<see cref="ColumnWriter.RememberPlan"/>).</param>
+    internal ChunkStats(ChunkSnapshot frozen, IChunkLedger? ledger, bool keeps = false)
+        : this(frozen.Column, frozen.FirstBlock, frozen.BlockCount, ledger, dry: false, frozen, keeps)
+    {
+    }
+
+    private ChunkStats(ColumnWriter? column, int firstBlock, int blockCount, IChunkLedger? ledger, bool dry, ChunkSnapshot? frozen, bool keeps)
     {
         _column = column;
         _firstBlock = firstBlock;
         _blockCount = blockCount;
         _ledger = ledger;
         _dry = dry;
+        _frozen = frozen;
+        _keeps = keeps;
     }
 
     /// <summary>
     /// The same statistics for a write that is only measured: priced under the rules every profile
     /// but size first applies, and leaving the column's memory and counters as they were.
     /// </summary>
-    internal ChunkStats Dry() => new ChunkStats(_column, _firstBlock, _blockCount, ledger: null, dry: true);
+    internal ChunkStats Dry() => new ChunkStats(_column, _firstBlock, _blockCount, ledger: null, dry: true, _frozen, _keeps);
 
     /// <summary>Whether this is a <see cref="Dry"/> chunk: one priced as every profile but size first prices it.</summary>
     internal bool IsDry => _dry;
 
     /// <summary>This column's summary over the chunk, or an absent one.</summary>
     internal BlockStats Stats =>
-        _column is null ? default : _column.Chunk(_firstBlock, _blockCount);
+        _frozen is { } frozen ? frozen.Stats : _column is null ? default : _column.Chunk(_firstBlock, _blockCount);
 
     /// <summary>
     /// The chunk's pair of bit-width histograms, when every block of it carries them.
     /// </summary>
     /// <param name="destination">Receives the sum; must hold <see cref="BitPackWidths.Length"/>.</param>
     /// <returns>Whether the histograms were available.</returns>
-    internal bool Widths(Span<int> destination) =>
-        _column is not null && _column.Widths(_firstBlock, _blockCount, destination);
+    internal bool Widths(Span<int> destination)
+    {
+        if (_frozen is { } frozen)
+        {
+            if (!frozen.HasWidths)
+            {
+                return false;
+            }
+
+            frozen.Widths.AsSpan(0, BitPackWidths.Length).CopyTo(destination);
+            return true;
+        }
+
+        return _column is not null && _column.Widths(_firstBlock, _blockCount, destination);
+    }
 
     /// <summary>The column's running distinct table, or <see langword="null"/>.</summary>
-    internal DistinctTable? Table => _column?.Table;
+    internal DistinctTable? Table => _frozen is { } frozen ? frozen.Table : _column?.Table;
 
     /// <summary>
     /// The table's distinct count and heap bytes when the chunk's last block closed — the entries
     /// that are this chunk's, as opposed to the carried tail's.
     /// </summary>
     internal (int Distinct, long Heap) TableAtClose =>
-        _column is null ? (-1, 0) : _column.TableAtClose(_firstBlock + _blockCount - 1);
+        _frozen is { } frozen ? frozen.TableAtClose : _column is null ? (-1, 0) : _column.TableAtClose(_firstBlock + _blockCount - 1);
 
     /// <summary>
     /// Whether a table was running when the chunk's last block closed — so a table that cannot
@@ -141,10 +173,18 @@ internal readonly struct ChunkStats
     /// <param name="actualBytes">The buffer bytes it produced.</param>
     internal void Remember(in ColumnPlan plan, long actualBytes)
     {
-        if (!_dry)
+        if (_dry)
         {
-            _column?.Remember(in plan, actualBytes, _firstBlock, _blockCount);
+            return;
         }
+
+        if (_frozen is { } frozen)
+        {
+            frozen.Remember(in plan, actualBytes, _keeps);
+            return;
+        }
+
+        _column?.Remember(in plan, actualBytes, _firstBlock, _blockCount, _keeps);
     }
 
     /// <summary>
@@ -152,10 +192,19 @@ internal readonly struct ChunkStats
     /// struct's fields and an extension's storage are row-aligned with their parent.
     /// </summary>
     /// <param name="index">The field index, in the canonical node's own order.</param>
-    internal ChunkStats Field(int index) =>
-        _column is null
+    internal ChunkStats Field(int index)
+    {
+        if (_frozen is { } frozen)
+        {
+            return (uint)index < (uint)frozen.ChildCount && frozen.Children[index] is { } child
+                ? new ChunkStats(child.Column, _firstBlock, _blockCount, _ledger, _dry, child, _keeps)
+                : default;
+        }
+
+        return _column is null
             ? default
-            : new ChunkStats(_column.Field(index), _firstBlock, _blockCount, _ledger, _dry);
+            : new ChunkStats(_column.Field(index), _firstBlock, _blockCount, _ledger, _dry, frozen: null, _keeps);
+    }
 
     /// <summary>
     /// The cursor for a list's elements, which their parent's blocks cover, or an absent one when
@@ -170,6 +219,19 @@ internal readonly struct ChunkStats
             return default;
         }
 
+        if (_frozen is { } frozen)
+        {
+            // What ElementsOver reads, on the snapshot: one child, not scattered, naming the elements the chunk writes.
+            ChunkSnapshot? elementsOf = _ledger is { ElementsServe: false } || frozen.ChildCount != 1 ? null : frozen.Children[0];
+            if (elementsOf is null || elementsOf.Stats.Scattered || elementsOf.Stats.Rows != elements)
+            {
+                _ledger?.ElementsUnserved();
+                return default;
+            }
+
+            return new ChunkStats(elementsOf.Column, _firstBlock, _blockCount, _ledger, _dry, elementsOf, _keeps);
+        }
+
         ColumnWriter? child = _ledger is { ElementsServe: false }
             ? null
             : _column.ElementsOver(_firstBlock, _blockCount, elements);
@@ -179,6 +241,6 @@ internal readonly struct ChunkStats
             return default;
         }
 
-        return new ChunkStats(child, _firstBlock, _blockCount, _ledger, _dry);
+        return new ChunkStats(child, _firstBlock, _blockCount, _ledger, _dry, frozen: null, _keeps);
     }
 }

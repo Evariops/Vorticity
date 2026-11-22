@@ -589,17 +589,55 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             : new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, MarkedAt, TableOfContents.Span, LastKey.Span, NegativesAt, seconds), _negatives);
     }
 
+    /// <summary>
+    /// What a reader holds of the object while it reads its rows in their order, besides its batches, at most, as its
+    /// writer counted it: for each column its two heaviest neighbouring chunks, which a reader crossing from one to the
+    /// next holds at once, each the chunk's bytes and what a read of a part of it decodes whole, a dictionary's values,
+    /// runs, patches; and each object dictionary. What a merge counts the object at as one of its inputs open
+    /// (<see cref="DatasetCompactor"/>). 0 when the entry does not say, an object written before entries said it.
+    /// </summary>
+    public long OpenBytes { get; private set; }
+
+    /// <summary>
+    /// What a reader's batches of the object's rows weigh decoded, all its rows together, as its writer counted them:
+    /// their canonical bytes, less the texts a column written against a dictionary or in runs keeps once, which a batch
+    /// names by views into what the reader holds open (<see cref="OpenBytes"/>). 0 when the entry does not say.
+    /// </summary>
+    public long DecodedBytes { get; private set; }
+
+    /// <summary>
+    /// The entry with what a reader holds of its object open, <paramref name="openBytes"/>, and what its rows weigh
+    /// decoded, <paramref name="decodedBytes"/>, as its writer counted them; itself when it says so already, or when the
+    /// writer counted neither.
+    /// </summary>
+    /// <param name="openBytes">What a reader holds of the object open besides its batches; 0 for unknown.</param>
+    /// <param name="decodedBytes">The canonical bytes of its rows; 0 for unknown.</param>
+    public ObjectEntry WithWeights(long openBytes, long decodedBytes)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(openBytes);
+        ArgumentOutOfRangeException.ThrowIfNegative(decodedBytes);
+        return openBytes == OpenBytes && decodedBytes == DecodedBytes
+            ? this
+            : new ObjectEntry(Key, Uid, Rows, Bytes, Hash, Fragments, Summaries, DeletedRows, _vectorAt, _vector, Fields(FooterBytes, MarkedAt, TableOfContents.Span, LastKey.Span, NegativesAt, Arrival, openBytes, decodedBytes), _negatives);
+    }
+
     /// <summary>What an open reads of an object's end before it knows its footer: past it, a second request.</summary>
     internal const long FirstReadBytes = 65_536;
 
     /// <summary>
     /// The tagged fields, in the order of their tags, those this library knows written
-    /// afresh and those it does not carried as they were read; null when there are none.
+    /// afresh and those it does not carried as they were read; null when there are none. The object's weights are the
+    /// entry's own unless <paramref name="openBytes"/> and <paramref name="decodedBytes"/> give them.
     /// </summary>
-    private byte[]? Fields(long footerBytes, long markedAt, ReadOnlySpan<byte> contents, ReadOnlySpan<byte> lastKey, PageReference negativesAt, long arrival)
+    private byte[]? Fields(
+        long footerBytes, long markedAt, ReadOnlySpan<byte> contents, ReadOnlySpan<byte> lastKey, PageReference negativesAt, long arrival,
+        long openBytes = -1, long decodedBytes = -1)
     {
+        openBytes = openBytes < 0 ? OpenBytes : openBytes;
+        decodedBytes = decodedBytes < 0 ? DecodedBytes : decodedBytes;
         ReadOnlySpan<byte> unknown = UnknownFields(_fields);
-        if (footerBytes == 0 && markedAt == 0 && contents.IsEmpty && lastKey.IsEmpty && !negativesAt.Exists && arrival == 0 && unknown.IsEmpty)
+        if (footerBytes == 0 && markedAt == 0 && contents.IsEmpty && lastKey.IsEmpty && !negativesAt.Exists && arrival == 0
+            && openBytes == 0 && decodedBytes == 0 && unknown.IsEmpty)
         {
             return null;
         }
@@ -637,6 +675,16 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             if (arrival > 0)
             {
                 writer.WriteUInt64(FieldTag.Arrival, (ulong)arrival);
+            }
+
+            if (openBytes > 0)
+            {
+                writer.WriteUInt64(FieldTag.OpenBytes, (ulong)openBytes);
+            }
+
+            if (decodedBytes > 0)
+            {
+                writer.WriteUInt64(FieldTag.DecodedBytes, (ulong)decodedBytes);
             }
 
             byte[] fields = new byte[writer.WrittenSpan.Length + unknown.Length];
@@ -683,6 +731,12 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
                     case (FieldTag.Arrival, ProtoWireType.Varint):
                         Arrival = Count(reader.ReadVarint());
                         break;
+                    case (FieldTag.OpenBytes, ProtoWireType.Varint):
+                        OpenBytes = Count(reader.ReadVarint());
+                        break;
+                    case (FieldTag.DecodedBytes, ProtoWireType.Varint):
+                        DecodedBytes = Count(reader.ReadVarint());
+                        break;
                     default:
                         reader.SkipField(wire);
                         break;
@@ -714,7 +768,8 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
             }
 
             reader.SkipField(wire);
-            if (start < 0 && field is not (FieldTag.FooterBytes or FieldTag.MarkedAt or FieldTag.Contents or FieldTag.LastKey or FieldTag.Negatives or FieldTag.Arrival))
+            if (start < 0 && field is not (FieldTag.FooterBytes or FieldTag.MarkedAt or FieldTag.Contents or FieldTag.LastKey or FieldTag.Negatives or FieldTag.Arrival
+                or FieldTag.OpenBytes or FieldTag.DecodedBytes))
             {
                 // Known fields come first, in the order of their tags, and a later library's after them.
                 start = at;
@@ -731,6 +786,8 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         internal const int LastKey = 4;
         internal const int Negatives = 5;
         internal const int Arrival = 6;
+        internal const int OpenBytes = 7;
+        internal const int DecodedBytes = 8;
     }
 
     /// <summary>

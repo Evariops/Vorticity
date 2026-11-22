@@ -42,6 +42,8 @@ public sealed class SheetAllocationTests
             nodes[part] = arenas[part].AddPrimitive(i64, Part, Validity.NonNullable, PType.I64, buffer);
         }
 
+        // The rows' hashes go into the batches' counted rows, which the batches share here, as a writer's one after another do.
+        using CountedRows batch = new CountedRows();
         for (int warm = 0; warm < 3; warm++)
         {
             Assert.Equal(20_000, Feed());
@@ -58,9 +60,9 @@ public sealed class SheetAllocationTests
 
         int Feed()
         {
-            ColumnSheetBuilder sheet = new ColumnSheetBuilder();
+            ColumnSheetBuilder sheet = new ColumnSheetBuilder { Counted = batch };
             sheet.NumberRows();
-            sheet.HashRows();
+            sheet.HashRows(0);
             for (int part = 0; part < arenas.Length; part++)
             {
                 sheet.Accumulate(arenas[part], nodes[part], 0, Part);

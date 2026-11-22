@@ -107,7 +107,7 @@ internal static class CanonicalConcat
 
         for (int i = 0; i < chunks.Length; i++)
         {
-            if (arena.GetNode(chunks[i]).Kind is CanonicalKind.Dictionary or CanonicalKind.RunEnd)
+            if (arena.GetNode(chunks[i]).Kind is CanonicalKind.Dictionary or CanonicalKind.RunEnd or CanonicalKind.Shredded)
             {
                 return ConcatDecoding(context, dtype, length, chunks, depth);
             }
@@ -177,7 +177,7 @@ internal static class CanonicalConcat
             // than at decode: concatenation is the only place that sees the chunks together.
             CanonicalKind.Constant =>
                 ConcatConstant(context, dtype, length, chunks, validity, depth),
-            CanonicalKind.Dictionary or CanonicalKind.RunEnd => throw new UnreachableException(
+            CanonicalKind.Dictionary or CanonicalKind.RunEnd or CanonicalKind.Shredded => throw new UnreachableException(
                 $"{kind} chunks are decoded above, before ConcatValidity."),
             _ => throw new UnreachableException($"CanonicalKind {(byte)kind} is not defined."),
         };
@@ -733,14 +733,34 @@ internal static class CanonicalConcat
                 bufferBase += chunk.DataBufferCount;
             }
 
-            // Views copied as they lay, rebased past their own bytes: padded where every chunk's were.
+            // Views copied as they lay, rebased past their own bytes: padded where every chunk's were. Where a chunk's shared
+            // its repeats' bytes, they stand for the bytes every chunk's buffers or the bytes it stood for add up to.
             bool padded = true;
+            bool shares = false;
             for (int i = 0; i < chunks.Length; i++)
             {
                 padded &= arena.RecordRef(chunks[i]).PaddedViews;
+                shares |= arena.RecordRef(chunks[i]).SharesBytes;
             }
 
-            return arena.AddVarBinView(dtype, length, validity, views, buffers, padded);
+            long standsFor = shares ? 0 : -1;
+            for (int i = 0; shares && i < chunks.Length; i++)
+            {
+                long stood = arena.StandsFor(chunks[i]);
+                if (stood < 0)
+                {
+                    CanonicalNode chunk = arena.GetNode(chunks[i]);
+                    stood = 0;
+                    for (int b = 0; b < chunk.DataBufferCount; b++)
+                    {
+                        stood += chunk.GetDataBuffer(b).Length;
+                    }
+                }
+
+                standsFor += stood;
+            }
+
+            return arena.AddVarBinView(dtype, length, validity, views, buffers, padded, standsFor);
         }
         finally
         {

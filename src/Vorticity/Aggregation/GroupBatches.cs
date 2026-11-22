@@ -1085,29 +1085,41 @@ internal static class GroupSelection
         AggregationQuery query, AggregationOutcome outcome, GroupOrder order, Block<int> groups, int count, int keep, int chunks, CancellationToken cancellationToken)
     {
         int size = (count + chunks - 1) / chunks;
-        Task<(Block<int> Groups, int Count)>[] ranking = new Task<(Block<int> Groups, int Count)>[chunks];
-        using CancellationTokenSource failed = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        CancellationToken token = failed.Token;
-        for (int c = 0; c < chunks; c++)
+        (Block<int> Groups, int Count)[] ranking = new (Block<int> Groups, int Count)[chunks];
+
+        // Each chunk ranked on a lane of the session's, the caller's among them: the chunks are as many as the degree at most.
+        try
         {
-            int first = c * size;
-            int length = Math.Min(size, count - first);
-            ranking[c] = Task.Run(() => TopOfChunk(query, outcome, order, groups, first, length, keep, token), token);
+            await Execution.CoreFor.RunAsync(
+                query.Session.Core, chunks, chunks,
+                c =>
+                {
+                    int first = c * size;
+                    ranking[c] = TopOfChunk(query, outcome, order, groups, first, Math.Min(size, count - first), keep, cancellationToken);
+                },
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            foreach ((Block<int> kept, _) in ranking)
+            {
+                GiveBack(kept);
+            }
+
+            throw;
         }
 
-        await AggregationEngine.GuardedAsync(ranking, failed).ConfigureAwait(false);
         int candidates = 0;
-        foreach (Task<(Block<int> Groups, int Count)> chunk in ranking)
+        foreach ((_, int n) in ranking)
         {
-            candidates += (await chunk.ConfigureAwait(false)).Count;
+            candidates += n;
         }
 
         Block<int> best = Lent(null, candidates, counted: 0);
         int at = 0;
         long rounded = 0;
-        foreach (Task<(Block<int> Groups, int Count)> chunk in ranking)
+        foreach ((Block<int> kept, int n) in ranking)
         {
-            (Block<int> kept, int n) = await chunk.ConfigureAwait(false);
             kept.AsSpan(0, n).CopyTo(best.AsSpan(at));
             at += n;
             rounded += (long)(kept.Length - n) * sizeof(int);

@@ -320,6 +320,22 @@ public sealed record VortexWriteOptions
     internal long GatheredGroupRows { get; init; }
 
     /// <summary>
+    /// The rows below which a batch waits with the ones after it until together they hold that many, or 0 for the writer's
+    /// own bound of a few rows: what a compaction gives its writer, whose merge hands it a run of each input at a time, a
+    /// series' rows of one input, sixteen rows of metric records, where a writer's call costs what a block's would.
+    /// </summary>
+    internal int StagedRows { get; init; }
+
+    /// <summary>
+    /// What the work the writer is part of tells it of the work's memory, or null for a writer on its own: what a
+    /// compaction job gives its writer (<see cref="Writing.WriteRoom"/>). A block it does not admit in flight past the one
+    /// that must go goes through once the blocks before it landed; a chunk it does not admit in emission waits for those
+    /// before it; the arenas of a writer it does not hold give back the blocks they kept idle. Each changes when, and not
+    /// what, the writer writes.
+    /// </summary>
+    internal Writing.WriteRoom? Room { get; init; }
+
+    /// <summary>
     /// The bytes from which the file keeps a sheet of each top-level column (<see cref="Indexes.ColumnSheet"/>), which a
     /// file's table of contents names, counted before its sheets; null, the default, for none. A dataset's sealed
     /// objects keep them from the size at which its scans read an object's sheets before the object, under which a

@@ -1,9 +1,11 @@
 // The run search over a column with nulls, sixty-four rows a word: the runs the row-by-row walk finds, in the same order,
-// whatever the nulls, the values, the kind of the column, the bit its validity starts at, and the ceiling it gives up at.
+// whatever the nulls, the values, the kind of the column, the bit its validity starts at, and the ceiling it gives up at. Over
+// all-valid views, a view at a time: the same runs, whether the views are padded or hold anything past a short value's bytes.
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Types;
 using Vorticity.Writing;
@@ -67,6 +69,149 @@ public sealed class NullableRunsTests
                 }
             }
         }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void TheViewWalkFindsTheRowWalksRuns(bool padded)
+    {
+        // All valid, as a merge's gathered chunk is: each row's bytes a copy of their own across three buffers, so that equal
+        // long values differ by their views, and, unpadded, bytes past every short value's that the views of equal ones differ by.
+        Random random = new Random(padded ? 11 : 13);
+        string[] shapes = ["", "ab", "abc", "abcd", "abcde", "twelve bytes", "thirteen byte", "a value longer than twelve bytes", "a value longer than twelve bytez"];
+        foreach (int length in (int[])[1, 2, 63, 1_000, 10_007])
+        {
+            string[] texts = new string[length];
+            for (int row = 0; row < length;)
+            {
+                int stretch = random.Next(1, random.Next(2) == 0 ? 4 : 100);
+                string text = shapes[random.Next(shapes.Length)];
+                for (int i = 0; i < stretch && row < length; i++, row++)
+                {
+                    texts[row] = text;
+                }
+            }
+
+            CanonicalArena arena = new CanonicalArena();
+            DTypeArena types = new DTypeArena();
+            int column = SpreadTexts(arena, types, texts, padded, random);
+            foreach (int ceiling in (int[])[length, length / 4, 3])
+            {
+                int[] viewStarts = new int[ceiling + 1];
+                int[] viewEnds = new int[ceiling + 1];
+                int[] rowStarts = new int[ceiling + 1];
+                int[] rowEnds = new int[ceiling + 1];
+                int views = ColumnCompressor.RunsOf(arena, column, compared: false, viewStarts, viewEnds);
+                int rows = ColumnCompressor.RunsOf(arena, column, compared: true, rowStarts, rowEnds);
+                Assert.Equal(rows, views);
+                Assert.Equal(rowStarts, viewStarts);
+                Assert.Equal(rowEnds[..Math.Max(0, Math.Min(rows, ceiling + 1) - 1)], viewEnds[..Math.Max(0, Math.Min(views, ceiling + 1) - 1)]);
+            }
+        }
+    }
+
+    [Theory]
+    [InlineData(0.0, 0)]
+    [InlineData(0.5, 3)]
+    [InlineData(0.97, 5)]
+    [InlineData(1.0, 0)]
+    public void TheValidLengthsAreTheRowWalksSum(double valid, int bitOffset)
+    {
+        Random random = new Random((int)(valid * 100) + bitOffset);
+        foreach (int length in (int[])[1, 63, 64, 65, 1_000, 10_007])
+        {
+            bool[] present = new bool[length];
+            Int128[] views = new Int128[length];
+            long expected = 0;
+            for (int row = 0; row < length; row++)
+            {
+                // Long stretches of each, so that whole words of valid rows come up, and a length under every null row too.
+                present[row] = row > 0 && random.Next(16) != 0 ? present[row - 1] : random.NextDouble() < valid;
+                uint size = (uint)random.Next(0, 1 << 20);
+                views[row] = new Int128((ulong)random.NextInt64(), ((ulong)random.Next() << 32) | size);
+                expected += present[row] ? size : 0;
+            }
+
+            CanonicalArena arena = new CanonicalArena();
+            DTypeArena types = new DTypeArena();
+            Validity validity = valid == 1.0 ? Validity.NonNullable : Bitmap(arena, types, present, bitOffset);
+            Assert.Equal(valid == 1.0 ? ViewLengths(views) : expected, ColumnCompressor.ValidLengths(ValidityMask.From(arena, validity), views));
+        }
+
+        static long ViewLengths(Int128[] views)
+        {
+            long total = 0;
+            foreach (Int128 view in views)
+            {
+                total += (uint)(ulong)view;
+            }
+
+            return total;
+        }
+    }
+
+    private static int SpreadTexts(CanonicalArena arena, DTypeArena types, string[] texts, bool padded, Random random)
+    {
+        const int Buffers = 3;
+        int[] heapBytes = new int[Buffers];
+        int[] bufferOf = new int[texts.Length];
+        for (int row = 0; row < texts.Length; row++)
+        {
+            bufferOf[row] = random.Next(Buffers);
+            heapBytes[bufferOf[row]] += Encoding.UTF8.GetByteCount(texts[row]);
+        }
+
+        VortexBuffer views = arena.Allocate(texts.Length * 16, 16, out Span<byte> viewBytes);
+        VortexBuffer[] heaps = new VortexBuffer[Buffers];
+        byte[][] heapSpans = new byte[Buffers][];
+        for (int b = 0; b < Buffers; b++)
+        {
+            heapSpans[b] = new byte[Math.Max(heapBytes[b], 1)];
+        }
+
+        int[] at = new int[Buffers];
+        for (int row = 0; row < texts.Length; row++)
+        {
+            byte[] value = Encoding.UTF8.GetBytes(texts[row]);
+            Span<byte> view = viewBytes.Slice(row * 16, 16);
+
+            // Half the repeats view the bytes the row before views, as a shredded leaf's do, so that runs of equal views come up.
+            if (row > 0 && texts[row] == texts[row - 1] && random.Next(2) == 0)
+            {
+                viewBytes.Slice((row - 1) * 16, 16).CopyTo(view);
+                continue;
+            }
+
+            random.NextBytes(view);
+            if (padded)
+            {
+                view.Clear();
+            }
+
+            MemoryMarshal.Write(view, value.Length);
+            if (value.Length <= 12)
+            {
+                value.CopyTo(view[4..]);
+            }
+            else
+            {
+                int b = bufferOf[row];
+                value.AsSpan(0, 4).CopyTo(view[4..]);
+                MemoryMarshal.Write(view[8..], b);
+                MemoryMarshal.Write(view[12..], at[b]);
+                value.CopyTo(heapSpans[b].AsSpan(at[b]));
+                at[b] += value.Length;
+            }
+        }
+
+        for (int b = 0; b < Buffers; b++)
+        {
+            heaps[b] = arena.Allocate(heapSpans[b].Length, 8, out Span<byte> heap);
+            heapSpans[b].CopyTo(heap);
+        }
+
+        return arena.AddVarBinView(types.Utf8(Nullability.NonNullable), texts.Length, Validity.NonNullable, views, heaps, padded);
     }
 
     private static int Numbers(CanonicalArena arena, DTypeArena types, long[] numbers, Validity validity)

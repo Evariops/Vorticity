@@ -85,13 +85,15 @@ public sealed class DatasetCompactionPointerTests
     {
         CancellationToken ct = TestContext.Current.CancellationToken;
         await using MemoryObjectStore store = new MemoryObjectStore();
-        await using VortexDataset dataset = await CreateAsync(store, ct, objectBytes: 2 << 10);
+        await using VortexDataset dataset = await CreateAsync(store, ct, objectBytes: 1 << 10);
         for (int append = 0; append < 4; append++)
         {
             await AppendAsync(dataset, append, ct, rows: 400);
         }
 
-        // Level 0 into level 1, in objects the layout makes small enough that level 1 holds several.
+        // Level 0 into level 1, in objects the layout makes small enough that level 1 holds several: a kibibyte of data
+        // each, where 2 KiB made three once an object's data reached its size, its chunks of a few hundred rows bit-packed
+        // in blocks of 1 024 values.
         Assert.NotNull(await dataset.CompactAsync(new CompactionOptions { LevelZeroCeiling = 0, MaxObjectBytes = 2 << 10 }, ct));
         int objects = (int)dataset.Levels[1].Entries;
         Assert.True(objects >= 4, $"level 1 holds {objects} objects");

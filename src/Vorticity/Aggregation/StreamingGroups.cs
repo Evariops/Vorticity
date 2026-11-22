@@ -460,6 +460,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         _ranges = new StreamingRanges(
             ranges,
             lanes,
+            host.Source.Session.Lanes,
             async (rows, token) =>
             {
                 AggregationPartition range = new AggregationPartition(
@@ -734,13 +735,16 @@ internal sealed class StreamingRanges : IAsyncDisposable
     private readonly Func<RowRange, CancellationToken, Task<AggregationPartition>> _group;
     private readonly Task<AggregationPartition>?[] _flight;
     private readonly CancellationTokenSource _stop;
+    private readonly Execution.LaneBudget _lanes;
     private int _next;
     private int _started;
 
     internal StreamingRanges(
-        RowRange[] ranges, int degree, Func<RowRange, CancellationToken, Task<AggregationPartition>> group, CancellationToken cancellationToken)
+        RowRange[] ranges, int degree, Execution.LaneBudget lanes, Func<RowRange, CancellationToken, Task<AggregationPartition>> group,
+        CancellationToken cancellationToken)
     {
         _ranges = ranges;
+        _lanes = lanes;
         _group = group;
         _flight = new Task<AggregationPartition>?[Math.Max(1, Math.Min(degree, ranges.Length))];
         _stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -795,6 +799,14 @@ internal sealed class StreamingRanges : IAsyncDisposable
         _stop.Dispose();
     }
 
+    /// <summary>Range <paramref name="rows"/> grouped on a lane of the session's, once one is free.</summary>
+    private async Task<AggregationPartition> GroupedAsync(RowRange rows, CancellationToken token)
+    {
+        AggregationPartition? grouped = null;
+        await Execution.LaneWorkers.RunHeldAsync(_lanes, async () => grouped = await _group(rows, token).ConfigureAwait(false), token).ConfigureAwait(false);
+        return grouped!;
+    }
+
     /// <summary>
     /// Starts the ranges the window has room for, on the pool, in the order of the rows: the pool
     /// takes them in that order, so the range waited for is never queued behind the others. The
@@ -806,7 +818,9 @@ internal sealed class StreamingRanges : IAsyncDisposable
         {
             RowRange rows = _ranges[_started];
             CancellationToken token = _stop.Token;
-            _flight[_started % _flight.Length] = Task.Run(() => _group(rows, token), token);
+
+            // Grouped on a lane of the session's it holds, waited for holding none: the reader awaits it in order.
+            _flight[_started % _flight.Length] = GroupedAsync(rows, token);
             _started++;
         }
     }

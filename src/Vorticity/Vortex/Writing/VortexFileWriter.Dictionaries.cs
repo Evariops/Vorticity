@@ -188,9 +188,12 @@ public sealed partial class VortexFileWriter
         CanonicalArena arena = _dictionaryArena ??= new CanonicalArena(64, Account);
         try
         {
-            using ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(
-                Blobs, arena, dictionary.ValuesNode(arena, _schema.GetField(field)), _arrayEncodings, _compress);
+            int values = dictionary.ValuesNode(arena, _schema.GetField(field));
+            using ArrayBlobWriter.BlobLease blob = ArrayBlobWriter.Write(Blobs, arena, values, _arrayEncodings, _compress);
             _dictionarySegments[field] = await WriteSegmentAsync(blob, cancellationToken).ConfigureAwait(false);
+
+            // What a reader holds of it for as long as it reads the column: its bytes, and its values decoded.
+            _sharedOpenBytes += ArrayBlobWriter.Held(blob.Length) + blob.Whole + ArrayBlobWriter.DecodedBytes(arena, values);
         }
         finally
         {

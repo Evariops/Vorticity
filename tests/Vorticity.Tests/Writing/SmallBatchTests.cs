@@ -49,6 +49,7 @@ public sealed class SmallBatchTests
         Assert.True(held <= rows.Rows / 256, $"{held} nodes in transit for {rows.Rows} one-row batches");
     }
 
+    /// <summary>A column of fixed width alone, whose writer takes its rows as they come rather than a block at a time.</summary>
     [Theory]
     [InlineData(1, true)]
     [InlineData(63, true)]
@@ -56,7 +57,7 @@ public sealed class SmallBatchTests
     public async Task FixedWidthBatchesWaitBelowSixtyFourRows(int batchRows, bool wait)
     {
         Decoders.EnsureRegistered();
-        (DType schema, CanonicalArena arena, int root) = Build(text: false);
+        (DType schema, CanonicalArena arena, int root) = Build(text: false, alone: true);
 
         (byte[] whole, _) = await WriteAsync(schema, arena, root, Rows, Rows);
         (byte[] small, int held) = await WriteAsync(schema, arena, root, Rows, batchRows);
@@ -65,6 +66,7 @@ public sealed class SmallBatchTests
         AssertHeld(held, batchRows, wait);
     }
 
+    /// <summary>A column of text alone, whose writer takes its rows as they come rather than a block at a time.</summary>
     [Theory]
     [InlineData(1, true)]
     [InlineData(5, true)]
@@ -74,13 +76,36 @@ public sealed class SmallBatchTests
         // A copy of values of their own length walks every row, where a fixed width moves blocks:
         // waiting pays for fewer rows.
         Decoders.EnsureRegistered();
-        (DType schema, CanonicalArena arena, int root) = Build(text: true);
+        (DType schema, CanonicalArena arena, int root) = Build(text: true, alone: true);
 
         (byte[] whole, _) = await WriteAsync(schema, arena, root, Rows, Rows);
         (byte[] small, int held) = await WriteAsync(schema, arena, root, Rows, batchRows);
 
         Assert.Equal(await ReadAsync(whole), await ReadAsync(small));
         AssertHeld(held, batchRows, wait);
+    }
+
+    /// <summary>
+    /// A table of several columns takes its rows a block at a time: every batch below a block waits in the block it falls in,
+    /// copied, and none is held in transit; the file is the one its rows written at once make.
+    /// </summary>
+    [Theory]
+    [InlineData(1, false)]
+    [InlineData(63, false)]
+    [InlineData(64, false)]
+    [InlineData(1_000, false)]
+    [InlineData(6, true)]
+    [InlineData(1_000, true)]
+    public async Task ATableOfSeveralColumnsTakesItsRowsABlockAtATime(int batchRows, bool text)
+    {
+        Decoders.EnsureRegistered();
+        (DType schema, CanonicalArena arena, int root) = Build(text, alone: false);
+
+        (byte[] whole, _) = await WriteAsync(schema, arena, root, Rows, Rows);
+        (byte[] small, int held) = await WriteAsync(schema, arena, root, Rows, batchRows);
+
+        Assert.Equal(await ReadAsync(whole), await ReadAsync(small));
+        Assert.Equal(0, held);
     }
 
     [Fact]
@@ -165,8 +190,8 @@ public sealed class SmallBatchTests
         }
     }
 
-    /// <summary>A key and a measure, or a key and text with nulls, short values and long ones.</summary>
-    private static (DType Schema, CanonicalArena Arena, int Root) Build(bool text)
+    /// <summary>A key and a measure, or a key and text with nulls, short values and long ones; the measure or the text <paramref name="alone"/>.</summary>
+    private static (DType Schema, CanonicalArena Arena, int Root) Build(bool text, bool alone = false)
     {
         DTypeArena types = new DTypeArena();
         CanonicalArena arena = new CanonicalArena();
@@ -190,6 +215,12 @@ public sealed class SmallBatchTests
             }
 
             int measure = arena.AddPrimitive(f64, Rows, Validity.NonNullable, PType.F64, measures);
+            if (alone)
+            {
+                DType single = types.Struct(["measure"], [f64], Nullability.NonNullable);
+                return (single, arena, arena.AddStruct(single, Rows, Validity.NonNullable, [measure]));
+            }
+
             DType pair = types.Struct(["key", "measure"], [i64, f64], Nullability.NonNullable);
             return (pair, arena, arena.AddStruct(pair, Rows, Validity.NonNullable, [key, measure]));
         }
@@ -235,6 +266,12 @@ public sealed class SmallBatchTests
 
         int valid = arena.AddBool(types.Bool(Nullability.NonNullable), Rows, Validity.NonNullable, bits, 0);
         int textNode = arena.AddVarBinView(utf8, Rows, Validity.Bitmap(valid), views, [data]);
+        if (alone)
+        {
+            DType single = types.Struct(["text"], [utf8], Nullability.NonNullable);
+            return (single, arena, arena.AddStruct(single, Rows, Validity.NonNullable, [textNode]));
+        }
+
         DType schema = types.Struct(["key", "text"], [i64, utf8], Nullability.NonNullable);
         return (schema, arena, arena.AddStruct(schema, Rows, Validity.NonNullable, [key, textNode]));
     }

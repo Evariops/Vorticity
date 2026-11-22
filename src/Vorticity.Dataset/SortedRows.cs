@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading.Tasks;
 using Vorticity.Buffers;
 using Vorticity.Compute;
 using Vorticity.Expressions;
@@ -13,6 +14,76 @@ internal interface IOrderedKeys
 {
     /// <summary>The key of row <paramref name="row"/>.</summary>
     ReadOnlySpan<byte> KeyAt(int row);
+}
+
+/// <summary>
+/// A run of rows of a merge in the key's order, as a job's output takes it: its rows, their keys, and where they lie in an
+/// input's batch. A merge's own (<see cref="KeyOrderedMerge"/>), or one of a merge cut in slices (<see cref="SlicedMerge"/>).
+/// </summary>
+internal interface IMergedRun : IOrderedKeys
+{
+    /// <summary>The rows of the run the merge is on.</summary>
+    int CurrentRows { get; }
+
+    /// <summary>
+    /// Where the run lies: the arena and the root of its input's batch, its first row there, and the bytes a row of the batch
+    /// names on average.
+    /// </summary>
+    (Vorticity.Arrays.CanonicalArena Arena, int Root, int Row, double RowBytes) CurrentRun { get; }
+}
+
+/// <summary>Whether a key, row-encoded, lies where its caller asks: past the last key an output holds, for a merge's stop.</summary>
+internal delegate bool KeyTest(ReadOnlySpan<byte> key);
+
+/// <summary>
+/// How a merge ended short of room stands toward the last key it gave (<see cref="IMergedRuns.Stopped"/>): whether every
+/// row it has yet to give lies past it, so that its outputs end on a whole key; and, when all that is left to know is the
+/// next key of one input, the object and the row of its file that key is read at.
+/// </summary>
+/// <param name="Clean">Whether the outputs end on a whole key, by what the merge holds: false while a key is still to read.</param>
+/// <param name="Why">What ended the merge and, when not clean, what may share the key.</param>
+/// <param name="NextOf">The input whose next key alone is unknown, its next batch not read; null when nothing is left to read.</param>
+/// <param name="NextRow">The row of <paramref name="NextOf"/>'s file its next row is at or past, deleted rows counted.</param>
+internal readonly record struct StopVerdict(bool Clean, string Why, ObjectEntry? NextOf, long NextRow)
+{
+    /// <summary>The outputs end on a whole key.</summary>
+    internal static StopVerdict Whole(string why) => new StopVerdict(true, why, null, 0);
+
+    /// <summary>A row left may share the last key given, or nothing says.</summary>
+    internal static StopVerdict Not(string why) => new StopVerdict(false, why, null, 0);
+
+    /// <summary>Every row left lies past the last key given but, maybe, the next row of <paramref name="entry"/>'s object, read at <paramref name="row"/>.</summary>
+    internal static StopVerdict Read(ObjectEntry entry, long row, string why) => new StopVerdict(false, why, entry, row);
+}
+
+/// <summary>The runs of a merge in the key's order, one at a time, as a job's output takes them.</summary>
+internal interface IMergedRuns : IMergedRun, IAsyncDisposable
+{
+    /// <summary>Moves to the next run.</summary>
+    /// <exception cref="ReserveExhaustedException">
+    /// An input of the merge could not reserve what it needs to go on, the job having given back all it started ahead:
+    /// the merge ends at the key it reached, every run it gave before taken by its caller.
+    /// </exception>
+    ValueTask<bool> MoveNextAsync();
+
+    /// <summary>The place among the job's inputs of the input the run the merge is on comes from.</summary>
+    long CurrentInput { get; }
+
+    /// <summary>
+    /// How the merge, ended by <paramref name="stop"/>, stands toward the last key it gave, <paramref name="below"/>
+    /// telling a key that last one lies strictly below: whether every row it has yet to give lies past it, its outputs
+    /// then ending on a whole key and the rows left in its inputs starting at another. A stop as an input is opened is
+    /// judged by the input's bound; one as an input takes its next batch, by what every other input holds next, the one
+    /// key left unknown being read in the input's file (<see cref="StopVerdict.NextOf"/>).
+    /// </summary>
+    StopVerdict Stopped(ReserveExhaustedException stop, KeyTest below);
+
+    /// <summary>
+    /// Gives back what the merge keeps past what it needs to go on, at <paramref name="level"/> of what a job short of
+    /// room gives back (<see cref="JobMemory"/>): at 0, the windows of its inputs' batches whose runs the writers have all
+    /// copied; at 2, the batches its inputs decoded ahead and it has not taken. On the merge's own flow.
+    /// </summary>
+    ValueTask GiveBackAsync(int level);
 }
 
 /// <summary>

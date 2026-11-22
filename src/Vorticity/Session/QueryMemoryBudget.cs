@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Buffers;
 
 namespace Vorticity;
@@ -77,6 +78,19 @@ public sealed class QueryMemoryBudget
     // Whether a reservation was refused since the budget was made: what tells a job that ran out of its budget.
     private int _refused;
 
+    // A child funded by a reservation its parent granted (MemoryGrant): the grant's bytes, which the parent counts for it
+    // already, and what is left of them, which the child's first reservations take before they ask the parent; -1 once
+    // closed (CloseGrant); 0 for any other budget.
+    private readonly long _granted;
+    private long _grantLeft;
+
+    // The reservations that wait for room (ReserveAsync), the oldest first, and how many: served in order as the work under
+    // the budget gives memory back.
+    private readonly Lock _waitGate = new Lock();
+    private Waiter? _firstWaiter;
+    private Waiter? _lastWaiter;
+    private int _waiting;
+
     // The process's own: the bytes the queries' tables hold, as last measured; the rest of the
     // process, read after the last full collection; what the queries let go since, still in the heap;
     // whether a collection is being asked for, and the full collection after which the last one asked
@@ -89,7 +103,19 @@ public sealed class QueryMemoryBudget
     // collector ran, which happened since. The heap a collection read, less what is measured when the budget reads it, left
     // the rest out by what the queries took between the two: 145 MiB in the heap, 227 measured by then, a rest read as none,
     // and eight queries under a heap held to 512 MiB were granted what the next collection found taken (2026-11-16).
+    // What a reading falls back on when it cannot tell what was measured when the collector ran: several collections since
+    // the rest was last read, or a background one, whose numbers are its end's (_measuredAtCollection).
     private long _measuredLow;
+
+    // What the work measured when the collector last ran: the measure as the first move after that collection found it,
+    // nothing having moved in between, and the count of collections of any generation it saw then (NoteCollection); -1
+    // before any is noted. The fewest bytes measured since the reading before, taken off the heap instead, counted as
+    // the rest's the blocks a job took back since its low: a low of 210 MiB between two slices of a consolidation, 361 to
+    // 481 MiB measured at the collection, 201 MiB of rest too many, and a process that left its work 127 MiB counted
+    // itself 138 MiB past its ceiling 20 ms later; a lane of the job's writer was refused a block (2026-11-22).
+    private readonly Lock _noteGate = new Lock();
+    private long _measuredAtCollection;
+    private int _notedCollections = -1;
 
     // Taken by every writer of the rest: a give-back that wrote the rest it read before a collection's was read put the
     // collection's number back, and the next reservation read the same collection again, its let go and its reuse lost.
@@ -139,11 +165,13 @@ public sealed class QueryMemoryBudget
     {
     }
 
-    private QueryMemoryBudget(long ceilingBytes, QueryMemoryBudget? process, int share)
+    private QueryMemoryBudget(long ceilingBytes, QueryMemoryBudget? process, int share, long granted = 0)
     {
         _ceiling = ceilingBytes;
         _process = process;
         _share = share;
+        _granted = granted;
+        _grantLeft = granted;
         Account = new BudgetAccount(this, process is null ? "library's own work" : "work");
         if (process is null && Volatile.Read(ref s_reading) is not null)
         {
@@ -255,7 +283,239 @@ public sealed class QueryMemoryBudget
     /// A budget under this one that refuses a block past its own ceiling and past this one's (<see cref="Hard"/>): what a
     /// compaction job's inputs, or its writer, rent under, so that the job learns what each held at most.
     /// </summary>
-    internal QueryMemoryBudget HardChild(long ceilingBytes = long.MaxValue / 4) => new QueryMemoryBudget(ceilingBytes, this) { Hard = true };
+    internal QueryMemoryBudget HardChild(long ceilingBytes = long.MaxValue / 4, bool countsPast = false) =>
+        new QueryMemoryBudget(ceilingBytes, this) { Hard = true, CountsPast = countsPast };
+
+    /// <summary>
+    /// Whether a hard budget counts past its ceiling a block its work could not reserve, the process bounding it
+    /// (<see cref="Force"/>), rather than refuse it: what the budget of a compaction job's writer is, and the job's own
+    /// for it. A writer cannot wait in the middle of a chunk it encodes, and does not yet reserve what it takes before it
+    /// takes it: refused a block, it gave up the job and what the job had written. What it takes past its share, the
+    /// job's inputs, which reserve before they take, find taken, and wait or end their merge at the key it reached. A
+    /// reservation under such a budget is still told no at its ceiling.
+    /// </summary>
+    internal bool CountsPast { get; init; }
+
+    /// <summary>
+    /// <see cref="HardChild(long, bool)"/>, funded by <paramref name="grant"/>, a reservation this budget granted
+    /// (<see cref="ReserveAsync"/>), which the child takes over: its first reservations take the grant's bytes, which this
+    /// budget counts already, and ask this one for what passes them; its releases go back to this one, as any child's do.
+    /// What is left of the grant goes back when the child's work closes it (<see cref="CloseGrant"/>).
+    /// </summary>
+    internal QueryMemoryBudget HardChild(MemoryGrant grant, bool countsPast = false) =>
+        new QueryMemoryBudget(long.MaxValue / 4, this, share: 0, granted: grant.TakeOver()) { Hard = true, CountsPast = countsPast };
+
+    /// <summary>What is left of the grant that funds the budget (<see cref="HardChild(MemoryGrant, bool)"/>): 0 for one no grant funds, or once closed.</summary>
+    internal long GrantLeft => Math.Max(0, Volatile.Read(ref _grantLeft));
+
+    /// <summary>
+    /// Ends the grant that funds the budget, once its work is done: what is left of it goes back to the parent now; what the
+    /// budget holds goes back as it is released, as it always does.
+    /// </summary>
+    internal void CloseGrant()
+    {
+        if (_granted == 0)
+        {
+            return;
+        }
+
+        long left = Interlocked.Exchange(ref _grantLeft, -1);
+        if (left > 0)
+        {
+            _process!.Release(left);
+        }
+    }
+
+    /// <summary>
+    /// Reserves <paramref name="bytes"/> under this budget and the process's, waiting for room when the work under the budget
+    /// holds it: the reservation takes its turn, the oldest first, and is taken in the same step as the room another gives
+    /// back, so that none passes it; no thread waits meanwhile. Granted at once when the room is there. Null, nothing
+    /// reserved, when it can never be granted: past the budget's ceiling, or nothing under the budget holds what would make
+    /// room, which no release would then wake.
+    /// </summary>
+    /// <remarks>
+    /// What a compaction job asks before it reads anything, holding nothing: a job of another table that holds the memory
+    /// gives it back as it ends, and the job runs then at its width, where a block refused at its start gave it up and the
+    /// next plan narrowed it. A job that holds memory never waits for more (the rule of the two cases): it writes a chunk
+    /// early, or gives way.
+    /// </remarks>
+    /// <exception cref="OperationCanceledException">The wait was cancelled; nothing is reserved.</exception>
+    internal ValueTask<MemoryGrant?> ReserveAsync(long bytes, CancellationToken cancellationToken)
+    {
+        if (bytes <= 0)
+        {
+            return new ValueTask<MemoryGrant?>(new MemoryGrant(this, 0));
+        }
+
+        if (bytes > Ceiling)
+        {
+            return new ValueTask<MemoryGrant?>((MemoryGrant?)null);
+        }
+
+        if (Volatile.Read(ref _waiting) == 0 && TryReserve(bytes))
+        {
+            return new ValueTask<MemoryGrant?>(new MemoryGrant(this, bytes));
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        Waiter waiter = new Waiter(bytes) { Budget = this };
+        lock (_waitGate)
+        {
+            if (_lastWaiter is null)
+            {
+                _firstWaiter = waiter;
+            }
+            else
+            {
+                _lastWaiter.Next = waiter;
+            }
+
+            _lastWaiter = waiter;
+            Interlocked.Increment(ref _waiting);
+        }
+
+        if (cancellationToken.CanBeCanceled)
+        {
+            waiter.Cancellation = cancellationToken.UnsafeRegister(static (state, token) => ((Waiter)state!).Cancel(token), waiter);
+        }
+
+        // Room given back between the refusal above and the turn taken is served here, as is a budget that holds nothing.
+        Serve();
+        return new ValueTask<MemoryGrant?>(waiter.Task);
+    }
+
+    /// <summary>
+    /// Serves the reservations that wait, the oldest first, while the room is there: each taken in the same step, its task
+    /// ended outside the gate. The first that does not fit stops the turn, unless nothing under the budget holds memory: no
+    /// release would wake it, and it is told no. A cancelled one leaves its turn.
+    /// </summary>
+    private void Serve()
+    {
+        // One turn at a time: a reservation taken in a turn may have the memory kept let go, whose release serves again on
+        // the same thread, and would grant the head twice; a release on another thread meanwhile asks the turn to run again.
+        while (Volatile.Read(ref _waiting) != 0)
+        {
+            if (Interlocked.CompareExchange(ref _serving, 1, 0) != 0)
+            {
+                Volatile.Write(ref _serveAgain, 1);
+                return;
+            }
+
+            ServeTurn();
+            Volatile.Write(ref _serving, 0);
+            if (Interlocked.Exchange(ref _serveAgain, 0) == 0)
+            {
+                return;
+            }
+        }
+    }
+
+    // Whether a turn serves the waiting reservations now, and whether a release asked for another meanwhile.
+    private int _serving;
+    private int _serveAgain;
+
+    /// <summary>One turn of <see cref="Serve"/>.</summary>
+    private void ServeTurn()
+    {
+        Waiter? served = null;
+        Waiter? lastServed = null;
+        lock (_waitGate)
+        {
+            while (_firstWaiter is { } head)
+            {
+                bool cancelled = head.Task.IsCompleted;
+                bool granted = !cancelled && CanReserve(head.Bytes) && TryReserve(head.Bytes);
+                if (!cancelled && !granted && ReservedBytes > 0)
+                {
+                    break;
+                }
+
+                _firstWaiter = head.Next;
+                if (_firstWaiter is null)
+                {
+                    _lastWaiter = null;
+                }
+
+                Interlocked.Decrement(ref _waiting);
+                head.Next = null;
+                if (!cancelled)
+                {
+                    // Kept in their order, ended in it.
+                    head.Granted = granted;
+                    if (lastServed is null)
+                    {
+                        served = head;
+                    }
+                    else
+                    {
+                        lastServed.Next = head;
+                    }
+
+                    lastServed = head;
+                }
+            }
+        }
+
+        // Ended past the gate: a continuation runs elsewhere (RunContinuationsAsynchronously), and a grant whose waiter was
+        // cancelled meanwhile goes back.
+        while (served is { } waiter)
+        {
+            served = waiter.Next;
+            waiter.Next = null;
+            waiter.End(this);
+        }
+    }
+
+    /// <summary>A reservation waiting its turn: its bytes, its task, and the next one.</summary>
+    private sealed class Waiter(long bytes) : TaskCompletionSource<MemoryGrant?>(TaskCreationOptions.RunContinuationsAsynchronously)
+    {
+        internal readonly long Bytes = bytes;
+        internal Waiter? Next;
+        internal bool Granted;
+        internal CancellationTokenRegistration Cancellation;
+        internal QueryMemoryBudget? Budget;
+
+        /// <summary>Ends the wait, granted or told no; a grant no one takes any more goes back to <paramref name="budget"/>.</summary>
+        internal void End(QueryMemoryBudget budget)
+        {
+            Cancellation.Dispose();
+            if (!Granted)
+            {
+                TrySetResult(null);
+            }
+            else if (!TrySetResult(new MemoryGrant(budget, Bytes)))
+            {
+                budget.Release(Bytes);
+            }
+        }
+
+        /// <summary>Leaves the turn at once, the ones behind it served when the room is there.</summary>
+        internal void Cancel(CancellationToken token)
+        {
+            if (TrySetCanceled(token))
+            {
+                Budget?.Serve();
+            }
+        }
+    }
+
+    /// <summary>
+    /// The process's own: the parts <see cref="RestBytes"/> is made of, as last read. What its heap held past the measured
+    /// work at the last full collection, less what the work took back from the pool since; what a collection of the
+    /// youngest generations saw held past that; what the collector kept committed past its heap; what the work let go
+    /// since; what a container uses past what the registry knows; then the bytes the work measures now, the fewest it
+    /// measured since the rest was last read, and what it measured when the collector last ran. For a tool that tells
+    /// which part of the rest moves (<c>vortex-queries --memory-timeline</c>).
+    /// </summary>
+    internal (long Live, long Uncertain, long Reclaimable, long Pending, long Container, long Measured, long MeasuredLow, long MeasuredAtCollection) RestParts
+    {
+        get
+        {
+            Rest rest = Volatile.Read(ref _rest);
+            return (LiveOf(rest), rest.Uncertain, rest.Reclaimable, Volatile.Read(ref _pending), Volatile.Read(ref _containerRest),
+                Volatile.Read(ref _measured), Volatile.Read(ref _measuredLow), Volatile.Read(ref _measuredAtCollection));
+        }
+    }
 
     /// <summary>
     /// The rest of the process's memory: what its heap held past the queries' tables at the last full
@@ -317,10 +577,21 @@ public sealed class QueryMemoryBudget
     /// floors, in the registry's order (<see cref="HeldMemory.GiveBack"/>), for the collection that follows to
     /// take it; and the reservations nearing the ceiling have it let go of a share before they get there.
     /// </summary>
-    internal bool TryReserve(long bytes)
+    /// <remarks>
+    /// With <paramref name="kept"/>, the bytes are those of a block the pool kept, parked or free in a slab alive
+    /// (<see cref="BlockPool.Rent"/>): each budget counts them under its own ceiling as any others, and the process's
+    /// counts them without weighing them against the rest of its memory (<see cref="TakeKept"/>).
+    /// </remarks>
+    internal bool TryReserve(long bytes, bool kept = false)
     {
         if (_process is null)
         {
+            if (kept)
+            {
+                TakeKept(bytes);
+                return true;
+            }
+
             Observe();
             long available = Available();
             if (TryAdd(ref _reserved, bytes, available))
@@ -357,9 +628,16 @@ public sealed class QueryMemoryBudget
         // The jobs' share asks the process too, which weighs it against the rest of its memory as it weighs the questions':
         // carved out of the limit and never refused there, the jobs given the whole limit filled it with the blocks they
         // rented and those the pool parked for them, 1 222 MiB, and the writer's own arrays, which no account counts,
-        // found no room in a heap held to 1.5 GiB, at a new site each run (2026-11-16).
-        if (!_process.TryReserve(bytes))
+        // found no room in a heap held to 1.5 GiB, at a new site each run (2026-11-16). A budget a grant funds takes the
+        // grant's bytes first, which the parent counts already, and asks it for the rest alone.
+        long funded = _granted > 0 ? TakeGrant(bytes) : 0;
+        if (bytes > funded && !_process.TryReserve(bytes - funded, kept))
         {
+            if (funded > 0)
+            {
+                FillGrant(funded);
+            }
+
             Interlocked.Add(ref _reserved, -bytes);
             Refuse();
             return false;
@@ -441,10 +719,20 @@ public sealed class QueryMemoryBudget
     /// heap itself would run out, and nothing is reserved.
     /// </summary>
     /// <returns>Whether it was reserved.</returns>
-    internal bool Force(long bytes)
+    /// <remarks>
+    /// With <paramref name="kept"/>, the bytes of a block the pool kept: the process's budget counts them whatever it
+    /// holds (<see cref="TakeKept"/>), and only a hard budget that is never passed refuses them.
+    /// </remarks>
+    internal bool Force(long bytes, bool kept = false)
     {
         if (_process is null)
         {
+            if (kept)
+            {
+                TakeKept(bytes);
+                return true;
+            }
+
             Observe();
             if (!TryAdd(ref _reserved, bytes, Available() + (Ceiling / 16)))
             {
@@ -454,7 +742,7 @@ public sealed class QueryMemoryBudget
             return true;
         }
 
-        if (Hard)
+        if (Hard && !CountsPast)
         {
             // A hard budget is never passed: the work under it gives way.
             Refuse();
@@ -464,7 +752,7 @@ public sealed class QueryMemoryBudget
         // The jobs' share passed as any budget is, the process bounding it: carved out of the process with no refusal, an append
         // of 324 000 rows under a limit of 1 GiB held 524 MiB of the share's 336, and a block of 64 MiB more failed the heap
         // (2026-11-16).
-        if (!_process.Force(bytes))
+        if (!_process.Force(bytes, kept))
         {
             return false;
         }
@@ -472,6 +760,43 @@ public sealed class QueryMemoryBudget
         Raise(Interlocked.Add(ref _reserved, bytes));
         return true;
     }
+
+    /// <summary>
+    /// The process's own: counts <paramref name="bytes"/> of a block the pool kept, parked or free in a slab alive, without
+    /// weighing them against the rest of the process's memory. The rest holds them already: the block's account takes them
+    /// out of it once the block is its work's (<see cref="Reuse"/>), and the heap holds what it held. Refused there, a
+    /// block of a few kilobytes failed a compaction's writer in the middle of a chunk under a pool that kept 505 MiB,
+    /// 464 of them free in its slabs (2026-11-21).
+    /// </summary>
+    /// <remarks>
+    /// Counted when the limit left the work no room for them, and when it left none within the sixteenth a block may count
+    /// past (<see cref="Force"/>): the blocks that, asked as new memory, had the memory kept let go and the collector run,
+    /// and those refused (<see cref="KeptPastRoom"/>, <see cref="KeptPastMargin"/>).
+    /// </remarks>
+    private void TakeKept(long bytes)
+    {
+        Observe();
+        long held = Interlocked.Add(ref _reserved, bytes);
+        Raise(held);
+        long available = Available();
+        if (held > available)
+        {
+            Interlocked.Increment(ref _keptPastRoom);
+            if (held > available + (Ceiling / 16))
+            {
+                Interlocked.Increment(ref _keptPastMargin);
+            }
+        }
+    }
+
+    private long _keptPastRoom;
+    private long _keptPastMargin;
+
+    /// <summary>The process's own: the blocks the pool kept that work took while the limit left it no room for them (<see cref="TakeKept"/>).</summary>
+    internal long KeptPastRoom => Interlocked.Read(ref _keptPastRoom);
+
+    /// <summary>The process's own: those of <see cref="KeptPastRoom"/> taken while the limit left none within the sixteenth a block may count past: refused, when asked as new memory.</summary>
+    internal long KeptPastMargin => Interlocked.Read(ref _keptPastMargin);
 
     /// <summary>Whether this budget and the process's would grant <paramref name="bytes"/> more now to a query that holds <paramref name="held"/>, without reserving them.</summary>
     internal bool CanReserve(long bytes, long held = 0)
@@ -487,11 +812,62 @@ public sealed class QueryMemoryBudget
         return ReservedBytes + bytes <= ceiling && Fair(bytes, held, ceiling) && (_share > 0 || _process.CanReserve(bytes, held));
     }
 
-    /// <summary>Gives back <paramref name="bytes"/> reserved, to this budget and the process's.</summary>
+    /// <summary>
+    /// Gives back <paramref name="bytes"/> reserved, to this budget and the process's, the reservations that wait for room
+    /// taking their turn then. A budget a grant funds gives them to its parent too: the grant funds its first reservations
+    /// alone, and its parent counts what is left of it and what the budget holds, exactly. Filled again by the releases,
+    /// the grant would keep the parent counting the most the budget ever held.
+    /// </summary>
     internal void Release(long bytes)
     {
         Interlocked.Add(ref _reserved, -bytes);
         _process?.Release(bytes);
+        Serve();
+    }
+
+    /// <summary>Takes up to <paramref name="bytes"/> of what is left of the grant that funds the budget, and returns what it took.</summary>
+    private long TakeGrant(long bytes)
+    {
+        long left = Volatile.Read(ref _grantLeft);
+        while (true)
+        {
+            long take = Math.Min(bytes, left);
+            if (take <= 0)
+            {
+                return 0;
+            }
+
+            long seen = Interlocked.CompareExchange(ref _grantLeft, left - take, left);
+            if (seen == left)
+            {
+                return take;
+            }
+
+            left = seen;
+        }
+    }
+
+    /// <summary>Gives back to the grant that funds the budget up to <paramref name="bytes"/> a reservation refused took of it, never past its bytes, and returns what it took back.</summary>
+    private long FillGrant(long bytes)
+    {
+        long left = Volatile.Read(ref _grantLeft);
+        while (true)
+        {
+            // A grant closed (CloseGrant) takes nothing back: its holder gave what was left of it to the parent.
+            long put = left < 0 ? 0 : Math.Min(bytes, _granted - left);
+            if (put <= 0)
+            {
+                return 0;
+            }
+
+            long seen = Interlocked.CompareExchange(ref _grantLeft, left + put, left);
+            if (seen == left)
+            {
+                return put;
+            }
+
+            left = seen;
+        }
     }
 
     /// <summary>
@@ -501,11 +877,40 @@ public sealed class QueryMemoryBudget
     internal void Measure(long delta)
     {
         QueryMemoryBudget process = Root;
+        process.NoteCollection();
         long measured = Interlocked.Add(ref process._measured, delta);
         if (delta < 0)
         {
             Interlocked.Add(ref process._pending, -delta);
             process.Lower(measured);
+        }
+    }
+
+    /// <summary>
+    /// The process's own, before its measure moves: when a collection ran since the measure last moved, what the work
+    /// measures now is what it measured when the collector ran, and is noted with the count of collections
+    /// (<see cref="Observe"/> takes it off the heap that collection read). One read of the collections' count a move; the
+    /// note is written once a collection, by the first move after it.
+    /// </summary>
+    /// <remarks>
+    /// To within one move: a lane the collector stopped between this reading of the count and its move adds, once it runs
+    /// again, bytes the note that another lane then writes counts as measured at the collection.
+    /// </remarks>
+    private void NoteCollection()
+    {
+        int collections = GC.CollectionCount(0);
+        if (collections == Volatile.Read(ref _notedCollections))
+        {
+            return;
+        }
+
+        lock (_noteGate)
+        {
+            if (collections > _notedCollections)
+            {
+                _measuredAtCollection = Volatile.Read(ref _measured);
+                Volatile.Write(ref _notedCollections, collections);
+            }
         }
     }
 
@@ -538,6 +943,7 @@ public sealed class QueryMemoryBudget
     internal void Returned(long bytes)
     {
         QueryMemoryBudget process = Root;
+        process.NoteCollection();
         process.Lower(Interlocked.Add(ref process._measured, -bytes));
     }
 
@@ -670,11 +1076,34 @@ public sealed class QueryMemoryBudget
                 return;
             }
 
-            // What was measured when the collector ran, at least: the fewest bytes measured since the rest was last read,
-            // before which no collection it reads now ran. The window starts again from what is measured now.
+            // The fewest bytes measured since the rest was last read, before which no collection it reads now ran: what a
+            // reading takes off the heap when it cannot tell what was measured when the collector ran. The window starts
+            // again from what is measured now.
             long measured = Volatile.Read(ref _measured);
             long low = Math.Min(Interlocked.Exchange(ref _measuredLow, measured), measured);
             Lower(Volatile.Read(ref _measured));
+
+            // What was measured when the collector ran, when one collection ran since the rest was last read: the measure
+            // the first move after it noted (NoteCollection), or the measure now when nothing moved since. And never more
+            // than the measure now: a block given back since the collection is the pool's again, and the rest's. The
+            // blocks a job gave back and took again before the collection are the work's, and no longer read as the rest's.
+            long at = low;
+            if (any - rest.Ephemeral == 1)
+            {
+                lock (_noteGate)
+                {
+                    if (any > _notedCollections)
+                    {
+                        _measuredAtCollection = measured;
+                        Volatile.Write(ref _notedCollections, any);
+                    }
+
+                    if (any == _notedCollections)
+                    {
+                        at = Math.Min(_measuredAtCollection, measured);
+                    }
+                }
+            }
 
             // A full collection is read once it is done. A background one is counted from its start, and the collector tells
             // the one before's memory until it ends: read as the new one's, the let go and the reuse since were dropped, the
@@ -688,8 +1117,11 @@ public sealed class QueryMemoryBudget
             {
                 Interlocked.Exchange(ref _pending, 0);
                 Interlocked.Exchange(ref _reused, 0);
+                // A blocking collection's numbers are those of the moment it ran, the one the measure was noted at. A
+                // background one's are its end's, which no count tells: the fewest measured since the reading before.
                 long inUse = info.HeapSizeBytes - info.FragmentedBytes;
-                rest = new Rest(full, any, info.Index, info.Index, Math.Max(0, inUse - low), 0, Math.Max(0, info.TotalCommittedBytes - inUse));
+                long taken = full != rest.Collections && !info.Concurrent ? at : low;
+                rest = new Rest(full, any, info.Index, info.Index, Math.Max(0, inUse - taken), 0, Math.Max(0, info.TotalCommittedBytes - inUse));
             }
 
             // What the queries let go is in the heap or already taken: never more than the heap holds past what lived at the
@@ -700,7 +1132,7 @@ public sealed class QueryMemoryBudget
             GCMemoryInfo ephemeral = GC.GetGCMemoryInfo(GCKind.Ephemeral);
             if (ephemeral.Index > rest.Read)
             {
-                long inHeap = ephemeral.HeapSizeBytes - ephemeral.FragmentedBytes - low;
+                long inHeap = ephemeral.HeapSizeBytes - ephemeral.FragmentedBytes - at;
                 long live = LiveOf(rest);
                 long most = Math.Max(0, inHeap - live);
                 long pending = Volatile.Read(ref _pending);

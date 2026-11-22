@@ -61,6 +61,88 @@ public sealed partial class ShreddedVariantWriteTests
     }
 
     /// <summary>
+    /// Documents that repeat one after the other, as a metric's series holds its attributes, which the shredder takes again
+    /// without reading them: every shape of <see cref="ARandomShreddingReadsBackEveryDocument"/>, null rows and objects of
+    /// keys kept apart among them, in runs of one to forty, read back every document, over chunks of 512 rows on one lane or
+    /// four.
+    /// </summary>
+    [Theory]
+    [InlineData(11, 1)]
+    [InlineData(12, 4)]
+    [InlineData(13, 1)]
+    public async Task DocumentsThatRepeatReadBackEveryDocument(int seed, int degree)
+    {
+        Random random = new Random(seed);
+        List<Doc> drawn = [];
+        while (drawn.Count < 3_000)
+        {
+            Variant attributes = Document(random);
+            Variant? extra = random.Next(10) == 0 ? null : Document(random);
+            for (int run = 1 + random.Next(random.Next(4) == 0 ? 1 : 40); run > 0; run--)
+            {
+                drawn.Add(new Doc(drawn.Count, attributes, random.Next(30) == 0 ? null : extra));
+            }
+        }
+
+        Doc[] rows = [.. drawn];
+        Dictionary<string, VariantShredding> shredding = new()
+        {
+            [nameof(Doc.Attributes)] = Shredding(random),
+            [nameof(Doc.Extra)] = Shredding(random),
+        };
+
+        List<Doc> read = await RoundTripAsync(rows, shredding, degree);
+        Assert.Equal(rows.Length, read.Count);
+        for (int i = 0; i < rows.Length; i++)
+        {
+            Assert.Equal(rows[i].Id, read[i].Id);
+            Assert.True(rows[i].Attributes.Equals(read[i].Attributes), $"row {i}: {rows[i].Attributes.ToJson()} read as {read[i].Attributes.ToJson()}");
+            Assert.Equal(rows[i].Extra is null, read[i].Extra is null);
+            if (rows[i].Extra is { } extra)
+            {
+                Assert.True(extra.Equals(read[i].Extra!.Value), $"row {i}: {extra.ToJson()} read as {read[i].Extra!.Value.ToJson()}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Runs of thousands of rows of one document, its text a few bytes, a hundred or a thousand long: the rows that repeat it
+    /// lay its text again row after row, a block's room at a time and doubled, across the blocks the column's bytes are kept
+    /// in. Every row reads back its document, on one lane or four.
+    /// </summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    public async Task LongRunsOfOneDocumentReadBackEveryRow(int degree)
+    {
+        string[] texts = [new string('a', 3), new string('b', 97), new string('c', 1_000)];
+        List<Doc> drawn = [];
+        for (int run = 0; run < 6; run++)
+        {
+            Variant document = Variant.Object(("route", Variant.From(texts[run % 3] + run)), ("n", Variant.From(run)));
+            for (int i = 0; i < 2_500 + (run * 37); i++)
+            {
+                drawn.Add(new Doc(drawn.Count, document, null));
+            }
+        }
+
+        Doc[] rows = [.. drawn];
+        Dictionary<string, VariantShredding> shredding = new()
+        {
+            [nameof(Doc.Attributes)] = VariantShredding.Object(
+                ("route", VariantShredding.Primitive(VariantClass.String)), ("n", VariantShredding.Primitive(VariantClass.Integer))),
+        };
+
+        List<Doc> read = await RoundTripAsync(rows, shredding, degree);
+        Assert.Equal(rows.Length, read.Count);
+        for (int i = 0; i < rows.Length; i++)
+        {
+            Assert.Equal(rows[i].Id, read[i].Id);
+            Assert.True(rows[i].Attributes.Equals(read[i].Attributes), $"row {i}: {rows[i].Attributes.ToJson()[..Math.Min(60, rows[i].Attributes.ToJson().Length)]} read as {read[i].Attributes.ToJson()[..Math.Min(60, read[i].Attributes.ToJson().Length)]}");
+        }
+    }
+
+    /// <summary>
     /// Two columns shredded alike, whose rows a scan puts back together by one plan kept from a batch to the next and
     /// from a column to the other, read back every document, over chunks of 512 rows on one lane or four.
     /// </summary>
@@ -407,6 +489,206 @@ public sealed partial class ShreddedVariantWriteTests
     }
 
     /// <summary>
+    /// Shredded variant columns that gather to a target of their own, each chunk emitted by a task of its own as it is due,
+    /// write the same file on one thread and on four, which reads back every row: a chunk's blob goes out where the column's
+    /// chunk after next is due, whatever lane compressed it and whenever it ended, its new encoding ids made the file's then.
+    /// </summary>
+    [Fact]
+    public async Task ChunksEmittedApartWriteTheSameFileOnOneThreadAndOnFour()
+    {
+        Random random = new Random(23);
+        Doc[] rows = [.. Enumerable.Range(0, 30_000).Select(i => new Doc(i, Document(random), random.Next(3) == 0 ? null : Document(random)))];
+        Dictionary<string, VariantShredding> shredding = new() { [nameof(Doc.Attributes)] = Shredding(random), [nameof(Doc.Extra)] = Shredding(random) };
+        string onePath = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.vortex");
+        string fourPath = Path.Combine(Path.GetTempPath(), $"vorticity-ahead-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            (int one, int oneGrafted, _, int oneThin, _) = await WriteGatheredAsync(rows, shredding, onePath, degree: 1);
+            (int four, int fourGrafted, int fourOnLine, int fourThin, _) = await WriteGatheredAsync(rows, shredding, fourPath, degree: 4);
+
+            // On four threads, the line took the rows of shredded chunks block by block, and gathered their rows thin. On one,
+            // there is no line.
+            Assert.True(fourOnLine > 0, $"no chunk of {four} emitted apart was taken on the line");
+            Assert.True(fourThin > 0, $"no chunk of {fourOnLine} taken on the line gathered thin");
+            Assert.Equal(0, oneThin);
+            Assert.True(one > 2, $"{one} chunks emitted apart on one thread");
+            Assert.Equal(one, four);
+
+            // On four threads each shredded chunk's leaves were written apart, then grafted into its blob: the same bytes.
+            Assert.Equal(0, oneGrafted);
+            Assert.True(fourGrafted >= fourOnLine, $"{fourGrafted} chunks grafted of {fourOnLine} taken on the line");
+            byte[] bytes = await System.IO.File.ReadAllBytesAsync(onePath, Ct);
+            Assert.Equal(bytes, await System.IO.File.ReadAllBytesAsync(fourPath, Ct));
+            await using VortexFile file = await VortexFile.OpenAsync(fourPath, Ct);
+            List<Doc> read = await file.Scan<Doc>().ToRecordsAsync(Ct).ToListAsync(Ct);
+            Assert.Equal(rows.Length, read.Count);
+            for (int i = 0; i < rows.Length; i++)
+            {
+                Assert.Equal(rows[i].Id, read[i].Id);
+                Assert.True(rows[i].Attributes.Equals(read[i].Attributes), $"row {i}'s attributes");
+                Assert.True(Equals(rows[i].Extra, read[i].Extra), $"row {i}'s extra");
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(onePath);
+            System.IO.File.Delete(fourPath);
+        }
+    }
+
+    /// <summary>
+    /// Shredded columns gathering chunks of several blocks, written 700 rows at a time on four threads: the last rows, short
+    /// of a block, go through alone after rows of the chunk gathered thin, and the chunk's rows past those its chain took are
+    /// taken as it is compressed. The file is the one a thread writes, and reads back every row.
+    /// </summary>
+    [Fact]
+    public async Task ChunksWhoseChainBreaksAfterRowsGatheredThinWriteTheFileOfOneThread()
+    {
+        Random random = new Random(29);
+        Doc[] rows = [.. Enumerable.Range(0, 30_000).Select(i => new Doc(i, Document(random), random.Next(3) == 0 ? null : Document(random)))];
+        Dictionary<string, VariantShredding> shredding = new() { [nameof(Doc.Attributes)] = Shredding(random), [nameof(Doc.Extra)] = Shredding(random) };
+        string onePath = Path.Combine(Path.GetTempPath(), $"vorticity-part-{Guid.NewGuid():N}.vortex");
+        string fourPath = Path.Combine(Path.GetTempPath(), $"vorticity-part-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            (int one, _, _, _, _) = await WriteGatheredAsync(rows, shredding, onePath, degree: 1, batch: 700, chunkBytes: 256 << 10);
+            (int four, _, int fourOnLine, int fourThin, int fourInPart) = await WriteGatheredAsync(rows, shredding, fourPath, degree: 4, batch: 700, chunkBytes: 256 << 10);
+            Assert.True(fourThin > 0, $"no chunk of {fourOnLine} taken on the line gathered thin");
+            Assert.True(fourInPart > 0, $"no chunk of {fourOnLine} taken on the line was taken in part");
+            Assert.Equal(one, four);
+            Assert.Equal(await System.IO.File.ReadAllBytesAsync(onePath, Ct), await System.IO.File.ReadAllBytesAsync(fourPath, Ct));
+            await using VortexFile file = await VortexFile.OpenAsync(fourPath, Ct);
+            List<Doc> read = await file.Scan<Doc>().ToRecordsAsync(Ct).ToListAsync(Ct);
+            Assert.Equal(rows.Length, read.Count);
+            for (int i = 0; i < rows.Length; i++)
+            {
+                Assert.True(rows[i].Attributes.Equals(read[i].Attributes), $"row {i}'s attributes");
+                Assert.True(Equals(rows[i].Extra, read[i].Extra), $"row {i}'s extra");
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(onePath);
+            System.IO.File.Delete(fourPath);
+        }
+    }
+
+    /// <summary>
+    /// A shredded column whose top-level keys are counted block by block, its chunks' rows taken on the line on four threads:
+    /// the bounds the line counted a chunk's keys into go back to the column as the chunk lands, for its next chunk to count
+    /// into, and the file is the one a thread writes. Made by the line rather than taken from the column's, they found no
+    /// place to go back to, and a tier merge of log records failed at its first chunk landed (2026-11-17).
+    /// </summary>
+    [Fact]
+    public async Task ChunksTakenOnTheLineGiveTheirKeysBoundsBackAsTheyLand()
+    {
+        VariantShredding plan = VariantShredding.Object(
+            ("route", VariantShredding.Primitive(VariantClass.String)),
+            ("code", VariantShredding.Primitive(VariantClass.Integer)));
+        Doc[] rows = [.. Enumerable.Range(0, 30_000).Select(i => new Doc(i, Variant.Object(("route", $"/r/{i % 97}"), ("code", i % 13)), null))];
+        Dictionary<string, VariantShredding> shredding = new() { [nameof(Doc.Attributes)] = plan };
+        string onePath = Path.Combine(Path.GetTempPath(), $"vorticity-bounds-{Guid.NewGuid():N}.vortex");
+        string fourPath = Path.Combine(Path.GetTempPath(), $"vorticity-bounds-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            (int one, _, _, _, _) = await WriteGatheredAsync(rows, shredding, onePath, degree: 1);
+            (int four, _, int fourOnLine, _, _) = await WriteGatheredAsync(rows, shredding, fourPath, degree: 4);
+            Assert.True(fourOnLine > 1, $"{fourOnLine} chunks of {four} taken on the line");
+            Assert.Equal(one, four);
+            Assert.Equal(await System.IO.File.ReadAllBytesAsync(onePath, Ct), await System.IO.File.ReadAllBytesAsync(fourPath, Ct));
+        }
+        finally
+        {
+            System.IO.File.Delete(onePath);
+            System.IO.File.Delete(fourPath);
+        }
+    }
+
+    /// <summary>
+    /// Shredded variant columns whose keys a job's object indexes, each key's sheet, locates and statistics over the granules:
+    /// on four and eight threads, the keys of each column written in groups apart, each group on its own thread, the file is
+    /// the one written on one thread, byte for byte.
+    /// </summary>
+    [Theory]
+    [InlineData(4)]
+    [InlineData(8)]
+    public async Task KeysWrittenInGroupsApartWriteTheFileOfOneThread(int degree)
+    {
+        Random random = new Random(31);
+        Doc[] rows = [.. Enumerable.Range(0, 20_000).Select(i => new Doc(i, Document(random), random.Next(3) == 0 ? null : Document(random)))];
+        Dictionary<string, VariantShredding> shredding = new() { [nameof(Doc.Attributes)] = Shredding(random), [nameof(Doc.Extra)] = Shredding(random) };
+        string onePath = Path.Combine(Path.GetTempPath(), $"vorticity-keys-{Guid.NewGuid():N}.vortex");
+        string manyPath = Path.Combine(Path.GetTempPath(), $"vorticity-keys-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            Assert.Equal(0, await WriteIndexedAsync(rows, shredding, onePath, degree: 1));
+            Assert.True(await WriteIndexedAsync(rows, shredding, manyPath, degree) > 0, "no batch wrote its keys apart");
+            Assert.Equal(await System.IO.File.ReadAllBytesAsync(onePath, Ct), await System.IO.File.ReadAllBytesAsync(manyPath, Ct));
+        }
+        finally
+        {
+            System.IO.File.Delete(onePath);
+            System.IO.File.Delete(manyPath);
+        }
+    }
+
+    /// <summary>
+    /// Writes <paramref name="rows"/> in blocks of 1 024 rows with what a job's object keeps of its shredded keys, and returns
+    /// the batches whose keys were written in groups apart.
+    /// </summary>
+    private static async Task<int> WriteIndexedAsync(Doc[] rows, Dictionary<string, VariantShredding> shredding, string path, int degree)
+    {
+        VortexWriteOptions options = new VortexWriteOptions
+        {
+            Identity = new Guid("5e5e5e5e-5e5e-4e5e-8e5e-5e5e5e5e5e5e"),
+            BlockRows = 1_024,
+            ShreddedVariants = shredding,
+            DegreeOfParallelism = degree,
+            CarriesContents = true,
+            ColumnSheetBytes = 0,
+            Counted = true,
+            Granulated = true,
+        };
+        await using VortexSession session = VortexSession.Create(o => o.MaxDegreeOfParallelism = degree);
+        await using VortexFileWriter writer = session.CreateWriter<Doc>(path, options);
+        for (int start = 0; start < rows.Length; start += 2_048)
+        {
+            await writer.WriteAsync<Doc>(rows.AsSpan(start, Math.Min(2_048, rows.Length - start)), Ct);
+        }
+
+        await writer.CompleteAsync(Ct);
+        return writer.BatchesKeysApart;
+    }
+
+    /// <summary>
+    /// Writes <paramref name="rows"/>, every column gathering chunks of <paramref name="chunkBytes"/>, and returns the chunks
+    /// emitted apart, the chunks grafted from their leaves, the shredded ones emitted apart whose rows the line took block by
+    /// block, of those the ones some of whose rows were gathered thin, and the ones taken in part. Given
+    /// <paramref name="batch"/>, written that many rows at a time; otherwise at once.
+    /// </summary>
+    private static async Task<(int Apart, int Grafted, int OnLine, int Thin, int InPart)> WriteGatheredAsync(
+        Doc[] rows, Dictionary<string, VariantShredding> shredding, string path, int degree, int batch = 0, int chunkBytes = 16 << 10)
+    {
+        VortexWriteOptions options = new VortexWriteOptions
+        {
+            Identity = new Guid("4d4d4d4d-4d4d-4d4d-8d4d-4d4d4d4d4d4d"),
+            BlockRows = 1_024,
+            ShreddedVariants = shredding,
+            DegreeOfParallelism = degree,
+            GatheredChunkBytes = chunkBytes,
+        };
+        await using VortexFileWriter writer = VortexSession.Default.CreateWriter<Doc>(path, options);
+        for (int start = 0; start < rows.Length; start += batch > 0 ? batch : rows.Length)
+        {
+            int count = batch > 0 ? Math.Min(batch, rows.Length - start) : rows.Length;
+            await writer.WriteAsync<Doc>(rows.AsSpan(start, count), Ct);
+        }
+
+        await writer.CompleteAsync(Ct);
+        return (writer.ChunksEmittedApart, writer.ChunksGrafted, writer.ChunksTakenOnLine, writer.ChunksGatheredThin, writer.ChunksTakenInPart);
+    }
+
+    /// <summary>
     /// Writes <paramref name="rows"/> whole in one chunk, then each variant column of the chunk under its shredding,
     /// compressed or not and in frames of a block or one, laid out whole and a column at a time: the two blobs are equal.
     /// </summary>
@@ -435,6 +717,108 @@ public sealed partial class ShreddedVariantWriteTests
                             Assert.True(
                                 expected.Memory.Span.SequenceEqual(actual.Memory.Span),
                                 $"{name}, compressed {compress}, frames of {frameRows} rows: {actual.Length} bytes a column at a time against {expected.Length} laid out whole");
+
+                            // Each leaf written apart, the last first as lanes would finish them in any order, then grafted.
+                            using ArrayBlobWriter.Workspace grafting = new ArrayBlobWriter.Workspace { FrameRows = frameRows, Account = TestAccount.Shared };
+                            using ArrayBlobWriter.Workspace apart = new ArrayBlobWriter.Workspace { FrameRows = frameRows, Account = TestAccount.Shared };
+                            VariantShredder.Shredding shredding = grafting.Shredding(plan);
+                            shredding.Take(batch.Arena, column, null);
+                            int leaves = shredding.PrepareLeaves(grafting.EncodesValidity, compress);
+
+                            // What a writer reserves for the leaves it writes at once: the largest of them, each at what it
+                            // lays out and the largest first, a shorter list being the head of a longer one.
+                            long[] every = new long[leaves];
+                            int listed = shredding.LargestLeaves(every);
+                            for (int i = 0; i < listed; i++)
+                            {
+                                Assert.True(every[i] > 0 && (i == 0 || every[i - 1] >= every[i]), $"{name}: leaf {i} of {listed} lays out {every[i]} bytes");
+                            }
+
+                            long[] head = new long[Math.Min(2, leaves)];
+                            int few = shredding.LargestLeaves(head);
+                            Assert.Equal(Math.Min(head.Length, listed), few);
+                            Assert.True(head.AsSpan(0, few).SequenceEqual(every.AsSpan(0, few)), $"{name}: the two largest of {listed} leaves");
+
+                            EncodingDictionary leafIds = new EncodingDictionary(ComponentKind.Array, Vorticity.Editions.EditionRegistry.Newest);
+                            for (int leaf = leaves - 1; leaf >= 0; leaf--)
+                            {
+                                shredding.WriteLeafApart(leaf, apart, leafIds, compress);
+                            }
+
+                            using ArrayBlobWriter.BlobLease grafted = shredding.WriteGrafted(
+                                grafting, new EncodingDictionary(ComponentKind.Array, Vorticity.Editions.EditionRegistry.Newest), compress);
+                            Assert.True(
+                                actual.Memory.Span.SequenceEqual(grafted.Memory.Span),
+                                $"{name}, compressed {compress}, frames of {frameRows} rows: {grafted.Length} bytes of {leaves} leaves grafted against {actual.Length} written in the blob");
+
+                            // Taken in parts of 700 rows, each in an arena of its own emptied once taken, as blocks are.
+                            using ArrayBlobWriter.Workspace parted = new ArrayBlobWriter.Workspace { FrameRows = frameRows, Account = TestAccount.Shared };
+                            VariantShredder.Shredding inParts = parted.Shredding(plan);
+                            CanonicalArena store = new CanonicalArena();
+                            CanonicalArena part = new CanonicalArena();
+                            int field = file.DType.IndexOfField(name);
+                            inParts.Begin(store, null);
+                            for (int start = 0; start < batch.RowCount; start += 700)
+                            {
+                                int count = Math.Min(700, batch.RowCount - start);
+                                int slice = Vorticity.Layouts.CanonicalSlice.SliceAcross(batch.Arena, part, batch.RootIndex, start, count);
+                                VariantShredder.Shredding.Rows taken = VariantShredder.Shredding.Prepare(part, part.GetNode(slice).GetFieldIndex(field));
+                                inParts.TakeMore(in taken, start);
+                                part.Reset();
+                            }
+
+                            inParts.Settle(batch.Arena, column);
+                            using ArrayBlobWriter.BlobLease partedBlob = inParts.Write(
+                                parted, new EncodingDictionary(ComponentKind.Array, Vorticity.Editions.EditionRegistry.Newest), compress);
+                            Assert.True(
+                                actual.Memory.Span.SequenceEqual(partedBlob.Memory.Span),
+                                $"{name}, compressed {compress}, frames of {frameRows} rows: {partedBlob.Length} bytes taken in parts against {actual.Length} taken whole");
+
+                            // Each part read alone into a shredding of its own, its rows numbered from its first, then added to the
+                            // chunk's where the part falls, as the line takes a column's blocks: the same blob, and the same
+                            // counts of the chunk's keys block by block as the parts taken in place count, blocks of 256 rows
+                            // that the parts of 700 cross.
+                            using ArrayBlobWriter.Workspace addedTo = new ArrayBlobWriter.Workspace { FrameRows = frameRows, Account = TestAccount.Shared };
+                            VariantShredder.Shredding added = addedTo.Shredding(plan);
+                            VariantShredder.Shredding alone = new VariantShredder.Shredding(plan);
+                            VariantShredder.Shredding inPlace = new VariantShredder.Shredding(plan);
+                            CanonicalArena addedStore = new CanonicalArena();
+                            CanonicalArena aloneStore = new CanonicalArena();
+                            CanonicalArena inPlaceStore = new CanonicalArena();
+                            Vorticity.Indexes.ChunkBlockBounds addedBounds = new(Vorticity.Indexes.ChunkBlockBounds.Counted(plan), 256, 16);
+                            Vorticity.Indexes.ChunkBlockBounds inPlaceBounds = new(Vorticity.Indexes.ChunkBlockBounds.Counted(plan), 256, 16);
+                            added.Begin(addedStore, addedBounds);
+                            inPlace.Begin(inPlaceStore, inPlaceBounds);
+                            for (int start = 0; start < batch.RowCount; start += 700)
+                            {
+                                int count = Math.Min(700, batch.RowCount - start);
+                                int slice = Vorticity.Layouts.CanonicalSlice.SliceAcross(batch.Arena, part, batch.RootIndex, start, count);
+                                VariantShredder.Shredding.Rows taken = VariantShredder.Shredding.Prepare(part, part.GetNode(slice).GetFieldIndex(field));
+                                aloneStore.Reset();
+                                alone.Begin(aloneStore, null, counted: true);
+                                alone.TakeMore(in taken, 0);
+                                added.Append(alone, start);
+                                inPlace.TakeMore(in taken, start);
+                                part.Reset();
+                            }
+
+                            Assert.Equal(batch.RowCount, added.Taken);
+                            added.Settle(batch.Arena, column);
+                            using ArrayBlobWriter.BlobLease addedBlob = added.Write(
+                                addedTo, new EncodingDictionary(ComponentKind.Array, Vorticity.Editions.EditionRegistry.Newest), compress);
+                            Assert.True(
+                                actual.Memory.Span.SequenceEqual(addedBlob.Memory.Span),
+                                $"{name}, compressed {compress}, frames of {frameRows} rows: {addedBlob.Length} bytes of parts read alone and added against {actual.Length} taken whole");
+                            Assert.Equal(inPlaceBounds.Keys.Count, addedBounds.Keys.Count);
+                            for (int key = 0; key < addedBounds.Keys.Count; key++)
+                            {
+                                Assert.Equal(inPlaceBounds.Keys[key].Count, addedBounds.Keys[key].Count);
+                                Assert.Equal(inPlaceBounds.Keys[key].First, addedBounds.Keys[key].First);
+                                Assert.Equal(inPlaceBounds.Keys[key].Last, addedBounds.Keys[key].Last);
+                                Assert.True(
+                                    inPlaceBounds.Keys[key].Body.SequenceEqual(addedBounds.Keys[key].Body),
+                                    $"{name}, key {key}: the blocks counted from parts added differ from those counted as the parts are taken");
+                            }
                         }
                     }
                 }

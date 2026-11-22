@@ -132,6 +132,57 @@ public sealed class SparseDecoderTests
         Assert.Equal(33, values[3]);
     }
 
+    /// <summary>
+    /// A range of the node is the same rows of its whole decode, the patches before, inside and after it placed or left out,
+    /// under a fill and under a null fill: what a window of a large chunk holding a sparse key reads.
+    /// </summary>
+    [Theory]
+    [InlineData(false, 0, 10)]
+    [InlineData(false, 2, 5)]
+    [InlineData(false, 4, 1)]
+    [InlineData(false, 6, 4)]
+    [InlineData(true, 0, 3)]
+    [InlineData(true, 3, 6)]
+    [InlineData(true, 9, 1)]
+    public void ARangeIsTheSameRowsOfTheWholeDecode(bool nullFill, int start, int count)
+    {
+        ScalarStore store = new();
+        byte[] fill = nullFill ? TestMetadata.Scalar(store.Null()) : TestMetadata.Scalar(store.Int64(7));
+        TestNode root = Node(TestMetadata.Sparse(PatchesMetadata.Create(4, 0, PType.U32)), fill);
+        using DecodeHarness harness = DecodeHarness.Load(
+            root,
+            fill,
+            TestBuffers.UInt32(1, 3, 4, 8),
+            TestBuffers.Int32(11, 33, 44, 88));
+
+        DType i32 = harness.Types.Primitive(PType.I32, nullFill ? Nullability.Nullable : Nullability.NonNullable);
+        int[] whole = ForDecoderTests.ReadInt32(harness.Node(harness.DecodeRoot(i32, 10)));
+        CanonicalNode range = harness.Node(harness.DecodeRootRange(i32, 10, start, count));
+        int[] values = ForDecoderTests.ReadInt32(range);
+        Assert.Equal(count, range.Length);
+        int[] patched = [1, 3, 4, 8];
+        for (int i = 0; i < count; i++)
+        {
+            bool present = !nullFill || Array.IndexOf(patched, start + i) >= 0;
+            if (nullFill && range.Validity.Kind == ValidityKind.Bitmap)
+            {
+                CanonicalNode bits = harness.Node(range.Validity.CanonicalNodeIndex);
+                Assert.Equal(present, (bits.Bits.Span[i >> 3] & (1 << (i & 7))) != 0);
+            }
+            else if (nullFill)
+            {
+                // A range no patch falls in is null throughout, which the validity says without a bitmap.
+                Assert.False(present);
+                Assert.False(range.Validity.IsAllValid);
+            }
+
+            if (present)
+            {
+                Assert.Equal(whole[start + i], values[i]);
+            }
+        }
+    }
+
     [Fact]
     public void ANullPatchValueOverridesANonNullFill()
     {

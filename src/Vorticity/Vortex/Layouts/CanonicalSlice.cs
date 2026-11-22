@@ -160,8 +160,40 @@ internal static class CanonicalSlice
                 SliceDictionary(source, destination, in node, dtype, validity, start, length),
             CanonicalKind.RunEnd =>
                 SliceRunEnd(source, destination, nodeIndex, dtype, validity, start, length, depth),
+            CanonicalKind.Shredded =>
+                SliceShredded(source, destination, nodeIndex, dtype, validity, start, length, depth),
             _ => throw new UnreachableException($"CanonicalKind {(byte)node.Kind} is not defined."),
         };
+    }
+
+    /// <remarks>
+    /// The views narrow like any fixed-width buffer, those of the values not written among them, and so does the rows'
+    /// metadata. What took the rows is every row's, so the window is told it too, from the row its first row is, where
+    /// the destination keeps such things: no value is put back to cut a window. A destination that keeps none has the
+    /// window's values put back at once, and values put back already are cut as they were put back.
+    /// </remarks>
+    private static int SliceShredded(
+        CanonicalArena source, CanonicalArena destination, int nodeIndex, DType dtype, Validity validity, int start, int length, int depth)
+    {
+        int put = source.PutBack(nodeIndex);
+        if (put >= 0)
+        {
+            return Slice(source, destination, put, start, length, depth);
+        }
+
+        // Read before the metadata's window is added, which may move the records.
+        CanonicalNode node = source.GetNode(nodeIndex);
+        VortexBuffer views = node.HollowViews.Slice(start * CanonicalSupport.ViewSize, length * CanonicalSupport.ViewSize);
+        int child = node.ShreddedMetadataIndex;
+        int metadata = Slice(source, destination, child, start, length, depth + 1);
+        int window = destination.AddShredded(dtype, length, validity, views, source.GetNode(nodeIndex).HollowDataBuffers, metadata);
+        if (source.TryTaken(nodeIndex, out CanonicalArena.ITakenRows? rows, out int first) && rows is not null
+            && !destination.NoteTaken(window, rows, first + start))
+        {
+            return destination.MaterializeShredded(window, rows, first + start);
+        }
+
+        return window;
     }
 
     /// <remarks>
@@ -355,10 +387,11 @@ internal static class CanonicalSlice
                 buffers[i] = node.GetDataBuffer(i);
             }
 
-            // A window of views zero past their bytes is one too, which the kernels that read views whole rely on.
+            // A window of views zero past their bytes is one too, which the kernels that read views whole rely on; and of a
+            // node that shares its repeats' bytes, one that stands for the same bytes, as it keeps the same buffers.
             return destination.AddVarBinView(
                 dtype, length, validity, node.Views.Slice(start * ViewWidth, length * ViewWidth), buffers,
-                padded: node.Arena.RecordRef(node.Index).PaddedViews);
+                padded: node.Arena.RecordRef(node.Index).PaddedViews, standsFor: node.Arena.StandsFor(node.Index));
         }
         finally
         {

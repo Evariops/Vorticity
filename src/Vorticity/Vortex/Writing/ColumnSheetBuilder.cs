@@ -106,10 +106,9 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
     private Block<int> _rowIds;
     private bool _rowIdsFilled;
 
-    // The hash of each row of the batch being fed, by its row in the batch, 0 for a null, when another column's counts ask
-    // for them; and whether every row fed of the batch has its hash.
-    private Block<ulong> _rowHashes;
-    private bool _rowHashesWhole;
+    // The column's number among the plan's wide columns, whose hash of each row of a batch the sheet writes into the batch's
+    // counted rows as it takes them, for the distinct values another column's counts keep of it; -1 when none asks.
+    private int _wide = -1;
 
     // Whether the working blocks went back to the pool (Dispose), the ranks among them, which a second giving would lend twice.
     private bool _disposed;
@@ -151,21 +150,15 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         }
     }
 
-    /// <summary>Asks the builder to keep the hash of each row of a batch (<see cref="RowHashes"/>), for the distinct values another column's counts keep of it.</summary>
-    internal void HashRows()
-    {
-        if (_rowHashes.IsEmpty)
-        {
-            _rowHashes = Blocks.RentCleared<ulong>(1_024);
-        }
-    }
+    /// <summary>
+    /// Asks the builder to write the hash of each row of a batch into the batch's counted rows, as wide column
+    /// <paramref name="wide"/> of the plan (<see cref="CountedRows.RowHashes"/>), for the distinct values another column's
+    /// counts keep of it.
+    /// </summary>
+    internal void HashRows(int wide) => _wide = wide;
 
-    /// <summary>Stops keeping the hash of each row: no column's counts asks for them any more.</summary>
-    internal void StopHashing()
-    {
-        Blocks.Return(_rowHashes);
-        _rowHashes = default;
-    }
+    /// <summary>Stops writing the hash of each row: no column's counts asks for them any more.</summary>
+    internal void StopHashing() => _wide = -1;
 
     /// <summary>Every working block back to the pool, once: the builder is not used again.</summary>
     public override void Dispose()
@@ -182,7 +175,6 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         Blocks.Return(_heap);
         Blocks.Return(_views);
         Blocks.Return(_rowIds);
-        Blocks.Return(_rowHashes);
         Blocks.Return(_ranks);
         Blocks.Return(_slotOf);
         _slotOf = default;
@@ -192,15 +184,8 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         _heap = default;
         _views = default;
         _rowIds = default;
-        _rowHashes = default;
         base.Dispose();
     }
-
-    /// <summary>
-    /// The hash of each row of the batch fed last, by its row in the batch, 0 for a null; empty when a row of it has none,
-    /// the counts gone. Asked for with <see cref="HashRows"/>.
-    /// </summary>
-    internal ReadOnlySpan<ulong> RowHashes => _rowHashesWhole && !_slots.IsEmpty ? _rowHashes : default;
 
     internal override void Accumulate(CanonicalArena arena, int nodeIndex, int start, int count)
     {
@@ -217,18 +202,10 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
             Blocks.Ensure(ref _rowIds, (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(count, _rowIds.Length * 2)));
         }
 
-        // A batch's first rows start its hashes; its next pieces keep those before them.
-        if (!_rowHashes.IsEmpty)
-        {
-            _rowHashesWhole = start == 0 || _rowHashesWhole;
-            if (_rowHashes.Length < start + count)
-            {
-                Block<ulong> grown = Blocks.RentCleared<ulong>((int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(start + count, _rowHashes.Length * 2)));
-                _rowHashes.AsSpan(0, Math.Min(start, _rowHashes.Length)).CopyTo(grown);
-                Blocks.Return(_rowHashes);
-                _rowHashes = grown;
-            }
-        }
+        // The batch's hashes of the column's rows, when another column's counts ask for them: a batch's first rows start
+        // them, its next pieces keep those before them.
+        CountedRows? counted = _wide >= 0 ? Counted : null;
+        Span<ulong> rowHashes = counted is not null ? counted.Hashes(_wide, start, count) : default;
 
         _rows += count;
         CanonicalNode outer = arena.GetNode(nodeIndex);
@@ -248,9 +225,9 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 _rowIds.AsSpan(0, count).Fill(-1);
             }
 
-            if (!_rowHashes.IsEmpty)
+            if (!rowHashes.IsEmpty)
             {
-                _rowHashes.AsSpan(start, count).Clear();
+                rowHashes.Slice(start, count).Clear();
             }
 
             _rowIdsFilled = !_rowIds.IsEmpty;
@@ -261,7 +238,7 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         switch (node.Kind)
         {
             case CanonicalKind.Primitive:
-                Fixed(node.Values.Span, node.PType.ByteWidth(), start, count, allValid, own, wrapper);
+                Fixed(node.Values.Span, node.PType.ByteWidth(), start, count, allValid, own, wrapper, rowHashes);
                 break;
 
             case CanonicalKind.Constant:
@@ -290,9 +267,8 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                     }
                 }
 
-                if (!_rowHashes.IsEmpty)
+                if (!rowHashes.IsEmpty)
                 {
-                    Span<ulong> rowHashes = _rowHashes;
                     ulong hash = valid > 0 ? SplitBlockBloom.Hash(node.ConstantElement, BloomHash.XxHash3) : 0;
                     for (int row = start; row < start + count; row++)
                     {
@@ -304,12 +280,12 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
             }
 
             case CanonicalKind.VarBinView:
-                Text(node.Views.Span, node.DataBuffers, start, count, allValid, own, wrapper);
+                Text(node.Views.Span, node.DataBuffers, start, count, allValid, own, wrapper, rowHashes);
                 break;
 
             default:
                 // A kind no index keys: the rows are counted, their values not, nor hashed.
-                _rowHashesWhole = false;
+                counted?.Unhashed(_wide);
                 return;
         }
 
@@ -441,7 +417,8 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
     /// A fixed-width column's rows <c>[start, start + count)</c>, hashed a batch at a time; a row whose hash is the row
     /// before's counted in that row's slot, with no probe.
     /// </summary>
-    private void Fixed(ReadOnlySpan<byte> values, int width, int start, int count, bool allValid, ValidityMask own, ValidityMask wrapper)
+    private void Fixed(
+        ReadOnlySpan<byte> values, int width, int start, int count, bool allValid, ValidityMask own, ValidityMask wrapper, Span<ulong> rowHashes)
     {
         Span<ulong> hashes = stackalloc ulong[HashBatch];
         Span<int> ids = _rowIds.IsEmpty ? default : _rowIds.AsSpan(0, count);
@@ -453,9 +430,8 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         {
             int stop = Math.Min(from + HashBatch, start + count);
             XxHash3Fixed.HashRows(values, width, from, stop, hashes);
-            if (!_rowHashes.IsEmpty)
+            if (!rowHashes.IsEmpty)
             {
-                Span<ulong> rowHashes = _rowHashes;
                 for (int row = from; row < stop; row++)
                 {
                     rowHashes[row] = allValid || (own.IsValid(row) && wrapper.IsValid(row)) ? hashes[row - from] : 0;
@@ -518,7 +494,8 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
 
     /// <summary>A text column's rows <c>[start, start + count)</c>, each looked up in the views met last first.</summary>
     private void Text(
-        ReadOnlySpan<byte> views, ReadOnlySpan<VortexBuffer> buffers, int start, int count, bool allValid, ValidityMask own, ValidityMask wrapper)
+        ReadOnlySpan<byte> views, ReadOnlySpan<VortexBuffer> buffers, int start, int count, bool allValid, ValidityMask own, ValidityMask wrapper,
+        Span<ulong> rowHashes)
     {
         if (_slots.IsEmpty && allValid)
         {
@@ -531,11 +508,68 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
         ref byte origin = ref MemoryMarshal.GetReference(views);
         Span<int> ids = _rowIds.IsEmpty ? default : _rowIds.AsSpan(0, count);
         bool numbering = !ids.IsEmpty;
-        Span<ulong> rowHashes = _rowHashes;
         bool hashing = !rowHashes.IsEmpty;
+
+        // The longer view taken last in this call, its slot, -1 for none or for a value counted apart, and its hash: a view
+        // that names the same bytes of the same batch is the same value, which a shredded key's rows repeat row after row,
+        // each viewing the first's bytes (VariantFieldExpr.Output.Repeat), and each was hashed again.
+        bool repeats = false;
+        ulong lastLow = 0;
+        ulong lastHigh = 0;
+        int lastAt = -1;
+        ulong lastHash = 0;
+
+        // Most rows hold no value, a shredded key's: their marks set at once, and the rows that do found a word of the bitmap
+        // at a time rather than each row's validity read. A row at a time, the hundreds of keys of a log's attributes walked
+        // every row of every block.
+        ReadOnlySpan<byte> bits = default;
+        int bitOffset = 0;
+        bool one = !allValid && OneBitmap(own, wrapper, out bits, out bitOffset);
+        bool sparse = one && BitmapKernels.CountSet(bits, bitOffset + start, count) * 2 < count;
+
+        // A row that views what the valid row before viewed holds its value: it and the valid rows after it that view the same
+        // are counted at once as that row was, by the cache of views met or as a longer view's repeats. A metric's attributes
+        // repeat row after row, and the 772 M rows a consolidation of metric records' keys fed here each looked their view up
+        // and read their validity twice, 7.6 % of its processor (2026-11-18).
+        int runRow = -1;
+        ulong runLow = 0;
+        ulong runHigh = 0;
+        int end = start + count;
+        if (sparse)
+        {
+            _nulls += count - BitmapKernels.CountSet(bits, bitOffset + start, count);
+            if (numbering)
+            {
+                ids.Fill(-1);
+            }
+
+            if (hashing)
+            {
+                rowHashes.Slice(start, count).Clear();
+            }
+        }
+
+        ulong word = 0;
+        int wordAt = -64;
         for (int row = start; row < start + count; row++)
         {
-            if (!allValid && !(own.IsValid(row) && wrapper.IsValid(row)))
+            if (sparse)
+            {
+                while (word == 0 && wordAt + 64 < count)
+                {
+                    wordAt += 64;
+                    word = BitmapKernels.Word(bits, bitOffset + start + wordAt, Math.Min(64, count - wordAt));
+                }
+
+                if (word == 0)
+                {
+                    break;
+                }
+
+                row = start + wordAt + BitOperations.TrailingZeroCount(word);
+                word &= word - 1;
+            }
+            else if (!allValid && !(one ? Bit(bits, bitOffset + row) : own.IsValid(row) && wrapper.IsValid(row)))
             {
                 _nulls++;
                 if (numbering)
@@ -554,6 +588,24 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
             ulong low = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref origin, row * 16));
             ulong high = Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref origin, (row * 16) + 8));
 
+            // The stretch of rows from this one that hold its value as the row before held it: one row, or, past the sparse
+            // walk, each valid row after it whose view is the same.
+            int rows = 1;
+            if (runRow == row - 1 && low == runLow && high == runHigh && !sparse)
+            {
+                while (row + rows < end
+                    && Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref origin, (row + rows) * 16)) == low
+                    && Unsafe.ReadUnaligned<ulong>(ref Unsafe.Add(ref origin, ((row + rows) * 16) + 8)) == high
+                    && (allValid || (one ? Bit(bits, bitOffset + row + rows) : own.IsValid(row + rows) && wrapper.IsValid(row + rows))))
+                {
+                    rows++;
+                }
+            }
+
+            runRow = row + rows - 1;
+            runLow = low;
+            runHigh = high;
+
             // A view of twelve bytes or fewer is its value, which an equal view names again; a longer one names its bytes'
             // place, which another copy of them does not share, and is looked up by its hash alone.
             bool inline = (uint)low <= 12;
@@ -564,33 +616,65 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 if (slot > 1)
                 {
                     ref Slot held = ref _slots[(int)(slot - 2)];
-                    held.Count++;
+                    held.Count += rows;
                     if (numbering)
                     {
-                        ids[row - start] = (int)(held.Count >> IdShift);
+                        ids.Slice(row - start, rows).Fill((int)(held.Count >> IdShift));
                     }
 
                     if (hashing)
                     {
-                        rowHashes[row] = held.Key;
+                        rowHashes.Slice(row, rows).Fill(held.Key);
                     }
                 }
                 else if (!_slots.IsEmpty)
                 {
-                    _zeroRows++;
+                    _zeroRows += rows;
                     if (numbering)
                     {
-                        ids[row - start] = _zeroId;
+                        ids.Slice(row - start, rows).Fill(_zeroId);
                     }
 
                     if (hashing)
                     {
-                        rowHashes[row] = 0;
+                        rowHashes.Slice(row, rows).Clear();
                     }
                 }
 
+                row += rows - 1;
                 continue;
             }
+
+            // The rows a longer view repeats are counted as Take counts a value it holds: its slot's count, or the rows of
+            // the value counted apart; past the counts, its register was raised already.
+            if (!inline && repeats && low == lastLow && high == lastHigh)
+            {
+                if (lastAt >= 0)
+                {
+                    _slots[lastAt].Count += rows;
+                }
+                else if (!_slots.IsEmpty)
+                {
+                    _zeroRows += rows;
+                }
+
+                if (numbering)
+                {
+                    ids.Slice(row - start, rows).Fill(lastAt >= 0 ? IdAt(lastAt) : _zeroId);
+                }
+
+                if (hashing)
+                {
+                    rowHashes.Slice(row, rows).Fill(lastHash);
+                }
+
+                row += rows - 1;
+                continue;
+            }
+
+            // A row the stretch reached is one of the two above, the row before having left its view met or repeated: this
+            // one is taken alone whatever the stretch.
+            runRow = row;
 
             ReadOnlySpan<byte> value = BloomBuilder.ValueAt(views, buffers, row);
             ulong valueHash = SplitBlockBloom.Hash(value, BloomHash.XxHash3);
@@ -605,13 +689,40 @@ internal sealed class ColumnSheetBuilder : IndexBuilder
                 ids[row - start] = at >= 0 ? IdAt(at) : _zeroId;
             }
 
+            // A value taken may have grown the counts, which moves every slot: the longer view taken last is forgotten.
             if (entry >= 0)
             {
                 met[entry] = low;
                 met[entry + 1] = high;
                 met[entry + 2] = at < 0 ? 1 : (ulong)at + 2;
+                repeats = false;
+            }
+            else
+            {
+                (repeats, lastLow, lastHigh, lastAt, lastHash) = (true, low, high, at, valueHash);
             }
         }
+    }
+
+    /// <summary>Bit <paramref name="at"/> of <paramref name="bits"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool Bit(ReadOnlySpan<byte> bits, int at) => ((bits[at >> 3] >> (at & 7)) & 1) != 0;
+
+    /// <summary>
+    /// The one bitmap that says which rows hold a value, of <paramref name="own"/> and <paramref name="wrapper"/> read together:
+    /// either's when the other holds every row, theirs when they are the same; false when none holds one, or for two bitmaps.
+    /// </summary>
+    private static bool OneBitmap(ValidityMask own, ValidityMask wrapper, out ReadOnlySpan<byte> bits, out int bitOffset)
+    {
+        ValidityMask one = wrapper.AllValid ? own : own.AllValid ? wrapper : own;
+        bits = one.Bits;
+        bitOffset = one.BitOffset;
+        if (own.AllInvalid || wrapper.AllInvalid || bits.IsEmpty)
+        {
+            return false;
+        }
+
+        return own.AllValid || wrapper.AllValid || (own.Bits == wrapper.Bits && own.BitOffset == wrapper.BitOffset);
     }
 
     /// <summary>A text column's valid rows <c>[start, start + count)</c> once the counts are gone: each value's register raised.</summary>

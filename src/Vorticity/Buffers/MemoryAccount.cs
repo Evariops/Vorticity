@@ -46,6 +46,16 @@ internal abstract class MemoryAccount
     internal abstract bool TryTake(long bytes);
 
     /// <summary>
+    /// <see cref="TryTake(long)"/> for a block of which <paramref name="reserved"/> bytes are counted under the account's
+    /// budget already, a reserve's that the block takes over (<see cref="MemoryReserve.Take"/>): the account reserves the
+    /// rest alone, and measures them all. And, with <paramref name="kept"/>, for a block the pool kept, parked or free in
+    /// a slab alive (<see cref="BlockPool.Rent"/>): bytes the heap holds already, which the budgets of the account's work
+    /// count as any others, and which the process's does not weigh against the rest of its memory, where they are
+    /// (<see cref="QueryMemoryBudget.TryReserve"/>). An account that reserves nothing takes them as any others.
+    /// </summary>
+    internal virtual bool TryTake(long bytes, long reserved, bool kept) => TryTake(bytes);
+
+    /// <summary>
     /// A block of <paramref name="bytes"/> taken came from what the pool kept, parked or free in a slab alive: memory the heap
     /// holds already, which an account that measures it tells the process's budget.
     /// </summary>
@@ -106,9 +116,13 @@ internal class BudgetAccount : MemoryAccount
     /// the middle of a batch is (<see cref="QueryMemoryBudget.Force"/>): a block is what the work needs to go on, and the work
     /// beside it that can wait, spill or turn to the core sees the room it took. Only the process past its limit refuses it.
     /// </summary>
-    internal override bool TryTake(long bytes)
+    internal override bool TryTake(long bytes) => TryTake(bytes, 0, kept: false);
+
+    /// <inheritdoc/>
+    internal override bool TryTake(long bytes, long reserved, bool kept)
     {
-        if (!Budget.TryReserve(bytes) && !Budget.Force(bytes))
+        long rest = bytes - reserved;
+        if (rest > 0 && !Budget.TryReserve(rest, kept) && !Budget.Force(rest, kept))
         {
             return false;
         }
@@ -160,7 +174,7 @@ internal class BudgetAccount : MemoryAccount
         QueryMemoryBudget process = QueryMemoryBudget.Process;
         return new VortexMemoryException(string.Create(
             CultureInfo.InvariantCulture,
-            $"The {_work} asks for a block of {bytes:N0} bytes, which the process cannot take past its limit: its budget of {Budget.CeilingBytes:N0} bytes holds {Budget.ReservedBytes:N0}, and the process leaves its work {process.CeilingBytes:N0} bytes, the rest of its memory holding {process.RestBytes:N0}."));
+            $"The {_work} asks for a block of {bytes:N0} bytes, which the process cannot take past its limit: its budget of {Budget.CeilingBytes:N0} bytes holds {Budget.ReservedBytes:N0}, and the process leaves its work {process.CeilingBytes:N0} bytes, the rest of its memory holding {process.RestBytes:N0}. The process's work holds {process.ReservedBytes:N0} bytes in all, and its pool keeps {Pool.ParkedBytes:N0} bytes parked and {Slabs.FreeBytes:N0} free in its slabs."));
     }
 }
 
@@ -186,33 +200,55 @@ internal class WorkAccount : BudgetAccount, IDisposable
     /// <summary>The bytes the work's blocks hold now.</summary>
     internal long Held => Math.Max(0, Volatile.Read(ref _held));
 
+    /// <summary>
+    /// What the work reserves in before it takes, at the points where it can wait (<see cref="ReservingAccount"/>); null
+    /// for a work that reserves nothing, any but a compaction job's writer.
+    /// </summary>
+    internal virtual MemoryReserve? Reserve => null;
+
     /// <inheritdoc/>
     private protected override bool Measures => Volatile.Read(ref _held) >= 0;
 
-    internal override bool TryTake(long bytes)
+    internal override bool TryTake(long bytes) => TryTake(bytes, 0, kept: false);
+
+    /// <inheritdoc/>
+    internal override bool TryTake(long bytes, long reserved, bool kept)
     {
         long held = Volatile.Read(ref _held);
+        if (held < 0)
+        {
+            // Ended: a block rented now is the caller's alone, counted nowhere, as a block given back after the end is.
+            // What a reserve had counted for it goes back to the budget, which the block will not.
+            if (reserved > 0)
+            {
+                Budget.Release(reserved);
+            }
+
+            return true;
+        }
+
+        if (!base.TryTake(bytes, reserved, kept))
+        {
+            return false;
+        }
+
+        // Taken once, then counted: another block taken or given meanwhile only moves the count it is added to. A take
+        // given back and made again for each such move would hand a reserve's bytes to the budget and ask for them anew.
         while (true)
         {
-            if (held < 0)
-            {
-                // Ended: a block rented now is the caller's alone, counted nowhere, as a block given back after the end is.
-                return true;
-            }
-
-            if (!base.TryTake(bytes))
-            {
-                return false;
-            }
-
             long seen = Interlocked.CompareExchange(ref _held, held + bytes, held);
             if (seen == held)
             {
                 return true;
             }
 
-            base.Give(bytes);
             held = seen;
+            if (held < 0)
+            {
+                // Ended meanwhile: the block is the caller's alone.
+                base.Give(bytes);
+                return true;
+            }
         }
     }
 
@@ -247,5 +283,30 @@ internal class WorkAccount : BudgetAccount, IDisposable
     {
         Close();
         GC.SuppressFinalize(this);
+    }
+}
+
+/// <summary>
+/// The account of a piece of work that reserves what it is about to hold where it can wait, a compaction job's writer: a
+/// block it rents takes first from what was reserved (<see cref="MemoryReserve.Take"/>), bytes the budget counts already,
+/// and asks the budget for the rest alone. The work reserves on the flow that drives it, before a copy whose size it
+/// counted; what a lane of it takes past that is asked of the budget as any block is.
+/// </summary>
+internal sealed class ReservingAccount(QueryMemoryBudget budget, string work, MemoryReserve reserve) : WorkAccount(budget, work)
+{
+    /// <inheritdoc/>
+    internal override MemoryReserve? Reserve => reserve;
+
+    /// <inheritdoc/>
+    internal override bool TryTake(long bytes, long reserved, bool kept)
+    {
+        long spare = reserve.Take(bytes - reserved);
+        if (base.TryTake(bytes, reserved + spare, kept))
+        {
+            return true;
+        }
+
+        reserve.PutBack(spare);
+        return false;
     }
 }

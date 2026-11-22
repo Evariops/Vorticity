@@ -117,6 +117,14 @@ internal static class CountsMicro
             long planTicks = 0;
             long[] ticks = new long[columns];
             int[] nodes = new int[columns];
+
+            // What each batch's counts read beside their columns, read once by the plan.
+            using CountedRows counted = new CountedRows();
+            foreach (ColumnCountsBuilder? builder in builders)
+            {
+                builder?.Counted = counted;
+            }
+
             await foreach (RecordBatch batch in file.ScanBuilder().ExecuteAsync())
             {
                 for (int column = 0; column < columns; column++)
@@ -125,7 +133,7 @@ internal static class CountsMicro
                 }
 
                 long started = Stopwatch.GetTimestamp();
-                counts.Prepare(batch.Arena, nodes, batch.RowCount);
+                counts.Prepare(counted, batch.Arena, nodes, batch.RowCount);
                 planTicks += Stopwatch.GetTimestamp() - started;
                 for (int column = 0; column < columns; column++)
                 {

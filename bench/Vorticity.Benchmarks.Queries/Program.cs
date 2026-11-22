@@ -167,13 +167,18 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
         Task.FromResult(PoolRentMicro.Run(rounds))),
     ["needles"] = ("what a needle's index weighs and what a probe costs, sorted run against a hashed index (NeedleMicro.cs)", () =>
         NeedleMicro.Run((int)Option(args, "--rows", 4_000_000), rounds)),
-    ["backlog"] = ("a maintainer back to a backlog of metric records, every append spanning every series, compacted job by job under --memory-limit SIZE (BacklogBench.cs)", () =>
+    ["backlog"] = ("a maintainer back to a backlog of metric records, every append spanning every series, or of log records with --logs, compacted job by job under --memory-limit SIZE (BacklogBench.cs)", () =>
         BacklogBench.RunAsync(
             Text(args, "--store") ?? BenchStores.Of("backlog"), (int)Option(args, "--appends", 300), (int)Option(args, "--rows", 30_000),
             (int)Option(args, "--series", 20_000),
             Text(args, "--memory-limit") is { } limit ? VortexMemory.ParseBytes(limit) ?? throw new ArgumentException($"--memory-limit {limit} is not a size: 2g, 2048m.") : 0,
             args.Contains("--compact-only"), (int)Option(args, "--latency", 0), (int)Option(args, "--scans", 0), args.Contains("--build-only"),
-            Text(args, "--bytes") is { } size ? VortexMemory.ParseBytes(size) ?? throw new ArgumentException($"--bytes {size} is not a size: 25g, 512m.") : 0)),
+            Text(args, "--bytes") is { } size ? VortexMemory.ParseBytes(size) ?? throw new ArgumentException($"--bytes {size} is not a size: 25g, 512m.") : 0,
+            (int)Option(args, "--degree", 0), args.Contains("--digest"), args.Contains("--logs"), (int)Option(args, "--jobs", -1), Text(args, "--keep"),
+            (int)Option(args, "--repeat", 1), args.Contains("--quick-exit"), args.Contains("--bytes-digest"), Text(args, "--memory-timeline"), Text(args, "--segments"),
+            args.Contains("--takes-variants"),
+            Text(args, "--object-bytes") is { } aim ? VortexMemory.ParseBytes(aim) ?? throw new ArgumentException($"--object-bytes {aim} is not a size: 64m, 1g.") : 0,
+            args.Contains("--calm"), args.Contains("--object-sizes"))),
     ["inputs"] = ("--store DIR: what the inputs of a merge hold while it reads them, 1 to 8 of a dataset's largest objects in lockstep (InputMemoryMicro.cs)", () =>
         InputMemoryMicro.Run(Text(args, "--store") ?? throw new ArgumentException("--micro inputs needs --store DIR, a dataset's directory."), (int)Option(args, "--objects", 8))),
     ["consolidation"] = ("--store DIR: what a consolidation holds apart from any other work, hours of log records left in level 0 consolidated on 1 lane and on 8 (ConsolidationMemoryMicro.cs)", () =>
@@ -263,7 +268,9 @@ if (Text(args, "--micro") is { } micro)
     if (micros.TryGetValue(micro, out (string Help, Func<Task<int>> Run) chosen))
     {
         // --block-sites FILE: the blocks the run holds at its peak, by the site that rented them (BlockSites.cs).
-        using BlockSites? sites = Text(args, "--block-sites") is { } path ? BlockSites.Watch(path) : null;
+        // --block-sites-of TEXT: only the blocks whose site names TEXT in one of its frames, the peak theirs alone: a
+        // compaction's writer with VortexFileWriter, whatever its inputs hold beside it.
+        using BlockSites? sites = Text(args, "--block-sites") is { } path ? BlockSites.Watch(path, Text(args, "--block-sites-of")) : null;
 
         // --memory-limit SIZE: the process held to it, as a host sets it, for every micro but the backlog, which sets it itself.
         if (micro != "backlog" && Text(args, "--memory-limit") is { } held)

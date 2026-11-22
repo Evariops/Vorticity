@@ -44,9 +44,10 @@ internal enum PathPlace : byte
 /// The groups of rows of the object the path may hold a value in, a bit each, group 0 the low bit of byte 0;
 /// null when it may hold one in every group, or the object counts none.
 /// </param>
+/// <param name="WholeDoubles">Whether every number of a double entry is a 64-bit double (<see cref="DirectoryEntry.WholeDoubles"/>).</param>
 internal sealed record PathEntry(
     string[] Path, PathClass Class, long Values, PathPlace Place, long Low, long High, bool NaNs, byte[]? MinText, byte[]? MaxText,
-    byte[]? Groups = null)
+    byte[]? Groups = null, bool WholeDoubles = false)
 {
     /// <summary>Whether the path may hold a value in group <paramref name="group"/>; any group for -1.</summary>
     internal bool In(int group) => group < 0 || Groups is null || (group >> 3 < Groups.Length && (Groups[group >> 3] & (1 << (group & 7))) != 0);
@@ -115,6 +116,12 @@ internal readonly ref struct DirectoryEntry
     /// <summary>Whether the entry names the groups it may hold a value in; it may hold one in every group otherwise.</summary>
     internal bool HasGroups => (_flags & 8) != 0;
 
+    /// <summary>
+    /// Whether every number of a <see cref="PathClass.Double"/> entry is a 64-bit double, none a 32-bit float: what a count of
+    /// the rows keeps apart, which a shredding chooses from. Written since 2026-11-18; a directory before says nothing of it.
+    /// </summary>
+    internal bool WholeDoubles => (_flags & 16) != 0;
+
     internal ReadOnlySpan<byte> MinText { get; }
 
     internal ReadOnlySpan<byte> MaxText { get; }
@@ -144,17 +151,22 @@ internal readonly ref struct DirectoryEntry
 /// </remarks>
 internal sealed class VariantDirectory
 {
-    // Version 1 named the slices bounded by keys a path lies in, retired with them; 2 names groups of fixed rows.
-    private const byte Version = 2;
+    // Version 1 named the slices bounded by keys a path lies in, retired with them; 2 names groups of fixed rows; 3 keeps the
+    // bytes of the rows' values too, which a job's first pass then takes from the directory in place of reading the column.
+    private const byte Version = 3;
+
+    /// <summary>The version before the rows' value bytes, still read: its directories keep none (<see cref="ValueBytes"/> of -1).</summary>
+    private const byte ValuelessVersion = 2;
 
     private readonly Dictionary<string, PathEntry[]> _byPath;
 
-    internal VariantDirectory(long rows, IReadOnlyList<PathEntry> entries, long groupRows = 0, bool partial = false)
+    internal VariantDirectory(long rows, IReadOnlyList<PathEntry> entries, long groupRows = 0, bool partial = false, long valueBytes = -1)
     {
         Rows = rows;
         Entries = entries;
         GroupRows = groupRows;
         Partial = partial;
+        ValueBytes = valueBytes;
         Dictionary<string, List<PathEntry>> grouped = new Dictionary<string, List<PathEntry>>(StringComparer.Ordinal);
         foreach (PathEntry entry in entries)
         {
@@ -195,6 +207,12 @@ internal sealed class VariantDirectory
     /// <summary>Whether the budget left a path out, so that a path's absence proves nothing.</summary>
     internal bool Partial { get; }
 
+    /// <summary>
+    /// The bytes of the rows' values as the residual would hold them unshredded (<see cref="PathCensus.ValueBytes"/>), what a
+    /// job's first pass sizes a shredded column's chunks by; -1 for a directory of a version that kept none.
+    /// </summary>
+    internal long ValueBytes { get; }
+
     /// <summary>The classes the path of <paramref name="keys"/> holds; empty when the object holds no value there.</summary>
     internal ReadOnlySpan<PathEntry> Of(IReadOnlyList<string> keys) =>
         _byPath.TryGetValue(Joined(keys), out PathEntry[]? entries) ? entries : [];
@@ -210,7 +228,7 @@ internal sealed class VariantDirectory
         List<string> path = [];
         int groups = groupRows <= 0 ? 0 : (int)((census.Rows + groupRows - 1) / groupRows);
         Walk(census.Root, shredding, groupRows, groups, path, entries);
-        return new VariantDirectory(census.Rows, entries, groups > 1 ? groupRows : 0, partial: census.Partial);
+        return new VariantDirectory(census.Rows, entries, groups > 1 ? groupRows : 0, partial: census.Partial, valueBytes: census.ValueBytes);
     }
 
     private static void Walk(
@@ -227,7 +245,8 @@ internal sealed class VariantDirectory
 
             (long low, long high, bool nans, byte[]? min, byte[]? max) = Bounds(count, @class);
             byte[]? held = groups > 1 ? GroupsOf(count.SpansOf(@class), groupRows, groups) : null;
-            entries.Add(new PathEntry(keys, @class, values, PlaceOf(shredding, @class), low, high, nans, min, max, held));
+            bool wholeDoubles = @class == PathClass.Double && count.Of(VariantClass.Double) == values;
+            entries.Add(new PathEntry(keys, @class, values, PlaceOf(shredding, @class), low, high, nans, min, max, held, wholeDoubles));
         }
 
         // Keys in their ordinal order, so that the same rows give the same bytes.
@@ -644,8 +663,9 @@ internal sealed class VariantDirectory
         ProtoWriter writer = new ProtoWriter();
         try
         {
+            // A directory that keeps no value bytes, one read from a region of the version before, is written at that version.
             Body(ref writer);
-            return ZstdRegion.Encode(Version, writer.WrittenSpan);
+            return ZstdRegion.Encode(ValueBytes >= 0 ? Version : ValuelessVersion, writer.WrittenSpan);
         }
         finally
         {
@@ -653,12 +673,17 @@ internal sealed class VariantDirectory
         }
     }
 
-    /// <summary>The rows, then each entry: its keys, class, count, place, bounds and texts.</summary>
+    /// <summary>The rows, the rows' value bytes, then each entry: its keys, class, count, place, bounds and texts.</summary>
     private void Body(ref ProtoWriter writer)
     {
         writer.WriteVarint((ulong)Rows);
         writer.WriteVarint((ulong)GroupRows);
         writer.WriteVarint(Partial ? 1UL : 0);
+        if (ValueBytes >= 0)
+        {
+            writer.WriteVarint((ulong)ValueBytes);
+        }
+
         writer.WriteVarint((ulong)Entries.Count);
         foreach (PathEntry entry in Entries)
         {
@@ -674,7 +699,8 @@ internal sealed class VariantDirectory
             writer.WriteVarint(Zigzag(entry.Low));
             writer.WriteVarint(Zigzag(entry.High));
             writer.WriteVarint(
-                (entry.NaNs ? 1UL : 0) | (entry.MinText is null ? 0 : 2UL) | (entry.MaxText is null ? 0 : 4UL) | (entry.Groups is null ? 0 : 8UL));
+                (entry.NaNs ? 1UL : 0) | (entry.MinText is null ? 0 : 2UL) | (entry.MaxText is null ? 0 : 4UL) | (entry.Groups is null ? 0 : 8UL)
+                | (entry.WholeDoubles ? 16UL : 0));
             Text(ref writer, entry.MinText);
             Text(ref writer, entry.MaxText);
             Text(ref writer, entry.Groups);
@@ -705,14 +731,14 @@ internal sealed class VariantDirectory
     /// </remarks>
     internal static VariantDirectory? From(ReadOnlySpan<byte> bytes, IReadOnlyList<byte[][]>? wanted)
     {
-        if (ZstdRegion.Rent(bytes, Version) is not { } body)
+        if (Rent(bytes, out bool valued) is not { } body)
         {
             return null;
         }
 
         try
         {
-            return BodyFrom(body, wanted);
+            return BodyFrom(body, valued, wanted);
         }
         finally
         {
@@ -720,13 +746,28 @@ internal sealed class VariantDirectory
         }
     }
 
+    /// <summary>The body of a region of either version, decompressed into a rented block, and whether it keeps the value bytes; null when it does not decode.</summary>
+    private static Buffers.Block<byte>? Rent(ReadOnlySpan<byte> bytes, out bool valued)
+    {
+        if (ZstdRegion.Rent(bytes, Version) is { } body)
+        {
+            valued = true;
+            return body;
+        }
+
+        valued = false;
+        return ZstdRegion.Rent(bytes, ValuelessVersion);
+    }
+
     /// <summary>The groups of <paramref name="groupRows"/> rows of <paramref name="rows"/>; 0 for none.</summary>
     internal static int Groups(long rows, long groupRows) => groupRows <= 0 ? 0 : (int)((rows + groupRows - 1) / groupRows);
 
-    private static VariantDirectory? BodyFrom(ReadOnlySpan<byte> bytes, IReadOnlyList<byte[][]>? wanted)
+    private static VariantDirectory? BodyFrom(ReadOnlySpan<byte> bytes, bool valued, IReadOnlyList<byte[][]>? wanted)
     {
         EntryList list = new EntryList(wanted);
-        return VisitBody(bytes, ref list) ? new VariantDirectory(list.Rows, list.Entries, list.GroupRows, list.Partial) : null;
+        return VisitBody(bytes, valued, ref list, out long valueBytes)
+            ? new VariantDirectory(list.Rows, list.Entries, list.GroupRows, list.Partial, valueBytes)
+            : null;
     }
 
     /// <summary>
@@ -736,7 +777,7 @@ internal sealed class VariantDirectory
     internal static bool Visit<TVisitor>(ReadOnlySpan<byte> bytes, ref TVisitor visitor)
         where TVisitor : IDirectoryVisitor
     {
-        if (ZstdRegion.Rent(bytes, Version) is not { } body)
+        if (Rent(bytes, out bool valued) is not { } body)
         {
             return false;
         }
@@ -745,7 +786,7 @@ internal sealed class VariantDirectory
         {
             // Walked twice, the first time to know it decodes: what a visitor takes it takes whole or not at all.
             Decodes decodes = default;
-            return VisitBody(body, ref decodes) && VisitBody(body, ref visitor);
+            return VisitBody(body, valued, ref decodes, out _) && VisitBody(body, valued, ref visitor, out _);
         }
         finally
         {
@@ -754,18 +795,25 @@ internal sealed class VariantDirectory
     }
 
     /// <summary>
-    /// Walks the body <paramref name="bytes"/>, handing <paramref name="visitor"/> its head and each entry as it lies; false when
+    /// Walks the body <paramref name="bytes"/>, of the version that keeps the rows' value bytes when <paramref name="valued"/>,
+    /// handing <paramref name="visitor"/> its head and each entry as it lies, and giving the value bytes, -1 for none; false when
     /// it does not decode, the visitor having seen the entries before the fault.
     /// </summary>
-    private static bool VisitBody<TVisitor>(ReadOnlySpan<byte> bytes, ref TVisitor visitor)
+    private static bool VisitBody<TVisitor>(ReadOnlySpan<byte> bytes, bool valued, ref TVisitor visitor, out long valueBytes)
         where TVisitor : IDirectoryVisitor
     {
+        valueBytes = -1;
         try
         {
             ProtoReader reader = new ProtoReader(bytes);
             long rows = checked((long)reader.ReadVarint());
             long groupRows = checked((long)reader.ReadVarint());
             bool partial = reader.ReadVarint() != 0;
+            if (valued)
+            {
+                valueBytes = checked((long)reader.ReadVarint());
+            }
+
             ulong count = reader.ReadVarint();
             if (count > (ulong)bytes.Length)
             {
@@ -844,32 +892,35 @@ internal sealed class VariantDirectory
     /// </summary>
     internal static DirectoryBody? Open(ReadOnlySpan<byte> bytes)
     {
-        if (ZstdRegion.Rent(bytes, Version) is not { } body)
+        if (Rent(bytes, out bool valued) is not { } body)
         {
             return null;
         }
 
         Decodes decodes = default;
-        if (!VisitBody(body, ref decodes))
+        if (!VisitBody(body, valued, ref decodes, out long valueBytes))
         {
             Buffers.Blocks.Return(body);
             return null;
         }
 
-        return new DirectoryBody(body, decodes.Rows, decodes.GroupRows, decodes.Partial);
+        return new DirectoryBody(body, valued, decodes.Rows, decodes.GroupRows, decodes.Partial, valueBytes);
     }
 
     /// <summary>
     /// A directory's body, decompressed and known to decode (<see cref="Open"/>): its head, and its entries walked as they lie,
     /// as often as asked, until it is disposed and its buffer given back.
     /// </summary>
-    internal sealed class DirectoryBody(Buffers.Block<byte> body, long rows, long groupRows, bool partial) : IDisposable
+    internal sealed class DirectoryBody(Buffers.Block<byte> body, bool valued, long rows, long groupRows, bool partial, long valueBytes) : IDisposable
     {
         private Buffers.Block<byte> _body = body;
         private bool _disposed;
 
         /// <summary>The object's rows.</summary>
         internal long Rows { get; } = rows;
+
+        /// <summary>The bytes of the rows' values as the residual would hold them unshredded; -1 for a directory of a version that kept none.</summary>
+        internal long ValueBytes { get; } = valueBytes;
 
         /// <summary>The rows of a group the entries name; 0 for none.</summary>
         internal long GroupRows { get; } = groupRows;
@@ -882,7 +933,7 @@ internal sealed class VariantDirectory
             where TVisitor : IDirectoryVisitor
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            VisitBody(_body, ref visitor);
+            VisitBody(_body, valued, ref visitor, out _);
         }
 
         public void Dispose()
@@ -931,7 +982,7 @@ internal sealed class VariantDirectory
             Entries.Add(new PathEntry(
                 path, entry.Class, entry.Values, entry.Place, entry.Low, entry.High, entry.NaNs,
                 entry.HasMinText ? entry.MinText.ToArray() : null, entry.HasMaxText ? entry.MaxText.ToArray() : null,
-                entry.HasGroups ? entry.Groups.ToArray() : null));
+                entry.HasGroups ? entry.Groups.ToArray() : null, entry.WholeDoubles));
         }
     }
 

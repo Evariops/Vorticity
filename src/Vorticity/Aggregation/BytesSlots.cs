@@ -776,7 +776,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
 
     public long Pairs => _seen.Count;
 
-    public async Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, int degree, QueryMemory? memory, CancellationToken cancellationToken)
+    public async Task MergeInPartsAsync(AggregateSlot[] slots, int[][] maps, int groups, int parts, Execution.Spread degree, QueryMemory? memory, CancellationToken cancellationToken)
     {
         BytesDistinctSlot[] all = new BytesDistinctSlot[slots.Length];
         for (int p = 0; p < slots.Length; p++)

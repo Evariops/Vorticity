@@ -69,6 +69,14 @@ internal static class GranulesMicro
                 locates[column] = new LocateBuilder(sheets[column]);
             }
 
+            // What each batch's counts and statistics read beside their columns, read once by the plan.
+            using CountedRows counted = new CountedRows();
+            for (int column = 0; column < columns; column++)
+            {
+                counters[column].Counted = counted;
+                builders[column].Counted = counted;
+            }
+
             long[] ticks = new long[columns];
             int[] nodes = new int[columns];
             long row = 0;
@@ -79,7 +87,7 @@ internal static class GranulesMicro
                     nodes[column] = batch.Arena.GetNode(batch.RootIndex).GetFieldIndex(column);
                 }
 
-                counts.Prepare(batch.Arena, nodes, batch.RowCount);
+                counts.Prepare(counted, batch.Arena, nodes, batch.RowCount);
 
                 // The batch in pieces that end where a granule does, each granule closed as the writer closes its block.
                 for (int from = 0; from < batch.RowCount;)

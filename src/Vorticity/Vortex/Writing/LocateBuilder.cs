@@ -1,6 +1,7 @@
 using System;
 using System.Numerics;
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Indexes;
 
@@ -68,24 +69,57 @@ internal sealed class LocateBuilder : IndexBuilder
         }
 
         int mark = _granule + 1;
-        Span<int> seenIn = _seenIn;
-        foreach (int id in ids[..count])
+        if (ValidityMask.OneBitmap(arena, nodeIndex, out ReadOnlySpan<byte> bits, out int bitOffset)
+            && BitmapKernels.CountSet(bits, bitOffset + start, count) * 2 < count)
         {
-            if (id < 0)
+            // Most rows hold no value, a shredded key's: the rows that do, found a word of the bitmap at a time. A row at a
+            // time, the hundreds of keys of a log's attributes walked every row of every block.
+            for (int at = 0; at < count; at += 64)
             {
-                continue;
+                ulong word = BitmapKernels.Word(bits, bitOffset + start + at, Math.Min(64, count - at));
+                while (word != 0)
+                {
+                    Take(ids[at + BitOperations.TrailingZeroCount(word)], mark);
+                    word &= word - 1;
+                }
             }
-
-            if ((uint)id >= (uint)seenIn.Length)
+        }
+        else
+        {
+            // A run of rows of one value is noted once, its end found a vector at a time: a block's rows come in the order of
+            // their keys, and a series' rows hold its attributes row after row.
+            Span<int> seenIn = _seenIn;
+            ReadOnlySpan<int> rows = ids[..count];
+            int at = 0;
+            while (at < rows.Length)
             {
-                Grow(id);
-                seenIn = _seenIn;
-            }
+                int id = rows[at];
+                if (at + 1 < rows.Length && rows[at + 1] == id)
+                {
+                    int past = rows[(at + 2)..].IndexOfAnyExcept(id);
+                    at = past < 0 ? rows.Length : at + 2 + past;
+                }
+                else
+                {
+                    at++;
+                }
 
-            if (seenIn[id] != mark)
-            {
-                seenIn[id] = mark;
-                Note(id);
+                if (id < 0)
+                {
+                    continue;
+                }
+
+                if ((uint)id >= (uint)seenIn.Length)
+                {
+                    Grow(id);
+                    seenIn = _seenIn;
+                }
+
+                if (seenIn[id] != mark)
+                {
+                    seenIn[id] = mark;
+                    Note(id);
+                }
             }
         }
 
@@ -96,6 +130,27 @@ internal sealed class LocateBuilder : IndexBuilder
     }
 
     internal override void CloseBlock() => _granule++;
+
+    /// <summary>Notes value <paramref name="id"/> in the open granule, once, a null's -1 aside.</summary>
+    private void Take(int id, int mark)
+    {
+        if (id < 0)
+        {
+            return;
+        }
+
+        if ((uint)id >= (uint)_seenIn.Length)
+        {
+            Grow(id);
+        }
+
+        Span<int> seenIn = _seenIn;
+        if (seenIn[id] != mark)
+        {
+            seenIn[id] = mark;
+            Note(id);
+        }
+    }
 
     internal override void Abandon(string reason)
     {

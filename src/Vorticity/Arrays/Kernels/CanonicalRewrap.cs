@@ -68,8 +68,30 @@ internal static class CanonicalRewrap
                 arena.AddDictionary(dtype, length, validity, source.Codes, source.EncodedValuesIndex),
             CanonicalKind.RunEnd =>
                 arena.AddRunEnd(dtype, length, validity, source.RunEnds, source.EncodedValuesIndex),
+
+            // The views, the rows' metadata and what took the rows stay shared: no value is put back.
+            CanonicalKind.Shredded => RewrapShredded(arena, sourceIndex, dtype, validity, length),
             _ => throw new UnreachableException($"CanonicalKind {(byte)source.Kind} is not defined."),
         };
+    }
+
+    private static int RewrapShredded(CanonicalArena arena, int sourceIndex, DType dtype, Validity validity, int length)
+    {
+        // Values put back already are re-published as they were put back.
+        int put = arena.PutBack(sourceIndex);
+        if (put >= 0)
+        {
+            return WithValidity(arena, put, dtype, validity, length);
+        }
+
+        CanonicalNode source = arena.GetNode(sourceIndex);
+        int wrapped = arena.AddShredded(dtype, length, validity, source.HollowViews, source.HollowDataBuffers, source.ShreddedMetadataIndex);
+        if (arena.TryTaken(sourceIndex, out CanonicalArena.ITakenRows? rows, out int first) && rows is not null)
+        {
+            arena.NoteTaken(wrapped, rows, first);
+        }
+
+        return wrapped;
     }
 
     private static int RewrapVarBinView(
@@ -86,7 +108,9 @@ internal static class CanonicalRewrap
                 buffers[i] = source.GetDataBuffer(i);
             }
 
-            return arena.AddVarBinView(dtype, length, validity, source.Views, buffers);
+            // Standing for the bytes the source stood for, where it shared its repeats' bytes.
+            return arena.AddVarBinView(
+                dtype, length, validity, source.Views, buffers, padded: false, standsFor: source.Arena.StandsFor(source.Index));
         }
         finally
         {

@@ -244,6 +244,42 @@ internal static class BitmapKernels
     }
 
     /// <summary>
+    /// The <paramref name="count"/> bits of <paramref name="bits"/> from bit <paramref name="start"/>, at most 64, the first
+    /// in the lowest place and the places past them clear: a word to walk the set bits of, a row at each one.
+    /// </summary>
+    /// <param name="bits">The bitmap; the caller has established it covers the range.</param>
+    /// <param name="start">First bit.</param>
+    /// <param name="count">How many bits, 1 to 64.</param>
+    /// <returns>The bits.</returns>
+    internal static ulong Word(ReadOnlySpan<byte> bits, int start, int count)
+    {
+        int at = start >> 3;
+        int shift = start & 7;
+        int bytes = Math.Min(bits.Length - at, 9);
+        ulong word;
+        if (bytes >= 8)
+        {
+            word = BinaryPrimitives.ReadUInt64LittleEndian(bits[at..]) >> shift;
+            if (shift > 0 && bytes == 9)
+            {
+                word |= (ulong)bits[at + 8] << (64 - shift);
+            }
+        }
+        else
+        {
+            ulong gathered = 0;
+            for (int i = 0; i < bytes; i++)
+            {
+                gathered |= (ulong)bits[at + i] << (8 * i);
+            }
+
+            word = gathered >> shift;
+        }
+
+        return count >= 64 ? word : word & ((1UL << count) - 1);
+    }
+
+    /// <summary>
     /// The set bits of the whole pairs of vectors of <paramref name="bytes"/>, 512-bit on AVX-512 where the runtime takes
     /// such vectors (as <see cref="Compute.WordBytes.IsAccelerated"/> says), 256-bit on AVX2, and how many bytes those are:
     /// each byte's two nibbles counted by a table shuffle, the bytes' counts summed by eight with a sum of absolute

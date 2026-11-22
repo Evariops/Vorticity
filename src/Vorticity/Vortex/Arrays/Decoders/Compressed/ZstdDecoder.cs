@@ -229,6 +229,32 @@ internal sealed class ZstdDecoder : ArrayDecoder
         return Rows(context, in node, dtype, length, start, count, metadata, frames, firstValue, 0, 0);
     }
 
+    /// <summary>
+    /// The bytes the frames of <paramref name="node"/> say they hold decompressed, read in its metadata without a frame
+    /// decompressed: what a decode of the whole node writes of its values' bytes, which a scan that reserves its memory
+    /// reserves before it decodes them (<see cref="ArrayDecodeContext.StatedBytes"/>). 0 when the metadata names more
+    /// frames than the node holds buffers, which the decode refuses.
+    /// </summary>
+    internal static long StatedBytes(in ArrayNode node)
+    {
+        Span<ZstdFrameMetadata> stack = stackalloc ZstdFrameMetadata[16];
+        using Scratch<ZstdFrameMetadata> scratch = new Scratch<ZstdFrameMetadata>(node.BufferCount, stack);
+        ZstdMetadata metadata = ZstdMetadata.Read(node.Metadata, scratch.Span);
+        if (metadata.FrameCount > scratch.Span.Length)
+        {
+            return 0;
+        }
+
+        long bytes = 0;
+        foreach (ZstdFrameMetadata frame in scratch.Span[..metadata.FrameCount])
+        {
+            // A size past what any decode would take is the decode's to refuse.
+            bytes += (long)Math.Min(frame.UncompressedSize, int.MaxValue);
+        }
+
+        return bytes;
+    }
+
     /// <summary>The node's metadata, read into <paramref name="table"/> and checked against its children, dtype and buffers.</summary>
     private static ZstdMetadata Read(in ArrayNode node, DType dtype, Span<ZstdFrameMetadata> table)
     {

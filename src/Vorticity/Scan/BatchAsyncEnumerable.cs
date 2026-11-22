@@ -138,7 +138,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live: null, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: ReadsAhead, account: Account));
+            readAhead: ReadsAhead, account: Account, decoders: Decoders, handover: Handover));
 
     /// <summary>
     /// The chunks of the variant columns the scan reads through some shredded keys alone; null when it
@@ -203,8 +203,32 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
     /// </summary>
     internal bool SinkDecodes { get; init; }
 
-    /// <summary>The lanes the scan runs on: the degree, widened by the read-ahead.</summary>
-    private int Lanes => _reverse ? 1 : Math.Max(_degree, Prefetch > 0 ? Prefetch + 1 : 1);
+    /// <summary>
+    /// Whether the consumer holds a lane of the session's for its own flow, a compaction job's merge: the splits it asks
+    /// ahead (<see cref="Prefetch"/>) then decode on lanes of the session's beside it, where a caller's own thread is one of
+    /// the degree.
+    /// </summary>
+    internal bool ConsumerHoldsLane { get; init; }
+
+    /// <summary>
+    /// The consumer that takes batches over past the scan's next step (<see cref="BatchHandover"/>); null for a consumer
+    /// done with each batch at the next.
+    /// </summary>
+    internal BatchHandover? Handover { get; init; }
+
+    /// <summary>
+    /// The splits the scan keeps going at once: the degree, widened by the read-ahead; two at least for a consumer that takes
+    /// batches over, whose lanes the scan cannot reuse at the next step.
+    /// </summary>
+    private int Lanes => _reverse ? 1 : Math.Max(Handover is null ? 1 : 2 + (Handover.Ahead?.PerInput ?? 0), Math.Max(_degree, Prefetch > 0 ? Prefetch + 1 : 1));
+
+    /// <summary>
+    /// The splits of those that may decode at once beside the consumer, each on a lane of the session's: the degree but the
+    /// caller's thread, which decodes the splits none took, so that a scan at a degree of 1 decodes on its caller's flow
+    /// alone; every split but the consumer's for a consumer that holds a lane of the session's itself. A split reads on
+    /// no lane: its reads wait for the store, not for a core.
+    /// </summary>
+    private int Decoders => _reverse ? 0 : ConsumerHoldsLane ? Lanes - 1 : Math.Max(_degree, 1) - 1;
 
     /// <summary>
     /// The splits a scan keeps in flight, decoding or decoded and waiting for the consumer: its
@@ -240,7 +264,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(_take), _filter, _take, live, _metrics,
             cancellationToken, reverse: _reverse, compact: Compact, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            zones: zones, widenRows: WidenRows, readAhead: ReadsAhead, account: Account));
+            zones: zones, widenRows: WidenRows, readAhead: ReadsAhead, account: Account, decoders: Decoders, handover: Handover));
 
     /// <summary>
     /// The most rows a run of zones the zone maps prove whole is read in as one batch, rather than
@@ -262,7 +286,7 @@ internal sealed class BatchAsyncEnumerable : IAsyncEnumerable<RecordBatch>
         Keyed(new BatchAsyncEnumerator(
             _file, _tree, _read, _keep, _schema, _plan, Lanes, WindowFor(proven), _filter, proven, live, _metrics,
             cancellationToken, filterProven: true, reverse: _reverse, keepEncodings: KeepEncodings, sinkDecodes: SinkDecodes,
-            readAhead: ReadsAhead, account: Account));
+            readAhead: ReadsAhead, account: Account, decoders: Decoders, handover: Handover));
 #pragma warning restore VSTHRD200
 
     /// <summary>Whether the scan already has a take of the caller's.</summary>
@@ -363,10 +387,11 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
     private long _started;
     private long _delivered;
 
-    // The decodes the scan's degree still allows, and the splits started and waiting for one, the
-    // last `_queued` of them: both under the lock of the splits in flight (see EnterLanes).
+    // The decodes the scan's degree still allows beside its consumer, under the lock of the splits in flight (see
+    // EnterLanes). A split reads on no lane, and decodes on a lane of the session's (_budget) it takes once read, handed
+    // from split to split while some wait read (Lane.Parked), and given back once none does; a split none took, the
+    // consumer decodes when it reaches it.
     private int _free;
-    private int _queued;
 
     /// <summary>
     /// The bytes the lanes of the splits in flight may hold together: what a share of the pool's size class let them hold
@@ -384,6 +409,30 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
 
     /// <summary>The share of what one of the pool's size classes keeps parked that the lanes of the splits in flight may hold together.</summary>
     private const double InFlightShare = 0.75;
+
+    /// <summary>
+    /// How many splits a scan may have in flight, a split's lane holding <paramref name="splitBytes"/> bytes once decoded,
+    /// <paramref name="splitShare"/> of what the pool keeps parked of a size class: as many lanes as hold
+    /// <see cref="InFlightBytes"/> together and <see cref="InFlightShare"/> of any size class of the pool, one at least and
+    /// <paramref name="window"/> at most. With <paramref name="sharesAhead"/>, the window whatever a split holds.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The two bounds are those of a consumer that reads each batch as it comes: what it decodes further ahead leaves its
+    /// last-level cache before it reads it, and what its lanes hold past the pool's share is freed and allocated again.
+    /// </para>
+    /// <para>
+    /// A scan whose consumer shares windows ahead (<see cref="DecodeAhead"/>), a merge's input, is bound otherwise: its own
+    /// two windows are what its job prices it at, and each window past them is admitted by the job's memory as it is taken.
+    /// Its batches are read later, by the lanes that assemble a writer's blocks. Held to the bytes, an input of log records
+    /// whose split of 15 000 rows holds 40 MiB had one split in flight where it is priced at two, and took no shared
+    /// window: the merge waited for 31 % of its inputs' batches, 5.3 s over the two rounds of a consolidation of 23 inputs,
+    /// with half of the session's lanes idle. Held to its window it waits 1.9 s, and the job runs in 6.1 to 6.2 s where it
+    /// ran in 7.2 to 7.3, on the same processor time, its inputs holding the same 3.7 GiB (2026-11-19).
+    /// </para>
+    /// </remarks>
+    internal static int InFlightSplits(double splitBytes, double splitShare, int window, bool sharesAhead) =>
+        sharesAhead ? window : (int)Math.Clamp(Math.Min(InFlightBytes / splitBytes, InFlightShare / splitShare), 1, window);
 
     /// <summary>What the pool keeps parked of one size class, which the guess puts all of a split's bytes in.</summary>
     private const double GuessedClassBytes = 64 << 20;
@@ -514,7 +563,9 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         ZonePruner? zones = null,
         int widenRows = 0,
         int readAhead = 0,
-        Buffers.MemoryAccount? account = null)
+        Buffers.MemoryAccount? account = null,
+        int decoders = -1,
+        BatchHandover? handover = null)
         : base(QueryMemoryBudget.Of(file.Session), "scan")
     {
         // The question's account when the scan serves one, the scan holding nothing of its own to give back; else the scan
@@ -560,7 +611,8 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         _extras = own > 0 && window == 1 && !file.Source.ReadsInPlace
             ? new AheadReads(Math.Min(own, splits), pool is null ? 0 : Math.Max(0, Math.Min(ReadAheadPool.Most, splits) - own), pool)
             : window > 1 ? NewWindow(file, schema, plan, window) : null;
-        _segments = new ScanSegments(Ahead is { } ahead ? ahead.Lanes.Length : degree);
+        // Every split of the window reads at once, a take's window wider than the degree: each may wait for a segment.
+        _segments = new ScanSegments(Ahead is { } ahead ? ahead.Lanes.Length : window);
 
         // Before the first read, the file's reader learns whether the plan reads data, and chooses
         // how to read it.
@@ -569,7 +621,9 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         // Like the segments, the chunks decoded are the scan's and not a lane's: the lanes take
         // consecutive splits in turn, and a chunk of several splits would otherwise be decoded once
         // per lane that meets it.
-        _retained = RetainedChunks.Create(_mask.IsAll ? tree.Root.ChildCount : _mask.NamedFieldCount, degree);
+        // A consumer that reserves its memory has a lane that meets a chunk another is decoding run its split again once
+        // that is published, rather than decode the chunk too.
+        _retained = RetainedChunks.Create(_mask.IsAll ? tree.Root.ChildCount : _mask.NamedFieldCount, degree, waits: handover?.Reserve is not null);
 
         // The blocks the plan counts, so that what is decoded and pruned is counted in its units.
         long blockRows = live?.BlockRows ?? SplitPlan.NaturalBatchRows(tree);
@@ -577,13 +631,34 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         _prunedBlocks = new BlockTally(blockRows);
 
         // The first lane now, the others at the first split they are given: a take's window is
-        // wider than the splits of a small one.
-        _free = degree;
+        // wider than the splits of a small one. The consumer is one of the degree: the others decode beside it, each on a
+        // lane of the session's it takes once its split is read, and a split none took the consumer decodes itself.
+        _free = decoders >= 0 ? decoders : Math.Max(0, degree - 1);
         _lanes = new Lane?[window];
         _lanes[0] = NewLane(file, live, metrics, keepEncodings);
         if (_extras is LaneWindow lanes)
         {
+            lanes.SessionLanes = file.Session.Lanes;
+            lanes.ReadSlots = Math.Max(1, degree);
+            lanes.Template = _lanes[0];
             lanes.Return(lanes.Add(_lanes[0]!));
+            if (handover is not null)
+            {
+                lanes.Handover = handover;
+                lanes.Handed = [];
+                handover.Scan = this;
+                _lanes[0]!.Context.TakenVariants = handover.Taken;
+                if (handover.Ahead is { } shared)
+                {
+                    handover.Own = Math.Max(1, window - shared.PerInput);
+                }
+
+                // A consumer that reserves its memory: each lane reserves in it.
+                if (handover.Reserve is { } reserve)
+                {
+                    _lanes[0]!.Context.Reserve = reserve;
+                }
+            }
         }
         else if (Ahead is { } reads)
         {
@@ -621,8 +696,11 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
     /// <summary>Another lane, bound as the first one is.</summary>
     private Lane NextLane()
     {
-        ScanContext first = _lanes[0]!.Context;
+        // The scan's first lane, which the window keeps for as long as the scan lives: the ring's first slot may name a lane
+        // a consumer that takes batches over gave back past the window, its context back with the pool.
+        ScanContext first = (_extras is LaneWindow { Template: { } template } ? template : _lanes[0]!).Context;
         Lane lane = NewLane(first.File, first.LiveBlocks, first.Metrics, first.KeepEncodings);
+        lane.Context.Reserve = first.Reserve;
         lane.Context.VariantKeys = first.VariantKeys;
         lane.Context.VariantsApart = first.VariantsApart;
         if (first.ApartKeys is { } apartKeys)
@@ -633,6 +711,11 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         if (first.FewRowsOfChunks)
         {
             lane.Context.FewRowsOfChunks = true;
+        }
+
+        if (first.TakenVariants is { } taken)
+        {
+            lane.Context.TakenVariants = taken;
         }
 
         lane.Context.ZoneKeys = first.ZoneKeys;
@@ -1066,7 +1149,28 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
     {
         // Every lane made, the idle ones first, the one freed last at the top of them, then those
         // holding a split: one array for both, the scan's allocation being held to a ceiling.
-        private readonly Lane[] _made;
+        private Lane[] _made;
+
+        /// <summary>The consumer that takes batches over, past the scan's next step; null for none.</summary>
+        internal BatchHandover? Handover;
+
+        /// <summary>The session's lanes a split's decode takes one of, beside the consumer (see the scan's <c>_free</c>).</summary>
+        internal Execution.LaneBudget SessionLanes = null!;
+
+        /// <summary>
+        /// The reads the scan may still start: its lanes, a take's window being wider, so that what it reads at once is what
+        /// its degree says; under the lock of the splits in flight.
+        /// </summary>
+        internal int ReadSlots;
+
+        /// <summary>The splits assigned and waiting for a read slot, the last ones started; under the lock of the splits in flight.</summary>
+        internal int Queued;
+
+        /// <summary>The scan's first lane, which the others are made like, kept for as long as the scan lives.</summary>
+        internal Lane? Template;
+
+        /// <summary>The lanes whose batches the consumer took and has not given back, oldest first.</summary>
+        internal List<Lane>? Handed;
 
         /// <summary>
         /// The lock the pump and the lanes hand splits over under, lent by the process (see
@@ -1158,11 +1262,34 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         /// <summary>Lane <paramref name="index"/> of those made.</summary>
         internal Lane LaneAt(int index) => _made[index];
 
-        /// <summary>Counts <paramref name="lane"/> among those made, holding a split, and returns it.</summary>
-        internal Lane Add(Lane lane) => _made[Count++] = lane;
+        /// <summary>
+        /// Counts <paramref name="lane"/> among those made, holding a split, and returns it: past the window only when the
+        /// consumer holds batches taken over, whose lanes hold no split in flight.
+        /// </summary>
+        internal Lane Add(Lane lane)
+        {
+            if (Count == _made.Length)
+            {
+                Array.Resize(ref _made, _made.Length * 2);
+            }
+
+            return _made[Count++] = lane;
+        }
 
         /// <summary>The lane freed last, which now holds a split, or null when every lane made holds one.</summary>
         internal Lane? TakeIdle() => _idleCount > 0 ? _made[--_idleCount] : null;
+
+        /// <summary>
+        /// Takes <paramref name="lane"/>, which holds no split, off the lanes made: one the consumer held past the window,
+        /// whose blocks would otherwise stay idle with it.
+        /// </summary>
+        internal void Remove(Lane lane)
+        {
+            int at = Array.IndexOf(_made, lane, _idleCount, Count - _idleCount);
+            Debug.Assert(at >= 0, "A lane is removed once, while it is not idle.");
+            _made[at] = _made[--Count];
+            _made[Count] = null!;
+        }
 
         /// <summary>Puts a lane that holds no split on top of the idle ones.</summary>
         internal void Return(Lane lane)
@@ -1192,12 +1319,16 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         }
 
         /// <summary>
-        /// How many splits may be in flight: as many lanes as hold <see cref="InFlightBytes"/>
-        /// together and <see cref="InFlightShare"/> of any size class of the pool, one at least and
-        /// <paramref name="window"/> at most.
+        /// How many splits may be in flight (<see cref="InFlightSplits"/>), of the bytes and the share of a size class a
+        /// split's lane was measured to hold; a scan whose consumer shares windows ahead holds as many as its window.
         /// </summary>
-        internal int Budget(int window) =>
-            (int)Math.Clamp(Math.Min(InFlightBytes / _splitBytes, InFlightShare / _splitShare), 1, window);
+        internal int Budget(int window) => InFlightSplits(_splitBytes, _splitShare, window, Handover is { Ahead: not null });
+
+        /// <summary>The bytes a split's lane holds once decoded, the most measured so far, or the guess before.</summary>
+        internal double SplitBytes => _splitBytes;
+
+        /// <summary>Whether a split's lane was measured yet: before, <see cref="SplitBytes"/> is a guess by the schema.</summary>
+        internal bool Measured => _measured > 0;
     }
 
     /// <summary>
@@ -1333,6 +1464,10 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
 
         _disposed = true;
         _drained = true;
+        if (_extras is LaneWindow { Handover: { Borrowed: > 0 } handover })
+        {
+            GiveBackAhead(handover, 0);
+        }
 
         if (Ahead is { Count: > 0 } ahead)
         {
@@ -2627,17 +2762,49 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         }
 
         Lane lane = _lanes[(int)(_delivered % _lanes.Length)]!;
-        _delivered++;
 
+        // The next split read and waiting for a lane, none of the session's free: the consumer, one of the degree, decodes
+        // it on its own flow, rather than wait for a lane another work holds. Still reading, it is awaited, and says so once
+        // read if no lane took it, for the consumer to decode it then.
+        // One a lane left to the consumer, short of the room its reserve holds or met by a chunk another lane decodes, is
+        // run here too, with the waits a lane never makes.
+        bool parked;
+        bool held;
+        using (EnterLanes())
+        {
+            parked = lane.Parked;
+            held = lane.Held;
+            lane.Parked = false;
+            lane.Awaited = !parked && !held;
+        }
+
+        _delivered++;
         int root;
         try
         {
-            root = await lane.Completion.ConfigureAwait(false);
+            root = held ? HeldRoot : parked ? ReadRootOnly : await lane.Completion.ConfigureAwait(false);
+
+            // A batch decoded ahead that the consumer's job had given back, short of room, is decoded again here.
+            if (lane.Dropped)
+            {
+                root = HeldRoot;
+            }
+
+            if (root == HeldRoot)
+            {
+                root = await RunHeldAsync(lane, read: true).ConfigureAwait(false);
+            }
+            else if (root == ReadRootOnly)
+            {
+                root = lane.Context.Reserve is null ? DecodeSplit(lane) : await RunHeldAsync(lane, read: false).ConfigureAwait(false);
+            }
         }
         catch
         {
             lane.Running = false;
+            Unbind(lane);
             lane.Context.ResetBatch();
+            CloseRaised(lane);
             ReturnLane(lane);
             throw;
         }
@@ -2645,6 +2812,211 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         lane.Running = false;
         DeliverSplit(lane, root);
         return true;
+    }
+
+    /// <summary>
+    /// What a split's loop reports when it left its split to the consumer, its batch reset: it lacked room its consumer's
+    /// reserve did not hold, or met a chunk another lane was decoding (<see cref="HoldBack"/>). A root no decode returns.
+    /// </summary>
+    private const int HeldRoot = int.MinValue + 1;
+
+    /// <summary>
+    /// What a batch of the scan is reserved at before its decode: what the heaviest split measured held, or, before one
+    /// was, what the consumer read of the file's own record (<see cref="BatchHandover.WindowBytes"/>), nothing when it
+    /// says nothing.
+    /// </summary>
+    private static long BatchBytes(LaneWindow lanes, BatchHandover handover) =>
+        lanes.Measured ? (long)lanes.SplitBytes : handover.WindowBytes;
+
+    /// <summary>
+    /// What the decode of a batch on <paramref name="lane"/> takes past what the lane holds already: a lane keeps the
+    /// blocks of its batch before for the next, and a batch reserved whole on such a lane was counted twice, once in the
+    /// blocks held and once in the reservation, thirteen lanes decoding ahead a batch each.
+    /// </summary>
+    private static long BatchNeed(Lane lane, LaneWindow lanes, BatchHandover handover) =>
+        Math.Max(0, BatchBytes(lanes, handover) - lane.Context.BatchBlocksHeld);
+
+    /// <summary>Gives back what the split of <paramref name="lane"/> reserved and no block took, its decode ended or given up.</summary>
+    private static void CloseRaised(Lane lane)
+    {
+        if (lane.Context.Reserve is { } reserve)
+        {
+            reserve.Close(lane.Raised + lane.Context.TakeRaised());
+        }
+
+        lane.Raised = 0;
+        lane.BatchRaised = false;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="error"/> is what stops a split of a scan that reserves its memory without failing it: a
+    /// block its reserve did not hold, or a chunk another lane is decoding.
+    /// </summary>
+    private static bool Stops(ScanContext context, Exception error) =>
+        context.Reserve is not null && error is VortexMemoryException { ShortOfRoom: > 0 } or ChunkBusyException;
+
+    /// <summary>
+    /// Leaves the split of <paramref name="lane"/> to the consumer when <paramref name="error"/> only stopped it
+    /// (<see cref="Stops"/>), its batch reset by the step that threw: told at once when the consumer awaits it, found held
+    /// when it comes to it otherwise. A lane never waits for room, which only the consumer's flow can have the job make.
+    /// </summary>
+    /// <returns>Whether the split was left to the consumer; false for a failure, which the caller reports.</returns>
+    private bool HoldBack(Lane lane, Exception error)
+    {
+        if (!Stops(lane.Context, error))
+        {
+            return false;
+        }
+
+        CloseRaised(lane);
+        if (Window.Handover is { } handover)
+        {
+            Interlocked.Increment(ref error is ChunkBusyException ? ref handover.ChunkWaits : ref handover.Reruns);
+        }
+
+        using (EnterLanes())
+        {
+            lane.Lacked = error is VortexMemoryException lacked ? lacked.ShortOfRoom : 0;
+            lane.Busy = (error as ChunkBusyException)?.Key;
+            lane.Held = true;
+            if (lane.Awaited)
+            {
+                lane.Done(HeldRoot);
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Runs on the consumer's flow a split of a scan that reserves its memory: one a lane left to it, one no lane decoded,
+    /// or one the scan runs inline. Its batch is reserved first, the job giving back what it started ahead while the
+    /// reserve does not hold it; a decode that then lacks a block, or meets a chunk another lane is decoding, is run again
+    /// once that is reserved, at twice what it asked before when more, or published.
+    /// </summary>
+    /// <param name="lane">The split's lane.</param>
+    /// <param name="read">Whether the split's segments are to be claimed again: false for a split read and never decoded.</param>
+    /// <exception cref="ReserveExhaustedException">The job gave back all it started ahead and the reserve still does not hold what the split needs.</exception>
+    private async ValueTask<int> RunHeldAsync(Lane lane, bool read)
+    {
+        LaneWindow lanes = Window;
+        BatchHandover handover = lanes.Handover!;
+        MemoryReserve reserve = handover.Reserve!;
+        long? busy = lane.Busy;
+
+        // The batch, past what the lane holds of its batch before, and what the lane lacked when it left the split here.
+        long ask = lane.BatchRaised ? lane.Lacked : Math.Max(BatchNeed(lane, lanes, handover), lane.Lacked);
+        lane.Held = false;
+        lane.Dropped = false;
+        lane.Lacked = 0;
+        lane.Busy = null;
+
+        // A batch the consumer gives back while it runs this split, its job making room, starts no split of the scan.
+        handover.Running = true;
+        try
+        {
+            while (true)
+            {
+                if (busy is { } met)
+                {
+                    // The chunk another lane of the scan decodes: its table says once it is published, or given up.
+                    await _retained.WhenFreeAsync(met).ConfigureAwait(false);
+                    busy = null;
+                }
+
+                if (ask > 0)
+                {
+                    if (!await reserve.RaiseAsync(ask).ConfigureAwait(false))
+                    {
+                        throw new ReserveExhaustedException(ask) { Reserve = reserve };
+                    }
+
+                    lane.Raised += ask;
+                    lane.BatchRaised = true;
+                }
+
+                try
+                {
+                    if (read)
+                    {
+                        await ReadSplitAsync(lane, waits: true).ConfigureAwait(false);
+                    }
+
+                    int root = DecodeSplit(lane);
+                    CloseRaised(lane);
+                    return root;
+                }
+                catch (VortexMemoryException shortOf) when (shortOf.ShortOfRoom > 0)
+                {
+                    // What it lacked, and twice what was asked before when that is more: a batch heavier than any before
+                    // it is then reserved in a few runs whatever it weighs, a block lacked at a time in as many as it has.
+                    ask = Math.Max(shortOf.ShortOfRoom, Math.Min(2 * ask, long.MaxValue / 4));
+                    Interlocked.Increment(ref handover.Reruns);
+                }
+                catch (ChunkBusyException decoding)
+                {
+                    // The chunk another lane decodes: the same room again, once it is published.
+                    busy = decoding.Key;
+                    Interlocked.Increment(ref handover.ChunkWaits);
+                }
+
+                // The step that threw reset the batch: its segments are claimed again, held as they are by the scan.
+                CloseRaised(lane);
+                read = true;
+            }
+        }
+        finally
+        {
+            handover.Running = false;
+        }
+    }
+
+    /// <summary>
+    /// Gives back the batches the scan decoded ahead of its consumer and has not delivered, for a consumer that reserves
+    /// its memory and is short of room: each is decoded again by the consumer when it comes to it. A split still read or
+    /// decoded is left to end. On the consumer's flow.
+    /// </summary>
+    /// <returns>The batches given back.</returns>
+    internal int DropAhead()
+    {
+        if (_disposed || _extras is not LaneWindow { Handover.Reserve: not null } lanes)
+        {
+            return 0;
+        }
+
+        int dropped = 0;
+        using (EnterLanes())
+        {
+            for (long split = _delivered; split < _started - lanes.Queued; split++)
+            {
+                Lane lane = _lanes[(int)(split % _lanes.Length)]!;
+                if (!lane.Running || lane.Handed || lane.Held || lane.Dropped || lane.Parked || !lane.Decoded)
+                {
+                    continue;
+                }
+
+                // Its batch goes, and the blocks its lane would keep for the next with it: the consumer decodes it again.
+                Unbind(lane);
+                lane.Context.ResetBatch();
+                lane.Context.LetBatchBlocksGo();
+                lane.Dropped = true;
+                dropped++;
+            }
+
+            // And the blocks the lanes that hold no split keep for their next batch.
+            for (int i = 0; i < lanes.Count; i++)
+            {
+                Lane idle = lanes.LaneAt(i);
+                if (!idle.Running && !idle.Handed && !ReferenceEquals(idle, _currentLane) && idle.Context.BatchBlocksHeld > 0)
+                {
+                    Unbind(idle);
+                    idle.Context.LetBatchBlocksGo();
+                    dropped++;
+                }
+            }
+        }
+
+        return dropped;
     }
 
     /// <summary>
@@ -2681,10 +3053,13 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         int root;
         try
         {
-            root = await RunLaneAsync(lane).ConfigureAwait(false);
+            root = lane.Context.Reserve is null
+                ? await RunLaneAsync(lane).ConfigureAwait(false)
+                : await RunHeldAsync(lane, read: true).ConfigureAwait(false);
         }
         catch
         {
+            CloseRaised(lane);
             ReturnLane(lane);
             throw;
         }
@@ -2706,10 +3081,11 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
             window.Measure(lane.Context.Canonical.HeldBytes(out double share), share);
         }
 
-        // Every batch before this one has taken its own reference to what it needed, and is dead;
-        // a chunk none of them borrowed after an earlier one is borrowed by no later one either.
-        _segments.Release(lane.Sequence);
-        _retained.Release(lane.Sequence);
+        // Every batch before this one has taken its own reference to what it needed, and is dead, but those the consumer
+        // took over; a chunk none of them borrowed after an earlier one is borrowed by no later one either.
+        long floor = ReleaseFloor(lane.Sequence);
+        _segments.Release(floor);
+        _retained.Release(floor);
 
         try
         {
@@ -2720,6 +3096,7 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         }
         catch
         {
+            Unbind(lane);
             lane.Context.ResetBatch();
             throw;
         }
@@ -2769,10 +3146,41 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         long assigned = _started;
         LaneWindow lanes = Window;
         int budget = lanes.Budget(window);
+
+        // The batches the consumer still holds past its current one take places of the window, so that it holds what it
+        // held before it kept them: the window's splits ahead start again as it gives them back (TakeBack).
+        if (lanes.Handed is { Count: > 0 } handed)
+        {
+            int kept = handed.Count - (_held && _currentLane is { Handed: true } ? 1 : 0);
+            budget = Math.Max(1, budget - kept);
+        }
+
+        // The shared windows past the splits now in flight go back, for the input the merge reads next to take.
+        BatchHandover? handover = lanes.Handover;
+        if (handover is { Borrowed: > 0 })
+        {
+            GiveBackAhead(handover, Math.Max(0, (int)(assigned - _delivered) - handover.Own));
+        }
+
         try
         {
             while (assigned - _delivered < budget)
             {
+                // Past its own places, a split takes a window of the merge's shared ones: only once the consumer reads the
+                // scan, past its first batch, and while the job's memory admits it. What its decode takes past the blocks
+                // its lane holds already is reserved by the lane, as it comes to it (ReserveBatch).
+                if (handover is { Ahead: { } shared } && assigned - _delivered >= handover.Own + handover.Borrowed)
+                {
+                    long ahead = Math.Max(BatchBytes(lanes, handover), 1);
+                    if (_drained || _delivered == 0 || !shared.TryTake(ahead))
+                    {
+                        break;
+                    }
+
+                    handover.Borrowed++;
+                    handover.BorrowedBytes = ahead;
+                }
+
                 if (_drained || !TryNextSplit(out RowRange split))
                 {
                     _drained = true;
@@ -2791,38 +3199,109 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         finally
         {
             // Published even when a split or a lane fails to come: a lane assigned and never
-            // counted would be awaited by the dispose, and run by no one.
+            // counted would be awaited by the dispose, and run by no one. Each split starts its reads, on no lane, once a read
+            // slot is free: a take's window is wider than its degree, and reads no more at once.
             using (EnterLanes())
             {
-                _queued += (int)(assigned - _started);
+                lanes.Queued += (int)(assigned - _started);
                 _started = assigned;
-                while (_free > 0 && _queued > 0)
-                {
-                    _free--;
-                    _lanes[(int)((_started - _queued) % window)]!.Go();
-                    _queued--;
-                }
+                StartReads(lanes);
             }
         }
     }
 
+    /// <summary>Gives back the shared windows the scan holds through <paramref name="handover"/> past <paramref name="kept"/>; on the consumer's flow.</summary>
+    private static void GiveBackAhead(BatchHandover handover, int kept)
+    {
+        int over = handover.Borrowed - kept;
+        if (over > 0)
+        {
+            handover.Borrowed -= over;
+            handover.Ahead!.Give(over, over * handover.BorrowedBytes);
+        }
+    }
+
     /// <summary>
-    /// Hands the decode a lane has finished to the next split waiting for one, in the order of the
-    /// splits, or gives it back when none waits.
+    /// What a split's loop reports when its split is read and no lane decoded it, for the consumer to decode it: a root no
+    /// decode returns.
     /// </summary>
-    private void HandOff()
+    private const int ReadRootOnly = int.MinValue;
+
+    /// <summary>
+    /// Takes a decode and a lane of the session's for the split <paramref name="lane"/> has read, or else leaves it to the
+    /// consumer: reported at once when the consumer awaits it, else parked for the next decode to end or the consumer to
+    /// reach it, whichever comes first.
+    /// </summary>
+    /// <returns>Whether the split decodes on its own loop now.</returns>
+    private bool TryDecodeRead(Lane lane)
     {
         using (EnterLanes())
         {
-            if (_queued > 0)
+            // Its read done, its slot goes to the next split waiting for one.
+            LaneWindow lanes = Window;
+            lanes.ReadSlots++;
+            StartReads(lanes);
+            if (_free > 0 && Execution.LaneWorkers.TryTake(lanes.SessionLanes, out long entered))
             {
-                _lanes[(int)((_started - _queued) % _lanes.Length)]!.Go();
-                _queued--;
+                _free--;
+                lane.Entered = entered;
+                return true;
+            }
+
+            if (lane.Awaited)
+            {
+                lane.Done(ReadRootOnly);
+            }
+            else
+            {
+                lane.Parked = true;
+            }
+
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Hands the decode <paramref name="lane"/> has finished, and the lane of the session's it held, to the oldest split read
+    /// and waiting for one, or gives both back when none waits.
+    /// </summary>
+    private void HandOff(Lane lane)
+    {
+        using (EnterLanes())
+        {
+            Lane? next = null;
+            for (long split = _delivered; split < _started; split++)
+            {
+                if (_lanes[(int)(split % _lanes.Length)] is { Parked: true } parked)
+                {
+                    next = parked;
+                    break;
+                }
+            }
+
+            if (next is not null)
+            {
+                next.Parked = false;
+                next.Entered = lane.Entered;
+                next.Decodes = true;
+                next.Go();
             }
             else
             {
                 _free++;
+                Window.SessionLanes.Exit(lane.Entered);
             }
+        }
+    }
+
+    /// <summary>Starts the reads of the splits waiting for a slot, oldest first, as many as slots are free; under the lock.</summary>
+    private void StartReads(LaneWindow lanes)
+    {
+        while (lanes.Queued > 0 && lanes.ReadSlots > 0)
+        {
+            lanes.ReadSlots--;
+            _lanes[(int)((_started - lanes.Queued) % _lanes.Length)]!.Go();
+            lanes.Queued--;
         }
     }
 
@@ -2842,25 +3321,114 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         while (await lane.NextAsync().ConfigureAwait(false))
         {
             lane.Taken();
+
+            // Its split's reads first, on no lane; then its decode, on a lane of the session's it takes, or one a decode
+            // that ended handed it (Decodes), or by the consumer.
+            if (!lane.Decodes)
+            {
+                try
+                {
+                    await ReadSplitAsync(lane).ConfigureAwait(false);
+                }
+                catch (Exception error)
+                {
+                    // Its read slot to the next split waiting, which reads for itself.
+                    using (EnterLanes())
+                    {
+                        Window.ReadSlots++;
+                        StartReads(Window);
+                    }
+
+                    // Short of the room its consumer reserved, the split is the consumer's to run; failed, its failure.
+                    if (!HoldBack(lane, error))
+                    {
+                        CloseRaised(lane);
+                        lane.Failed(error);
+                    }
+
+                    continue;
+                }
+
+                if (!TryDecodeRead(lane))
+                {
+                    continue;
+                }
+            }
+
+            lane.Decodes = false;
             int root;
             try
             {
-                root = await RunLaneAsync(lane).ConfigureAwait(false);
+                ReserveBatch(lane);
+                root = DecodeSplit(lane);
             }
             catch (Exception error)
             {
-                HandOff();
-                lane.Failed(error);
+                HandOff(lane);
+                if (!HoldBack(lane, error))
+                {
+                    CloseRaised(lane);
+                    lane.Failed(error);
+                }
+
                 continue;
             }
 
-            HandOff();
+            HandOff(lane);
+            CloseRaised(lane);
             lane.Done(root);
         }
     }
 
+    /// <summary>
+    /// Reserves the batch of the split <paramref name="lane"/> is about to decode, in a scan whose consumer reserves its
+    /// memory, unless it was reserved as the split started, a window decoded ahead: without waiting, a lane's way. A
+    /// reserve that does not hold it stops the split before its decode, its batch reset, for the consumer to run.
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The reserve does not hold the batch now.</exception>
+    private void ReserveBatch(Lane lane)
+    {
+        if (lane.BatchRaised || lane.Context.Reserve is not { } reserve || Window.Handover is not { } handover)
+        {
+            return;
+        }
+
+        long batch = BatchNeed(lane, Window, handover);
+        if (batch <= 0)
+        {
+            return;
+        }
+
+        if (!reserve.TryRaise(batch))
+        {
+            Unbind(lane);
+            lane.Context.ResetBatch();
+            VortexMemoryException refused = lane.Context.Account.Refused(batch);
+            refused.ShortOfRoom = batch;
+            throw refused;
+        }
+
+        lane.Raised += batch;
+        lane.BatchRaised = true;
+    }
+
+    /// <summary>A split read and decoded on the caller's flow: what a scan run inline does.</summary>
     [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder<>))]
     private async ValueTask<int> RunLaneAsync(Lane lane)
+    {
+        await ReadSplitAsync(lane).ConfigureAwait(false);
+        return DecodeSplit(lane);
+    }
+
+    /// <summary>The reads of the split <paramref name="lane"/> was given: what it waits for from the store, and no core.</summary>
+    /// <param name="lane">The split's lane.</param>
+    /// <param name="waits">
+    /// Whether the read is the consumer's own, in a scan whose consumer reserves its memory: the bytes it is about to read
+    /// are then reserved with the job giving back what it started ahead, where a lane asks without waiting and leaves its
+    /// split to the consumer.
+    /// </param>
+    [AsyncMethodBuilder(typeof(PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask ReadSplitAsync(Lane lane, bool waits = false)
     {
         ScanContext context = lane.Context;
         RowRange rows = lane.Rows;
@@ -2880,8 +3448,37 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
             // A segment another lane is reading is waited for rather than read twice, the batch's own claims read meanwhile;
             // once it is in, the claim fills it.
             bool along = true;
-            while (_segments.Claim(context.Segments, batch, lane, along && context.Along is { } specs ? specs.Specs : default, along && context.Along is { } batches ? batches.Batches : default))
+            while (true)
             {
+                bool blocked = _segments.Claim(
+                    context.Segments, batch, lane, along && context.Along is { } specs ? specs.Specs : default,
+                    along && context.Along is { } batches ? batches.Batches : default, out long claimed);
+
+                // What the batch is about to read, as the file's footer says it, reserved before the read is made.
+                if (claimed > 0 && context.Reserve is { } reserve)
+                {
+                    if (waits)
+                    {
+                        if (!await reserve.RaiseAsync(claimed).ConfigureAwait(false))
+                        {
+                            throw new ReserveExhaustedException(claimed) { Reserve = reserve };
+                        }
+                    }
+                    else if (!reserve.TryRaise(claimed))
+                    {
+                        VortexMemoryException refused = context.Account.Refused(claimed);
+                        refused.ShortOfRoom = claimed;
+                        throw refused;
+                    }
+
+                    lane.Raised += claimed;
+                }
+
+                if (!blocked)
+                {
+                    break;
+                }
+
                 along = false;
                 await _segments.ReadOwnAsync(context.Segments, batch, _source, context.OwnSegments(), _metrics, _token)
                     .ConfigureAwait(false);
@@ -2896,7 +3493,32 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
             {
                 _segments.Publish(context.Segments, batch);
             }
+        }
+        catch (Exception error)
+        {
+            // A split only stopped, short of room or told there is none, leaves the scan sharing its reads: the batches
+            // waiting for what it claimed claim it in their turn.
+            if (Stops(context, error) || error is ReserveExhaustedException)
+            {
+                _segments.Withdraw(batch);
+            }
+            else
+            {
+                _segments.Abandon(batch);
+            }
 
+            context.ResetBatch();
+            throw;
+        }
+    }
+
+    /// <summary>The decode of the split <paramref name="lane"/> has read: computes, on whichever lane or flow runs it.</summary>
+    private int DecodeSplit(Lane lane)
+    {
+        ScanContext context = lane.Context;
+        RowRange rows = lane.Rows;
+        try
+        {
             // A split the consumer runs, which no lane runs beside, says when its decode began.
             if (_extras is LaneWindow { Inline: true } window)
             {
@@ -2904,18 +3526,59 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
             }
 
             ScanCounters.Served(_metrics, context.Segments);
-            if (!_compact && !_filterProven)
+            int root = !_compact && !_filterProven ? ExecuteSelected(lane, rows) : ExecuteFiltered(lane, rows);
+
+            // What the consumer that takes batches over adds to each, beside its decode: a merge's input, its keys.
+            if (_extras is LaneWindow { Handover.Prepare: { } prepare })
             {
-                return ExecuteSelected(lane, rows);
+                lane.Prepared = prepare(Bind(lane, root, rows.Start), lane.Prepared);
             }
 
-            return ExecuteFiltered(lane, rows);
+            return root;
         }
-        catch
+        catch (Exception error)
         {
-            _segments.Abandon(batch);
+            // A decode only stopped, short of room or met by a chunk another lane decodes, is run again: the scan goes
+            // on sharing its reads.
+            if (!Stops(context, error))
+            {
+                _segments.Abandon(lane.Sequence);
+            }
+
+            Unbind(lane);
             context.ResetBatch();
             throw;
+        }
+    }
+
+    /// <summary>
+    /// The lane's own batch, bound to <paramref name="root"/> of its context, once a split: a scan whose consumer takes
+    /// batches over. Bound already for the split by its preparation, it is the same batch at its delivery.
+    /// </summary>
+    private static RecordBatch Bind(Lane lane, int root, long startRow)
+    {
+        if (lane.Owned is { } owned)
+        {
+            if (!lane.Bound)
+            {
+                owned.Rebind(lane.Context, root, startRow);
+                lane.Bound = true;
+            }
+
+            return owned;
+        }
+
+        lane.Bound = true;
+        return lane.Owned = new RecordBatch(lane.Context, root, startRow);
+    }
+
+    /// <summary>Lets the lane's own batch go, bound or not: it may be bound to the lane's next split.</summary>
+    private static void Unbind(Lane lane)
+    {
+        if (lane.Bound)
+        {
+            lane.Bound = false;
+            lane.Owned!.Dispose();
         }
     }
 
@@ -2923,17 +3586,36 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
     {
         ReleaseCurrent();
 
-        // The splits no loop has started are withdrawn, since nothing would ever run them; the
-        // lanes running one are awaited.
+        // The splits waiting for a read slot, and those read and waiting for a decode, are withdrawn, since nothing would ever
+        // run them; the lanes still reading one are awaited, and report it read rather than wait for a decode.
         using (EnterLanes())
         {
-            for (long split = _started - _queued; split < _started; split++)
+            LaneWindow window = Window;
+            for (long split = _started - window.Queued; split < _started; split++)
             {
                 _lanes[(int)(split % _lanes.Length)]!.Running = false;
             }
 
-            _started -= _queued;
-            _queued = 0;
+            _started -= window.Queued;
+            window.Queued = 0;
+            for (long split = _delivered; split < _started; split++)
+            {
+                Lane lane = _lanes[(int)(split % _lanes.Length)]!;
+                if (lane.Parked || lane.Held)
+                {
+                    // Read and published, it claims nothing: what it holds goes as a decoded split's does. One left to
+                    // the consumer, short of room, reported nothing and holds nothing.
+                    lane.Parked = false;
+                    lane.Held = false;
+                    lane.Running = false;
+                    lane.Context.ResetBatch();
+                    CloseRaised(lane);
+                }
+                else
+                {
+                    lane.Awaited = true;
+                }
+            }
         }
 
         for (int i = 0; i < MadeLaneCount; i++)
@@ -2953,7 +3635,9 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
             }
 
             lane.Running = false;
+            Unbind(lane);
             lane.Context.ResetBatch();
+            CloseRaised(lane);
         }
 
         DisposeLanes();
@@ -2983,7 +3667,20 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
             NoteDecoded(batch, lane);
         }
 
-        batch?.Dispose();
+        // A batch the consumer took over stays, its lane with it, until it is given back (TakeBack).
+        if (lane is { Handed: true })
+        {
+            return;
+        }
+
+        if (lane is { Bound: true })
+        {
+            Unbind(lane);
+        }
+        else
+        {
+            batch?.Dispose();
+        }
 
         // The lane holds nothing once its batch is gone, and takes the next split.
         if (lane is not null)
@@ -2993,12 +3690,114 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
     }
 
     /// <summary>
+    /// Takes <paramref name="batch"/> over for the consumer, when it is the current batch of a scan that hands its batches
+    /// over: the scan keeps it, its lane and what it reads, past its next step, until <see cref="TakeBack"/>.
+    /// </summary>
+    internal bool TryHandOver(RecordBatch batch, out object? prepared, out bool same)
+    {
+        // The current batch, or a view a wrapper made of it in its arena, an object's columns reshaped there.
+        if (_extras is LaneWindow { Handed: { } handed } && _held && _currentLane is { Handed: false } lane
+            && (ReferenceEquals(batch, _current) || ReferenceEquals(batch.Arena, _current!.Arena)))
+        {
+            lane.Handed = true;
+            handed.Add(lane);
+            prepared = lane.Prepared;
+            same = ReferenceEquals(batch, _current);
+            return true;
+        }
+
+        prepared = null;
+        same = false;
+        return false;
+    }
+
+    /// <summary>
+    /// Gives back <paramref name="batch"/>, taken over before: its lane takes splits again, and what the oldest batch still
+    /// held no longer reads is released.
+    /// </summary>
+    internal void TakeBack(RecordBatch batch)
+    {
+        if (_extras is not LaneWindow { Handed: { } handed })
+        {
+            return;
+        }
+
+        int at = 0;
+        while (at < handed.Count && !ReferenceEquals(handed[at].Owned, batch))
+        {
+            at++;
+        }
+
+        if (at == handed.Count)
+        {
+            return;
+        }
+
+        Lane lane = handed[at];
+        handed.RemoveAt(at);
+        lane.Handed = false;
+        if (_disposed)
+        {
+            // The scan ended while the consumer held the batch: the lane goes now, and with the last batch what they read.
+            LetLaneGo(lane);
+            if (handed.Count == 0)
+            {
+                EndDisposal();
+            }
+
+            return;
+        }
+
+        // Still the current batch, it goes back at the next step as any other.
+        if (_held && ReferenceEquals(_currentLane, lane))
+        {
+            return;
+        }
+
+        // A lane made past the window, for the batches the consumer held, goes back to the pool with its blocks rather than
+        // stay idle holding them: the window's lanes are what the scan keeps.
+        LaneWindow lanes = (LaneWindow)_extras;
+        if (lanes.Count > _lanes.Length && !ReferenceEquals(lane, lanes.Template))
+        {
+            lanes.Remove(lane);
+            LetLaneGo(lane);
+        }
+        else
+        {
+            Unbind(lane);
+            ReturnLane(lane);
+        }
+        long floor = handed.Count > 0 ? Math.Min(handed[0].Sequence, _delivered - 1) : _delivered - 1;
+        _segments.Release(floor);
+        _retained.Release(floor);
+
+        // Its place in the window back, the splits ahead start again while the consumer works on its current batch: but
+        // not while the consumer runs a split itself, short of room, which gives batches back to make that room.
+        if (!_drained && lanes.Handover is not { Running: true })
+        {
+            Pump();
+        }
+    }
+
+    /// <summary>
+    /// What the scan may release once batch <paramref name="sequence"/> is delivered: what no batch from it on reads, and
+    /// none from the oldest batch the consumer still holds on either.
+    /// </summary>
+    private long ReleaseFloor(long sequence) =>
+        _extras is LaneWindow { Handed: { Count: > 0 } handed } ? Math.Min(handed[0].Sequence, sequence) : sequence;
+
+    /// <summary>
     /// Makes the batch over <paramref name="root"/> current: the one the previous step disposed,
     /// bound again so that a step allocates nothing, or a new one at the first step.
     /// </summary>
     private RecordBatch Deliver(Lane lane, int root, long startRow)
     {
-        if (_current is { } spare)
+        // A consumer that takes batches over is given each lane's own batch, which the next step does not rebind.
+        if (_extras is LaneWindow { Handover: not null })
+        {
+            _current = Bind(lane, root, startRow);
+        }
+        else if (_current is { } spare)
         {
             spare.Rebind(lane.Context, root, startRow);
         }
@@ -3054,12 +3853,18 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
 
     private void DisposeLanes()
     {
+        // A batch the consumer took over outlives the scan: a wrapper disposes the scan as soon as it ends, while the
+        // consumer still reads its last batches. Its lane, and what the batches read, go once it is given back (TakeBack).
+        bool holding = _extras is LaneWindow { Handed.Count: > 0 };
         for (int i = 0; i < MadeLaneCount; i++)
         {
             if (MadeLane(i) is { } lane)
             {
                 lane.Stop();
-                ScanContexts.Shared.Return(lane.Context);
+                if (!lane.Handed)
+                {
+                    LetLaneGo(lane);
+                }
             }
         }
 
@@ -3082,9 +3887,27 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         }
 
         _along = null;
+        if (!holding)
+        {
+            EndDisposal();
+        }
+    }
 
-        // Once no lane runs: the held segments and the retained chunks carry references of their own,
-        // and the locks they and the window were lent go back to the process.
+    /// <summary>What a lane holds, back to the pool: its batch, what the handover prepared of it, its context.</summary>
+    private static void LetLaneGo(Lane lane)
+    {
+        Unbind(lane);
+        (lane.Prepared as IDisposable)?.Dispose();
+        lane.Prepared = null;
+        ScanContexts.Shared.Return(lane.Context);
+    }
+
+    /// <summary>
+    /// The end of the scan's disposal, once no lane runs and no batch is held: the held segments and the retained chunks
+    /// carry references of their own, and the locks they and the window were lent go back to the process.
+    /// </summary>
+    private void EndDisposal()
+    {
         _segments.Dispose();
         _retained.Dispose();
         (_extras as LaneWindow)?.ReturnGate();
@@ -3109,6 +3932,21 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
     /// is given its split when the scan's window has room and runs it when its degree does, which
     /// for a take, whose window is wider than its degree, may be later.
     /// </remarks>
+    /// <summary>What a lane of a scan whose consumer takes batches over keeps: its own batch, and what the handover made of it.</summary>
+    private sealed class LaneHand
+    {
+        internal RecordBatch? Owned;
+        internal object? Prepared;
+
+        // What a lane of a scan whose consumer reserves its memory keeps of its split in flight (see Lane).
+        internal long Raised;
+        internal long Lacked;
+        internal long? Busy;
+        internal bool BatchRaised;
+        internal bool Held;
+        internal bool Dropped;
+    }
+
     private sealed class Lane : SegmentWaiter, IValueTaskSource<bool>, IValueTaskSource<int>
     {
         private ManualResetValueTaskSourceCore<bool> _go = new() { RunContinuationsAsynchronously = true };
@@ -3118,6 +3956,48 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         internal Lane(ScanContext context) => Context = context;
 
         internal ScanContext Context { get; }
+
+        /// <summary>When the lane of the session's the split in flight decodes on was taken, for its giving back.</summary>
+        internal long Entered { get; set; }
+
+        /// <summary>Whether the split is read and waits for a decode: a lane of the session's freed, or the consumer.</summary>
+        internal bool Parked { get; set; }
+
+        /// <summary>Whether the consumer awaits the split, which once read is reported to it rather than parked.</summary>
+        internal bool Awaited { get; set; }
+
+        /// <summary>Whether the loop's next signal is the decode of its split read, on a lane a decode that ended handed it.</summary>
+        internal bool Decodes { get; set; }
+
+        // What a lane of a scan whose consumer takes batches over keeps, made with its first batch: a scan whose consumer
+        // takes none pays one reference a lane, its allocation being held to a ceiling.
+        private LaneHand? _hand;
+
+        /// <summary>The lane's own batch, for a scan whose consumer takes batches over: one a lane, never rebound while taken.</summary>
+        internal RecordBatch? Owned
+        {
+            get => _hand?.Owned;
+            set => (_hand ??= new LaneHand()).Owned = value;
+        }
+
+        /// <summary>What the handover's preparation made of the lane's batch, kept with the lane to reuse.</summary>
+        internal object? Prepared
+        {
+            get => _hand?.Prepared;
+            set
+            {
+                if (_hand is not null || value is not null)
+                {
+                    (_hand ??= new LaneHand()).Prepared = value;
+                }
+            }
+        }
+
+        /// <summary>Whether the consumer took the lane's batch over and has not given it back.</summary>
+        internal bool Handed { get; set; }
+
+        /// <summary>Whether <see cref="Owned"/> is bound to the lane's split, until it is let go.</summary>
+        internal bool Bound { get; set; }
 
         internal RowRange Rows { get; set; }
 
@@ -3130,6 +4010,96 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         /// <summary>Whether a split was started on this lane and its result not yet taken.</summary>
         internal bool Running { get; set; }
 
+        // What follows is kept with what a lane of a scan whose consumer takes batches over keeps (LaneHand): only such a
+        // consumer reserves its memory, and a scan of any other pays nothing for it.
+
+        /// <summary>
+        /// What the split in flight reserved in its consumer's reserve on this lane, its read's bytes and its batch, closed
+        /// once it is decoded, left to the consumer or given up; what its decode reserved past them is its context's.
+        /// </summary>
+        internal long Raised
+        {
+            get => _hand?.Raised ?? 0;
+            set
+            {
+                if (_hand is not null || value != 0)
+                {
+                    (_hand ??= new LaneHand()).Raised = value;
+                }
+            }
+        }
+
+        /// <summary>Whether the split's batch is reserved: as it started, for a window decoded ahead, or before its decode.</summary>
+        internal bool BatchRaised
+        {
+            get => _hand?.BatchRaised ?? false;
+            set
+            {
+                if (_hand is not null || value)
+                {
+                    (_hand ??= new LaneHand()).BatchRaised = value;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Whether the split was left to the consumer, its batch reset, short of room or met by a chunk another lane
+        /// decodes (<see cref="HoldBack"/>); under the lock of the splits in flight.
+        /// </summary>
+        internal bool Held
+        {
+            get => _hand?.Held ?? false;
+            set
+            {
+                if (_hand is not null || value)
+                {
+                    (_hand ??= new LaneHand()).Held = value;
+                }
+            }
+        }
+
+        /// <summary>The bytes the split lacked when it was left to the consumer; 0 for none.</summary>
+        internal long Lacked
+        {
+            get => _hand?.Lacked ?? 0;
+            set
+            {
+                if (_hand is not null || value != 0)
+                {
+                    (_hand ??= new LaneHand()).Lacked = value;
+                }
+            }
+        }
+
+        /// <summary>The key of the chunk the split met while another lane decoded it, when it was left to the consumer for it; null for none.</summary>
+        internal long? Busy
+        {
+            get => _hand?.Busy;
+            set
+            {
+                if (_hand is not null || value is not null)
+                {
+                    (_hand ??= new LaneHand()).Busy = value;
+                }
+            }
+        }
+
+        /// <summary>Whether the split's batch, decoded ahead, was given back short of room (<see cref="DropAhead"/>): the consumer decodes it again.</summary>
+        internal bool Dropped
+        {
+            get => _hand?.Dropped ?? false;
+            set
+            {
+                if (_hand is not null || value)
+                {
+                    (_hand ??= new LaneHand()).Dropped = value;
+                }
+            }
+        }
+
+        /// <summary>Whether the split's decode ended and reported its batch, which the consumer has not taken yet.</summary>
+        internal bool Decoded => _done.GetStatus(_done.Version) == ValueTaskSourceStatus.Succeeded;
+
         /// <summary>The split in flight, to be awaited once.</summary>
         internal ValueTask<int> Completion => new ValueTask<int>(this, _done.Version);
 
@@ -3137,6 +4107,19 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         internal void Assign(BatchAsyncEnumerator owner)
         {
             Running = true;
+            Parked = false;
+            Awaited = false;
+            Decodes = false;
+            if (_hand is { } hand)
+            {
+                hand.Held = false;
+                hand.Dropped = false;
+                hand.Lacked = 0;
+                hand.Busy = null;
+                hand.Raised = 0;
+                hand.BatchRaised = false;
+            }
+
             _done.Reset();
             _loop ??= owner.LaneLoopAsync(this);
         }

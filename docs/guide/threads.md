@@ -160,15 +160,23 @@ The host asks once, with `MaxDegreeOfParallelism` on its session, and a single s
 ScanOptions four = new ScanOptions { DegreeOfParallelism = 4 };   // 0, the default, is the session's
 ```
 
+The session's degree is the number of cores its work takes beside its callers' own threads, all of it together: the writers' helpers and the parts of `WriteRecordsAsync`, the scans' decodes ahead of their loops, a count's lanes, a dataset's objects answered side by side, an aggregation's lanes and its merge, a Parquet file's pages and columns, and the compaction jobs. Every one of them past the first, which runs on your thread, starts only on a lane of the session's that is free, and holds it until it ends: a group by and a job run together never take more cores than the degree beside your thread. Your thread is one of a scan's degree: a scan at 4 decodes on three pool threads at most beside your loop. A compaction job has no caller, and holds one of the session's lanes for its own flow, its reads' decodes and its writer's helpers taking the others; its flow gives that lane back while an object it writes waits for the store, and takes it again after: at a degree of 8, a maintainer's jobs compute on eight threads at most, however many run at once. What waits on the store or the disk and computes little, the objects a question opens, a top's reads of its best granules, the reads of a local file, the writes of the synopsis cache, goes beside the degree, since a lane held while a request is out does nothing the degree is for. The runtime's own work comes on top: the garbage collector, and the thread pool's idle spin (below). Whatever holds a lane takes another only when one is free, or does the work itself, so that a session never waits on its own degree; a question's work that must run whatever the lanes, an object of a dataset answered beside the others, waits for a lane holding none, as a job does before it starts.
+
 A writer uses the session's degree too, and `VortexWriteOptions.DegreeOfParallelism` overrides it
 for one file. When a batch of a block or more comes in, the writer summarizes its columns side by
 side: each column's statistics, plus a text column's bounds and the distinct values a dictionary is
-priced from. It then chooses and compresses a chunk's columns side by side, a column with a chunk
-target of its own included. A column that takes longer than its share of the threads, and whose
-previous chunk was tried as zstd on a quarter of a megabyte of values or more, has its zstd frames
-compressed in parallel too, one frame per block, beside the other columns' work. The file is byte
-for byte the same whatever the degree. A write that builds indexes summarizes its columns on one
-thread.
+priced from. It then compresses each column's chunk as a task of its own, on a free lane while the
+rows after the chunk go through, the chunks of one column one after another, and writes them in
+column order as the column's next chunk leaves; a writer that builds indexes writes them before the
+chunk closes, its columns still compressed side by side. A column whose previous chunk was tried as
+zstd on a quarter of a megabyte of values or more has its zstd frames compressed in parallel too, one
+frame per block, beside the other columns' work. A column with a chunk target of its own, as a
+dataset's objects have, goes the same way, chunk by chunk. The file is byte for byte the same
+whatever the degree. A write that builds indexes summarizes its first block on one
+thread, which tells its index builders what the statistics say of it, and every block after it side by
+side; one that indexes a nested column summarizes every block on one thread.
+
+A writer of a table of several columns cut into chunks by their bytes, the default, takes your rows a block at a time whatever the calls you write them in, records and batches alike: a call of a few rows waits, copied, in the block it falls in, and a call of many is cut into blocks where it lies, each copied as it goes through. From its fifth block on, on more than one lane, it sends up to four blocks through at once, each column's work on them in the order of the blocks, so that a column quick to take a block runs ahead of the slowest one rather than waiting for it at every block. A call returns once its blocks went through, so that you may reuse what its batch lies in. The file is the same bytes at any degree, and calls of a block or more write the bytes of one call; calls of a few rows of text write the same rows, a text that repeats the row before shared within a call alone. A compaction job's writer does the same from its first block when its object is aimed at 32 blocks or more, and its objects are the same bytes at any degree: the job reads what an object holds at an end of a group of rows, once its blocks in flight landed. A block that makes a whole chunk goes through with the others too; one longer than a chunk, which the writer must cut, goes through alone. Each block of a consolidation of metric records made a chunk, and going through alone they held the job at 11.1 s at fourteen lanes; through the line, 9.2 s, and 10.0 at eight.
 
 Measured on the demonstration file, warmed up, each variant run in turn, the best of fifteen rounds in
 a process and the median of seven processes:
@@ -184,6 +192,21 @@ is about twice as fast at four threads, and two and a half times for the filtere
 hands batches to your loop gains little: it still delivers them one at a time and in file order
 (which the sample checks at degree 4), and most of its cost here is walking 123 blocks. Measure on
 your own files. Timings vary from run to run on a busy machine, so read the ratios.
+
+When your loop is the larger part of the work, run it on the lanes too. A fold that keeps a state goes through `AggregateAsync<TAggregator, TState>()` with an `IBatchAggregator` of your own ([aggregates.md](aggregates.md#an-aggregator-of-your-own)). Work that keeps no state, an export or a copy into another store, takes the scan in parts: `SplitAsync(n)`, on a typed scan or an untyped one, cuts it into at most `n` scans of disjoint rows, a file's where every column it reads starts a chunk and a dataset's at its objects, and each part is a scan you enumerate on a task of your own.
+
+```csharp
+IReadOnlyList<Scan<Reading>> parts = await file.Scan<Reading>().SplitAsync(4);
+await Parallel.ForEachAsync(parts, async (part, ct) =>
+{
+    await foreach (Columns<Reading> batch in part.WithCancellation(ct))
+    {
+        Export(batch);   // on this task's thread, beside the other parts'
+    }
+});
+```
+
+A writer has the same limit the other way: you fill its builder on one thread. Fill it in parts instead, `writer.CreatePartAsync<TRecord>()`, each a builder of its own on a thread of yours, written in the order the parts were created, or hand it records already in memory with `writer.WriteRecordsAsync(records)`, which fills a part a lane ([write-rows.md](write-rows.md)).
 
 ## Many questions at once
 
@@ -237,14 +260,22 @@ on every core and pauses the process a fraction as long.
   `DOTNET_GCgen0size=0x8000000` (128 MiB) answered 900 questions a second at 16 clients and 829 at 32,
   paused 3 % and 7 % of the time.
 
+## The thread pool's idle spin
+
+A thread of .NET's pool that runs out of work spins for a while before it sleeps, in case more arrives. A writer or a scan on many lanes hands the pool short items in waves, so its idle threads spin between them: 17 % of a write's processor time at 14 lanes, in a profile of a file of ten million rows on an M4 Pro (2026-11-17). The spin does no work, and the cores it takes are ones the write had left idle.
+
+A host that runs the library on many lanes, a maintainer compacting a dataset or a batch job writing files, can turn it off with `DOTNET_ThreadPool_UnfairSemaphoreSpinLimit=0` in its environment. Measured on that write at 14 lanes, two runs each, the time stayed the same (58.7 and 69.4 ms a round with the spin, 59.1 and 63.7 without), and the processor time fell by a quarter (406.8 and 483.4 ms a round, against 313.2 and 361.8). Keep the default in a process whose threads answer requests one at a time, where a thread that spins answers the next one sooner.
+
 ## Prefetch
 
-`ScanOptions.Prefetch` is the number of batches decoded ahead of the loop, 1 by default, so that
-decoding the next batch overlaps your work on the current one. The scan holds at most that many extra
-batches. The batch ahead is decoded on the thread pool, so a scan at the default degree of 1 uses one
-pool thread beside yours, and `Prefetch = 0` keeps everything on your thread. On a mapped file with a
-loop that works on every value it changed nothing measurable, about 3.1 ms at 0, 1 and 2. It pays
-off when the source has latency to hide, as a remote one does.
+`ScanOptions.Prefetch` is the number of batches read ahead of the loop, 1 by default, so that the
+next batch's reads overlap your work on the current one. The scan holds at most that many extra
+batches. A batch ahead is decoded within the degree, of which your thread is one: at the default degree
+of 1 it is decoded on your thread when your loop asks for it, its reads already in, and nothing runs on
+the pool beside you; at a degree of 4, up to three pool threads decode ahead of your loop, each on a
+lane of the session's. On a mapped file with a loop that works on every value it changed nothing
+measurable, about 3.1 ms at 0, 1 and 2. It pays off when the source has latency to hide, as a remote
+one does.
 
 A batch that costs less to decode than the trip to a pool thread and back is decoded on your thread
 instead, whatever the degree and the prefetch: a column of a few thousand values read from a local

@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Buffers;
+using Vorticity.Execution;
 using Vorticity.Indexes;
 using Vorticity.Types;
 using Vorticity.Writing;

@@ -11,6 +11,7 @@ using System.Threading.Tasks;
 using Vorticity.Arrays;
 using Vorticity.Layouts;
 using Vorticity.Arrays.Decoders.Canonical;
+using Vorticity.Execution;
 using Vorticity.Expressions;
 using Vorticity.File;
 using Vorticity.Indexes;
@@ -34,7 +35,7 @@ namespace Vorticity;
 /// A writer is used by one thread at a time. Disposing it without <see cref="CompleteAsync"/>
 /// abandons the file, as <see cref="Abandon"/> does.
 /// </remarks>
-public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, IFanWork
+public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, IBatchWork
 {
     private readonly ISegmentSink _sink;
     private readonly DType _schema;
@@ -155,6 +156,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Batches whose columns were ingested on several threads.</summary>
     internal int BatchesIngestedAcross { get; private set; }
 
+    /// <summary>Batches whose variant columns' keys were written in groups apart, each on a thread of its own.</summary>
+    internal int BatchesKeysApart { get; private set; }
+
     /// <summary>
     /// Once the file is completed, the bytes from its first structure an open reads to its end: what an
     /// open asking for that many reads in one request. 0 before.
@@ -162,7 +166,47 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     internal long TailBytes { get; private set; }
 
     /// <summary>The bytes of the column chunks, once the file is completed: its data, without its indexes.</summary>
-    internal long DataBytes => _reportBytes.Data;
+    internal long DataBytes => _writtenBytes.Data;
+
+    /// <summary>
+    /// What a reader holds of the file while it reads its rows in their order, besides its batches, at most: for each
+    /// column its two heaviest neighbouring chunks, each the chunk's bytes and what a read of a part of it decodes whole
+    /// (<see cref="ColumnWriter.OpenBytes"/>), and each object dictionary, its bytes and its values. What a merge counts
+    /// the file at as one of its inputs, which the entry a dataset keeps of it says.
+    /// </summary>
+    /// <remarks>
+    /// A reader holds a chunk of each column at once, and two of a column while it crosses from one to the next; every
+    /// column crosses at the same row where a group of rows ends, so the sum counts two of each.
+    /// </remarks>
+    internal long OpenBytes
+    {
+        get
+        {
+            long bytes = _sharedOpenBytes;
+            foreach (ColumnWriter column in _columns)
+            {
+                bytes += column.OpenBytes;
+            }
+
+            return bytes;
+        }
+    }
+
+    // What the object dictionaries hold open, their segments and their values decoded.
+    private long _sharedOpenBytes;
+
+    /// <summary>
+    /// What a reader's batches of the rows written weigh decoded, which a merge sizes its inputs' batches by: the
+    /// canonical bytes of the rows, the bytes their texts name counted and not the heaps their batches kept, less the texts
+    /// a column written against a dictionary or in runs keeps once, which a batch names by views into what the reader
+    /// holds open (<see cref="OpenBytes"/>), and more what a shredded variant's typed columns and values decode to, beside
+    /// the rows a reader puts back together from them (<see cref="ArrayBlobWriter.BlobLease.PastNamed"/>).
+    /// </summary>
+    internal long DecodedBytes => Math.Max(0, Interlocked.Read(ref _decodedBytes));
+
+    // Added to as rows are taken, on the flow that hands them over, and taken from as a chunk is written, on the flow
+    // that writes the file.
+    private long _decodedBytes;
 
     /// <summary>
     /// Once a file that carries a table of contents (<see cref="VortexWriteOptions.CarriesContents"/>) is
@@ -402,9 +446,43 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The canonical bytes the columns that gather hold together now, which lanes add to side by side.</summary>
     private long _gatheredHeld;
 
-    /// <summary>Whether <paramref name="gathering"/> writes what it holds: its target reached, or the columns together past their ceiling.</summary>
-    private bool DueOrOver(Gathering gathering) =>
-        gathering.Due || (_gatheredCeiling > 0 && Volatile.Read(ref _gatheredHeld) > _gatheredCeiling);
+    /// <summary>
+    /// Whether <paramref name="gathering"/> writes what it holds: its target reached, or the columns together past their
+    /// ceiling as they stood when the chunk began, and it the column that held the most then (<see cref="Over"/>).
+    /// </summary>
+    /// <remarks>
+    /// Read as the columns gathered, the total moved under the items of a chunk compressed side by side: which column
+    /// crossed the ceiling depended on the order the lanes took them, and an object's bytes changed by a few hundred from one
+    /// run to the next at one degree (2026-11-16). Taken before the chunk, the decision is the rows' alone.
+    /// </remarks>
+    private bool DueOrOver(Gathering gathering) => gathering.Due || ReferenceEquals(gathering, _over);
+
+    /// <summary>
+    /// The column that writes its chunk early in the chunk of the file under way: the one that held the most when the chunk
+    /// began, if the columns together then held past their ceiling; null otherwise. Set by <see cref="Over"/>.
+    /// </summary>
+    private Gathering? _over;
+
+    /// <summary>
+    /// Decides, before a chunk of the file is gathered, which column writes its chunk early (<see cref="_over"/>): from what
+    /// the columns and the chunks compressed ahead held then, the same whatever the lanes do next.
+    /// </summary>
+    private void Over()
+    {
+        _over = null;
+        if (_gatheredCeiling <= 0 || _gathering is not { } gathering || Volatile.Read(ref _gatheredHeld) <= _gatheredCeiling)
+        {
+            return;
+        }
+
+        foreach (Gathering? column in gathering)
+        {
+            if (column is { Rows: > 0 } && (_over is null || column.Held > _over.Held))
+            {
+                _over = column;
+            }
+        }
+    }
 
     /// <summary>The rows the columns that gather took since their chunks last ended together.</summary>
     private long _groupTaken;
@@ -412,38 +490,14 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The bytes from which the file keeps the sheets it gathers, or null (<see cref="VortexWriteOptions.ColumnSheetBytes"/>).</summary>
     private long? _sheetBytes;
 
-    /// <summary>
-    /// What the writer holds and has not written, as the bytes it would encode to: what each column that gathers holds, at
-    /// its last rate, and the rows that wait for a chunk of the file, staged or in transit, at the rate of what the columns
-    /// hold, their mean rate when they hold nothing, a first guess with none: what a caller sizing the file adds to the
-    /// bytes its sink took.
-    /// </summary>
-    internal long HeldBytes
-    {
-        get
-        {
-            long canonical = 0;
-            double encoded = 0;
-            double rates = 0;
-            int columns = 0;
-            if (_gathering is { } gathering)
-            {
-                foreach (Gathering? column in gathering)
-                {
-                    if (column is not null)
-                    {
-                        canonical += column.Bytes;
-                        encoded += column.Bytes * column.Rate;
-                        rates += column.Rate;
-                        columns++;
-                    }
-                }
-            }
+    // The rows staged before, going through on a lane of their own while the next ones stage (FlyAsync): their task, null
+    // when none flies, and their staging, which the rows after the next ones stage in once they landed (LandAsync).
+    private Task? _flight;
+    private Staging? _flying;
+    private Staging? _landed;
 
-            double rate = canonical > 0 ? encoded / canonical : columns > 0 ? rates / columns : Gathering.FirstRate;
-            return (long)(encoded + ((_pendingBytes + (_staging?.Bytes ?? 0)) * rate));
-        }
-    }
+    /// <summary>The staged batches that went through on a lane of their own while the caller staged the next ones.</summary>
+    internal int BatchesFlown { get; private set; }
 
     /// <summary>By column, what a variant column shreds, null for a column written whole; null when none shreds.</summary>
     private VariantShredding?[]? _shredding;
@@ -462,7 +516,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// By column, the censuses of the lanes that count slices of a call's rows beside the column's own, merged into it in
-    /// order (<see cref="CountSlicesAsync"/>); null until a call is cut in slices.
+    /// order (<see cref="CountedPathsAsync"/>); null until a call is cut in slices.
     /// </summary>
     private PathCensus?[][]? _sliceCensus;
 
@@ -483,6 +537,46 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>The rows past which the batches waiting go through the writer, as one.</summary>
     private const int StagedRows = 256;
+
+    /// <summary>
+    /// The rows from which a batch's ingest is spread over the writer's threads, a block's at most: what a batch that tops up
+    /// the block in transit holds, a block less the rows already there. At a block exactly, the batches a compaction's merge
+    /// gathers ingested on one thread, each a few rows short of it. A fan costs some ten microseconds, under a twentieth of
+    /// what this many rows cost its columns at half a microsecond a row (estimate, 2026-11-16).
+    /// </summary>
+    private const int AcrossRows = 1_024;
+
+    // The rows a batch waits below, and the waiting ones go through past, when the writer's caller says
+    // (VortexWriteOptions.StagedRows); 0 for the writer's own bounds.
+    private int _stagedRows;
+
+    // What the work the writer is part of tells it of its memory (VortexWriteOptions.Room); null for a writer on its own.
+    private Writing.WriteRoom? _room;
+
+    /// <summary>
+    /// Whether the writer's arenas keep their blocks from one use to the next: always for a writer on its own, and for a
+    /// job's writer while the job holds what the writer holds (<see cref="Writing.WriteRoom.Holds"/>). Read by each
+    /// arena's owner where it resets it, a lane's workspace, a staging, an index's keys, which then keeps its blocks or
+    /// gives them back.
+    /// </summary>
+    /// <remarks>
+    /// Kept, the blocks spare their owner the pool and the budget at each use: given back each time, those of the leaves
+    /// and of the indexes' keys took a consolidation of log records from 4.6 to 5.4 s to 7.3 to 8.1 s. But they are what a
+    /// writer holds past its share when the room is short: 70 to 100 MiB of the 339 to 358 a consolidation's writer held
+    /// under 2 GiB at degree 14, for a share of 269 (2026-11-21).
+    /// </remarks>
+    internal bool KeepsBlocks => _room is not { } room || room.Holds;
+
+    /// <summary>The blocks the line sent through only once the blocks before them landed, the memory of the work not admitting more in flight.</summary>
+    internal int FlightsHeldBack { get; private set; }
+
+    /// <summary>
+    /// Whether the writer takes its caller's rows a block at a time, as a merge hands its writer its blocks: a table of several
+    /// columns cut into chunks by their bytes, whose caller stages nothing of its own. Its blocks go through its line, several
+    /// at once, on more than one lane, and one after another on one; a call of a block or more is cut into blocks
+    /// (<see cref="WriteInBlocksAsync"/>). The same at any degree, so that the file is too.
+    /// </summary>
+    private bool _blocksExactly;
 
     /// <summary>The bytes past which they go whatever their rows, so that batches of large values wait for few others.</summary>
     private const long StagedBytes = 64 << 10;
@@ -683,9 +777,18 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>The session's lanes its helpers compute on, shared with every writer of the session; null outside one.</summary>
     private LaneBudget? _budget;
 
-    /// <summary>The threads above one, rented with the first piece of work that uses them.</summary>
-    private WorkFan? _fan;
-    private WriteBytes _reportBytes;
+    /// <summary>
+    /// The core whose pumps run the writer's pieces and units beside its caller: the session's, or the process's for a
+    /// writer made without one.
+    /// </summary>
+    private FlowCore _core = FlowCore.Process;
+
+    /// <summary>The lanes above one, rented with the first piece of work that uses them.</summary>
+    private CoreBatch? _fan;
+
+    // What the completed file holds by kind, as its report says it (BuildReport). Five numbers, as the report's six are with
+    // their total, which is their sum: a writer's object grows by none, and its allocations are held to the byte.
+    private (long Data, long Statistics, long ZoneMaps, long Indexes, long Footer) _writtenBytes;
 
     /// <summary>The sink position the write meter has counted to; an append starts it at the file's length.</summary>
     private long _meteredBytes;
@@ -783,7 +886,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// Whether any batch has waited in the transit arena or with the small batches, which is what
     /// <see cref="PreferredBatchRows"/> exists to avoid.
     /// </summary>
-    internal bool Buffered => _transit is not null || _staging is not null;
+    internal bool Buffered => _transit is not null || _staging is not null || _flying is not null || _line?.Flying == true;
 
     /// <summary>How many nodes wait in transit for their chunk.</summary>
     /// <remarks>Nothing in the library asks; the count exists for the tests of the small batches.</remarks>
@@ -979,7 +1082,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             _metadata = UserMetadata.Ordered(options.Metadata),
             _automaticChunks = options.AutomaticChunks,
             _lanes = options.DegreeOfParallelism > 0 ? options.DegreeOfParallelism : session?.Options.MaxDegreeOfParallelism ?? 1,
-            _budget = session?.WriteLanes,
+            _budget = session?.Lanes,
+            _core = session?.Core ?? FlowCore.Process,
             _located = options.Located,
             _zones = options.Zones,
             _zoneMapsOfOneZone = options.ZoneMapsOfOneZone,
@@ -1007,6 +1111,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             built.BucketBits = options.HashedBucketBits;
             built.Streamer = writer.StreamPayloadsAsync;
             built.Lanes = writer._lanes > 1 ? writer._budget : null;
+            built.KeyLanes = writer._lanes;
         }
 
         foreach (KeyValuePair<string, int> level in options.ZstdLevels)
@@ -1034,6 +1139,19 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         writer._groupRows = writer._gathering is null ? 0 : options.GatheredGroupRows;
+        writer._stagedRows = options.StagedRows;
+        writer._room = options.Room;
+
+        // A table of several columns cut into chunks by their bytes takes its caller's rows a block at a time, whatever its
+        // degree, and sends them through its line, four at once: its blocks go as a merge's do, a merge saying itself how
+        // many at once (FlightDepth). Its chunks are cut block by block, as a merge's are.
+        if (writer._stagedRows == 0 && rowBlock > 0 && rowBlock < 2 * CensusSliceRows && options.AutomaticChunks && writer._isTabular
+            && writer._fieldCount > 1)
+        {
+            writer._stagedRows = rowBlock;
+            writer._blocksExactly = true;
+            writer.FlightDepth = FlightsAhead;
+        }
 
         // A sheet of each column a sheet describes, fed as the column's indexes are.
         if (options.ColumnSheetBytes is not null && writer._isTabular)
@@ -1372,26 +1490,46 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // tables, the indexes and the blob writer behind this line only ever meet canonical nodes.
         root = arena.DecodedTree(root);
 
-        // The paths of the variant columns counted on another lane while the rows are taken, and done counting before the
-        // caller may reset the arena: the rows of each call follow those of the call before.
-        Task? counting = _census is null ? null : CountPathsAsync(arena, root, rows);
+        // A batch that waits with the ones after it has its paths counted with them, as they go through together
+        // (UnstageAsync): a compaction's merge hands its writer a run of a few rows at a time, each of which was counted on a
+        // lane of its own.
+        if (Stages(rows, seal))
+        {
+            await WriteCountedAsync(arena, root, rows, seal, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // A writer that takes its rows a block at a time cuts a call of a block or more into blocks, each counted as it goes.
+        if (_blocksExactly && !seal)
+        {
+            await StartAsync(cancellationToken).ConfigureAwait(false);
+            await WriteInBlocksAsync(arena, root, rows, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        // The rows waiting go through first, counted first, the rows of each call following those of the call before.
+        await UnstageAsync(cancellationToken).ConfigureAwait(false);
+
+        // The paths of the variant columns counted on other lanes while the rows are taken, and done counting before the
+        // caller may reset the arena.
+        bool counting = _census is not null && CountPaths(arena, root, rows);
         try
         {
             await WriteCountedAsync(arena, root, rows, seal, cancellationToken).ConfigureAwait(false);
         }
         catch
         {
-            if (counting is not null)
+            if (counting)
             {
-                await counting.ContinueWith(static _ => { }, TaskScheduler.Default).ConfigureAwait(false);
+                await CountedPathsAsync(quietly: true).ConfigureAwait(false);
             }
 
             throw;
         }
 
-        if (counting is not null)
+        if (counting)
         {
-            await counting.ConfigureAwait(false);
+            await CountedPathsAsync(quietly: false).ConfigureAwait(false);
         }
     }
 
@@ -1409,16 +1547,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// Counts the paths of the rows of <paramref name="root"/> into each variant column's census, made ready here, which may
-    /// add nodes to the arena; with lanes to spare, on others while the writer takes the same rows, returning what they run
-    /// on; inline otherwise, returning null. With lanes to spare and rows enough, the rows are cut in slices, the first
-    /// counted by the census, each other by a census of its own merged into it in order (<see cref="PathCensus.Merge"/>):
-    /// the census the rows counted in order make.
+    /// add nodes to the arena: on one lane, here, at once; on more, in slices offered to the core, which its pumps count
+    /// while the writer takes the same rows, and which <see cref="CountedPathsAsync"/> waits for, counting itself those no
+    /// pump took. The first slice counts into the census, each other into a census of its own merged into it in order
+    /// (<see cref="PathCensus.Merge"/>): the census the rows counted in order make.
     /// </summary>
+    /// <returns>Whether slices are offered, which <see cref="CountedPathsAsync"/> must then wait for.</returns>
     /// <remarks>
     /// One lane counting the rows of an append of 16 lanes left 109 to 117 ms of a 617 ms append unhidden: its rows cost
     /// some 190 ns each, the writer's own work at 16 lanes less.
     /// </remarks>
-    private Task? CountPathsAsync(CanonicalArena arena, int root, int rows)
+    private bool CountPaths(CanonicalArena arena, int root, int rows)
     {
         PathCensus?[] census = _census!;
         PathCensus.Counting[] ready = new PathCensus.Counting[census.Length];
@@ -1432,83 +1571,202 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         if (_lanes <= 1)
         {
-            Count(census, ready, 0, rows);
-            return null;
+            CountSlice(ready, 0, 0, rows);
+            return false;
         }
 
-        int slices = Math.Min(_lanes, rows / CensusSliceRows);
-        return slices <= 1 ? Task.Run(() => Count(census, ready, 0, rows)) : CountSlicesAsync(census, ready, rows, slices);
-
-        static void Count(PathCensus?[] census, PathCensus.Counting[] ready, int start, int count)
+        System.Diagnostics.Debug.Assert(_censusOffered == 0, "A census is counted while the one before is still offered.");
+        int slices = Math.Max(1, Math.Min(_lanes, rows / CensusSliceRows));
+        if (slices > 1)
         {
+            Interlocked.Increment(ref CensusesSliced);
+            PathCensus?[][] sliced = _sliceCensus ??= new PathCensus?[census.Length][];
             for (int field = 0; field < census.Length; field++)
             {
-                census[field]?.Add(in ready[field], start, count);
+                if (census[field] is null)
+                {
+                    continue;
+                }
+
+                PathCensus?[] kept = sliced[field] ??= [];
+                if (kept.Length < slices)
+                {
+                    Array.Resize(ref kept, slices);
+                    sliced[field] = kept;
+                }
+
+                for (int slice = 1; slice < slices; slice++)
+                {
+                    kept[slice] ??= new PathCensus(census[field]!.StringBoundBytes, CensusGroupRows);
+                }
+            }
+        }
+
+        if (_censusSlices.Length < slices)
+        {
+            Array.Resize(ref _censusSlices, slices);
+        }
+
+        for (int slice = 0; slice < slices; slice++)
+        {
+            CensusSlice unit = _censusSlices[slice] ??= new CensusSlice(this);
+            unit.Ready = ready;
+            unit.At = slice;
+            unit.Start = (int)((long)rows * slice / slices);
+            unit.End = (int)((long)rows * (slice + 1) / slices);
+            unit.Offer(_core, Flow.Write);
+        }
+
+        _censusOffered = slices;
+        return true;
+    }
+
+    /// <summary>
+    /// Waits for the slices <see cref="CountPaths"/> offered, counting here those no pump took, then merges them in order;
+    /// <paramref name="quietly"/>, for a write that failed, without the merge and without throwing.
+    /// </summary>
+    private async ValueTask CountedPathsAsync(bool quietly)
+    {
+        int slices = _censusOffered;
+        _censusOffered = 0;
+        Exception? failed = null;
+        for (int slice = 0; slice < slices; slice++)
+        {
+            try
+            {
+                await _censusSlices[slice]!.RunOrWaitAsync(_core).ConfigureAwait(false);
+            }
+            catch (Exception error)
+            {
+                failed ??= error;
+            }
+        }
+
+        for (int slice = 0; slice < slices; slice++)
+        {
+            _censusSlices[slice]!.Ready = [];
+        }
+
+        if (quietly)
+        {
+            return;
+        }
+
+        if (failed is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failed);
+        }
+
+        PathCensus?[] census = _census!;
+        for (int field = 0; field < census.Length; field++)
+        {
+            for (int slice = 1; census[field] is { } own && slice < slices; slice++)
+            {
+                own.Merge(_sliceCensus![field]![slice]!);
             }
         }
     }
 
     /// <summary>
-    /// Counts <paramref name="rows"/> rows made ready in <paramref name="slices"/> slices on lanes of their own: the first into
-    /// <paramref name="census"/>, each other into a census of its lane, cleared first, then merged into it in order.
+    /// Counts rows <c>[start, end)</c> of those made ready: slice <paramref name="at"/>, the first into each column's
+    /// census, any other into its own census of the slice, cleared first.
     /// </summary>
-    private async Task CountSlicesAsync(PathCensus?[] census, PathCensus.Counting[] ready, int rows, int slices)
+    private void CountSlice(PathCensus.Counting[] ready, int at, int start, int end)
     {
-        Interlocked.Increment(ref CensusesSliced);
-        PathCensus?[][] lanes = _sliceCensus ??= new PathCensus?[census.Length][];
+        PathCensus?[] census = _census!;
         for (int field = 0; field < census.Length; field++)
         {
-            if (census[field] is null)
+            if (census[field] is not { } own)
             {
                 continue;
             }
 
-            PathCensus?[] held = lanes[field] ??= [];
-            if (held.Length < slices)
+            PathCensus into = at == 0 ? own : _sliceCensus![field]![at]!;
+            if (at > 0)
             {
-                Array.Resize(ref held, slices);
-                lanes[field] = held;
+                into.Clear();
             }
 
-            for (int slice = 1; slice < slices; slice++)
-            {
-                held[slice] ??= new PathCensus(census[field]!.StringBoundBytes, CensusGroupRows);
-            }
+            into.Add(in ready[field], start, end - start);
         }
+    }
 
-        Task[] counting = new Task[slices];
-        for (int slice = 0; slice < slices; slice++)
+    /// <summary>The census's slices, kept from one call to the next, the first <see cref="_censusOffered"/> of them offered.</summary>
+    private CensusSlice?[] _censusSlices = [];
+
+    /// <summary>The slices of the census offered and not yet waited for; 0 when none is.</summary>
+    private int _censusOffered;
+
+    /// <summary>A slice of a call's rows, counted into the census of its slice by a pump of the core, or by the writer.</summary>
+    private sealed class CensusSlice(VortexFileWriter writer) : CoreUnit
+    {
+        internal PathCensus.Counting[] Ready = [];
+        internal int At;
+        internal int Start;
+        internal int End;
+
+        protected override void Execute() => writer.CountSlice(Ready, At, Start, End);
+    }
+
+    /// <summary>
+    /// Takes a call of a block or more a block at a time, as a merge hands its writer its blocks: the rows staged before it
+    /// completed to a block from the call's first rows, copied in; then each whole block of the call, held where it lies in the
+    /// caller's arena and copied as its block is assembled, by a pump of the core when the writer has lanes; and the rows past
+    /// the last whole block staged for the next call. Every cut is made in the caller's arena before a block flies: the
+    /// assemblies read it, and a slice made meanwhile would grow it under them. The call returns once every block landed, so
+    /// that the caller may reset its arena.
+    /// </summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask WriteInBlocksAsync(CanonicalArena arena, int root, int rows, CancellationToken cancellationToken)
+    {
+        int block = _stagedRows;
+        int head = _staging is { Rows: > 0 } staged ? Math.Min(rows, block - staged.Rows) : 0;
+        int whole = (rows - head) / block;
+        int tail = rows - head - (whole * block);
+        int headNode = head == 0 ? -1 : CanonicalSlice.SliceAcross(arena, arena, root, 0, head);
+        int tailNode = tail == 0 ? -1 : CanonicalSlice.SliceAcross(arena, arena, root, rows - tail, tail);
+        Block<int> blocks = whole == 0 ? default : Blocks.Rent<int>(whole);
+        try
         {
-            int at = slice;
-            int start = (int)((long)rows * at / slices);
-            int end = (int)((long)rows * (at + 1) / slices);
-            counting[at] = Task.Run(() =>
+            for (int b = 0; b < whole; b++)
             {
-                for (int field = 0; field < census.Length; field++)
+                blocks[b] = CanonicalSlice.SliceAcross(arena, arena, root, head + (b * block), block);
+            }
+
+            try
+            {
+                if (headNode >= 0 && Stage(arena, headNode, head).Rows >= block)
                 {
-                    if (census[field] is not { } own)
-                    {
-                        continue;
-                    }
-
-                    PathCensus into = at == 0 ? own : lanes[field][at]!;
-                    if (at > 0)
-                    {
-                        into.Clear();
-                    }
-
-                    into.Add(in ready[field], start, end - start);
+                    await FlyAsync(cancellationToken).ConfigureAwait(false);
                 }
-            });
-        }
 
-        await Task.WhenAll(counting).ConfigureAwait(false);
-        for (int field = 0; field < census.Length; field++)
-        {
-            for (int slice = 1; census[field] is { } own && slice < slices; slice++)
-            {
-                own.Merge(lanes[field][slice]!);
+                for (int b = 0; b < whole; b++)
+                {
+                    Staging staging = StagingOf();
+                    staging.Parts.Add(new StagedPart(arena, blocks[b], 0, block, -1));
+                    staging.Rows = block;
+                    staging.Bytes = arena.NamedBytes(blocks[b]);
+                    Interlocked.Add(ref _decodedBytes, staging.Bytes);
+                    await FlyAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                if (tailNode >= 0)
+                {
+                    _ = Stage(arena, tailNode, tail);
+                }
             }
+            catch
+            {
+                // The blocks that flew land, whatever becomes of them, before the caller, failed, may reset its arena.
+                await SettleAsync().ConfigureAwait(false);
+                throw;
+            }
+
+            await LandAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            Blocks.Return(blocks);
         }
     }
 
@@ -1520,10 +1778,26 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // A small batch waits with the ones after it until together they make a batch worth the
         // work every batch costs below: its statistics, its chunk's sizing, its copy in transit,
         // and a node more to concatenate when its chunk goes out.
-        if (!seal && _rowBlock > 0 && rows < StageBelow(_fixedWidth))
+        if (Stages(rows, seal))
         {
+            // A merge's writer sends a block exactly, the run that crosses it cut there: a block goes out where it lies, where
+            // a batch a few rows past it left them in transit, and every batch after it was copied there whole behind them and
+            // concatenated again to go out.
+            if (_stagedRows > 0 && (_staging?.Rows ?? 0) + rows > _stagedRows)
+            {
+                int head = _stagedRows - (_staging?.Rows ?? 0);
+                _ = Stage(arena, CanonicalSlice.SliceAcross(arena, arena, root, 0, head), head);
+                await FlyAsync(cancellationToken).ConfigureAwait(false);
+                root = CanonicalSlice.SliceAcross(arena, arena, root, head, rows - head);
+                rows -= head;
+            }
+
             Staging staging = Stage(arena, root, rows);
-            if (staging.Rows >= StagedRows || staging.Bytes >= StagedBytes || CompletesABlock(staging))
+            if (_stagedRows > 0 && staging.Rows >= _stagedRows)
+            {
+                await FlyAsync(cancellationToken).ConfigureAwait(false);
+            }
+            else if (_stagedRows == 0 && (staging.Rows >= StagedRows || staging.Bytes >= StagedBytes || CompletesABlock(staging)))
             {
                 await UnstageAsync(cancellationToken).ConfigureAwait(false);
             }
@@ -1532,6 +1806,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         await UnstageAsync(cancellationToken).ConfigureAwait(false);
+
+        // Rows that go out without waiting: what they weigh decoded, which the rows staged count as they are staged.
+        Interlocked.Add(ref _decodedBytes, arena.NamedBytes(root));
         await WriteDecodedAsync(arena, root, rows, seal, cancellationToken).ConfigureAwait(false);
     }
 
@@ -1551,7 +1828,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // Under columns that gather, rows written at once are taken a few blocks at a time, the widest column's bytes those a
         // gathered chunk aims at: a column cuts its chunks where the file's end, and a merge that hands over long runs would
         // leave chunks of a whole run, which a read of a few rows fetches whole.
-        long gathered = _gatheredBytes > 0 && rows > _rowBlock ? GatheredChunkRows(arena, root, rows) : long.MaxValue;
+        // A block at a time too, as a merge's writer and one that takes its rows a block at a time write them: a column of a
+        // block of more than its chunk's bytes ends its chunk with the block, where blocks went into chunks of eight.
+        long gathered = _gatheredBytes > 0 && rows >= _rowBlock ? GatheredChunkRows(arena, root, rows) : long.MaxValue;
         if ((_automaticChunks && !(seal && _pending.Count == 0 && rows % _rowBlock == 0)) || gathered < rows)
         {
             (long widest, long total) = _automaticChunks ? ColumnBytes(arena, root) : (0, 0);
@@ -1587,6 +1866,78 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>
+    /// Ingests a chunk of the file taken whole and emits it. A writer whose columns all gather and whose ingest goes across
+    /// its lanes gathers each column in the ingest's own pass, an item beside its accumulators (<see cref="GatherItem"/>),
+    /// and the emission then has a pass of its own only for the columns whose chunk is due.
+    /// </summary>
+    /// <remarks>
+    /// A merge's writer passed each block through two passes over its lanes, the second only to gather the columns, each
+    /// waiting for its slowest item: of a consolidation's 0.9 ms a block on the one lane the blocks go through one after
+    /// another, the gathering pass took 0.4 (2026-11-17).
+    /// </remarks>
+    private async ValueTask IngestThenEmitAsync(CanonicalArena arena, int node, int rows, CancellationToken cancellationToken)
+    {
+        _gatherInIngest = GathersInIngest(rows);
+        _ingestGathered = false;
+
+        // The column that writes early is chosen before the chunk's rows are gathered, wherever they are gathered: on one
+        // lane, the emission gathers them after the choice (EmitChunkAsync).
+        Over();
+        try
+        {
+            await IngestAsync(arena, node).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gatherInIngest = false;
+        }
+
+        // Gathered only when the ingest went across the lanes, which says so.
+        _gatheredInIngest = _ingestGathered;
+        try
+        {
+            await EmitChunkAsync(arena, node, rows, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _gatheredInIngest = false;
+        }
+    }
+
+    // Whether the ingest under way gathers the columns (an item each), whether it did, and whether the emission after it
+    // finds them gathered.
+    private bool _gatherInIngest;
+    private bool _ingestGathered;
+    private bool _gatheredInIngest;
+
+    /// <summary>An item of an ingest across the lanes that gathers a column, its field in the low twenty bits.</summary>
+    private const int GatherItem = 1 << 29;
+
+    /// <summary>
+    /// Whether a chunk of <paramref name="rows"/> rows gathers its columns in its ingest: every column gathers, the chunk's
+    /// columns are compressed across the lanes, its ingest goes across them, and none would gather past int.MaxValue rows.
+    /// </summary>
+    private bool GathersInIngest(int rows)
+    {
+        if (_stagedRows == 0 || _gathering is not { } gathering || !CompressesAcross || Fan is null || _fieldCount <= 1
+            || _blockRows == 0 || rows % _blockRows != 0 || GatheringOverflows(rows)
+            || !(_indexes is null or { AsksNothing: true } || _indexes.FeedsAcross))
+        {
+            return false;
+        }
+
+        foreach (Gathering? column in gathering)
+        {
+            if (column is null)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
     /// Takes a batch into chunks of <paramref name="chunk"/> rows, cutting it where its chunks end before anything
     /// reads it: every chunk it holds whole is written where it lies, and the rest waits in transit
     /// for the rows that complete its chunk, which then goes out whole with nothing carried.
@@ -1614,16 +1965,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 int whole = (int)chunk;
                 int piece = whole == rows ? root : CanonicalSlice.SliceAcross(arena, arena, root, offset, whole);
-                if (IngestsWithColumns(whole))
-                {
-                    await IngestAndEmitAcrossAsync(arena, piece, whole, cancellationToken).ConfigureAwait(false);
-                }
-                else
-                {
-                    await IngestAsync(arena, piece).ConfigureAwait(false);
-                    await EmitChunkAsync(arena, piece, whole, cancellationToken).ConfigureAwait(false);
-                }
-
+                await IngestThenEmitAsync(arena, piece, whole, cancellationToken).ConfigureAwait(false);
                 offset += whole;
                 continue;
             }
@@ -1771,6 +2113,30 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
     }
 
+    /// <summary>
+    /// Takes the rows of <paramref name="staging"/>'s assembled block, node <paramref name="node"/>, as the transit's, where
+    /// they wait for their chunk, the transit holding none: the staging's context becomes the transit's, and the staging
+    /// takes the transit's, empty, for its next block. Its rows were copied out of the inputs' batches as it was assembled,
+    /// and own their bytes, as rows that wait must.
+    /// </summary>
+    /// <remarks>
+    /// Copied into the transit as a block that completes a chunk is, the block that makes one alone, each block of a
+    /// consolidation of metric records, was copied twice, its epilogue a copy of 5 MB in the order of the blocks: 0.56 ms of
+    /// the 2 ms a block took through the writer at degree 14 (2026-11-18). A list's elements a block may share whole with a
+    /// batch it was cut from are compacted as they are copied into the transit, so a schema with lists still copies.
+    /// </remarks>
+    private void Adopt(Staging staging, int node)
+    {
+        _transit ??= new ScanContext?[2];
+        ScanContext? empty = _transit[_current];
+        _transit[_current] = staging.Context;
+        staging.Context = empty ?? TransitContexts.Rent(Account);
+        CanonicalArena transit = _transit[_current]!.Canonical;
+        _pending.Add(node);
+        _pendingRows += transit.GetNode(node).Length;
+        _pendingBytes += WaitingBytes(transit, node);
+    }
+
     /// <summary>Copies the rows of node <paramref name="root"/> into the transit arena, where they wait for their chunk.</summary>
     private void Hold(CanonicalArena arena, int root)
     {
@@ -1780,8 +2146,50 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         _pendingBytes += transit.ByteSize(_pending[^1]);
     }
 
+    /// <summary>
+    /// The bytes the rows of <paramref name="node"/>, a block of <paramref name="arena"/> adopted where it was assembled,
+    /// count for among the bytes in transit while it waits for its chunk (<see cref="UnflushedBytes"/>): what its buffers
+    /// hold, and for a shredded variant column's values, what their rows name.
+    /// </summary>
+    /// <remarks>
+    /// A block assembled run after run holds once a value equal, byte for byte, to the one gathered before it
+    /// (<c>CanonicalRuns</c>), and counted by its buffers its count depended on which rows' values were equal: what a block
+    /// whose values are not put back together cannot tell. A block copied into the transit holds each row's bytes
+    /// (<see cref="Hold"/>), and a column cut on the line counts what its rows name (<see cref="Gather"/>), so the count
+    /// follows the rows' own bytes on the three ways a block lands. Measured on the three benches of the throughput work
+    /// under 16 GiB at degree 14, 78 to 204 blocks adopted a process and the two counts apart on 26 to 204 of them: not a
+    /// byte written differed (2026-11-20).
+    /// </remarks>
+    private long WaitingBytes(CanonicalArena arena, int node)
+    {
+        long bytes = arena.ByteSize(node);
+        if (_shredding is not { } plans)
+        {
+            return bytes;
+        }
+
+        CanonicalNode block = arena.GetNode(node);
+        for (int field = 0; block.Kind == CanonicalKind.Struct && field < plans.Length && field < block.FieldCount; field++)
+        {
+            if (plans[field] is null)
+            {
+                continue;
+            }
+
+            CanonicalNode column = arena.GetNode(block.GetFieldIndex(field));
+            if (column.Kind == CanonicalKind.Struct && column.FieldCount == 2
+                && arena.GetNode(column.GetFieldIndex(1)).Kind is CanonicalKind.VarBinView or CanonicalKind.Shredded)
+            {
+                int values = column.GetFieldIndex(1);
+                bytes += arena.NamedBytes(values) - arena.ByteSize(values);
+            }
+        }
+
+        return bytes;
+    }
+
     /// <summary>A copy of the rows of node <paramref name="root"/> in <paramref name="into"/>, owning their bytes.</summary>
-    private int Owned(CanonicalArena into, CanonicalArena arena, int root) =>
+    private int Owned(CanonicalArena into, CanonicalArena arena, int root, bool shareRepeats = false) =>
         // Materialized, not borrowed: the batch's arena is the scan's and is reset as soon as the
         // caller asks for the next batch, so rows that wait must own their bytes. Narrowed before
         // it is owned, since a batch cut from a large list chunk shares that chunk's elements whole
@@ -1789,8 +2197,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // works on views, so the copy pays for the window alone. Narrowing here also keeps the
         // concatenation tight, because rebasing uses each chunk's whole child length.
         _mayShareChildren
-            ? into.CopyFrom(into, ChunkCompactor.Compact(into, into.ReferenceFrom(arena, root)))
-            : into.CopyFrom(arena, root);
+            ? into.CopyFrom(into, ChunkCompactor.Compact(into, into.ReferenceFrom(arena, root)), shareRepeats)
+            : into.CopyFrom(arena, root, shareRepeats);
 
     /// <summary>
     /// The rows below which a batch waits with the next ones rather than going through the writer
@@ -1801,6 +2209,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// to 6.
     /// </summary>
     private static int StageBelow(bool fixedWidth) => fixedWidth ? 64 : 6;
+
+    /// <summary>Whether a batch of <paramref name="rows"/> rows waits with the ones after it rather than go through the writer alone.</summary>
+    private bool Stages(int rows, bool seal) =>
+        !seal && _rowBlock > 0 && rows < (_stagedRows > 0 ? _stagedRows : StageBelow(_fixedWidth));
 
     /// <summary>Whether every leaf of <paramref name="dtype"/> holds its values at a fixed width.</summary>
     private static bool FixedWidth(DType dtype)
@@ -1839,52 +2251,1203 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private bool CompletesABlock(Staging staging) =>
         !_automaticChunks && _pendingRows + staging.Rows >= _rowBlock && _pendingBytes + staging.Bytes >= _blockBytes;
 
-    /// <summary>Copies a small batch in with the ones waiting before it.</summary>
-    private Staging Stage(CanonicalArena arena, int root, int rows)
+    /// <summary>
+    /// Takes the runs of <paramref name="map"/>, a block of a merge's output where its rows lie in the merge's input batches,
+    /// in the key's order after the rows taken before: the writer keeps a window on them and copies them when the block they
+    /// complete goes through, on that block's lane, and says so to the merge's <see cref="Ledger"/>, which held them under
+    /// the map until now. A full map's block goes through at once; a map the merge hands over short, as an object or the
+    /// merge ends, waits with the rows after it. The map is empty once taken, for the merge's next block.
+    /// </summary>
+    /// <remarks>
+    /// The merge handed its writer one run at a time, 1.5 million calls a consolidation of the metrics, each a call of its
+    /// own through the writer's checks (2026-11-17). Before, its thread copied each run into the writer's staging as it chose
+    /// it, a ninth of a consolidation's processor (2026-11-16), then what the staging still held of an input before the input
+    /// moved on, and waited for the blocks in flight to copy theirs: 2.7 s over two rounds of a consolidation.
+    /// </remarks>
+    internal async ValueTask WriteBlockAsync(BlockMap map, CancellationToken cancellationToken)
     {
-        Staging staging = _staging ??= new Staging(TransitContexts.Rent(Account));
-        CanonicalArena into = staging.Context.Canonical;
-        int owned = Owned(into, arena, root);
-        staging.Nodes.Add(owned);
-        staging.Rows += rows;
-        staging.Bytes += into.ByteSize(owned);
-        return staging;
+        ThrowIfDone();
+        Carry();
+        await DrainAsync(cancellationToken).ConfigureAwait(false);
+        _acceptedRows += map.Rows;
+        if (!_started)
+        {
+            await StartAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        Staging staging = StagingOf();
+        List<MapRun> runs = map.Runs;
+        if (staging.Parts.Count == 0 && runs.Count > 0)
+        {
+            RequireMatchingSchema(runs[0].Source.GetNode(runs[0].Root).DType);
+        }
+
+        for (int i = 0; i < runs.Count; i++)
+        {
+            MapRun run = runs[i];
+            staging.Parts.Add(new StagedPart(run.Source, run.Root, run.Row, run.Rows, -1));
+        }
+
+        staging.Rows += map.Rows;
+        staging.Bytes += map.Bytes;
+        Interlocked.Add(ref _decodedBytes, map.Bytes);
+        Ledger?.Transfer(map, ref map.FirstRun, staging, ref staging.FirstRun);
+        map.Clear();
+        if (staging.Rows >= _stagedRows)
+        {
+            await FlyAsync(cancellationToken).ConfigureAwait(false);
+        }
     }
 
-    /// <summary>Writes the small batches waiting, as one batch of all their rows, and drops them.</summary>
-    private async ValueTask UnstageAsync(CancellationToken cancellationToken)
+    /// <summary>
+    /// Takes rows <paramref name="row"/> to <paramref name="row"/> + <paramref name="rows"/> of node <paramref name="root"/> of
+    /// <paramref name="source"/>, a merge's input batch, as a batch of their own, once the rows staged before them went: a run
+    /// of a block or more, which a merge hands its writer whole, or any run of a writer that stages none. Nothing flies then,
+    /// so the window is cut in the source itself, on the merge's thread alone. A level's objects, whose keys do not
+    /// interleave, give runs of whole batches.
+    /// </summary>
+    internal async ValueTask WriteRunAloneAsync(CanonicalArena source, int root, int row, int rows, CancellationToken cancellationToken)
     {
-        if (_staging is not { Rows: > 0 } staging)
+        ThrowIfDone();
+        Carry();
+        await DrainAsync(cancellationToken).ConfigureAwait(false);
+        _acceptedRows += rows;
+        await UnstageAsync(cancellationToken).ConfigureAwait(false);
+        await WriteCoreAsync(source, CanonicalSlice.SliceAcross(source, source, root, row, rows), seal: false, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The rows of a block a merge hands this writer at once (<see cref="WriteBlockAsync"/>), its staged rows; 0 for a writer
+    /// that stages none, which takes every run alone (<see cref="WriteRunAloneAsync"/>).
+    /// </summary>
+    internal int MapRows => _rowBlock == 0 ? 0 : _stagedRows;
+
+    /// <summary>The rows of the block being staged, not yet sent through: what a block's map completes it from.</summary>
+    internal int StagingRows => _staging?.Rows ?? 0;
+
+    /// <summary>
+    /// Copies the rows the block being staged still keeps where they lie in a merge's inputs, and tells the merge's ledger:
+    /// what the end of a slice of a merge asks, so that the slice's inputs can go before the next slice opens its own. The
+    /// block's rows stay the same, and go through as it fills.
+    /// </summary>
+    internal void OwnStaged()
+    {
+        if (_staging is { } staging)
+        {
+            Own(staging);
+        }
+    }
+
+    /// <summary>
+    /// Ends the group of rows being taken, as the caller asks: the blocks in flight land, the whole blocks in transit end
+    /// their chunk of the file, and every column that gathers writes what it holds. What the file then holds is exact: the
+    /// bytes its sink took and the rows its chunks hold. The rows of the block being staged, and those in transit short of a
+    /// block, stay for the chunks after.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The groups the writer ends by itself every <see cref="GroupRows"/> rows (<see cref="VortexWriteOptions.GatheredGroupRows"/>)
+    /// stay where they were: an end asked for is not counted as one of them, so that the chunks of every column still end
+    /// together where a reader cuts the rows between lanes, whatever ends were asked between.
+    /// </para>
+    /// <para>
+    /// The same bytes at any degree: decided once every block in flight landed, from what the columns then hold, as the
+    /// file's own chunks are.
+    /// </para>
+    /// </remarks>
+    internal async ValueTask<GroupEnd> EndGroupAsync(CancellationToken cancellationToken)
+    {
+        ThrowIfDone();
+        await LandAsync().ConfigureAwait(false);
+        if (_rowBlock > 0 && _pendingRows >= _rowBlock)
+        {
+            await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
+        }
+
+        bool[]? emitted = Emitting(static column => column.Rows > 0);
+        await EmitGatheredAsync(cancellationToken).ConfigureAwait(false);
+        ReprobeTransit(emitted);
+
+        // The flight staged next reads the columns as they stand: every flight landed.
+        _lastCut = false;
+
+        // The indexes' runs written among the chunks are the indexes', as the file's completion counts them: the data is what
+        // the index budget is judged against, and the runs go out when it lets them, a burst at a time.
+        return new GroupEnd(_sink.Position - (_indexes?.FileBytes ?? 0), _rowCount);
+    }
+
+    /// <summary>
+    /// The columns that gather whose chunk the caller writes now, each giving its distinct table to the chunk, as
+    /// <paramref name="emits"/> says; null when no row waits in transit, which their tables would have to see again.
+    /// </summary>
+    private bool[]? Emitting(Func<Gathering, bool> emits)
+    {
+        if (_pendingRows == 0 || _gathering is not { } gathering)
+        {
+            return null;
+        }
+
+        bool[] emitted = new bool[gathering.Length];
+        bool any = false;
+        for (int field = 0; field < gathering.Length; field++)
+        {
+            emitted[field] = gathering[field] is { } column && emits(column);
+            any |= emitted[field];
+        }
+
+        return any ? emitted : null;
+    }
+
+    /// <summary>
+    /// Probes the rows short of a block that stay in transit into the new distinct tables of the columns <paramref name="emitted"/>
+    /// names, whose chunks just took their tables with them.
+    /// </summary>
+    /// <remarks>
+    /// Those rows were probed into the tables the chunks took, a column still gathering keeping its table as rows are carried:
+    /// probed again into those columns' new tables, as the tail a chunk of the file carries is, and into no other, whose table
+    /// holds them already. Left out, a column of a few names coded those rows against a table that never saw them, and its
+    /// values ran one row off the others' from there; probed again into every column, they ran off from the next rows
+    /// (2026-11-21).
+    /// </remarks>
+    private void ReprobeTransit(bool[]? emitted)
+    {
+        if (emitted is null || _transit?[_current] is not { } transit)
         {
             return;
         }
 
+        foreach (int pending in _pending)
+        {
+            CanonicalNode root = transit.Canonical.GetNode(pending);
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                if (emitted[field])
+                {
+                    _columns[field].Reprobe(transit.Canonical, _isTabular ? root.GetFieldIndex(field) : pending, 0, root.Length);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// The runs of a merge this writer and the merge's other writers keep where they lie in its inputs' batches, which the
+    /// merge gives back once every run noted on a batch is copied; null for a writer whose rows are its own.
+    /// </summary>
+    internal RunLedger? Ledger { get; set; }
+
+    /// <summary>
+    /// Copies every row the writer still keeps where it lies in a merge's inputs, once its blocks in flight are through: what
+    /// a merge has its writers do as it ends, before it gives its inputs' batches back.
+    /// </summary>
+    internal async ValueTask LetGoOfInputsAsync()
+    {
+        await LandAsync().ConfigureAwait(false);
+        if (_staging is { } staging)
+        {
+            Own(staging);
+        }
+    }
+
+    /// <summary>
+    /// Copies the rows of <paramref name="staging"/> still held where they lie in a merge's inputs into the staging's arena,
+    /// each run cut there, decoded when the input delivered an encoded column, and a list narrowed to the elements its rows
+    /// name; then tells the merge's ledger they are copied.
+    /// </summary>
+    private void Own(Staging staging)
+    {
+        if (!_mayShareChildren && Windowed(staging))
+        {
+            OwnWindows(staging);
+        }
+        else
+        {
+            CanonicalArena into = staging.Context.Canonical;
+            List<StagedPart> parts = staging.Parts;
+            for (int i = 0; i < parts.Count; i++)
+            {
+                StagedPart part = parts[i];
+                if (part.Source is { } from)
+                {
+                    // A text that repeats the row before's is copied once: the rows staged are sized by the bytes they name, and
+                    // the writer copies each row's bytes again as it gathers them, before any encoder sizes them.
+                    int window = into.DecodedTree(CanonicalSlice.SliceAcross(from, into, part.Root, part.Row, part.Rows));
+                    parts[i] = new StagedPart(null, 0, 0, part.Rows, Owned(into, into, window, shareRepeats: true));
+                }
+            }
+        }
+
+        Ledger?.Release(staging, ref staging.FirstRun);
+    }
+
+    /// <summary>
+    /// Whether the runs of <paramref name="staging"/> still held in a merge's inputs are copied a window of each input batch at
+    /// a time rather than one by one, which then has its block gathered from the windows (<see cref="Gathered"/>): the windows
+    /// are told in <see cref="Staging.Windows"/>, each run's in <see cref="Staging.RunWindows"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A run copied alone pays the slice, the decoding and the copy of every column of the schema, and its block's concatenation
+    /// a piece of every column again, whatever its rows. A merge of inputs whose keys interleave closely hands its writer runs
+    /// of one or two rows: 1.2 million runs for 1.8 million rows of a consolidation of 60 appended objects, which assembled its
+    /// blocks in 2.9 s of 8.3 s of processor at degree 14, and 0.26 s with the windows (2026-11-18). An input's runs in a block
+    /// follow one another in its batch, the rows a merge passes over between them aside, so a window over each batch holds
+    /// them all at once.
+    /// </para>
+    /// <para>
+    /// The windows cost one more pass over the block's rows, the gather, and the copy of the rows they span that no run takes;
+    /// the runs copied alone, a fixed price each. The windows are taken when the runs they spare are worth more
+    /// (<see cref="RunCost"/>, <see cref="PassedOverCost"/>).
+    /// </para>
+    /// </remarks>
+    private static bool Windowed(Staging staging)
+    {
+        List<StagedPart> parts = staging.Parts;
+        int first = 0;
+        while (first < parts.Count && parts[first].Source is null)
+        {
+            first++;
+        }
+
+        if (first == parts.Count)
+        {
+            return false;
+        }
+
+        Dictionary<(CanonicalArena, int), int> windowOf = staging.WindowOf ??= [];
+        List<RunWindow> windows = staging.Windows ??= [];
+        if (staging.RunWindows.Length < parts.Count)
+        {
+            staging.RunWindows = new int[Math.Max(parts.Count, staging.RunWindows.Length * 2)];
+        }
+
+        int runs = 0;
+        long rows = 0;
+        for (int i = first; i < parts.Count; i++)
+        {
+            StagedPart part = parts[i];
+            if (part.Source is not { } from)
+            {
+                continue;
+            }
+
+            ref int window = ref CollectionsMarshal.GetValueRefOrAddDefault(windowOf, (from, part.Root), out bool exists);
+            if (!exists)
+            {
+                window = windows.Count;
+                windows.Add(new RunWindow(from, part.Root, part.Row, part.Row + part.Rows));
+            }
+            else
+            {
+                ref RunWindow known = ref CollectionsMarshal.AsSpan(windows)[window];
+                known.Row = Math.Min(known.Row, part.Row);
+                known.End = Math.Max(known.End, part.Row + part.Rows);
+            }
+
+            staging.RunWindows[i] = window;
+            runs++;
+            rows += part.Rows;
+        }
+
+        windowOf.Clear();
+        long spanned = 0;
+        foreach (RunWindow window in windows)
+        {
+            spanned += window.End - window.Row;
+        }
+
+        if ((long)(runs - windows.Count) * RunCost > rows + ((spanned - rows) * PassedOverCost))
+        {
+            return true;
+        }
+
+        windows.Clear();
+        return false;
+    }
+
+    /// <summary>
+    /// The rows a block's gather goes through for the price of one run copied alone, measured on the metrics schema at degree
+    /// 14 (2026-11-18): past its rows' bytes, a run cost 1.7 µs to copy and 0.75 µs to concatenate, and a row 14 ns to gather.
+    /// A consolidation of 51.8 million rows assembled its 1.52 million runs in 6.3 s of processor, and its 0.50 million windows
+    /// in 4.5 s. Both prices grow with the columns, which the ratio leaves out.
+    /// </summary>
+    private const int RunCost = 170;
+
+    /// <summary>
+    /// The rows a block's gather goes through for the price of one row a window copies that no run takes, which a merge passed
+    /// over: a row cost 64 ns to copy on the metrics schema (2026-11-18), against 14 ns to gather.
+    /// </summary>
+    private const int PassedOverCost = 5;
+
+    /// <summary>
+    /// Copies each window <see cref="Windowed"/> told of <paramref name="staging"/> into its arena, decoded, then has each run
+    /// name its rows there: its part becomes rows of the window's node, which <see cref="Assemble"/> gathers.
+    /// </summary>
+    private void OwnWindows(Staging staging) => Windows(staging, owned: true);
+
+    /// <summary>
+    /// Has each window <see cref="Windowed"/> told of <paramref name="staging"/> sliced in its arena, decoded, and copied when
+    /// <paramref name="owned"/>, or left over its input batch's bytes otherwise; then has each run name its rows there.
+    /// </summary>
+    private void Windows(Staging staging, bool owned)
+    {
+        CanonicalArena into = staging.Context.Canonical;
+        Span<RunWindow> windows = CollectionsMarshal.AsSpan(staging.Windows!);
+        for (int w = 0; w < windows.Length; w++)
+        {
+            ref RunWindow window = ref windows[w];
+            int slice = into.DecodedTree(CanonicalSlice.SliceAcross(window.Source, into, window.Root, window.Row, window.End - window.Row));
+            window.Node = owned ? Owned(into, into, slice, shareRepeats: true) : slice;
+        }
+
+        List<StagedPart> parts = staging.Parts;
+        for (int i = 0; i < parts.Count; i++)
+        {
+            StagedPart part = parts[i];
+            if (part.Source is not null)
+            {
+                RunWindow window = windows[staging.RunWindows[i]];
+                parts[i] = new StagedPart(null, 0, part.Row - window.Row, part.Rows, window.Node);
+            }
+        }
+
+        staging.Windows!.Clear();
+        staging.Gathers = true;
+    }
+
+    /// <summary>
+    /// The rows of <paramref name="staging"/> as one node of its arena: those still held in a merge's inputs copied, and every
+    /// part concatenated, or gathered from the windows they were copied in. Its parts are let go.
+    /// </summary>
+    private int Assemble(Staging staging)
+    {
+        // Runs still in a merge's inputs: each column gathered run after run from the inputs' batches, in one pass. Which
+        // variant columns' rows are taken from what the inputs took of them is decided first: it decides what is gathered
+        // of their values.
+        if (!_mayShareChildren)
+        {
+            bool[]? held = RunsHeld(staging);
+            if (GatheredByRuns(staging, held) is >= 0 and int assembled)
+            {
+                TakeRuns(staging, assembled, held);
+                staging.Gathers = false;
+                staging.Parts.Clear();
+                Ledger?.Release(staging, ref staging.FirstRun);
+                return assembled;
+            }
+
+            if (held is not null)
+            {
+                Array.Clear(held);
+            }
+        }
+
+        // A schema the gather by runs does not take, a decimal's: a window of each batch, gathered where they lie, then
+        // copied once. Each window copied first, then the windows concatenated and their rows gathered, paid the copy of
+        // every node of the schema for each of a block's eighty windows of metric records, half of its assembly's 630 µs
+        // (2026-11-18).
+        if (!_mayShareChildren && Windowed(staging))
+        {
+            CanonicalArena into = staging.Context.Canonical;
+            Windows(staging, owned: false);
+            int gathered = into.CopyFrom(into, Gathered(staging), shareRepeats: true);
+            staging.Gathers = false;
+            staging.Parts.Clear();
+            Ledger?.Release(staging, ref staging.FirstRun);
+            return gathered;
+        }
+
+        Own(staging);
+        ScanContext context = staging.Context;
+        List<StagedPart> parts = staging.Parts;
+        int node;
+        if (staging.Gathers)
+        {
+            node = Gathered(staging);
+            staging.Gathers = false;
+        }
+        else if (parts.Count == 1)
+        {
+            node = parts[0].Node;
+        }
+        else
+        {
+            if (staging.Order.Length < parts.Count)
+            {
+                staging.Order = new int[Math.Max(parts.Count, staging.Order.Length * 2)];
+            }
+
+            for (int i = 0; i < parts.Count; i++)
+            {
+                staging.Order[i] = parts[i].Node;
+            }
+
+            node = CanonicalConcat.Concat(context.Decode, _schema, staging.Rows, staging.Order.AsSpan(0, parts.Count));
+        }
+
+        parts.Clear();
+        return node;
+    }
+
+    /// <summary>
+    /// The rows of <paramref name="staging"/>, some still held where they lie in a merge's inputs, gathered run after run into
+    /// one node of its arena that owns its bytes (<see cref="CanonicalRuns"/>): each column in one pass over the runs, a text
+    /// that repeats the one copied last viewing its bytes. -1 when no run lies in an input, or when the schema holds a form
+    /// the gather does not take, the staging then left as it was.
+    /// </summary>
+    /// <remarks>
+    /// A window of each batch sliced, the windows concatenated, the runs' rows gathered by their indices and the result
+    /// copied gave the same node, every fixed value and every view copied three times over: 16.6 % of the processor of a
+    /// consolidation of 74 appends of metric records, whose blocks take 240 runs of 80 batches each (2026-11-18).
+    /// </remarks>
+    private int GatheredByRuns(Staging staging, bool[]? held = null)
+    {
+        List<StagedPart> parts = staging.Parts;
+        bool lent = false;
+        for (int i = 0; i < parts.Count && !lent; i++)
+        {
+            lent = parts[i].Source is not null;
+        }
+
+        if (!lent || !CanonicalRuns.Takes(_schema))
+        {
+            return -1;
+        }
+
+        // The batches the runs lie in, in the order their first run comes, a part the staging owns a batch of its own; the
+        // runs kept as integers in the room the gather by indices keeps its rows in.
+        CanonicalArena into = staging.Context.Canonical;
+        Dictionary<(CanonicalArena, int), int> windowOf = staging.WindowOf ??= [];
+        List<RunWindow> windows = staging.Windows ??= [];
+        windows.Clear();
+        const int RunInts = 3;
+        if (staging.Picks.Length < RunInts * parts.Count)
+        {
+            staging.Picks = new int[Math.Max(RunInts * parts.Count, staging.Picks.Length * 2)];
+        }
+
+        Span<CanonicalRuns.Run> runs = MemoryMarshal.Cast<int, CanonicalRuns.Run>(staging.Picks.AsSpan(0, RunInts * parts.Count));
+        int rows = 0;
+        for (int i = 0; i < parts.Count; i++)
+        {
+            StagedPart part = parts[i];
+            (CanonicalArena arena, int node) = part.Source is { } from ? (from, part.Root) : (into, part.Node);
+            ref int window = ref CollectionsMarshal.GetValueRefOrAddDefault(windowOf, (arena, node), out bool exists);
+            if (!exists)
+            {
+                window = windows.Count;
+                windows.Add(new RunWindow(arena, node, part.Row, part.Row + part.Rows));
+            }
+            else
+            {
+                ref RunWindow known = ref CollectionsMarshal.AsSpan(windows)[window];
+                known.Row = Math.Min(known.Row, part.Row);
+                known.End = Math.Max(known.End, part.Row + part.Rows);
+            }
+
+            runs[i] = new CanonicalRuns.Run(window, part.Row, part.Rows);
+            rows += part.Rows;
+        }
+
+        windowOf.Clear();
+        try
+        {
+            return CanonicalRuns.Gather<RunWindow>(staging.Context.Decode, _schema, CollectionsMarshal.AsSpan(windows), runs, rows, held);
+        }
+        finally
+        {
+            windows.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Which variant columns of <paramref name="staging"/>'s block take their rows from what the merge's inputs took of
+    /// them (<see cref="TakeRuns"/>), by field, in the flight's <see cref="Flight.RunsTaken"/>: those the inputs take as
+    /// their own shreddings hold them (<see cref="RunLedger.Takes"/>) whose every run lies in a batch that holds the
+    /// column's values not put back together, under a shredding of the column's plan made ready for ranges
+    /// (<see cref="HeldBy"/>). Their values are then gathered not put back either. Null when none does, or for a block no
+    /// flight takes: a writer on one lane, which reads its rows.
+    /// </summary>
+    private bool[]? RunsHeld(Staging staging)
+    {
+        if (Ledger?.Takes is not { } takes || _shredding is not { } plans || staging.Flight is not { } flight)
+        {
+            return null;
+        }
+
+        flight.SizeShreds(_fieldCount);
+        bool[] held = flight.RunsTaken;
+        List<StagedPart> parts = staging.Parts;
+        bool any = false;
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            held[field] = false;
+            if (plans[field] is not { } plan || TakeOf(takes, plan) is null)
+            {
+                continue;
+            }
+
+            // Runs too short on average are read (WorthTaking): their values are put back as they are gathered.
+            bool every = parts.Count > 0 && (long)parts.Count * TakenRunRows <= staging.Rows;
+            for (int i = 0; i < parts.Count && every; i++)
+            {
+                every = parts[i].Source is { } source && HeldBy(source, parts[i].Root, field, plan, out _) is not null;
+            }
+
+            held[field] = every;
+            any |= every;
+        }
+
+        return any ? held : null;
+    }
+
+    /// <summary>
+    /// What took the rows of variant column <paramref name="field"/> of the batch whose root is <paramref name="root"/> in
+    /// <paramref name="source"/>, a merge's input's, and the row of it the batch's first row is in
+    /// <paramref name="first"/>: a shredding of <paramref name="plan"/> made ready for ranges, told beside the column's
+    /// values, which are not put back together. Null for a batch whose values are, or were taken under another plan.
+    /// </summary>
+    private static VariantShredder.Shredding? HeldBy(CanonicalArena source, int root, int field, VariantShredding plan, out int first)
+    {
+        first = 0;
+        CanonicalNode column = source.GetNode(source.GetNode(root).GetFieldIndex(field));
+        if (column.Kind != CanonicalKind.Struct || column.FieldCount != 2)
+        {
+            return null;
+        }
+
+        int values = column.GetFieldIndex(1);
+        return source.GetNode(values).Kind == CanonicalKind.Shredded && source.PutBack(values) < 0
+            && source.TryTaken(values, out CanonicalArena.ITakenRows? rows, out first)
+            && rows is VariantShredder.Shredding taken && taken.Indexed && ReferenceEquals(taken.Plan, plan)
+            ? taken
+            : null;
+    }
+
+    /// <summary>
+    /// Has the flight of <paramref name="staging"/>, a block gathered run after run into node <paramref name="assembled"/>,
+    /// take its rows of each variant column <paramref name="held"/> names (<see cref="RunsHeld"/>) from what the merge's
+    /// inputs took of each run's batch (<see cref="VariantShredder.Shredding.AppendRange"/>): the column's item of the
+    /// flight then reads no row (<see cref="Flight.TakeBlock"/>), and the block's values of the column, gathered not put
+    /// back together, are put back by what the flight took when a reader asks for them. Tells the inputs whether a block
+    /// as this one is worth it (<see cref="WorthTaking"/>), which the windows they decode next follow. Before the runs'
+    /// batches are let go.
+    /// </summary>
+    private void TakeRuns(Staging staging, int assembled, bool[]? held)
+    {
+        if (Ledger?.Takes is not { } takes || _shredding is not { } plans || staging.Flight is not { } flight)
+        {
+            return;
+        }
+
+        CanonicalArena into = staging.Context.Canonical;
+        List<StagedPart> parts = staging.Parts;
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            if (plans[field] is not { } plan || TakeOf(takes, plan) is not { } take)
+            {
+                continue;
+            }
+
+            take.Note(WorthTaking(into, into.GetNode(assembled).GetFieldIndex(field), parts.Count));
+            if (held is null || !held[field])
+            {
+                continue;
+            }
+
+            VariantShredder.Shredding block = flight.BeginBlock(field, plan, Account);
+            int at = 0;
+            foreach (StagedPart part in parts)
+            {
+                VariantShredder.Shredding taken = HeldBy(part.Source!, part.Root, field, plan, out int first)!;
+                block.AppendRange(taken, first + part.Row, part.Rows, at);
+                at += part.Rows;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Puts back together, in <paramref name="arena"/>, the values of each variant column <paramref name="which"/> names of
+    /// the block at <paramref name="root"/>, gathered not put back (<see cref="RunsHeld"/>), by what
+    /// <paramref name="flight"/> took of the block's runs (<see cref="TakeRuns"/>), and has the block name them: a root
+    /// of the same rows, whose columns named hold their values as any block's do. On the thread that owns the arena, before
+    /// anything reads the block's rows of those columns.
+    /// </summary>
+    /// <returns>The block's root: <paramref name="root"/> itself when no column named held values not put back.</returns>
+    private int PutBack(Flight flight, CanonicalArena arena, int root, ReadOnlySpan<bool> which)
+    {
+        // Read before anything is added: the additions may move the records.
+        CanonicalNode block = arena.GetNode(root);
+        DType dtype = block.DType;
+        int rows = block.Length;
+        Validity validity = block.Validity;
+        Span<int> fields = stackalloc int[_fieldCount];
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            fields[field] = block.GetFieldIndex(field);
+        }
+
+        bool any = false;
+        for (int field = 0; field < which.Length; field++)
+        {
+            if (!which[field])
+            {
+                continue;
+            }
+
+            CanonicalNode variant = arena.GetNode(fields[field]);
+            if (variant.Kind != CanonicalKind.Struct || variant.FieldCount != 2)
+            {
+                continue;
+            }
+
+            int metadata = variant.GetFieldIndex(0);
+            int values = variant.GetFieldIndex(1);
+            if (arena.GetNode(values).Kind != CanonicalKind.Shredded)
+            {
+                continue;
+            }
+
+            DType variantType = variant.DType;
+            Validity variantValidity = variant.Validity;
+            int twin = arena.MaterializeShredded(values, flight.Blocks[field]!, 0);
+            fields[field] = arena.AddStruct(variantType, rows, variantValidity, [metadata, twin]);
+            any = true;
+        }
+
+        return any ? arena.AddStruct(dtype, rows, validity, fields) : root;
+    }
+
+    /// <summary>
+    /// Variant column <paramref name="field"/> of <paramref name="flight"/>'s block lent to <paramref name="into"/>, an
+    /// arena of the caller's own, its values, which the flight holds not put back together, put back there by what the
+    /// flight took of the block's runs: the block's arena is read by the flight's items, and takes nothing.
+    /// </summary>
+    private static int PutBackInto(CanonicalArena into, Flight flight, int field)
+    {
+        int lent = into.ReferenceFrom(flight.Arena, flight.FieldNodes[field]);
+        CanonicalNode variant = into.GetNode(lent);
+        int metadata = variant.GetFieldIndex(0);
+        int values = variant.GetFieldIndex(1);
+        if (into.GetNode(values).Kind != CanonicalKind.Shredded)
+        {
+            return lent;
+        }
+
+        DType dtype = variant.DType;
+        int length = variant.Length;
+        Validity validity = variant.Validity;
+        int twin = into.MaterializeShredded(values, flight.Blocks[field]!, 0);
+        return into.AddStruct(dtype, length, validity, [metadata, twin]);
+    }
+
+    /// <summary>
+    /// Puts back together the values of every variant column of <paramref name="staging"/>'s block at <paramref name="node"/>
+    /// that its flight's assembly gathered not put back (<see cref="PutBack"/>), for a block that goes through alone, every
+    /// row of it read: the block's root after it.
+    /// </summary>
+    private int PutBackWhole(Staging staging, int node)
+    {
+        if (node < 0 || staging.Flight is not { } flight || !flight.RunsTaken.AsSpan().Contains(true))
+        {
+            return node;
+        }
+
+        int whole = PutBack(flight, staging.Context.Canonical, node, flight.RunsTaken);
+        Array.Clear(flight.RunsTaken);
+        if (_line is { } line)
+        {
+            line.BlocksPutBack++;
+        }
+
+        return whole;
+    }
+
+    /// <summary>What takes the column written under <paramref name="plan"/> among <paramref name="takes"/>; null for none.</summary>
+    private static VariantTake? TakeOf(VariantTake[] takes, VariantShredding plan)
+    {
+        foreach (VariantTake take in takes)
+        {
+            if (ReferenceEquals(take.Plan, plan))
+            {
+                return take;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The rows a run of a block holds at least, on average, for the block's rows of a variant column to be taken from what
+    /// the merge's inputs took of them rather than read: a run costs each node of the shredding its place in the batch's.
+    /// </summary>
+    private const int TakenRunRows = 4;
+
+    /// <summary>
+    /// Whether the rows of variant column <paramref name="column"/> of a block of <paramref name="runs"/> runs, gathered in
+    /// <paramref name="arena"/>, are worth taking from what the merge's inputs took of them rather than read
+    /// (<see cref="TakeRuns"/>): runs long enough on average, and few rows that repeat the row before, which a read takes
+    /// again at once, a run at a time, and which a range takes whole each.
+    /// </summary>
+    private static bool WorthTaking(CanonicalArena arena, int column, int runs)
+    {
+        CanonicalNode variant = arena.GetNode(column);
+        int rows = variant.Length;
+        if (variant.Kind != CanonicalKind.Struct || variant.FieldCount != 2 || (long)runs * TakenRunRows > rows)
+        {
+            return false;
+        }
+
+        CanonicalNode metadata = arena.GetNode(variant.GetFieldIndex(0));
+        CanonicalNode value = arena.GetNode(variant.GetFieldIndex(1));
+        if (metadata.Kind != CanonicalKind.VarBinView || value.Kind is not (CanonicalKind.VarBinView or CanonicalKind.Shredded))
+        {
+            return false;
+        }
+
+        // A row whose views are the row before's repeats it: the gather has the rows that repeat view one copy, and a
+        // row not put back together that repeats the row before it in its run name what that row names.
+        ReadOnlySpan<Int128> values = MemoryMarshal.Cast<byte, Int128>(value.Kind == CanonicalKind.Shredded ? value.HollowViews.Span : value.Views.Span)[..rows];
+        ReadOnlySpan<Int128> metadatas = MemoryMarshal.Cast<byte, Int128>(metadata.Views.Span)[..rows];
+        int repeats = 0;
+        for (int row = 1; row < rows; row++)
+        {
+            repeats += values[row] == values[row - 1] && metadatas[row] == metadatas[row - 1] ? 1 : 0;
+        }
+
+        return 2L * repeats <= rows;
+    }
+
+    /// <summary>
+    /// The rows of <paramref name="staging"/>, whose parts name rows of the nodes they were copied in, as one node: the nodes
+    /// concatenated once each, and the rows gathered from them in the parts' order.
+    /// </summary>
+    private int Gathered(Staging staging)
+    {
+        ScanContext context = staging.Context;
+        CanonicalArena into = context.Canonical;
+        List<StagedPart> parts = staging.Parts;
+        Dictionary<int, int> starts = staging.NodeStarts ??= [];
+        if (staging.Order.Length < parts.Count)
+        {
+            staging.Order = new int[Math.Max(parts.Count, staging.Order.Length * 2)];
+        }
+
+        if (staging.Picks.Length < staging.Rows)
+        {
+            staging.Picks = new int[Math.Max(staging.Rows, staging.Picks.Length * 2)];
+        }
+
+        Span<int> picks = staging.Picks;
+        int nodes = 0;
+        int total = 0;
+        int picked = 0;
+        for (int i = 0; i < parts.Count; i++)
+        {
+            StagedPart part = parts[i];
+            ref int start = ref CollectionsMarshal.GetValueRefOrAddDefault(starts, part.Node, out bool exists);
+            if (!exists)
+            {
+                start = total;
+                staging.Order[nodes++] = part.Node;
+                total += into.GetNode(part.Node).Length;
+            }
+
+            int from = start + part.Row;
+            for (int row = 0; row < part.Rows; row++)
+            {
+                picks[picked++] = from + row;
+            }
+        }
+
+        starts.Clear();
+        int all = CanonicalConcat.Concat(context.Decode, _schema, total, staging.Order.AsSpan(0, nodes));
+        return Compute.CanonicalFilter.Apply(into, all, picks[..picked]);
+    }
+
+    /// <summary>
+    /// Rows <see cref="Row"/> to <see cref="End"/> of node <see cref="Root"/> of a merge's input batch <see cref="Source"/>,
+    /// which hold every run a block takes of it, and the node of the block's arena they were copied in.
+    /// </summary>
+    private struct RunWindow(CanonicalArena source, int root, int row, int end) : CanonicalRuns.ISource
+    {
+        internal readonly CanonicalArena Source = source;
+        internal readonly int Root = root;
+        internal int Row = row;
+        internal int End = end;
+        internal int Node = -1;
+
+        readonly CanonicalArena CanonicalRuns.ISource.Arena => Source;
+
+        readonly int CanonicalRuns.ISource.Node => Root;
+
+        readonly int CanonicalRuns.ISource.First => Row;
+
+        readonly int CanonicalRuns.ISource.End => End;
+    }
+
+    /// <summary>
+    /// What a staging holds of its rows, in their order: a node of its own arena (<see cref="Node"/>), or, while
+    /// <see cref="Source"/> is set, rows <see cref="Row"/> on of node <see cref="Root"/> of a merge's input batch, copied when
+    /// their block goes through.
+    /// </summary>
+    private readonly record struct StagedPart(CanonicalArena? Source, int Root, int Row, int Rows, int Node);
+
+    /// <summary>The staging the rows go into: the one under way, or the one the rows staged before last left, once landed.</summary>
+    private Staging StagingOf()
+    {
+        if (_staging is null)
+        {
+            _staging = _landed ?? SpareStaging();
+            _landed = null;
+        }
+
+        return _staging;
+    }
+
+    /// <summary>Copies a small batch in with the ones waiting before it: in the staging the rows staged before last left, once landed.</summary>
+    private Staging Stage(CanonicalArena arena, int root, int rows)
+    {
+        Staging staging = StagingOf();
+        CanonicalArena into = staging.Context.Canonical;
+        // A text that repeats the row before's is copied once: the rows staged are sized by the bytes they name, and the
+        // writer copies each row's bytes again as it gathers them, before any encoder sizes them.
+        int owned = Owned(into, arena, root, shareRepeats: true);
+        staging.Parts.Add(new StagedPart(null, 0, 0, rows, owned));
+        staging.Rows += rows;
+        long bytes = into.NamedBytes(owned);
+        staging.Bytes += bytes;
+        Interlocked.Add(ref _decodedBytes, bytes);
+        return staging;
+    }
+
+    /// <summary>
+    /// Sends the rows staged, a merge's batch of <see cref="VortexWriteOptions.StagedRows"/>, through the writer: on a lane
+    /// of the session's of their own when one is free, the caller going on to stage the next ones meanwhile; on the
+    /// caller's otherwise, as any other staged rows. The rows staged before land first, so that the batches go through one
+    /// at a time and in order: the file is the same either way.
+    /// </summary>
+    /// <remarks>
+    /// The merge and the writer took turns on one thread: at degree 14, the merge's thread spent 46 % of the job's processor
+    /// time, and every block the writer's lanes ingested waited for it.
+    /// </remarks>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask FlyAsync(CancellationToken cancellationToken)
+    {
+        Staging staging = _staging!;
+        if (UsesLine)
+        {
+            // The line made now: the blocks that went through one at a time before it land first.
+            if (_line is null)
+            {
+                await LandAsync().ConfigureAwait(false);
+            }
+
+            await FlyOnLineAsync(staging, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        LaneBudget? budget = _lanes > 1 ? _budget : null;
+
+        // The block is assembled at once, a unit of the core that a pump runs while the block before it still goes through:
+        // its runs copied out of the merge's inputs and concatenated, a third of a block's time on the one lane the blocks
+        // pass through one after another (2026-11-16). Two blocks may be assembled side by side. Assembled one after
+        // another, the blocks made a chain of 6 s of a consolidation's 9.6 (2026-11-17). Its copies done, the merge's ledger
+        // says so, and the merge gives back the input batches no run of a writer is left on.
+        bool offered = _lanes > 1;
+        if (offered)
+        {
+            (staging.Assembly ??= new AssemblyUnit(this, staging)).Offer(_core, Flow.Write);
+        }
+        else
+        {
+            staging.Assembled = Assemble(staging);
+        }
+
+        try
+        {
+            await LandAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            // The block before failed: this one's assembly ends before the writer, failing, gives its staging up.
+            if (offered)
+            {
+                try
+                {
+                    await staging.Assembly!.RunOrWaitAsync(_core).ConfigureAwait(false);
+                }
+                catch (Exception)
+                {
+                    // The writer fails with the block before's failure, which the caller meets.
+                }
+            }
+
+            throw;
+        }
+
+        // The flight before landed: this one is the next.
+        _flown++;
+        if (budget is null || !Execution.LaneWorkers.TryTake(budget, out long entered))
+        {
+            // No lane free: the block goes through on the merge's thread, and its staging takes the next rows.
+            if (offered)
+            {
+                await staging.Assembly!.RunOrWaitAsync(_core).ConfigureAwait(false);
+            }
+
+            await WriteStagedAsync(staging, cancellationToken, flown: true).ConfigureAwait(false);
+            return;
+        }
+
+        _staging = null;
+        _flying = staging;
+        BatchesFlown++;
+        _flight = Execution.LaneWorkers.RunOnAsync(
+            budget,
+            entered,
+            async () =>
+            {
+                // Its assembly, run here on the flight's lane when no pump took it yet.
+                await staging.Assembly!.RunOrWaitAsync(_core).ConfigureAwait(false);
+                await WriteStagedAsync(staging, cancellationToken, flown: true).ConfigureAwait(false);
+            });
+    }
+
+    /// <summary>
+    /// <see cref="FlyAsync"/> on the writer's line: the block admitted as the next flight and its assembly offered, then the
+    /// flights up to the one <see cref="FlightDepth"/> back waited for, the entries ready run meanwhile.
+    /// </summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask FlyOnLineAsync(Staging staging, CancellationToken cancellationToken)
+    {
+        FlightLine line = Line;
+
+        // Up to FlightDepth blocks in flight while the work's memory admits them. Otherwise the blocks before this one land
+        // and the chunks in emission end before the block is assembled, its rows copied out of the merge's inputs, and it
+        // goes through alone: the file is the same either way. The wait came after the copy, which the writer then held
+        // beside everything in the air.
+        bool alone = _room is { } room && !room.Admits(BlockCopied(staging));
+        if (alone)
+        {
+            FlightsHeldBack++;
+
+            // A line made now has no flight to wait for: the blocks before it went through one at a time, and count as
+            // landed once it admits its first.
+            if (line.Flying)
+            {
+                await line.SettleAsync(_flown, quietly: false, cancellationToken).ConfigureAwait(false);
+            }
+
+            await RoomAsync(BlockCopied(staging)).ConfigureAwait(false);
+        }
+
+        // What the assembly copies, reserved before it is offered, and given back once the block landed (Epilogue).
+        long raised = Raise(BlockCopied(staging));
+        long flight = NextFlight();
+        _staging = null;
+        BatchesFlown++;
+        line.Admit(staging, flight);
+        staging.Flight!.Raised = raised;
+        (staging.Assembly ??= new AssemblyUnit(this, staging)).Offer(_core, Flow.Write);
+        await line.SettleAsync(alone ? flight : flight - FlightDepth + 1, quietly: false, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// What the assembly of <paramref name="staging"/>'s block takes: the bytes its rows name, copied out of the merge's
+    /// inputs, less what its arena holds already, the rows staged by copy and the blocks it kept of the block before.
+    /// </summary>
+    private static long BlockCopied(Staging staging) =>
+        Math.Max(0, staging.Bytes - staging.Context.Canonical.HeldBytes(out _));
+
+
+    /// <summary>The assembly of a staging's block, a unit of the core (<see cref="Assemble"/>).</summary>
+    private sealed class AssemblyUnit(VortexFileWriter writer, Staging staging) : CoreUnit
+    {
+        protected override void Execute() => staging.Assembled = writer.Assemble(staging);
+
+        /// <summary>
+        /// On the line, the block's prologue may run, in order: told once the unit's result is set, since the flight may go
+        /// all the way through and its staging be staged and offered again before a pump that ran the unit leaves it.
+        /// </summary>
+        protected override void Ended()
+        {
+            if (staging.Flight is not null)
+            {
+                writer._line?.Assembled(staging);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Waits for the rows in flight to have gone through, throwing what failed them, and keeps their staging for the rows
+    /// staged after the next ones: before anything else changes the writer, a caller's declarations at the end among them.
+    /// </summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    internal async ValueTask LandAsync()
+    {
+        if (_line is { } line)
+        {
+            // Every flight on the line, then the distinct values of the last one, which no flight after it attaches.
+            await line.SettleAsync(_flown, quietly: false, CancellationToken.None).ConfigureAwait(false);
+            FlushAttach();
+        }
+
+        if (_flight is not { } flight)
+        {
+            return;
+        }
+
+        try
+        {
+            await flight.ConfigureAwait(false);
+        }
+        finally
+        {
+            _flight = null;
+            _landed = _flying;
+            _flying = null;
+        }
+    }
+
+    /// <summary>
+    /// Waits for the rows in flight whatever becomes of them, before the writer is given up, which releases what they write
+    /// with: what failed them failed a write the caller abandons, and is observed here rather than thrown.
+    /// </summary>
+    internal async ValueTask SettleAsync()
+    {
+        if (_line is { } line)
+        {
+            await line.SettleAsync(_flown, quietly: true, CancellationToken.None).ConfigureAwait(false);
+        }
+
+        if (_flight is { } flight)
+        {
+            await flight.ContinueWith(static done => _ = done.Exception, TaskScheduler.Default).ConfigureAwait(false);
+            _flight = null;
+            _landed = _flying;
+            _flying = null;
+        }
+
+        // And the chunks in emission, which write with the lanes and contexts the abandon releases.
+        await SettleEmissionsAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>Writes the small batches waiting, as one batch of all their rows, and drops them: the rows in flight land first.</summary>
+    private async ValueTask UnstageAsync(CancellationToken cancellationToken)
+    {
+        await LandAsync().ConfigureAwait(false);
+        if (_staging is { Rows: > 0 } staging)
+        {
+            await WriteStagedAsync(staging, cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Writes the small batches <paramref name="staging"/> holds, as one batch of all their rows, and drops them.</summary>
+    /// <param name="staging">The staging.</param>
+    /// <param name="cancellationToken">Cancels the write.</param>
+    /// <param name="flown">
+    /// Whether it is the last flight flown off the writer's line, which counts what its block names (<see cref="Weights"/>):
+    /// the thread that hands the rows over flies no other until it lands.
+    /// </param>
+    private async ValueTask WriteStagedAsync(Staging staging, CancellationToken cancellationToken, bool flown = false)
+    {
+        // The rows still held where they lie in a merge's inputs are copied now, and concatenated: a block that flies was
+        // assembled on its lane already, while the block before it went through. What it names is counted as it was
+        // assembled, as a block on the line counts it at its prologue, before any of its values are put back together.
         ScanContext context = staging.Context;
         int rows = staging.Rows;
-        int node = staging.Nodes.Count == 1
-            ? staging.Nodes[0]
-            : CanonicalConcat.Concat(
-                context.Decode, _schema, rows, System.Runtime.InteropServices.CollectionsMarshal.AsSpan(staging.Nodes));
-        staging.Nodes.Clear();
+        int assembled = staging.Assembled >= 0 ? staging.Assembled : Assemble(staging);
+        if (flown && Weights is { } weights)
+        {
+            weights.Weigh(_flown - 1, ColumnBytes(context.Canonical, assembled).Total);
+        }
+
+        int node = PutBackWhole(staging, assembled);
+        staging.Assembled = -1;
         staging.Rows = 0;
         staging.Bytes = 0;
         try
         {
-            await WriteDecodedAsync(context.Canonical, node, rows, seal: false, cancellationToken).ConfigureAwait(false);
+            // Their paths counted on other lanes while they are taken, done before their arena is reset.
+            bool counting = _census is not null && CountPaths(context.Canonical, node, rows);
+            try
+            {
+                await WriteDecodedAsync(context.Canonical, node, rows, seal: false, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                if (counting)
+                {
+                    await CountedPathsAsync(quietly: true).ConfigureAwait(false);
+                }
+
+                throw;
+            }
+
+            if (counting)
+            {
+                await CountedPathsAsync(quietly: false).ConfigureAwait(false);
+            }
         }
         finally
         {
-            context.Canonical.Reset();
+            // Its blocks kept for the rows staged next, which take the same sizes: each block back to the pool and rented
+            // again, through the budget each way, took 8 % of a merge's writer at degree 14. Given back all the same while
+            // the work the writer is part of does not hold what the writer holds (KeepsBlocks).
+            if (KeepsBlocks)
+            {
+                context.Canonical.ResetKeepingBlocks();
+            }
+            else
+            {
+                context.Canonical.Reset();
+            }
         }
     }
 
-    /// <summary>The context small batches wait in, their nodes, their rows and their bytes.</summary>
+    /// <summary>
+    /// The context small batches and a merge's runs wait in, what it holds of their rows in order, their rows and their
+    /// bytes; and once it goes through, the node its rows were concatenated into (<see cref="Assembled"/>), -1 before.
+    /// </summary>
     private sealed class Staging(ScanContext context)
     {
-        internal readonly ScanContext Context = context;
-        internal readonly List<int> Nodes = [];
+        // Exchanged with the transit's, empty, when the transit adopts the block it assembled (Adopt).
+        internal ScanContext Context = context;
+        internal readonly List<StagedPart> Parts = [];
         internal int Rows;
         internal long Bytes;
+        internal int Assembled = -1;
+
+        /// <summary>The number its first run kept in a merge's input took in the merge's ledger, -1 while it keeps none.</summary>
+        internal long FirstRun = -1;
+
+        /// <summary>The unit that assembles its block, kept from one block to the next.</summary>
+        internal AssemblyUnit? Assembly;
+
+        /// <summary>The flight on the writer's line that sends its block through; null off the line.</summary>
+        internal Flight? Flight;
+
+        /// <summary>Whether its block on the line is assembled, under the line's lock.</summary>
+        internal bool Ready;
+
+        // The parts' nodes in order, for their concatenation, kept from one block to the next: made with the first block of
+        // several parts, none for a writer whose blocks lie where its caller's rows do. A writer makes four to six stagings,
+        // as its flights come and go, and a kilobyte each made up front moved what a write on four lanes allocated by two.
+        internal int[] Order = [];
+
+        // The windows of a merge's input batches its runs are copied in (Windowed), each run's window by its part, the window
+        // of each batch, and where each node of the arena its parts name starts once concatenated: kept from one block to the
+        // next, made with the first run of a merge's input it holds, none for a writer whose rows are its own.
+        internal List<RunWindow>? Windows;
+        internal int[] RunWindows = [];
+        internal Dictionary<(CanonicalArena, int), int>? WindowOf;
+        internal Dictionary<int, int>? NodeStarts;
+
+        /// <summary>Whether its parts name rows of the windows they were copied in, which its block gathers (<see cref="Gathered"/>).</summary>
+        internal bool Gathers;
+
+        // The row of its nodes' concatenation each of its rows comes from, kept from one block to the next.
+        internal int[] Picks = [];
     }
 
     /// <summary>Seals the whole blocks waiting in transit into a chunk, whatever their bytes.</summary>
@@ -1918,12 +3481,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
 
         int rows = root.Length;
-        _indexes?.PrepareCounts(arena, _fieldNodes, rows);
+        _indexes?.PrepareCounts(Counted, arena, _fieldNodes, rows);
         await IngestRowsAsync(arena, rows).ConfigureAwait(false);
 
         // Once every column's builders took the batch: the distinct values the columns of few values keep of the wide ones.
-        _indexes?.AttachCounts(rows);
+        _indexes?.AttachCounts(Counted, rows);
     }
+
+    /// <summary>What the batch being ingested holds for the counts beside its columns: its measures, its wide columns' hashes; null for a file that keeps no counts.</summary>
+    private CountedRows? Counted => _indexes is null ? null : _counted ??= _indexes.NewCountedRows();
+
+    private CountedRows? _counted;
 
     /// <summary>Folds the batch's <paramref name="rows"/> into the open block of every column and feeds the indexes, crossing the blocks.</summary>
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
@@ -1948,7 +3516,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // its caller's thread: its two or three accumulators gained nothing spread (a million log
         // lines at eight lanes, 436 ms against 437 on one), and a helper that ends after the caller
         // moves the write onto its own thread, half the batches (8 ms of 448).
-        if ((_indexes is null or { AsksNothing: true } || _indexes.FeedsAcross) && rows >= _blockRows && _fieldCount > 1 && Fan is { } fan)
+        if ((_indexes is null or { AsksNothing: true } || _indexes.FeedsAcross) && rows >= Math.Min(_blockRows, AcrossRows) && _fieldCount > 1 && Fan is { } fan)
         {
             await IngestAcrossAsync(fan, arena, rows).ConfigureAwait(false);
             return;
@@ -1986,19 +3554,125 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// feeds them the batch block by block as the ingest on one thread does.
     /// </remarks>
     [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
-    private async ValueTask IngestAcrossAsync(WorkFan fan, CanonicalArena arena, int rows)
+    private async ValueTask IngestAcrossAsync(CoreBatch fan, CanonicalArena arena, int rows)
     {
-        int count = ItemsOf(fan, arena);
-        await fan.RunAsync(this, count, arena, rows).ConfigureAwait(false);
+        _ingestGathered = _gatherInIngest;
+        Flight flight = _across ??= new Flight();
+        flight.Take(arena, _fieldNodes, rows, _blockFilled, Counted);
+        try
+        {
+            if (_indexes is { AsksNothing: false, Streams: true } indexes && KeysApart(indexes) is int groups and > 0)
+            {
+                await IngestKeysApartAsync(fan, indexes, flight, groups).ConfigureAwait(false);
+            }
+            else
+            {
+                int count = ItemsOf(fan, flight);
+                await fan.RunAsync(this, count, flight).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            flight.Land();
+        }
+
         _blockFilled = (_blockFilled + rows) % _blockRows;
         BatchesIngestedAcross++;
     }
 
-    /// <summary>The items of an ingest across <paramref name="fan"/>'s threads, laid in its room: how many there are.</summary>
-    private int ItemsOf(WorkFan fan, CanonicalArena arena)
+    /// <summary>An item that feeds a variant column's keys apart, its field in the low twenty bits and its part above them.</summary>
+    private const int KeysItem = 1 << 30;
+
+    /// <summary>The groups the keys of the variant columns are written in apart, all columns together; 0 for none.</summary>
+    private int KeysApart(IndexWriter indexes)
     {
-        Span<int> items = fan.Items(_fieldCount * 4);
-        return FeedItems(items, IngestItems(arena, items));
+        int groups = 0;
+        for (int field = 0; field < _fieldCount; field++)
+        {
+            groups += indexes.KeyGroups(field);
+        }
+
+        return groups;
+    }
+
+    /// <summary>
+    /// <see cref="IngestAcrossAsync"/> for a batch whose variant columns' keys are fed apart, in two turns of the fan. The first
+    /// takes the columns' statistics, and each such column's rows read once for all its keys (<see cref="IndexWriter.ReadKeys"/>);
+    /// the second, the columns' index builders, and each group of keys written from that read and its builders fed
+    /// (<see cref="IndexWriter.FeedKeys"/>), a group on each lane. A log's hundreds of keys, fed on the one thread that
+    /// ingested their column, held every block of a merge of log records at fourteen lanes.
+    /// </summary>
+    [System.Runtime.CompilerServices.AsyncMethodBuilder(typeof(System.Runtime.CompilerServices.PoolingAsyncValueTaskMethodBuilder))]
+    private async ValueTask IngestKeysApartAsync(CoreBatch fan, IndexWriter indexes, Flight flight, int groups)
+    {
+        try
+        {
+            // The longest items first, the keys' reads and the columns' gatherings, so that the shortest fill in behind them.
+            // The columns' own index builders go in this first turn too, the variant columns' without their keys: the second
+            // turn holds the groups of keys alone, which wait for their column's read. With the builders in the second, each
+            // block waited for the slowest of them twice (2026-11-17).
+            Span<int> items = fan.Items((_fieldCount * 7) + 1);
+            int count = 0;
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                if (indexes.KeyGroups(field) > 0)
+                {
+                    flight.PassOf(indexes, field);
+                    items[count++] = KeysItem | field;
+                }
+            }
+
+            count = GatherItems(items, count);
+            count += IngestItems(flight.Arena, flight.FieldNodes, items[count..]);
+            count = FeedItems(items, count);
+            flight.KeysApart = true;
+            await fan.RunAsync(this, count, flight).ConfigureAwait(false);
+            items = fan.Items(groups);
+            count = 0;
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                for (int group = 0; group < indexes.KeyGroups(field); group++)
+                {
+                    items[count++] = KeysItem | ((group + 1) << 20) | field;
+                }
+            }
+
+            await fan.RunAsync(this, count, flight).ConfigureAwait(false);
+            BatchesKeysApart++;
+        }
+        finally
+        {
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                if (indexes.KeyGroups(field) > 0)
+                {
+                    flight.PassOf(indexes, field).End();
+                }
+            }
+        }
+    }
+
+    /// <summary>The items of an ingest across <paramref name="fan"/>'s threads, laid in its room: how many there are.</summary>
+    private int ItemsOf(CoreBatch fan, Flight flight)
+    {
+        Span<int> items = fan.Items((_fieldCount * 5) + 1);
+        int count = GatherItems(items, 0);
+        count += IngestItems(flight.Arena, flight.FieldNodes, items[count..]);
+        return FeedItems(items, count);
+    }
+
+    /// <summary>After the <paramref name="count"/> items of <paramref name="items"/>, one that gathers each column when the ingest gathers them (<see cref="IngestThenEmitAsync"/>); how many items there are then.</summary>
+    private int GatherItems(Span<int> items, int count)
+    {
+        if (_gatherInIngest)
+        {
+            for (int field = 0; field < _fieldCount; field++)
+            {
+                items[count++] = GatherItem | field;
+            }
+        }
+
+        return count;
     }
 
     /// <summary>
@@ -2016,6 +3690,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     items[count++] = field << 3;
                 }
             }
+
+            // The composite keys, together an item past the columns'.
+            if (indexes.FeedsKeys)
+            {
+                items[count++] = _fieldCount << 3;
+            }
         }
 
         return count;
@@ -2027,12 +3707,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// bounds and the distinct table of a column that keeps them apart from its statistics.
     /// </summary>
     /// <returns>How many items there are.</returns>
-    private int IngestItems(CanonicalArena arena, Span<int> items)
+    private int IngestItems(CanonicalArena arena, ReadOnlySpan<int> fieldNodes, Span<int> items)
     {
         int count = 0;
         for (int field = 0; field < _fieldCount; field++)
         {
-            ColumnWriter.IngestParts apart = _columns[field].Apart(arena.GetNode(_fieldNodes[field]).Kind);
+            ColumnWriter.IngestParts apart = _columns[field].Apart(arena.GetNode(fieldNodes[field]).Kind);
             items[count++] = (field << 3) | (int)(ColumnWriter.IngestParts.All & ~apart);
             if ((apart & ColumnWriter.IngestParts.Bounds) != 0)
             {
@@ -2049,44 +3729,100 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     }
 
     /// <summary>Runs one accumulator of <see cref="IngestAcrossAsync"/> over the batch, block by block, or one column's index builders.</summary>
-    void IFanWork.Run(WorkFan fan, int item)
+    void IBatchWork.Run(CoreBatch fan, int item) => RunItem((Flight)fan.State!, fan.Item(item));
+
+    /// <summary>Runs ingest item <paramref name="entry"/> of <paramref name="flight"/>: an accumulator over the batch, block by block, a column's index builders, a gathering or a part of the keys fed apart.</summary>
+    private void RunItem(Flight flight, int entry)
     {
-        int entry = fan.Item(item);
-        if ((entry & 7) == 0)
+        int rows = flight.Rows;
+        if ((entry & GatherItem) != 0)
         {
-            FeedPart(entry >> 3, (CanonicalArena)fan.State!, fan.Value);
+            int column = entry & 0xF_FFFF;
+            Gather(column, _gathering![column]!, flight.Arena, flight.FieldNodes[column], rows, ChunkBlocks(rows, _blockRows));
             return;
         }
 
-        IngestPart(entry >> 3, (ColumnWriter.IngestParts)(entry & 7), (CanonicalArena)fan.State!, fan.Value);
+        if ((entry & KeysItem) != 0)
+        {
+            int field = entry & 0xF_FFFF;
+            int part = (entry >> 20) & 0x3FF;
+            IndexWriter indexes = _indexes!;
+            IndexWriter.KeyPass pass = flight.Keys[field]!;
+            if (part == 0)
+            {
+                indexes.ReadKeys(field, pass, flight.Arena, flight.FieldNodes[field], rows, flight.Filled, _blockRows);
+            }
+            else
+            {
+                indexes.FeedKeys(field, part - 1, pass, rows, flight.Filled, _blockRows, KeepsBlocks);
+            }
+
+            return;
+        }
+
+        if ((entry & 7) == 0)
+        {
+            FeedPart(entry >> 3, flight.Arena, flight.FieldNodes, rows, flight.Filled, flight.Counted, flight.KeysApart);
+            return;
+        }
+
+        int accumulated = entry >> 3;
+        IngestPart(accumulated, (ColumnWriter.IngestParts)(entry & 7), flight.Arena, flight.FieldNodes[accumulated], rows, flight.Filled);
     }
 
-    /// <summary>Feeds column <paramref name="field"/>'s index builders the batch's <paramref name="rows"/>, block by block, closing each block as it fills.</summary>
-    private void FeedPart(int field, CanonicalArena arena, int rows)
+    /// <summary>
+    /// Feeds column <paramref name="field"/>'s index builders the batch's <paramref name="rows"/> of <paramref name="arena"/>,
+    /// whose columns' nodes are <paramref name="fieldNodes"/>, block by block, closing each block as it fills, from
+    /// <paramref name="filled"/> rows of the open block; past the columns, the composite keys'. The counts read
+    /// <paramref name="counted"/> beside the column; a variant column whose keys are fed apart in groups
+    /// (<paramref name="keysApart"/>) leaves them out.
+    /// </summary>
+    private void FeedPart(int field, CanonicalArena arena, ReadOnlySpan<int> fieldNodes, int rows, int filled, CountedRows? counted, bool keysApart)
     {
         IndexWriter indexes = _indexes!;
-        int node = _fieldNodes[field];
-        int filled = _blockFilled;
+        bool keys = field == _fieldCount;
+        int node = keys ? -1 : fieldNodes[field];
+
+        // A variant column whose keys go apart feeds its own builders alone.
+        bool apart = !keys && keysApart && indexes.KeyGroups(field) > 0;
         for (int offset = 0; offset < rows;)
         {
             int take = Math.Min(_blockRows - filled, rows - offset);
-            indexes.Accumulate(field, arena, node, offset, take);
+            if (keys)
+            {
+                indexes.AccumulateKeys(arena, fieldNodes, offset, take);
+            }
+            else
+            {
+                indexes.Accumulate(field, arena, node, offset, take, keys: !apart, counted);
+            }
+
             offset += take;
             filled += take;
             if (filled == _blockRows)
             {
-                indexes.CloseBlock(field);
+                if (keys)
+                {
+                    indexes.CloseKeysBlock();
+                }
+                else
+                {
+                    indexes.CloseBlock(field, keys: !apart);
+                }
+
                 filled = 0;
             }
         }
     }
 
-    /// <summary>Runs accumulator <paramref name="parts"/> of column <paramref name="field"/> over the batch's <paramref name="rows"/>, block by block.</summary>
-    private void IngestPart(int field, ColumnWriter.IngestParts parts, CanonicalArena arena, int rows)
+    /// <summary>
+    /// Runs accumulator <paramref name="parts"/> of column <paramref name="field"/>, node <paramref name="node"/> of
+    /// <paramref name="arena"/>, over the batch's <paramref name="rows"/>, block by block, from <paramref name="filled"/> rows
+    /// of the open block.
+    /// </summary>
+    private void IngestPart(int field, ColumnWriter.IngestParts parts, CanonicalArena arena, int node, int rows, int filled)
     {
         ColumnWriter column = _columns[field];
-        int node = _fieldNodes[field];
-        int filled = _blockFilled;
         for (int offset = 0; offset < rows;)
         {
             int take = Math.Min(_blockRows - filled, rows - offset);
@@ -2132,7 +3868,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
         for (int field = 0; field < _fieldCount; field++)
         {
-            indexes.Accumulate(field, arena, _fieldNodes[field], start, count);
+            indexes.Accumulate(field, arena, _fieldNodes[field], start, count, counted: Counted);
         }
 
         indexes.AccumulateKeys(arena, _fieldNodes, start, count);
@@ -2223,7 +3959,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     };
 
     /// <summary>The writer's threads, or null when it has one.</summary>
-    private WorkFan? Fan => _lanes > 1 ? _fan ??= WorkFan.Rent(_lanes, _budget) : null;
+    private CoreBatch? Fan => _lanes > 1 ? _fan ??= CoreBatch.Rent(_core, _lanes) : null;
 
     /// <summary>The arena the pending rows live in, created on first use.</summary>
     private CanonicalArena Transit()
@@ -2245,6 +3981,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         int emit = checked((int)(blocks * _rowBlock));
         int total = checked((int)_pendingRows);
 
+        // The emissions of the chunks cut from these rows read them through records of their own, and keep the transit's
+        // buffers until they are done: the writer lets go of it then, and the next rows go into another (EndSharing).
         if (emit == total)
         {
             int all = _pending.Count == 1
@@ -2252,7 +3990,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 : CanonicalConcat.Concat(
                     from.Decode, _schema, total,
                     System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending));
-            await EmitWholeBlocksAsync(from.Canonical, all, emit, cancellationToken).ConfigureAwait(false);
+            _sharingFrom = from;
+            try
+            {
+                await EmitWholeBlocksAsync(from.Canonical, all, emit, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                EndSharing(from);
+            }
+
             ResetTransit();
             return;
         }
@@ -2293,7 +4040,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             : CanonicalConcat.Concat(
                 from.Decode, _schema, emit,
                 System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending)[..going]);
-        await EmitWholeBlocksAsync(from.Canonical, head, emit, cancellationToken).ConfigureAwait(false);
+        _sharingFrom = from;
+        try
+        {
+            await EmitWholeBlocksAsync(from.Canonical, head, emit, cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            EndSharing(from);
+            throw;
+        }
 
         // The remainder moves to the other arena before this one is reset, because a slice is a
         // view onto the storage the reset would hand back.
@@ -2323,7 +4079,11 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             Reprobe(to.Canonical, _carry[i]);
         }
 
-        from.Canonical.Reset();
+        if (!EndSharing(from))
+        {
+            from.Canonical.Reset();
+        }
+
         _pending.Clear();
         _pending.AddRange(_carry);
         _pendingRows = total - emit;
@@ -2334,7 +4094,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Drops every pending row and frees the transit arena's storage.</summary>
     private void ResetTransit()
     {
-        _transit![_current]!.Canonical.Reset();
+        // Let go of when the emissions of its rows read it still (EndSharing): the next rows go into another.
+        _transit![_current]?.Canonical.Reset();
         _pending.Clear();
         _pendingRows = 0;
         _pendingBytes = 0;
@@ -2355,12 +4116,17 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         CanonicalArena arena, int rootIndex, long rows, CancellationToken cancellationToken)
     {
         int blocks = ChunkBlocks(rows, _blockRows);
-
-        // A column that would gather past int.MaxValue rows writes what it holds first, as the loop
-        // below does it: a chunk that would make one do so is written on this thread.
-        if (CompressesAcross && !GatheringOverflows(rows))
+        if (!_gatheredInIngest)
         {
-            await EmitColumnsAcrossAsync(arena, rootIndex, rows, blocks, cancellationToken).ConfigureAwait(false);
+            Over();
+        }
+
+        // Every column's chunk due leaves for an emission of its own once the file holds an encoding id; before, on this
+        // thread, which interns the file's first. A column that would gather past int.MaxValue rows writes what it holds
+        // first, as the loop below does it: a chunk that would make one do so is written on this thread.
+        if (EmitsApart && (_gatheredInIngest || !GatheringOverflows(rows)))
+        {
+            await EmitApartAsync(arena, rootIndex, rows, blocks, cancellationToken).ConfigureAwait(false);
         }
         else
         {
@@ -2386,7 +4152,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                     }
 
                     Gather(field, gathering, arena, node, rows, blocks);
-                    if (DueOrOver(gathering))
+                    if (DueOrOver(gathering) && EmitsApart)
+                    {
+                        await LandEmissionsAsync(field, cancellationToken, keep: EmissionDepth - 1).ConfigureAwait(false);
+
+                        // The chunk's nodes are copied into one as it leaves, what the column gathered once more: reserved
+                        // first, the chunks in emission ending while the writer's share does not hold it.
+                        await RoomAsync(CopiedLeaving(gathering)).ConfigureAwait(false);
+                        StartEmission(Detach(field, gathering, raised: Raise(CopiedLeaving(gathering))));
+                    }
+                    else if (DueOrOver(gathering))
                     {
                         await EmitGatheredAsync(field, gathering, cancellationToken).ConfigureAwait(false);
                     }
@@ -2402,6 +4177,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         // rows between lanes without a chunk two of them read.
         if (_groupRows > 0 && (_groupTaken += rows) >= _groupRows)
         {
+            _groupTaken = 0;
             await EmitGatheredAsync(cancellationToken).ConfigureAwait(false);
         }
 
@@ -2431,7 +4207,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <paramref name="firstBlock"/>; the node holds the column's codes already when <paramref name="coded"/>.
     /// </summary>
     private async ValueTask EmitColumnChunkAsync(
-        int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks, CancellationToken cancellationToken, bool coded = false)
+        int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks, CancellationToken cancellationToken, bool coded = false,
+        bool keeps = false)
     {
         // A shredded variant's chunk is written as its residual and its typed columns, which the
         // statistics of its rows as they came do not describe.
@@ -2449,34 +4226,31 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         }
         else
         {
-            stats = ChunkStatsOf(field, arena, node, rows, firstBlock, blocks);
+            stats = ChunkStatsOf(field, arena, node, rows, firstBlock, blocks, keeps);
         }
 
         ArrayBlobWriter.Workspace blobs = Blobs;
         ArrayBlobWriter.BlobLease blob;
         blobs.ColumnLevel = ZstdLevelOf(field);
-
-        // A column of a file whose next chunks are compressed side by side has its trial watched, and its time noted,
-        // for those.
-        ZstdPlan.Ahead? watched = plan is null && !Codes(field) ? Watch(field, arena, node) : null;
-        blobs.Ahead = watched;
-        long began = System.Diagnostics.Stopwatch.GetTimestamp();
         try
         {
-            blob = plan is not null
-                ? VariantShredder.Write(blobs, arena, node, plan, bounds, _arrayEncodings, _compress)
-                : ArrayBlobWriter.Write(blobs, arena, node, _arrayEncodings, _compress, stats);
+            if (plan is not null && Fan is { } fan)
+            {
+                // Its leaves written apart on the writer's lanes, then grafted: the bytes of the blob written in one go.
+                VariantShredder.Shredding shredding = blobs.Shredding(plan);
+                shredding.Take(arena, node, bounds);
+                blob = await WriteLeavesAsync(shredding, field, blobs, _arrayEncodings, fan).ConfigureAwait(false);
+            }
+            else
+            {
+                blob = plan is not null
+                    ? VariantShredder.Write(blobs, arena, node, plan, bounds, _arrayEncodings, _compress)
+                    : ArrayBlobWriter.Write(blobs, arena, node, _arrayEncodings, _compress, stats);
+            }
         }
         finally
         {
             blobs.ColumnLevel = 0;
-            blobs.Ahead = null;
-            watched?.Finish();
-        }
-
-        if (watched is not null)
-        {
-            _chunkColumns!.Took(field, System.Diagnostics.Stopwatch.GetTimestamp() - began);
         }
 
         await WriteColumnBlobAsync(field, blob, firstBlock, blocks, cancellationToken, bounds).ConfigureAwait(false);
@@ -2549,17 +4323,26 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// The ingest statistics of column <paramref name="field"/> over the chunk, counted for the
     /// writer's ledger: whether they cover the chunk's rows, and whether its distinct table serves.
     /// </summary>
-    private ChunkStats ChunkStatsOf(int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks)
+    private ChunkStats ChunkStatsOf(int field, CanonicalArena arena, int node, long rows, int firstBlock, int blocks, bool keeps = false)
     {
         if (Codes(field))
         {
             return default;
         }
 
+        return Tally(new ChunkStats(_columns[field], firstBlock, blocks, this, keeps), arena, node, rows);
+    }
+
+    /// <summary>
+    /// Counts <paramref name="stats"/>, a chunk's of <paramref name="rows"/> rows at node <paramref name="node"/> of
+    /// <paramref name="arena"/>, for the writer's ledger: whether they cover the chunk's rows, and whether its distinct
+    /// table serves.
+    /// </summary>
+    private ChunkStats Tally(ChunkStats stats, CanonicalArena arena, int node, long rows)
+    {
         // The chunk's statistics, computed at ingest over exactly these rows. The chooser checks the
         // row count against the node it is given and measures the column again when they disagree,
         // so a mismatch costs a pass and never a wrong plan.
-        ChunkStats stats = new ChunkStats(_columns[field], firstBlock, blocks, this);
         if (stats.Stats.Rows != rows)
         {
             Interlocked.Increment(ref _chunksWithoutStatistics);
@@ -2584,10 +4367,12 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
     /// <summary>
     /// Writes a column chunk's blob as the column's next segment, then lets go of the blob and of
-    /// what the column kept for the chunk.
+    /// what the column kept for the chunk, unless it was let go as the chunk left for an emission of its own
+    /// (<paramref name="released"/>).
     /// </summary>
     private async ValueTask WriteColumnBlobAsync(
-        int field, ArrayBlobWriter.BlobLease blob, int firstBlock, int blocks, CancellationToken cancellationToken, ChunkBlockBounds? bounds = null)
+        int field, ArrayBlobWriter.BlobLease blob, int firstBlock, int blocks, CancellationToken cancellationToken, ChunkBlockBounds? bounds = null,
+        bool released = false)
     {
         // The chunk's shredded keys, block by block, in the file's blocks.
         if (bounds is not null)
@@ -2660,12 +4445,36 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             uint length = Segments[segment].Length;
             _indexes?.AddColumnBytes(field, length);
             _gathering?[field]?.Measured(length);
+
+            // What a reader holds of the chunk open: its bytes, as the block they are read in holds them, and what it decodes
+            // whole of them. The texts its rows name there are in no batch of them; and a batch of a shredded variant's rows
+            // holds what its typed columns and its values decode to beside the rows put back together.
+            _columns[field].Opens(ArrayBlobWriter.Held(length) + blob.Whole);
+            if (blob.PastNamed != 0)
+            {
+                Interlocked.Add(ref _decodedBytes, blob.PastNamed);
+            }
         }
 
         // The compact summaries stay -- the zone map wants them at completion -- and only the sized
         // buffers go back to the pool.
-        _columns[field].ReleaseChunk(firstBlock, blocks);
+        if (!released)
+        {
+            _columns[field].ReleaseChunk(firstBlock, blocks);
+        }
     }
+
+    /// <summary>
+    /// Whether a block of <paramref name="rows"/> rows that makes a whole chunk on the writer's line copies its columns in with
+    /// what each gathers in its own items, rather than in a pass of the chunk's emission: a column gathers, and the chunk's
+    /// emission takes the columns that gather apart (<see cref="EmitApartAsync"/>), the only one that finds them gathered.
+    /// </summary>
+    /// <remarks>
+    /// The pass of the emission copied the columns side by side on the lanes while the writer's owner waited, and the next
+    /// block waited for the owner: of the 1.48 ms each of the 6 328 blocks of a consolidation of metric records took through
+    /// the line at degree 14, 0.28 ms (2026-11-18).
+    /// </remarks>
+    private bool GathersOnLine(int rows) => _gathering is not null && EmitsApart && !GatheringOverflows(rows);
 
     /// <summary>Whether a column that gathers would hold more than <see cref="int.MaxValue"/> rows with <paramref name="rows"/> more.</summary>
     private bool GatheringOverflows(long rows)
@@ -2691,32 +4500,126 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// for a column written against an object dictionary, rather than its values, which a merge's writer gathered as text
     /// up to sixteen times a chunk's target, 482 MiB of a job's 691 over metric records.
     /// </summary>
-    private void Gather(int field, Gathering gathering, CanonicalArena arena, int node, long rows, int blocks)
+    /// <remarks>
+    /// The blocks of the file before the rows are <paramref name="firstBlock"/>, or the writer's count now for -1: a flight cut
+    /// column by column passes its own, which the flights before it counted in their order, the owner counting them as it
+    /// emits them.
+    /// </remarks>
+    /// <param name="field">The column.</param>
+    /// <param name="gathering">What the column gathers.</param>
+    /// <param name="arena">The arena of the rows.</param>
+    /// <param name="node">The column's node of the rows.</param>
+    /// <param name="rows">The rows.</param>
+    /// <param name="blocks">The blocks the rows make.</param>
+    /// <param name="firstBlock">The blocks of the file before the rows, -1 for the writer's count now.</param>
+    /// <param name="thin">Whether a shredded column gathers the rows thin, its chain having taken them.</param>
+    /// <param name="hollow">
+    /// The flight whose block the rows are, when it holds the column's values not put back together and the column gathers
+    /// them whole all the same, its chain not taking them: they are put back in the gathering's arena by what the flight
+    /// took of them, the block's arena being read by the flight's other items, then copied as any values.
+    /// </param>
+    private void Gather(
+        int field, Gathering gathering, CanonicalArena arena, int node, long rows, int blocks, int firstBlock = -1, bool thin = false,
+        Flight? hollow = null)
     {
         CanonicalArena into = (gathering.Context ??= TransitContexts.Rent(Account)).Canonical;
         if (gathering.Rows == 0)
         {
-            gathering.FirstBlock = _emittedBlocks;
+            gathering.FirstBlock = firstBlock >= 0 ? firstBlock : _emittedBlocks;
         }
 
         // A column gathered as codes is cut where its values would have been: its target counts the values' bytes, so that
-        // its chunks hold the rows they held, and what it holds, its codes, is what counts toward the writer's ceiling.
+        // its chunks hold the rows they held, and what it holds, its codes, is what counts toward the writer's ceiling. The
+        // values' bytes are those the rows name: a merge's staged rows view a text that repeats the row before's once.
+        // Gathered, the copy holds each row's bytes, which the encoders size the chunk by, and a repeat views the copy of the
+        // row before: given views of their own, the repeats of a consolidation of metric records' gathered texts, 104 M rows,
+        // were each compared byte by byte by the chunk's search for runs (2026-11-18).
+        // A shredded column gathers thin the rows its chain took on the line, their values left out, their emission reading
+        // the metadata and the validity alone: gathered whole, a consolidation of metric records' shredded columns held
+        // 27.3 GiB over the job, their values half of it and their rows' metadata, the same bytes row after row, the other
+        // half; thin, 1.8 GiB (2026-11-18).
         bool coded = _dictionaries?[field] is not null;
+        bool shredded = !coded && _shredding?[field] is not null;
         int owned = coded
             ? _dictionaries![field]!.CodeInto(arena, node, into, _codesTypes![field])
-            : into.CopyFrom(arena, node);
-        long held = into.ByteSize(owned);
+            : thin && shredded ? Thin(into, arena, node)
+            : hollow is not null ? into.CopyFrom(into, PutBackInto(into, hollow, field), viewRepeats: true)
+            : into.CopyFrom(arena, node, viewRepeats: true);
+        if (hollow is not null && _line is { } line)
+        {
+            Interlocked.Increment(ref line.ColumnsPutBackApart);
+        }
+
         gathering.Nodes.Add(owned);
+        if (thin && shredded)
+        {
+            gathering.ThinNodes = gathering.Nodes.Count;
+        }
+
+        // What it holds counts as a whole copy holds it, gathered thin or not, so that the writer's ceiling decides the same
+        // at any degree: a writer on one lane has no line, and gathers its shredded columns whole.
+        long named = coded || shredded ? arena.NamedBytes(node) : 0;
+        long held = shredded ? named : into.ByteSize(owned);
         gathering.Rows += rows;
         gathering.Blocks += blocks;
-        gathering.Bytes += coded ? arena.ByteSize(node) : held;
+        gathering.Bytes += coded ? named : held;
         gathering.Held += held;
         Interlocked.Add(ref _gatheredHeld, held);
     }
 
-    /// <summary>Writes what column <paramref name="field"/> has gathered as one chunk of its own.</summary>
-    private async ValueTask EmitGatheredAsync(int field, Gathering gathering, CancellationToken cancellationToken)
+    /// <summary>
+    /// Variant node <paramref name="node"/> of <paramref name="arena"/> copied thin into <paramref name="into"/>: its rows'
+    /// metadata, each run of rows' bytes kept once, and validity, its values a constant of no bytes, for rows a shredded
+    /// column's chain took on the line, of which the emission reads nothing else
+    /// (<see cref="VariantShredder.Shredding.Settle"/>, which writes the metadata from a copy of each row's bytes). The same
+    /// arena for both, the node is thinned where it lies, its metadata and validity shared.
+    /// </summary>
+    private static int Thin(CanonicalArena into, CanonicalArena arena, int node)
     {
+        // Read before anything is added: the additions may move the records.
+        CanonicalNode variant = arena.GetNode(node);
+        DType dtype = variant.DType;
+        int length = variant.Length;
+        Validity validity = variant.Validity;
+        int metadata = variant.GetFieldIndex(0);
+        DType values = arena.GetNode(variant.GetFieldIndex(1)).DType;
+        if (!ReferenceEquals(into, arena))
+        {
+            if (validity.Kind == ValidityKind.Bitmap)
+            {
+                validity = Validity.Bitmap(into.CopyFrom(arena, validity.CanonicalNodeIndex));
+            }
+
+            // Standing for a copy of each row's bytes, as a column gathered whole holds them, so that its leaf is the same.
+            metadata = into.CopyFrom(arena, metadata, shareRepeats: true);
+            if (into.GetNode(metadata).Kind == CanonicalKind.VarBinView)
+            {
+                into.StandFor(metadata, into.NamedDataBytes(metadata));
+            }
+        }
+
+        int none = into.AddConstant(values, length, Validity.FromNullability(values.Nullability), []);
+        return into.AddStruct(dtype, length, validity, [metadata, none]);
+    }
+
+
+    /// <summary>
+    /// Writes what column <paramref name="field"/> has gathered as one chunk of its own, after its chunks in emission: cut by
+    /// its target, or by an end of rows when not <paramref name="due"/> (<see cref="Gathering.Measures"/>).
+    /// </summary>
+    private async ValueTask EmitGatheredAsync(int field, Gathering gathering, CancellationToken cancellationToken, bool due = true)
+    {
+        await LandEmissionsAsync(field, cancellationToken).ConfigureAwait(false);
+
+        // Rows gathered thin are emitted with what the chain took of them, which only a chunk emitted apart takes: a writer
+        // with a line emits apart.
+        if (gathering.ThinNodes > 0)
+        {
+            StartEmission(Detach(field, gathering, due));
+            await LandEmissionsAsync(field, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         ScanContext context = gathering.Context!;
         int rows = checked((int)gathering.Rows);
 
@@ -2730,14 +4633,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         int blocks = gathering.Blocks;
         gathering.Nodes.Clear();
         gathering.Rows = 0;
-        gathering.Cut = gathering.Bytes;
+        gathering.Generation++;
+        bool measures = gathering.Measures(due);
+        gathering.Cut = measures ? gathering.Bytes : 0;
         Interlocked.Add(ref _gatheredHeld, -gathering.Held);
         gathering.Held = 0;
         gathering.Bytes = 0;
         gathering.Blocks = 0;
         try
         {
-            await EmitColumnChunkAsync(field, context.Canonical, node, rows, firstBlock, blocks, cancellationToken, coded: Codes(field)).ConfigureAwait(false);
+            await EmitColumnChunkAsync(field, context.Canonical, node, rows, firstBlock, blocks, cancellationToken, coded: Codes(field), keeps: !measures).ConfigureAwait(false);
             gathering.ChunkRows.Add(rows);
         }
         finally
@@ -2749,24 +4654,38 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>Writes what every column with a target of its own has gathered, at a flush, the end of a group of rows or the completion.</summary>
     private async ValueTask EmitGatheredAsync(CancellationToken cancellationToken)
     {
+        // The chunks in emission go out before what the columns hold, in the columns' order: those of the columns chunked
+        // with the file too, which a flush and the completion write.
+        await LandEmissionsAsync(cancellationToken).ConfigureAwait(false);
         if (_gathering is not { } gathering)
         {
             return;
         }
 
-        _groupTaken = 0;
-
-        if (CompressesAcross && Fan is { } fan)
+        // What each column holds emitted at once, each by a task of its own, then written in the columns' order.
+        if (EmitsApart)
         {
-            await EmitGatheredAcrossAsync(gathering, fan, cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
-        for (int field = 0; field < gathering.Length; field++)
-        {
-            if (gathering[field] is { Rows: > 0 } column)
+            for (int field = 0; field < gathering.Length; field++)
             {
-                await EmitGatheredAsync(field, column, cancellationToken).ConfigureAwait(false);
+                if (gathering[field] is { Rows: > 0 } column)
+                {
+                    // Every column leaves at once only while the writer's share holds them: otherwise those that left
+                    // before end first, and the columns are compressed a few at a time, written in their order all the same.
+                    await RoomAsync(CopiedLeaving(column)).ConfigureAwait(false);
+                    StartEmission(Detach(field, column, due: false, raised: Raise(CopiedLeaving(column))));
+                }
+            }
+
+            await LandEmissionsAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            for (int field = 0; field < gathering.Length; field++)
+            {
+                if (gathering[field] is { Rows: > 0 } column)
+                {
+                    await EmitGatheredAsync(field, column, cancellationToken, due: false).ConfigureAwait(false);
+                }
             }
         }
     }
@@ -2801,30 +4720,67 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         internal int FirstBlock;
         internal int Blocks;
 
-        /// <summary>The bytes it holds: its values' as <see cref="Bytes"/> counts them, or its codes' for a column gathered as codes.</summary>
+        /// <summary>The chunks it began, counted as it lets one go: what the rows a line took block by block were taken for (<see cref="ShredChain"/>).</summary>
+        internal long Generation;
+
+        /// <summary>
+        /// The bytes it holds: its values' as <see cref="Bytes"/> counts them, its codes' for a column gathered as codes, or
+        /// the rows' metadata and validity alone for a shredded column's rows gathered thin (<see cref="ThinNodes"/>).
+        /// </summary>
         internal long Held;
+
+        /// <summary>
+        /// Its nodes up to the last gathered thin, 0 for none: a shredded column's rows its chain took on the line, of which
+        /// it keeps the metadata and the validity alone (<see cref="Thin"/>), every one within the rows the chain hands over.
+        /// </summary>
+        internal int ThinNodes;
 
         /// <summary>Whether the target counts encoded bytes, at <see cref="Rate"/>, rather than canonical ones.</summary>
         internal bool IsEncoded { get; private init; }
 
-        /// <summary>The share of its canonical bytes the column's last chunk encoded to; 1 for a target in canonical bytes.</summary>
+        /// <summary>
+        /// The share of its canonical bytes the column's last chunk encoded to, as measured and one at most, by which its
+        /// chunk is due (<see cref="Due"/>). Before its first chunk, <see cref="FirstRate"/> for a target in encoded bytes,
+        /// and 1 for a target in canonical bytes, which no rate enters.
+        /// </summary>
         internal double Rate { get; private set; } = 1;
 
         /// <summary>The canonical bytes of the chunk being written, which its segment measures the rate against; 0 when none is.</summary>
         internal long Cut;
 
-        /// <summary>Whether what the column holds is a chunk: its target reached, in encoded bytes at the last rate when it counts them.</summary>
-        internal bool Due => Bytes * Rate >= Target;
+        /// <summary>
+        /// Whether what the column holds is a chunk: its target reached, in encoded bytes when it counts them, at its last
+        /// rate held between <see cref="LeastRate"/> and one, so that a column that encodes better still holds no more.
+        /// </summary>
+        internal bool Due => (IsEncoded ? Bytes * Math.Max(Rate, LeastRate) : Bytes) >= Target;
 
         /// <summary>A column gathering to <paramref name="bytes"/> encoded bytes a chunk.</summary>
         internal static Gathering Encoded(long bytes) => new Gathering(bytes) { IsEncoded = true, Rate = FirstRate };
 
-        /// <summary>Takes the rate the chunk just written encoded to, <paramref name="encoded"/> bytes of its <see cref="Cut"/>.</summary>
+        /// <summary>
+        /// Whether the chunk the column lets go of now measures its rate: one cut by its target (<paramref name="due"/>), or
+        /// by the writer's ceiling, does; one an end of a group of rows, a flush or the completion cuts does when it holds
+        /// half a chunk at least, as its rate counts it, or when the column's target counts canonical bytes, which only a
+        /// chunk measures.
+        /// </summary>
+        /// <remarks>
+        /// A chunk of a few hundred rows encodes to several times what its rows do in a chunk of its size, its tree and its
+        /// headers a fixed cost, and a column of integers of 19 bits wrote one of 256 rows as they were, 8.5 bytes a row:
+        /// taken as its rate, it cut the column's next chunks at 512 rows, which were written as they were too, and the
+        /// column wrote 8.25 bytes a row to the object's end where it wrote 2.4 before (2026-11-21).
+        /// </remarks>
+        internal bool Measures(bool due) => due || !IsEncoded || Bytes * Math.Max(Rate, LeastRate) * 2 >= Target;
+
+        /// <summary>
+        /// Takes the rate the chunk just written encoded to, <paramref name="encoded"/> bytes of its <see cref="Cut"/>, one
+        /// at most: a chunk of a few rows encodes to several times its bytes, its tree and its headers a fixed cost, which
+        /// the rows the column takes next do not pay again in proportion.
+        /// </summary>
         internal void Measured(long encoded)
         {
-            if (IsEncoded && Cut > 0)
+            if (Cut > 0)
             {
-                Rate = Math.Clamp((double)encoded / Cut, LeastRate, 1);
+                Rate = Math.Min(1, (double)encoded / Cut);
             }
 
             Cut = 0;
@@ -2846,6 +4802,22 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     {
         // A file with no batches still has to start with the magic.
         await StartAsync(cancellationToken).ConfigureAwait(false);
+
+        // A writer that takes its rows a block at a time ends the chunk of its whole blocks before its last rows, short of a
+        // block, which then make the last chunk alone, as a sealed write's did: every chunk before the last is whole blocks,
+        // which a scan cuts at the zones. Folded into one last chunk, its rows cut evenly crossed the zones, and no block of
+        // the file settled by its zone maps. Not an append, which reads the file's last chunk and writes it again when the
+        // file ends inside a block: written apart there, an appended file's counts through its indexes came short of its
+        // rows' (AppendTests).
+        if (_blocksExactly && _append is null)
+        {
+            await LandAsync().ConfigureAwait(false);
+            if (_pendingRows >= _rowBlock)
+            {
+                await EmitBlockAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+
         await UnstageAsync(cancellationToken).ConfigureAwait(false);
 
         bool direct = false;
@@ -2856,9 +4828,9 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
             // The last rows' paths counted as every call's are: a census that missed them writes no directory, as a builder's
             // rows past its last whole block left a writer's of seventy thousand rows without one.
-            if (_census is not null && CountPathsAsync(tailArena, tailRoot, tailRows) is { } counting)
+            if (_census is not null && CountPaths(tailArena, tailRoot, tailRows))
             {
-                await counting.ConfigureAwait(false);
+                await CountedPathsAsync(quietly: false).ConfigureAwait(false);
             }
 
             await IngestAsync(tailArena, tailRoot).ConfigureAwait(false);
@@ -2893,7 +4865,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 : CanonicalConcat.Concat(
                     from.Decode, _schema, total,
                     System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_pending));
-            await EmitChunkAsync(from.Canonical, whole, total, cancellationToken).ConfigureAwait(false);
+            _sharingFrom = from;
+            try
+            {
+                await EmitChunkAsync(from.Canonical, whole, total, cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                EndSharing(from);
+            }
+
             ResetTransit();
         }
 
@@ -3284,13 +5265,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         long zoneMaps = zoneMapsEnd - indexStart;
         long indexBytes = interleaved + (indexStart - dataEnd) + (directory?.Length ?? 0);
         long footerBytes = _sink.Position - dtypeOffset;
-        _reportBytes = new WriteBytes(
-            Total: data + zoneMaps + statisticsLength + indexBytes + footerBytes,
-            Data: data,
-            Statistics: statisticsLength,
-            ZoneMaps: zoneMaps,
-            Indexes: indexBytes,
-            Footer: footerBytes);
+        _writtenBytes = (data, statisticsLength, zoneMaps, indexBytes, footerBytes);
     }
 
     /// <summary>What the completed file holds, from the writer's own accounts.</summary>
@@ -3309,8 +5284,16 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         ImmutableArray<IndexWriteReport> indexes = _indexes is { } writer
             ? [.. writer.Reports]
             : ImmutableArray<IndexWriteReport>.Empty;
+        (long data, long statistics, long zoneMaps, long indexBytes, long footer) = _writtenBytes;
+        WriteBytes bytes = new WriteBytes(
+            Total: data + zoneMaps + statistics + indexBytes + footer,
+            Data: data,
+            Statistics: statistics,
+            ZoneMaps: zoneMaps,
+            Indexes: indexBytes,
+            Footer: footer);
         return new WriteReport(
-            _rowCount, _blockRows, ImmutableCollectionsMarshal.AsImmutableArray(chunks), _reportBytes, ReportColumns(), indexes)
+            _rowCount, _blockRows, ImmutableCollectionsMarshal.AsImmutableArray(chunks), bytes, ReportColumns(), indexes)
         {
             ColumnChunkRows = ReportColumnChunkRows(),
         };

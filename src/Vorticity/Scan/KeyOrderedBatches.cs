@@ -99,6 +99,9 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         private readonly ScanContext _context;
         private readonly ScanContext[]? _lanes;
         private readonly GroupWaiter[]? _waiters;
+
+        /// <summary>The entries of the lanes of the session's a window's decode took, one per group past the caller's.</summary>
+        private readonly long[] _entered = [];
         private readonly ScanSegments _held;
         private readonly RetainedChunks _retained;
         private readonly Block<long> _rows;
@@ -165,6 +168,7 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             {
                 _lanes = new ScanContext[_scan.Degree];
                 _waiters = new GroupWaiter[_scan.Degree];
+                _entered = new long[_scan.Degree - 1];
                 for (int i = 0; i < _lanes.Length; i++)
                 {
                     _lanes[i] = Lent();
@@ -550,30 +554,38 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
         /// <summary>Decodes the window's splits, on the lanes when there are any, into one root in file order.</summary>
         private async ValueTask<int> DecodeAsync(RowSelection selection)
         {
+            // The caller decodes a group, and each lane of the session's free now another, the scan's degree at most: the
+            // groups are cut once the lanes are known, since a group waits for segments the others read and so cannot wait
+            // for a lane.
             int splits = _splits.Count;
-            int groups = _lanes is null ? 1 : Math.Min(_lanes.Length, splits);
-            return groups == 1
+            int taken = _lanes is null || splits < 2
+                ? 0
+                : Execution.LaneWorkers.TakeInto(_scan.File.Session.Lanes, _entered.AsSpan(0, Math.Min(_lanes.Length, splits) - 1));
+            return taken == 0
                 ? await DecodeGroupAsync(_context, null, 0, splits, selection).ConfigureAwait(false)
-                : await DecodeLanesAsync(groups, selection).ConfigureAwait(false);
+                : await DecodeLanesAsync(taken + 1, selection).ConfigureAwait(false);
         }
 
         /// <summary>
-        /// The splits cut into <paramref name="groups"/> contiguous groups, one per lane. Its own
-        /// method because its lambda captures the selection, and a captured parameter costs its
-        /// closure at the entry of the method that declares it -- on the sequential path too.
+        /// The splits cut into <paramref name="groups"/> contiguous groups, the first the caller's and each other on a lane
+        /// <see cref="DecodeAsync"/> took. Its own method because its lambda captures the selection, and a captured parameter
+        /// costs its closure at the entry of the method that declares it -- on the sequential path too.
         /// </summary>
         private async Task<int> DecodeLanesAsync(int groups, RowSelection selection)
         {
             int splits = _splits.Count;
             Task<int>[] work = new Task<int>[groups];
-            for (int g = 0; g < groups; g++)
+            Execution.LaneBudget budget = _scan.File.Session.Lanes;
+            for (int g = 1; g < groups; g++)
             {
                 ScanContext lane = _lanes![g];
                 GroupWaiter waiter = _waiters![g];
                 int from = g * splits / groups;
                 int to = (g + 1) * splits / groups;
-                work[g] = Task.Run(() => DecodeGroupAsync(lane, waiter, from, to, selection).AsTask(), _token);
+                work[g] = Execution.LaneWorkers.RunOnAsync(budget, _entered[g - 1], () => DecodeGroupAsync(lane, waiter, from, to, selection).AsTask());
             }
+
+            work[0] = DecodeGroupAsync(_lanes![0], _waiters![0], 0, splits / groups, selection).AsTask();
 
             // Every lane is observed before a failure surfaces: an abandoned one would still be
             // decoding into a context the caller's disposal is about to reset.

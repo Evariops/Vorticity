@@ -14,7 +14,7 @@ using Vorticity.Parquet.Schema;
 using Vorticity.Scanning;
 using Vorticity.Serialization.Schemas;
 using Vorticity.Types;
-using Vorticity.Writing;
+using Vorticity.Execution;
 
 namespace Vorticity.Parquet.Reading;
 
@@ -84,7 +84,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
 
     /// <summary>The lanes the columns decompress their next pages on, shared by every column of the scan; none on one lane.</summary>
     private readonly PageLanes? _lanes;
-    private WorkFan? _fan;
+    private CoreBatch? _fan;
     private FieldDecoding? _decoding;
 
     /// <summary>The fields from which a batch's fields decode side by side whatever the batches before took.</summary>
@@ -244,7 +244,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         // A scan given lanes decompresses each column's next pages on them while the pages before are
         // read: as many at once as its degree, shared by the columns.
         int degree = spec.Options.DegreeOfParallelism > 0 ? spec.Options.DegreeOfParallelism : file.Session.Options.MaxDegreeOfParallelism;
-        PageLanes? lanes = degree > 1 ? new PageLanes(degree) : null;
+        PageLanes? lanes = degree > 1 ? new PageLanes(degree, file.Session.Lanes) : null;
         _lanes = lanes;
         _degree = degree;
         _mayDecodeAcross = degree > 1 && fields.Length > 1;
@@ -389,7 +389,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             ScanContext[] fieldContexts = _fieldContexts ??= FieldContexts();
             // The fields side by side, each into its own arena, whose nodes the batch's then
             // references: their bytes stay where they were decoded, until the batch is dead.
-            WorkFan fan = _fan ??= WorkFan.Rent(Math.Min(_degree, FanLanes));
+            CoreBatch fan = _fan ??= CoreBatch.Rent(_file.Session.Core, Math.Min(_degree, FanLanes));
             FieldDecoding decoding = _decoding ??= new FieldDecoding(this);
             await PagesReadyAsync(rows, running: true).ConfigureAwait(false);
             decoding.Order(fan.Items(_nodes.Length));
@@ -489,7 +489,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         if (_fan is { } fan)
         {
             _fan = null;
-            WorkFan.Return(fan);
+            CoreBatch.Return(fan);
         }
 
         _abandon.Dispose();
@@ -543,7 +543,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
                 readers[i] = _readers[_flat[i]];
             }
 
-            _pipeline = new FieldPipeline(readers, _context.Options, PipelineLanes(_degree), _lanes, _account);
+            _pipeline = new FieldPipeline(readers, _context.Options, PipelineLanes(_degree), _lanes, _file.Session.Lanes, _account);
         }
 
         _pipeline.Start(System.Runtime.InteropServices.CollectionsMarshal.AsSpan(_steps));
@@ -624,15 +624,15 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
     }
 
     /// <summary>
-    /// A batch's fields decoded by the work fan, a field an item, each into its own context, on
-    /// whichever of the scan's threads claims it.
+    /// A batch's fields decoded by the core's pumps beside the reading thread, a field an item, each
+    /// into its own context, on whichever of the scan's lanes claims it.
     /// </summary>
     /// <remarks>
     /// The items go longest first, by what each field's took the batch before: the reading thread
     /// claims the first while the others wake, and the field that holds every batch is not the one
     /// that waits for a thread.
     /// </remarks>
-    private sealed class FieldDecoding(ParquetBatches batches) : IFanWork
+    private sealed class FieldDecoding(ParquetBatches batches) : IBatchWork
     {
         /// <summary>Per field, the ticks its item took the last time it ran.</summary>
         private readonly long[] _took = new long[batches._nodes.Length];
@@ -653,7 +653,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             }
         }
 
-        public void Run(WorkFan fan, int item)
+        public void Run(CoreBatch fan, int item)
         {
             int field = fan.Item(item);
             long began = Stopwatch.GetTimestamp();
@@ -739,7 +739,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         {
             GroupRead spare = _spare;
             CancellationToken abandon = _abandon.Token;
-            _planned = Task.Run(() => ChooseAsync(spare, abandon), abandon);
+            _planned = Execution.Waits.StartAsync(() => ChooseAsync(spare, abandon));
         }
 
         _groupStart = read.Group.FirstRow;
@@ -928,7 +928,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         ScanCounters.Note(_metrics, window.Runs.Count, bytes);
         CancellationToken abandon = _abandon.Token;
         ISegmentReader source = _file.Reader;
-        return Task.Run(() => source.ReadManyAsync(read, abandon).AsTask(), abandon);
+        return Execution.Waits.StartAsync(() => source.ReadManyAsync(read, abandon).AsTask());
     }
 
     /// <summary>The request that reads window <paramref name="window"/>, past the first, made the first time a group has so many.</summary>

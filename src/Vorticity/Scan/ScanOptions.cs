@@ -72,9 +72,10 @@ public sealed record ScanOptions
 
     /// <summary>Batches decoded ahead of the consumer, so decoding overlaps the caller's work; 0 decodes on demand.</summary>
     /// <remarks>
-    /// The batches ahead are decoded on the thread pool, beside the caller's thread, whatever the
-    /// degree of parallelism: 1 by default, so a scan takes a thread of the pool even at a degree
-    /// of 1. A source with latency to hide is where it pays.
+    /// The batches ahead are decoded within the degree of parallelism, of which the caller's thread is one: at a degree of
+    /// <c>N</c>, on <c>N − 1</c> threads of the pool at most beside it, each on a lane of the session's free at the time,
+    /// and at a degree of 1 on the caller's thread alone, a batch when it asks for it. A source with latency to hide is
+    /// where it pays; the reads it issues ahead go on whatever the degree.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
     public int Prefetch

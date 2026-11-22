@@ -203,7 +203,10 @@ internal sealed class ColumnWriter
             BlockStatsPass.Accumulate(arena, nodeIndex, start, count, ref _open, _previous, widths);
         }
 
-        if ((parts & IngestParts.Bounds) != 0 && _stringZones is not null && node.Kind == CanonicalKind.VarBinView)
+        // A text's rows as views, or as a constant: a block of rows that are all one value comes as either, as the batches it
+        // was cut from came, and its bounds are the same. Kept for views alone, a constant block had none, and its file's zone
+        // map then had none for its column, as a merge's runs cut the block at any degree.
+        if ((parts & IngestParts.Bounds) != 0 && _stringZones is not null && node.Kind is CanonicalKind.VarBinView or CanonicalKind.Constant)
         {
             _stringZones.Accumulate(arena, node, start, count);
         }
@@ -212,7 +215,7 @@ internal sealed class ColumnWriter
         // loaded them, so the probe pays its hash and its compare and none of its loads.
         if ((parts & IngestParts.Table) != 0 && DictionaryLive)
         {
-            _table ??= DistinctTable.For(node);
+            _table ??= SpareTable() ?? DistinctTable.For(node);
             _table?.Probe(arena, node, start, count);
         }
 
@@ -507,6 +510,29 @@ internal sealed class ColumnWriter
     internal void NoteWidthsServed() => _widthsServed++;
 
     /// <summary>
+    /// What a reader holds of the column at most while it reads its rows in their order: its two heaviest neighbouring
+    /// chunks, or its only one, each its bytes and what a read of a part of it decodes whole
+    /// (<see cref="ArrayBlobWriter.BlobLease.Whole"/>). 0 before its first chunk.
+    /// </summary>
+    /// <remarks>
+    /// Two, since a reader that crosses from a chunk to the next holds both: the batch before still borrows the first's
+    /// dictionary while the next decodes the second's. A column of 40 000 rows in two chunks, each with a dictionary of
+    /// 1.1 MB decoded in a block of 2 MiB, held 2.2 MB read within its first chunk and 4.3 MB read across them
+    /// (2026-11-21).
+    /// </remarks>
+    internal long OpenBytes { get; private set; }
+
+    // What the chunk written last holds open.
+    private long _lastOpen;
+
+    /// <summary>Notes a chunk of the column written, which holds <paramref name="bytes"/> open.</summary>
+    internal void Opens(long bytes)
+    {
+        OpenBytes = Math.Max(OpenBytes, _lastOpen + bytes);
+        _lastOpen = bytes;
+    }
+
+    /// <summary>
     /// Chunks of this column and its children whose bit-packing was priced from the ingested width
     /// histograms rather than from a walk.
     /// </summary>
@@ -533,45 +559,159 @@ internal sealed class ColumnWriter
     /// decides from that which ingest state the next chunk runs. A plan that was never priced
     /// leaves no memory, since a memory predicting zero cannot hold.
     /// </summary>
-    internal void Remember(in ColumnPlan plan, long actualBytes, int firstBlock, int blockCount)
+    internal void Remember(in ColumnPlan plan, long actualBytes, int firstBlock, int blockCount, bool keeps = false)
     {
-        // A progression predicts zero buffer bytes and is priced all the same; anything else
-        // predicting zero was never priced at all.
-        bool priced = plan.PredictedBytes > 0 || plan.Scheme == ColumnScheme.Sequence;
+        (byte written, bool live, bool widthsLive) = RememberPlan(in plan, actualBytes, keeps);
+        MarkWritten(firstBlock, blockCount, written);
 
-        // What each block's chunk became, in a byte the closed block already had spare. The hit is
-        // counted against the memory the chunk was chosen under, which is the one being replaced.
-        byte written = (byte)(plan.Scheme + 1);
+        // The table's consumer for the next chunk, decided here and nowhere else, so that the probe
+        // is paid exactly where its answer is used.
+        _live = live;
+        _widthsLive = widthsLive;
+    }
+
+    /// <summary>
+    /// The part of <see cref="Remember"/> that only the column's emissions read: its memory of its plans, replaced, unless the
+    /// chunk <paramref name="keeps"/> it as it was. What the chunk was written as and what the next chunk's ingest runs are
+    /// returned, for whoever applies them.
+    /// </summary>
+    /// <remarks>
+    /// A chunk an end of rows cut short of its target keeps the memory: its plan answers its few rows, not the column's. A
+    /// column of integers of 19 bits wrote such a chunk of 256 rows as it was, the bit-packing's blocks of 1 024 values
+    /// costing more there; remembered, that plan held on every chunk after it, which then priced nothing else, and the
+    /// column wrote its chunks as they were, 8 bytes a row where it wrote 2.4 (2026-11-21).
+    /// </remarks>
+    internal (byte Written, bool Live, bool WidthsLive) RememberPlan(in ColumnPlan plan, long actualBytes, bool keeps = false)
+    {
+        if (!keeps)
+        {
+            // A progression predicts zero buffer bytes and is priced all the same; anything else
+            // predicting zero was never priced at all.
+            bool priced = plan.PredictedBytes > 0 || plan.Scheme == ColumnScheme.Sequence;
+
+            // The hit is counted against the memory the chunk was chosen under, which is the one being replaced.
+            if (Memory is { } previous)
+            {
+                _plansPriced++;
+                if (previous.WithinTolerance && previous.Scheme == plan.Scheme)
+                {
+                    _plansHeld++;
+                }
+            }
+
+            // A pinned memory is not replaced: the caller's scheme is offered to every chunk, and a
+            // chunk written as something else does not withdraw it.
+            if (Memory is not { Pinned: true })
+            {
+                Memory = priced ? new PlanMemory(plan.Scheme, plan.PredictedBytes, actualBytes) : null;
+            }
+
+            // The ingest histograms are the raw and the zigzag widths. A frame of reference wants the
+            // framed widths, which are the raw ones exactly when the reference is zero and something
+            // the pack has to walk for otherwise, so counting them there would pay twice.
+            _memoryWidths = plan.BitPack is { } packed && (packed.Transform == BitPackTransform.ZigZag || packed.Reference == 0);
+        }
+
+        bool live = Memory is { WithinTolerance: true, Scheme: ColumnScheme.Dict };
+        bool widthsLive = Memory is { WithinTolerance: true, Scheme: ColumnScheme.BitPacked } && _memoryWidths;
+        return ((byte)(plan.Scheme + 1), live, widthsLive);
+    }
+
+    // Whether the plan the memory holds packed bits whose widths the ingest histograms count.
+    private bool _memoryWidths;
+
+    /// <summary>Notes, in a byte each closed block had spare, what the chunk over <paramref name="blockCount"/> blocks from <paramref name="firstBlock"/> was written as.</summary>
+    private void MarkWritten(int firstBlock, int blockCount, byte written)
+    {
         for (int block = Math.Max(firstBlock, 0); block < firstBlock + blockCount && block < _closed.Count; block++)
         {
             _closed.At(block).WrittenScheme = written;
         }
+    }
 
-        if (Memory is { } previous)
+    // A snapshot and a distinct table given back by a chunk's emission, for the column's next chunk; one each at most.
+    private ChunkSnapshot? _spareSnapshot;
+    private DistinctTable? _spareTable;
+
+    /// <summary>
+    /// What the ingest knows of the chunk over <paramref name="count"/> blocks from <paramref name="first"/>, all of them
+    /// closed, taken for an emission of its own, all the way down (<see cref="ChunkSnapshot"/>): its summary, its widths'
+    /// sum, its table and what that held at its last block. The chunk's width slots are given back and its table goes with
+    /// the snapshot, the column starting its next chunk in another; nothing of the chunk is released when it lands.
+    /// </summary>
+    /// <remarks>Runs while nothing ingests the column, as a chunk's emission did.</remarks>
+    internal ChunkSnapshot Freeze(int first, int count)
+    {
+        ChunkSnapshot snapshot = System.Threading.Interlocked.Exchange(ref _spareSnapshot, null) ?? new ChunkSnapshot();
+        snapshot.Column = this;
+        snapshot.FirstBlock = first;
+        snapshot.BlockCount = count;
+        snapshot.Stats = Chunk(first, count);
+        snapshot.HasWidths = Widths(first, count, snapshot.Widths);
+        snapshot.TableAtClose = TableAtClose(first + count - 1);
+        snapshot.Table = _table;
+        snapshot.Remembered = false;
+        _table = System.Threading.Interlocked.Exchange(ref _spareTable, null);
+        for (int i = first; i < first + count && i < _widths.Count; i++)
         {
-            _plansPriced++;
-            if (previous.WithinTolerance && previous.Scheme == plan.Scheme)
+            ref int slot = ref _widths.At(i);
+            _slots.Free(slot);
+            slot = WidthSlots.None;
+        }
+
+        ColumnWriter[]? children = _children;
+        int childCount = children?.Length ?? 0;
+        if (snapshot.Children.Length < childCount)
+        {
+            snapshot.Children = new ChunkSnapshot?[childCount];
+        }
+
+        snapshot.ChildCount = childCount;
+        for (int i = 0; i < childCount; i++)
+        {
+            snapshot.Children[i] = children![i].Freeze(first, count);
+        }
+
+        return snapshot;
+    }
+
+    /// <summary>
+    /// Takes back what a chunk's emission decided, as the chunk lands, all the way down: what its blocks were written as, and
+    /// whether the column's ingest runs its table and counts its widths from here on. The snapshot is kept for the next.
+    /// </summary>
+    internal void Land(ChunkSnapshot snapshot)
+    {
+        if (snapshot.Remembered)
+        {
+            MarkWritten(snapshot.FirstBlock, snapshot.BlockCount, snapshot.Written);
+            _live = snapshot.Live;
+            _widthsLive = snapshot.WidthsLive;
+        }
+
+        for (int i = 0; i < snapshot.ChildCount; i++)
+        {
+            if (snapshot.Children[i] is { } child)
             {
-                _plansHeld++;
+                child.Column.Land(child);
             }
+
+            snapshot.Children[i] = null;
         }
 
-        // A pinned memory is not replaced: the caller's scheme is offered to every chunk, and a
-        // chunk written as something else does not withdraw it.
-        if (Memory is not { Pinned: true })
-        {
-            Memory = priced ? new PlanMemory(plan.Scheme, plan.PredictedBytes, actualBytes) : null;
-        }
+        snapshot.GiveTables();
+        snapshot.Column = null!;
+        System.Threading.Interlocked.CompareExchange(ref _spareSnapshot, snapshot, null);
+    }
 
-        // The table's consumer for the next chunk, decided here and nowhere else, so that the probe
-        // is paid exactly where its answer is used.
-        _live = Memory is { WithinTolerance: true, Scheme: ColumnScheme.Dict };
-        // The ingest histograms are the raw and the zigzag widths. A frame of reference wants the
-        // framed widths, which are the raw ones exactly when the reference is zero and something
-        // the pack has to walk for otherwise, so counting them there would pay twice.
-        _widthsLive = Memory is { WithinTolerance: true, Scheme: ColumnScheme.BitPacked }
-            && plan.BitPack is { } packed
-            && (packed.Transform == BitPackTransform.ZigZag || packed.Reference == 0);
+    /// <summary>The table a chunk's emission gave back, for a column whose next chunk runs one; null for none.</summary>
+    private DistinctTable? SpareTable() =>
+        _spareTable is null ? null : System.Threading.Interlocked.Exchange(ref _spareTable, null);
+
+    /// <summary>Takes back a chunk's distinct table, emptied, for the column's next chunk: from whichever lane compressed the chunk.</summary>
+    internal void GiveTable(DistinctTable table)
+    {
+        table.Reset();
+        System.Threading.Interlocked.CompareExchange(ref _spareTable, table, null);
     }
 
     /// <summary>What the table held when block <paramref name="block"/> closed, or <c>(-1, 0)</c>.</summary>
@@ -591,7 +731,7 @@ internal sealed class ColumnWriter
         {
             // A table plan memory has just turned back on has no table yet for this column; the
             // carried tail is the first thing it must see, so it is created here as well.
-            _table ??= DistinctTable.For(node);
+            _table ??= SpareTable() ?? DistinctTable.For(node);
             _table?.Probe(arena, node, start, count);
         }
 

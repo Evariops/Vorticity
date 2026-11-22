@@ -57,33 +57,53 @@ public sealed partial class CompactionBlockBudgetTests
     }
 
     /// <summary>
-    /// A budget of 16 MiB and a handle that learned an input and a writer cost a byte each, so that its plan takes the whole
-    /// class: the job is refused a block, given up, and a narrower one runs in its place within the budget; once it ends,
-    /// the budget holds nothing, and the next job has it whole.
+    /// A handle under a budget of 18 MiB runs a job planned for the whole class, sixty-four objects, by a handle under a
+    /// large one, which its own plan would not take. Its inputs reserve what they hold as they read it, within the budget;
+    /// the job runs to its end when the budget holds it, and otherwise ends short of room and commits what it merged, or
+    /// commits nothing and gives way to the job the handle plans itself. Whichever, its inputs hold within the budget,
+    /// the budget holds nothing once it ends, and the backlog compacts to its end, every row read back.
     /// </summary>
+    /// <remarks>
+    /// The job was refused a block and given up every time, and a narrower one ran in its place: its inputs and its writer
+    /// were counted before it ran, and a block past the count gave it up. What a job holds in all is no longer within the
+    /// budget whatever its writer holds: a writer cannot wait in the middle of a chunk, reserves nothing yet, and is
+    /// counted past its share rather than refused. The sixty-four inputs of the first job take 13 MiB as they open and
+    /// its writer 13 after them, 25 MiB under 18; the last job of the backlog, four objects of the whole class into one,
+    /// holds 18.2, its writer 13 of a share of 7.2 (2026-11-21). A plan of the handle's own counts its writer at what
+    /// the job before it held, and takes fewer inputs for it.
+    /// </remarks>
     [Fact]
-    public async Task AJobTheBudgetRefusesGivesWayToANarrowerOneAndLeavesTheBudgetWhole()
+    public async Task AJobPlannedTooWideForItsBudgetRunsOrGivesWayAndLeavesTheBudgetWhole()
     {
-        const long Small = 16L << 20;
+        const long Small = 18L << 20;
         QueryMemoryBudget budget = new QueryMemoryBudget(Small);
         await using VortexSession session = VortexSession.Create(o => o.JobMemoryBudget = budget);
         await using MemoryObjectStore store = new MemoryObjectStore();
         await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Row.Schema, Options(session), Ct);
         List<Row> all = await AppendAsync(dataset, appends: 64, rows: 4_096);
-        dataset.LearnDecodedRowBytes(1);
-        dataset.LearnJobCosts(DatasetCompactor.InputFloorBytes + 1, 8_192, 1, width: int.MaxValue);
-        int planned = (await dataset.PlanCompactionAsync(cancellationToken: Ct)).Job!.Inputs.Count;
+        await using VortexSession large = VortexSession.Create(static o => o.JobMemoryBudget = new QueryMemoryBudget(4L << 30));
+        await using VortexDataset wide = await VortexDataset.OpenAsync(store, Options(large), Ct);
+        CompactionJob whole = (await wide.PlanCompactionAsync(cancellationToken: Ct)).Job!;
+        int planned = whole.Inputs.Count;
         Assert.Equal(64, planned);
+        Assert.True((await dataset.PlanCompactionAsync(cancellationToken: Ct)).Job!.Inputs.Count < planned, "the handle's own plan takes the whole class");
 
-        CompactionResult? first = await dataset.CompactAsync(cancellationToken: Ct);
+        CompactionResult? first = await dataset.RunWithinBudgetAsync(
+            whole, async token => (await dataset.PlanCompactionAsync(cancellationToken: token)).Job, Ct);
+
+        // Its inputs within the budget, which is never passed for them; and what it held in all, within the budget but for
+        // what its writer held, counted past rather than refused.
+        static void HoldsWithin(CompactionResult job) => Assert.True(
+            job.MemoryReservedBy.Inputs <= Small && job.MemoryReserved - Small <= job.MemoryReservedBy.Writer,
+            $"a job held {job.MemoryReserved} bytes under {Small}, its inputs {job.MemoryReservedBy.Inputs} and its writer {job.MemoryReservedBy.Writer}");
 
         Assert.NotNull(first);
-        Assert.True(first.ObjectsIn < planned, $"the job took {first.ObjectsIn} objects of the {planned} first planned");
-        Assert.InRange(first.MemoryReserved, 1, Small);
+        Assert.InRange(first.ObjectsIn, 2, planned);
+        HoldsWithin(first);
         Assert.Equal(0, budget.ReservedBytes);
 
         List<CompactionResult> rest = await CompactToTheEndAsync(dataset);
-        Assert.All(rest, job => Assert.InRange(job.MemoryReserved, 0, Small));
+        Assert.All(rest, HoldsWithin);
         Assert.Equal(0, budget.ReservedBytes);
         Assert.Equal(all.OrderBy(r => r.Sequence), (await dataset.Scan<Row>().ToRecordsAsync(Ct).ToListAsync(Ct)).OrderBy(r => r.Sequence));
     }

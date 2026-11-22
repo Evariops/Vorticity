@@ -83,6 +83,14 @@ internal static class Program
             return await Report.RunAsync(args).ConfigureAwait(false);
         }
 
+        // `--fixture <rows> <path>` writes the report's file of that many rows and nothing else, for a runner's scenarios to
+        // read without the whole report (bench/speed.sh).
+        if (args.Length == 3 && args[0] == "--fixture" && int.TryParse(args[1], System.Globalization.CultureInfo.InvariantCulture, out int fixtureRows))
+        {
+            await Report.WriteFixtureAsync(args[2], fixtureRows).ConfigureAwait(false);
+            return 0;
+        }
+
         if (args.Length > 0 && args[0] == "--ratio-check")
         {
             // `--recalibrate` takes an optional count: `--recalibrate 5`, or bare for three. The

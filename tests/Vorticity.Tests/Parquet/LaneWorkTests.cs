@@ -15,10 +15,12 @@ public sealed class LaneWorkTests
 {
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
+    private static PageLanes Lanes() => new PageLanes(2, new Vorticity.Execution.LaneBudget(2));
+
     [Fact]
     public void APageNoLaneHasBegunRunsWhereTheColumnComesToIt()
     {
-        Held work = new Held(new PageLanes(2));
+        Held work = new Held(Lanes());
         work.Release.Set();
         Assert.True(work.TryComplete());
         Assert.True(work.Done);
@@ -32,7 +34,7 @@ public sealed class LaneWorkTests
     [Fact]
     public async Task AColumnAwaitsThePageItsLaneRuns()
     {
-        Held work = new Held(new PageLanes(2));
+        Held work = new Held(Lanes());
         Task<bool> lane = Task.Run(work.TryRun, Ct);
         await work.Started.Task.WaitAsync(Ct);
 
@@ -53,7 +55,7 @@ public sealed class LaneWorkTests
     [Fact]
     public async Task AColumnIsCalledBackOnceItsLaneFinishes()
     {
-        Held work = new Held(new PageLanes(2));
+        Held work = new Held(Lanes());
         Task<bool> lane = Task.Run(work.TryRun, Ct);
         await work.Started.Task.WaitAsync(Ct);
 
@@ -73,7 +75,7 @@ public sealed class LaneWorkTests
     [Fact]
     public async Task APageGivenUpWhileItsLaneRunsIsGivenBackByTheLane()
     {
-        Held work = new Held(new PageLanes(2));
+        Held work = new Held(Lanes());
         Task<bool> lane = Task.Run(work.TryRun, Ct);
         await work.Started.Task.WaitAsync(Ct);
 
@@ -92,14 +94,14 @@ public sealed class LaneWorkTests
     public void APageGivenUpBeforeOrAfterItsLaneIsTheColumnsToGiveBack()
     {
         // No lane has begun it: never run, the column's to give back.
-        Held never = new Held(new PageLanes(2));
+        Held never = new Held(Lanes());
         Assert.True(never.Abandon());
         Assert.False(never.TryRun());
         Assert.Equal(0, never.Runs);
         Assert.Equal(0, never.Discards);
 
         // Its lane finished it: the column's too.
-        Held finished = new Held(new PageLanes(2));
+        Held finished = new Held(Lanes());
         finished.Release.Set();
         Assert.True(finished.TryRun());
         Assert.True(finished.Abandon());

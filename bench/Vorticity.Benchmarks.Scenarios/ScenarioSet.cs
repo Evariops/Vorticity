@@ -113,8 +113,34 @@ public static class ScenarioSet
         "take" => p => ScatteredTake(p, ReportTakeCount, rows / ReportTakeCount),
         "write" => ReadAndWrite,
         "append" => p => Append(p, rows / 10),
+        "scan-parts" => ScanParts,
         _ => null,
     };
+
+    /// <summary>
+    /// Every row of every column read, as <see cref="ScanAll"/> reads them, by a caller that takes the scan in parts and
+    /// reads each on a task of its own: the reads on as many threads as the scan has lanes, rather than on the one that
+    /// enumerates.
+    /// </summary>
+    /// <param name="path">The file.</param>
+    public static async Task<long> ScanParts(string path)
+    {
+        await using VortexFile file = await OpenAsync(path);
+        int degree = Math.Max(1, ScanBuilder.DefaultDegreeOfParallelism);
+        IReadOnlyList<Scan> parts = await file.Scan([]).SplitAsync(4 * degree, CancellationToken.None);
+        long rows = 0;
+        await Parallel.ForEachAsync(parts, new ParallelOptions { MaxDegreeOfParallelism = degree }, async (part, ct) =>
+        {
+            long read = 0;
+            await foreach (BatchView batch in part.With(new ScanOptions { DegreeOfParallelism = 1 }).WithCancellation(ct))
+            {
+                read += Consume.View(batch);
+            }
+
+            Interlocked.Add(ref rows, read);
+        });
+        return rows;
+    }
 
     /// <summary>
     /// Takes <c>--threads &lt;n&gt;</c> or <c>--threads all</c> out of <paramref name="args"/> and

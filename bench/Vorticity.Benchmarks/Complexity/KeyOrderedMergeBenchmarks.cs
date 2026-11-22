@@ -79,7 +79,7 @@ public class KeyOrderedMergeBenchmarks
         long rows = 0;
         KeyOrderedMerge merge = new KeyOrderedMerge(
             _dataset.Snapshot, ObjectsAsync(), SortKey.OfColumns(_dataset.Snapshot.Schema.DType, Paths, descending: false), rankedTies: true,
-            (lease, _) => lease.File.ScanBuilder().InKeyOrder(Paths, false).ExecuteAsync(), null, CancellationToken.None)
+            (lease, _, _) => lease.File.ScanBuilder().InKeyOrder(Paths, false).ExecuteAsync(), null, CancellationToken.None)
         {
             Account = QueryMemoryBudget.Process.Account,
         };

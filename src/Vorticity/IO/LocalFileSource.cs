@@ -558,7 +558,8 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
             Task[] lanes = new Task[Math.Min(ReadLanes, reads.Count)];
             for (int lane = 0; lane < lanes.Length; lane++)
             {
-                lanes[lane] = Task.Run(
+                // Reads of the disk, which block their thread and compute nothing: beside the session's degree.
+                lanes[lane] = Execution.Waits.StartBlockingAsync(
                     () =>
                     {
                         for (int i = Interlocked.Increment(ref next); i < reads.Count; i = Interlocked.Increment(ref next))

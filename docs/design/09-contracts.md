@@ -35,8 +35,16 @@ fanning out. So:
   call sites. Two sessions in one process keep two separate degrees.
 - A single call may override it: `ScanOptions.DegreeOfParallelism` for one scan and
   `VortexWriteOptions.DegreeOfParallelism` for one file, where 0 takes the session's.
+- The degree counts cores at work, not threads asked for, and all of the session's work together:
+  its lanes, as many as the degree, are taken by the writers' helpers, by the scans' decodes ahead of
+  their consumers and by the compaction jobs, each of which holds one for its own flow. A caller's
+  thread is one of a scan's degree, so that a scan at 1 decodes on the caller's thread alone. What
+  holds a lane takes another only when one is free now, or does the work itself: it never waits for
+  one, which would wait on itself. Only a job about to start, which holds none, waits for a lane.
 - A scan decodes its splits side by side, each on a context and arenas of its own with nothing
-  shared, and still delivers its batches in row order. A split that costs less than the hand-offs
+  shared, and still delivers its batches in row order. A split's reads go out on no lane, since they
+  wait for the store and not for a core; its decode takes a lane of the session's, or is left to the
+  consumer, which decodes a split read that no lane took when it reaches it. A split that costs less than the hand-offs
   to a lane and back, a column of a few thousand values read from a local file, is decoded on the
   caller's thread instead, from the first split when it looks small until one costs more, which a
   lane would then take. A take, whose splits are many and small, keeps

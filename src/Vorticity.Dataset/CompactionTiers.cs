@@ -146,11 +146,13 @@ internal static partial class CompactionPolicy
                 continue;
             }
 
-            if (await ConsolidationAsync(dataset, partition, top, fanout, layout.LateShare, consolidateAll, cancellationToken).ConfigureAwait(false) is { } job
-                && (consolidateAll || !deferred.ContainsKey(partition) || DatasetCompactor.Fits(dataset.Handle, job)))
+            CompactionJob? job = await ConsolidationAsync(dataset, partition, top, fanout, layout.LateShare, consolidateAll, cancellationToken).ConfigureAwait(false);
+            bool fits = job is not null && (consolidateAll || DatasetCompactor.Fits(dataset.Handle, job));
+            if (job is not null && (fits || !deferred.ContainsKey(partition)))
             {
+                // Too wide for a merge with no merge of its classes due: its smallest neighbours merged first.
                 busy.Add(index);
-                jobs.Add(job);
+                jobs.Add(!fits && Narrowing(dataset, job, top) is { } narrowing ? narrowing : job);
             }
             else if (deferred.TryGetValue(partition, out CompactionJob? merge))
             {
@@ -223,11 +225,150 @@ internal static partial class CompactionPolicy
     /// <paramref name="bytes"/> and the merge within the jobs' budget (<see cref="DatasetCompactor.TierWidth"/>). A merge
     /// due when its class reaches the fan-out takes the fan-out; one behind takes what it can.
     /// </summary>
+    /// <remarks>
+    /// A merge its memory holds below the fan-out takes the run of neighbours whose bytes are the fewest (<see cref="Lightest"/>),
+    /// not the first: the first of a class is the object the merge before wrote, and a merge of two at a time took it again
+    /// with the next, object after object, each row written once more a merge. Under 2 GiB, 240 appends of log records went
+    /// through 179 merges of two, objects of 12.3, 21.0, 28.5, 33.5 and 38.9 MB in turn, before the consolidation (2026-11-21).
+    /// </remarks>
     private static CompactionJob Wide(PlannedVersion dataset, List<CompactionInput> inputs, int fanout, long bytes, long top)
     {
         int width = DatasetCompactor.TierWidth(dataset.Handle, inputs, fanout, bytes);
-        return Tier(dataset, width == inputs.Count ? inputs : inputs.GetRange(0, width), top);
+        return Tier(dataset, width == inputs.Count ? inputs : width < fanout ? Lightest(inputs, width) : inputs.GetRange(0, width), top);
     }
+
+    /// <summary>
+    /// The run of <paramref name="take"/> neighbours of <paramref name="inputs"/>, in their order, whose bytes are the fewest,
+    /// the first such run: a merge of two at a time then pairs objects of about one weight, and a row is written once more a
+    /// level of a tree of merges, a logarithm of the inputs in base the width, rather than once more a merge.
+    /// </summary>
+    private static List<CompactionInput> Lightest(List<CompactionInput> inputs, int take)
+    {
+        int best = 0;
+        long least = long.MaxValue;
+        long sum = 0;
+        for (int i = 0; i < inputs.Count; i++)
+        {
+            sum += inputs[i].Entry.Bytes;
+            if (i >= take)
+            {
+                sum -= inputs[i - take].Entry.Bytes;
+            }
+
+            if (i >= take - 1 && sum < least)
+            {
+                least = sum;
+                best = i - take + 1;
+            }
+        }
+
+        return inputs.GetRange(best, take);
+    }
+
+    /// <summary>The lightest runs of neighbours a narrowing weighs against the jobs' budget for each number of inputs it tries.</summary>
+    private const int NarrowingTries = 4;
+
+    /// <summary>
+    /// The merge that narrows <paramref name="consolidation"/>, whose inputs open at once hold more than the jobs' budget
+    /// leaves them (<see cref="DatasetCompactor.Peak"/>): of its inputs of level 0 open together where they hold the most
+    /// (<see cref="DatasetCompactor.OpenAtPeak"/>), a run of neighbours in the order of the tree, those between them with
+    /// them, merged into level 0. As many of them as a merge holds, or as many as leave that many once merged, whichever
+    /// is fewer, and of such runs the one of the fewest bytes that fits the budget. The objects a merge writes lie one
+    /// after the other along the keys and are open one at a time: each such merge is committed, and lowers how many
+    /// inputs the consolidation holds open where it held the most, until it fits. Null when fewer than two inputs of
+    /// level 0 are open there, or no run of two fits, which the consolidation then meets as it runs.
+    /// </summary>
+    /// <remarks>
+    /// A consolidation takes its partition's whole level 0: one of 35 inputs of log records under 2 GiB failed on its
+    /// inputs alone, at its shortest batches, when no merge of its size classes was due to narrow it first. The merge took
+    /// the lightest neighbours of the level, as many as a merge holds counted all open at once: objects one merge had
+    /// written, which no merge holds open together, were merged again two into two, 262 merges in all, and the
+    /// consolidation never fitted (2026-11-21).
+    /// </remarks>
+    private static CompactionJob? Narrowing(PlannedVersion dataset, CompactionJob consolidation, long top)
+    {
+        VortexDataset handle = dataset.Handle;
+        DatasetSchema schema = handle.Snapshot.Schema;
+        List<CompactionInput> ordered = [.. consolidation.Inputs];
+        ordered.Sort(static (left, right) => left.Key.Span.SequenceCompareTo(right.Key.Span));
+        List<int> open = DatasetCompactor.OpenAtPeak(handle, schema, ordered, DatasetCompactor.LeastBatchRows);
+
+        // Level 0 in the order of the tree, the bytes before each of its objects, and the places there of those open at the peak.
+        List<CompactionInput> fresh = new List<CompactionInput>(ordered.Count);
+        List<long> before = new List<long>(ordered.Count + 1) { 0 };
+        List<int> peak = new List<int>(open.Count);
+        List<long> windows = new List<long>(open.Count);
+        for (int i = 0, next = 0; i < ordered.Count; i++)
+        {
+            bool opened = next < open.Count && open[next] == i;
+            next += opened ? 1 : 0;
+            if (ordered[i].Level != 0)
+            {
+                continue;
+            }
+
+            if (opened)
+            {
+                peak.Add(fresh.Count);
+                windows.Add(DatasetCompactor.Window(handle, schema, ordered[i].Entry, DatasetCompactor.LeastBatchRows));
+            }
+
+            fresh.Add(ordered[i]);
+            before.Add(before[^1] + ordered[i].Entry.Bytes);
+        }
+
+        if (peak.Count < 2)
+        {
+            return null;
+        }
+
+        // How many of them a merge holds beside its writer, the lightest by what they hold open first; then as many as
+        // leave that many once merged, a merge of them counting for one: the passes of an external sort.
+        windows.Sort();
+        long share = JobShares.Of(DatasetCompactor.JobBudget(handle)).Inputs;
+        int holds = 0;
+        for (long held = 0; holds < windows.Count && held + windows[holds] <= share; holds++)
+        {
+            held += windows[holds];
+        }
+
+        Span<(long Bytes, int From)> lightest = stackalloc (long, int)[NarrowingTries];
+        for (int take = Math.Clamp(Math.Min(holds, peak.Count - holds + 1), 2, peak.Count); take >= 2; take--)
+        {
+            // The runs from one of them to the one `take` places on, by their bytes: the lightest, tried in that order.
+            int kept = 0;
+            for (int from = 0; from + take <= peak.Count; from++)
+            {
+                long bytes = before[peak[from + take - 1] + 1] - before[peak[from]];
+                int place = kept < NarrowingTries ? kept++ : bytes < lightest[kept - 1].Bytes ? kept - 1 : -1;
+                for (; place > 0 && lightest[place - 1].Bytes > bytes; place--)
+                {
+                    lightest[place] = lightest[place - 1];
+                }
+
+                if (place >= 0)
+                {
+                    lightest[place] = (bytes, from);
+                }
+            }
+
+            for (int tried = 0; tried < kept; tried++)
+            {
+                int from = lightest[tried].From;
+                CompactionJob merge = Tier(dataset, fresh.GetRange(peak[from], peak[from + take - 1] - peak[from] + 1), top);
+                if (DatasetCompactor.Fits(handle, merge))
+                {
+                    return merge;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>The merge that narrows <paramref name="consolidation"/> of <paramref name="dataset"/> (<see cref="Narrowing"/>), what a consolidation asked for runs first.</summary>
+    internal static CompactionJob? NarrowingOf(VortexDataset dataset, CompactionJob consolidation) =>
+        Narrowing(new PlannedVersion(dataset), consolidation, consolidation.TargetBytes);
 
     /// <summary>
     /// The merge of <paramref name="inputs"/>, objects of one class of one partition at level 0, into level 0: on the key,

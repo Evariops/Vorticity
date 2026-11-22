@@ -379,6 +379,13 @@ public sealed record CompactionJob
     /// <summary>The bytes it reads, which are about the bytes it will write.</summary>
     public long Bytes { get; init; }
 
+    /// <summary>
+    /// Whether its plan chose its inputs to make one object: they weigh the size its objects aim at, or less. Such a job ends
+    /// no object by its size, whatever the merge writes of them, so that the object it writes leaves the size class its
+    /// inputs were in and no plan takes it again for the same reason.
+    /// </summary>
+    internal bool OneObject => TargetBytes > 0 && Bytes <= TargetBytes;
+
     /// <summary>The objects it reads, each with its level and tree key, the source level's first.</summary>
     internal IReadOnlyList<CompactionInput> Inputs { get; init; }
 

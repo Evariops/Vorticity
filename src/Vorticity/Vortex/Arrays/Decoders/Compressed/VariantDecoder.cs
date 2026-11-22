@@ -84,6 +84,7 @@ internal sealed class VariantDecoder : ArrayDecoder
         ArrayDecodeContext.RequireBufferCount(node.BufferCount, 0, Id);
         VariantMetadata metadata = VariantMetadata.Read(node.Metadata);
         bool residual = context.TakeResidual();
+        VariantTake? take = context.Scan.TakeTaken();
 
         if (dtype.Kind != DTypeKind.Variant)
         {
@@ -144,6 +145,18 @@ internal sealed class VariantDecoder : ArrayDecoder
             return core;
         }
 
+        // For a consumer that writes the rows under a shredding of its own and reads none: the rows taken into it as this
+        // chunk's shredding holds them, a slice at a time, carved from the arena the rows go to, and the rows sized, not
+        // put back together. When a slice is not taken so, or the rows taken are not every byte of the rows read, the
+        // chunk's rows are put back together as for any consumer, the slices before decoded again: the scan then takes no
+        // chunk more, whose rows would likely end the same way.
+        Writing.VariantShredder.Shredding? taken = null;
+        if (take is not null)
+        {
+            taken = take.Rent();
+            taken.Begin(context.Canonical, null);
+        }
+
         bool sliceable = rows == ChildRows.Selected
             ? context.ChildSelectsWithoutFullDecode(in node, 1, shreddedType)
             : context.ChildDecodesRange(in node, 1);
@@ -159,7 +172,39 @@ internal sealed class VariantDecoder : ArrayDecoder
                         ? context.DecodeChildSelected(in node, 1, shreddedType, length, wanted.Slice(at, part))
                         : context.DecodeChildRange(in node, 1, shreddedType, length, start + at, part);
                     int group = ShreddedTree.Group(context, dtype, coreSlice, shreddedSlice, out DType groupType);
-                    slices.Write(context, group, groupType, at);
+                    if (taken is null)
+                    {
+                        slices.Write(context, group, groupType, at);
+                    }
+                    else if (!Takes(taken, context.Canonical, group, at) || !slices.Size(context, group, groupType, at))
+                    {
+                        // From the chunk's first rows again, put back together.
+                        taken = Refused(context, taken, inexact: false);
+                        slices.Rebuild(context);
+                        at = -slices.Rows;
+                    }
+                }
+
+                if (taken is not null && taken.Exact && taken.Index())
+                {
+                    int sized = slices.CompleteSized(dtype, storage.GetFieldIndex(0), storage.GetFieldIndex(1), storage.Validity, out int values);
+                    Held(slices.Destination, values, taken);
+                    return sized;
+                }
+
+                if (taken is not null)
+                {
+                    taken = Refused(context, taken, inexact: true);
+                    slices.Rebuild(context);
+                    for (int at = 0; at < count; at += slices.Rows)
+                    {
+                        int part = Math.Min(slices.Rows, count - at);
+                        int coreSlice = slices.Narrow(context, core, at, part);
+                        int shreddedSlice = rows == ChildRows.Selected
+                            ? context.DecodeChildSelected(in node, 1, shreddedType, length, wanted.Slice(at, part))
+                            : context.DecodeChildRange(in node, 1, shreddedType, length, start + at, part);
+                        slices.Write(context, ShreddedTree.Group(context, dtype, coreSlice, shreddedSlice, out DType groupType), groupType, at);
+                    }
                 }
 
                 return slices.Complete(dtype, storage.GetFieldIndex(0), storage.GetFieldIndex(1), storage.Validity);
@@ -171,7 +216,67 @@ internal sealed class VariantDecoder : ArrayDecoder
         }
 
         int shredded = context.DecodeChildRows(in node, 1, shreddedType, length, start, count, wanted, rows);
-        return ShreddedTree.Assemble(context, dtype, core, shredded);
+        int whole = ShreddedTree.Group(context, dtype, core, shredded, out DType wholeType);
+        if (taken is not null)
+        {
+            bool took = Takes(taken, context.Canonical, whole, 0);
+            if (took
+                && ShreddedTree.Size(context, dtype, whole, wholeType, storage.GetFieldIndex(0), storage.GetFieldIndex(1), out int values) is >= 0 and int sized
+                && taken.Exact && taken.Index())
+            {
+                Held(context.Canonical, values, taken);
+                return sized;
+            }
+
+            Refused(context, taken, inexact: took);
+        }
+
+        return ShreddedTree.Assemble(context, dtype, whole, wholeType);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="taken"/> takes the rows of <paramref name="group"/>, a part of a chunk as its shredding holds
+    /// it, as its rows from <paramref name="at"/> on: false when it does not take a group of this shape, or when what the
+    /// shredding left of a row does not read as it lies, which the rows put back together then tell.
+    /// </summary>
+    private static bool Takes(Writing.VariantShredder.Shredding taken, CanonicalArena arena, int group, int at)
+    {
+        try
+        {
+            return taken.TakeGroup(arena, group, at);
+        }
+        catch (VortexFormatException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Gives <paramref name="taken"/>, which did not take a chunk's rows whole, back to its lender, and has the scan take no
+    /// chunk more (<see cref="TakenVariants.Refuse"/>); null, for the rows to be put back together. Counted by what lent it,
+    /// apart when the chunk was taken whole and not byte for byte (<paramref name="inexact"/>).
+    /// </summary>
+    private static Writing.VariantShredder.Shredding? Refused(ArrayDecodeContext context, Writing.VariantShredder.Shredding taken, bool inexact)
+    {
+        taken.Lender?.NoteRefused(inexact);
+        taken.Lender?.Return(taken);
+        context.Scan.TakenVariants?.Refuse();
+        return null;
+    }
+
+    /// <summary>
+    /// Tells <paramref name="arena"/> that <paramref name="taken"/>, carved from it and made ready for ranges, took the
+    /// rows of <paramref name="values"/>, a variant's values not put back together. An arena that keeps no such thing has
+    /// the values put back at once, and <paramref name="taken"/> goes back to its lender.
+    /// </summary>
+    private static void Held(CanonicalArena arena, int values, Writing.VariantShredder.Shredding taken)
+    {
+        taken.Lender?.NoteHeld();
+        if (!arena.NoteTaken(values, taken, 0, owned: true))
+        {
+            arena.MaterializeShredded(values, taken, 0);
+            taken.Lender?.Return(taken);
+        }
     }
 }
 
@@ -201,6 +306,9 @@ internal ref struct ShreddedSlices
     private readonly string _refusal;
     private ShreddedVariant? _plan;
     private DType _planned;
+
+    // Whether the slices' rows are sized and not rebuilt (Size), until one is not: they are then rebuilt, from the first.
+    private bool _sizing;
 
     private ShreddedSlices(CanonicalArena destination, VortexBuffer views, Span<byte> into, int rows, int slice, string refusal)
     {
@@ -286,6 +394,68 @@ internal ref struct ShreddedSlices
     }
 
     /// <summary>
+    /// Sizes the rows of the slice whose group node, in the slice's arena, is <paramref name="group"/> of
+    /// <paramref name="type"/>, the slice starting at row <paramref name="at"/>, without rebuilding them
+    /// (<see cref="ShreddedVariant.HollowSlice"/>), and clears the slice's arena. False, and the slice's arena as it was,
+    /// for a shredding whose rows are not sized so, or a row rebuilding it refuses: the rows are then rebuilt, from the
+    /// first slice (<see cref="Rebuild"/>), which tells why.
+    /// </summary>
+    internal bool Size(ArrayDecodeContext context, int group, DType type, int at)
+    {
+        CanonicalArena arena = context.Canonical;
+        try
+        {
+            if (_plan is null)
+            {
+                ShreddedVariant plan = ShreddedVariant.For(context.Scan, type);
+                if (!plan.Sizes)
+                {
+                    return false;
+                }
+
+                _plan = plan;
+                _plan.BeginHollow();
+                _sizing = true;
+                _planned = type;
+            }
+            else if (!_sizing || type != _planned)
+            {
+                return false;
+            }
+
+            int rows = arena.GetNode(group).Length;
+            if (!_plan.HollowSlice(arena, group, _into.Slice(at * ViewSize, rows * ViewSize)))
+            {
+                return false;
+            }
+        }
+        catch (VortexFormatException)
+        {
+            return false;
+        }
+
+        context.Scan.NextSlice();
+        context.Scan.Metrics?.AddVariantSlice();
+        return true;
+    }
+
+    /// <summary>
+    /// Leaves the rows sized so far (<see cref="Size"/>) for the slices to be rebuilt, from the first
+    /// (<see cref="Write"/>): the slice's arena cleared of the slice that was not sized.
+    /// </summary>
+    internal void Rebuild(ArrayDecodeContext context)
+    {
+        if (_sizing)
+        {
+            _plan!.EndHollow();
+            _sizing = false;
+        }
+
+        _plan = null;
+        context.Scan.NextSlice();
+    }
+
+    /// <summary>
     /// The variant node of the rows the slices rebuilt, in the destination: a struct of the <paramref name="metadata"/>
     /// column and of the values, valid as <paramref name="validity"/> says, over the buffers of the residual
     /// <paramref name="value"/> column when there is one (-1 otherwise).
@@ -299,10 +469,34 @@ internal ref struct ShreddedSlices
         return _destination.AddStruct(variant, _rows, validity, fields);
     }
 
+    /// <summary>
+    /// The variant node of the rows the slices sized (<see cref="Size"/>), in the destination: a struct of the
+    /// <paramref name="metadata"/> column and of the values not put back together, in <paramref name="values"/>
+    /// (<see cref="CanonicalKind.Shredded"/>), over the buffers of the residual <paramref name="value"/> column for the rows
+    /// that take their value as it is.
+    /// </summary>
+    internal readonly int CompleteSized(DType variant, int metadata, int value, Validity validity, out int values)
+    {
+        ReadOnlySpan<VortexBuffer> buffers = value >= 0 ? _destination.GetNode(value).DataBuffers : default;
+        values = _plan!.CompleteHollow(_destination, _rows, _views, buffers, metadata);
+        Span<int> fields = stackalloc int[2];
+        fields[0] = metadata;
+        fields[1] = values;
+        return _destination.AddStruct(variant, _rows, validity, fields);
+    }
+
     /// <summary>Ends the slices however they ended: the plan's scratch given back, the scan's arena redirected back.</summary>
     internal readonly void End(ArrayDecodeContext context)
     {
-        _plan?.EndSlices();
+        if (_sizing)
+        {
+            _plan?.EndHollow();
+        }
+        else
+        {
+            _plan?.EndSlices();
+        }
+
         context.Scan.EndSlice();
     }
 
@@ -382,6 +576,16 @@ internal static class ShreddedTree
     internal static int Assemble(ArrayDecodeContext context, DType variant, int core, int shredded)
     {
         int node = Group(context, variant, core, shredded, out DType group);
+        return Assemble(context, variant, node, group);
+    }
+
+    /// <summary>
+    /// The variant node of the rows of <paramref name="node"/>, the group of <paramref name="group"/> they are shredded into
+    /// (<see cref="Group(ArrayDecodeContext, DType, int, int, out DType)"/>).
+    /// </summary>
+    /// <exception cref="VortexFormatException">The tree is not one a shredding builds.</exception>
+    internal static int Assemble(ArrayDecodeContext context, DType variant, int node, DType group)
+    {
         try
         {
             return ShreddedVariant.For(context.Scan, group).Assemble(context.Canonical, variant, node);
@@ -390,6 +594,59 @@ internal static class ShreddedTree
         {
             CompressedThrow.Format($"{Malformed}: {malformed.Message}");
             throw;
+        }
+    }
+
+    /// <summary>
+    /// The variant node of the rows of <paramref name="node"/>, the group of <paramref name="group"/> they are shredded
+    /// into, sized and not put back together (<see cref="ShreddedVariant.HollowSlice"/>): a struct of
+    /// <paramref name="metadata"/> and of their values, in <paramref name="values"/>
+    /// (<see cref="CanonicalKind.Shredded"/>), over the buffers of the residual <paramref name="value"/> column. -1, and
+    /// nothing of it kept, for a shredding whose rows are not sized so or a row putting it back together refuses, which
+    /// <see cref="Assemble(ArrayDecodeContext, DType, int, DType)"/> then tells.
+    /// </summary>
+    internal static int Size(ArrayDecodeContext context, DType variant, int node, DType group, int metadata, int value, out int values)
+    {
+        values = -1;
+        CanonicalArena arena = context.Canonical;
+        try
+        {
+            ShreddedVariant plan = ShreddedVariant.For(context.Scan, group);
+            if (!plan.Sizes)
+            {
+                return -1;
+            }
+
+            int rows = arena.GetNode(node).Length;
+            Validity validity = arena.GetNode(node).Validity;
+            int bytes = checked(rows * CanonicalSupport.ViewSize);
+            VortexBuffer views = arena.AllocateUninitialized(Math.Max(bytes, 1), 64, out Span<byte> into).Slice(0, bytes);
+            bool sized;
+            plan.BeginHollow();
+            try
+            {
+                sized = plan.HollowSlice(arena, node, into[..bytes]);
+            }
+            finally
+            {
+                plan.EndHollow();
+            }
+
+            if (!sized)
+            {
+                return -1;
+            }
+
+            ReadOnlySpan<VortexBuffer> buffers = value >= 0 ? arena.GetNode(value).DataBuffers : default;
+            values = plan.CompleteHollow(arena, rows, views, buffers, metadata);
+            Span<int> fields = stackalloc int[2];
+            fields[0] = metadata;
+            fields[1] = values;
+            return arena.AddStruct(variant, rows, validity, fields);
+        }
+        catch (VortexFormatException)
+        {
+            return -1;
         }
     }
 

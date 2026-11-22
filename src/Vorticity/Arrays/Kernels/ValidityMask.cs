@@ -65,6 +65,47 @@ internal readonly ref struct ValidityMask
     internal static ValidityMask NonNullable => new(ValidityKind.NonNullable, default, 0);
 
     /// <summary>
+    /// The one bitmap that says which rows of node <paramref name="nodeIndex"/> hold a value, an extension's storage and the
+    /// extension around it read together: the storage's when the extension holds every row, the extension's when the storage
+    /// does. False when every row holds one or none does, and when both are bitmaps, which only a row at a time reads.
+    /// </summary>
+    /// <param name="arena">The node's arena.</param>
+    /// <param name="nodeIndex">The node, an extension's or any other's.</param>
+    /// <param name="bits">The bitmap, when there is one.</param>
+    /// <param name="bitOffset">The bit row 0 sits at in it.</param>
+    /// <returns>Whether one bitmap says it.</returns>
+    internal static bool OneBitmap(CanonicalArena arena, int nodeIndex, out ReadOnlySpan<byte> bits, out int bitOffset)
+    {
+        CanonicalNode outer = arena.GetNode(nodeIndex);
+        CanonicalNode node = outer;
+        while (node.Kind == CanonicalKind.Extension)
+        {
+            node = arena.GetNode(node.StorageIndex);
+        }
+
+        ValidityMask own = From(arena, node.Validity);
+        ValidityMask wrapper = From(arena, outer.Validity);
+        bits = default;
+        bitOffset = 0;
+        if (own.AllInvalid || wrapper.AllInvalid || (own.AllValid && wrapper.AllValid))
+        {
+            return false;
+        }
+
+        // Neither uniform kind is left on a side that does not hold every row: it is a bitmap. Two bitmaps are the same one for
+        // a node that is not an extension, and two for an extension's.
+        if (!own.AllValid && !wrapper.AllValid && outer.Kind == CanonicalKind.Extension)
+        {
+            return false;
+        }
+
+        ValidityMask one = own.AllValid ? wrapper : own;
+        bits = one._lookup;
+        bitOffset = one._bitOffset;
+        return true;
+    }
+
+    /// <summary>
     /// The mask of a bitmap held outside an arena: a Parquet page's validity, decoded from its
     /// levels before the node it will belong to exists.
     /// </summary>

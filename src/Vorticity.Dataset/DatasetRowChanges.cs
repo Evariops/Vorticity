@@ -350,12 +350,15 @@ internal static class DatasetRowChanges
             admitted++;
         }
 
-        ParallelOptions lanes = new ParallelOptions { MaxDegreeOfParallelism = admitted, CancellationToken = cancellationToken };
-        await Parallel.ForAsync(0, read.Count, lanes, async (i, token) =>
-        {
-            int o = read[i];
-            changes[o] = await RewriteAsync(dataset, version, touched[o], filter, null, doublings, token).ConfigureAwait(false);
-        }).ConfigureAwait(false);
+        // The caller and lanes of the session's free, as many as the memory admitted at most.
+        await Execution.LaneWorkers.ForAsync(
+            dataset.Session.Lanes, read.Count, admitted,
+            async (i, token) =>
+            {
+                int o = read[i];
+                changes[o] = await RewriteAsync(dataset, version, touched[o], filter, null, doublings, token).ConfigureAwait(false);
+            },
+            cancellationToken).ConfigureAwait(false);
         return changes;
     }
 

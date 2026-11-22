@@ -157,7 +157,7 @@ internal sealed partial class DatasetScanBuilder
             MergeObjectsAsync(paths, key, cancellationToken),
             key,
             rankedTies: true,
-            (lease, entry) => OrderedBatchesAsync(lease, entry, paths, drop, cancellationToken),
+            (lease, entry, _) => OrderedBatchesAsync(lease, entry, paths, drop, cancellationToken),
             lease => RecordOpen(lease),
             cancellationToken)
         {

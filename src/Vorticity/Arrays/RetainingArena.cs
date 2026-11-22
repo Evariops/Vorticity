@@ -99,8 +99,56 @@ internal sealed class RetainingArena : CanonicalArena
             Array.Clear(_origins, 0, Math.Min(records, _origins.Length));
         }
 
+        if (_taken is { } taken)
+        {
+            // What was carved from this arena is told, once each, that it holds nothing any more.
+            int held = Math.Min(records, taken.Length);
+            for (int i = 0; i < held; i++)
+            {
+                if (taken[i] is { Owned: true, Taken: { } own })
+                {
+                    own.Forgotten();
+                }
+            }
+
+            Array.Clear(taken, 0, held);
+        }
+
         _generation = 0;
     }
+
+    // What was taken of a node's rows beside the node, by node index, until the arena is reset: a shredding of a variant
+    // column's rows, which a job's input hands its writer in place of the rows put back together. Kept beside the records,
+    // as the origins are, so that an arena nothing is taken of pays nothing for it.
+    private TakenRows[]? _taken;
+
+    internal override bool TryTaken(int index, out ITakenRows? taken, out int first)
+    {
+        if (_taken is { } held && (uint)index < (uint)held.Length && held[index].Taken is { } found)
+        {
+            taken = found;
+            first = held[index].First;
+            return true;
+        }
+
+        taken = null;
+        first = 0;
+        return false;
+    }
+
+    internal override bool NoteTaken(int index, ITakenRows taken, int first, bool owned = false)
+    {
+        if (_taken is null || index >= _taken.Length)
+        {
+            Array.Resize(ref _taken, Math.Max(index + 1, 2 * (_taken?.Length ?? 8)));
+        }
+
+        _taken[index] = new TakenRows(taken, first, owned);
+        return true;
+    }
+
+    /// <summary>What was taken of a node's rows, the row of it the node's row 0 is, and whether it is carved from this arena.</summary>
+    private readonly record struct TakenRows(ITakenRows? Taken, int First, bool Owned);
 
     /// <summary>
     /// The bytes <paramref name="owner"/> derived from the retained values <paramref name="origin"/>
