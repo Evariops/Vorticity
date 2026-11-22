@@ -403,8 +403,9 @@ bound on reads in flight, as a file read with `MapFiles = false` does. The cache
 which the session's documentation says: a session with a keyring therefore does not share the
 process's cache, as a session given none does, and keeps segments only in a cache its host gives it. That cache is
 in memory. The synopsis cache on the local disk keeps a sealed object's bytes as the store holds them,
-its trailer and the frames around each region its table of contents declares, and the reader decrypts
-and authenticates them at each read, so the disk holds neither a key nor a plaintext byte
+its trailer and the frames around each region its table of contents declares, and, given a quota for
+data, the frames of the data its readers read, and the reader decrypts and authenticates them at each
+read, so the disk holds neither a key nor a plaintext byte
 ([19-object-storage.md](19-object-storage.md#105-the-synopsis-cache-on-the-local-disk)).
 
 A writer seals through a stage between itself and its sink. The stage is the pipe the writer writes

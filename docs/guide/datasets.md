@@ -416,9 +416,9 @@ lookup of an identifier in a large one, needs nothing else before its data; a re
 object reads its last 64 KiB from the store first. An object never changes, so an entry never goes
 stale. An object of 64 KiB at most holds its table of contents itself and is read through its open, which brings it whole: the cache keeps it when it keeps data, and nothing of it otherwise.
 
-Given a quota of its own, the cache keeps the data a question reads of a plain dataset's objects too,
-their footers included, so that the same question asked again, by this process or the next, reads no
-data object from the store:
+Given a quota of its own, the cache keeps the data a question reads of a dataset's objects too, their
+footers included, so that the same question asked again, by this process or the next, reads no data
+object from the store:
 
 ```csharp
 options.SynopsisCache = new SynopsisCache("/var/cache/vorticity", capacityBytes: 20L << 30, dataCapacityBytes: 200L << 30);
@@ -426,8 +426,12 @@ options.SynopsisCache = new SynopsisCache("/var/cache/vorticity", capacityBytes:
 
 The data keeps within its quota, the directories within theirs, so a sweep of a long window through
 the data never pushes the directories out. Each data segment's file holds an XXH3-64 of its bytes,
-which every read from the disk checks. An encrypted dataset's data never enters the cache, and a data
-segment whose write would hold up the question, past the bytes waiting for their writes, is not kept.
+which every read from the disk checks. Of an encrypted dataset the cache keeps the frames that hold the
+data, as the store holds them, never a plaintext byte nor a key: each read from the disk decrypts and
+authenticates them, as a read from the store does, and a frame whose tag fails is read again from the
+store. A read from the disk therefore pays the cipher's pass, and saves the store's round trip. A data
+segment or a frame whose write would hold up the question, past the bytes waiting for their writes, is
+not kept.
 Each region is checked against its checksum whenever it is read from the disk, and one that fails is
 read again from the store. One process owns a directory at a time, and the entries outlive it: the
 next session that opens the directory finds them. A second cache on the same directory, in the same

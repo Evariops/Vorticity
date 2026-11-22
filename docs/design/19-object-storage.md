@@ -686,9 +686,10 @@ place and length and its checksum, all known before the region is read. Given a 
 (`dataCapacityBytes`), it keeps besides the other segments a reader reads of a plain object, its data
 and its footer, by the object's uid and the segment's place and length: no directory gives their
 checksum, so their file holds their XXH3-64 after them, which each read from the disk checks, within
-their own S3-FIFO queues and capacity, so that they never push a region out. A sealed object's data
-never enters it, and a segment whose write would wait past the bytes waiting for their writes is not
-kept, so that a question never writes data on its own time. Warm, a lookup asks the store for the chunks
+their own S3-FIFO queues and capacity, so that they never push a region out. Of a sealed object it keeps
+within the same quota the frames those segments lie in, as the store holds them (below). A segment or a
+frame whose write would wait past the bytes waiting for their writes is not kept, so that a question
+never writes data on its own time. Warm, a lookup asks the store for the chunks
 of the blocks it found alone: a count per service and per 12 hours of every row but one request's, over
 3 objects of 180 M rows, asked for 11 regions in 23 ms, a fence page and two segments of each object's
 postings beside the chunks of the block that holds the id, and asks for those 2 chunks in 12.7 ms. An
@@ -704,7 +705,7 @@ create, close and rename on Windows, which the question paid for each region it 
 held the synopsis tables of the time, an unaligned window over 3 objects of 180 M rows, which read 104 MB
 of them, took 276 ms cold against 159 written behind, and a count per service over 48 hourly objects
 50 ms against 38 at one lane, 44 against 27 at sixteen. Past 256 MiB waiting, a region is written before its reader goes on, and the cache's dispose
-writes what waits. A sealed object's frames are written at once. The cache walks its directory when it opens,
+writes what waits. A sealed object's trailer and its regions' frames are written at once, its data's frames behind their reader. The cache walks its directory when it opens,
 and the entries an earlier cache left are its own. One cache owns a directory, through a lock of the
 operating system. An entry's file is opened at its first read and mapped, and kept so while the cache
 keeps up to 4 096 files open: a region read from the disk is a view of the mapping, with no read of the
@@ -724,14 +725,29 @@ A sealed object leaves no plaintext on the disk. The cache keeps the bytes the s
 object's trailer, which names its data key wrapped and its epochs, and the frames that hold a region its
 table of contents declares, each a file named by the object's uid and the frame's place. A read with no
 open of the object opens it from the trailer kept, with no request, and reads from the disk every group
-of frames the cache keeps whole. The reader decrypts them as it decrypts the store's: a frame whose tag
-fails, or a region whose plaintext fails its checksum, is dropped with its group and read again from the
-store, and a trailer that does not open the object is dropped and read again too. No key reaches the disk:
-the session unwraps the data key as it does for a read from the store, from its keyring or from the keys
-it holds in memory. A frame of 64 KiB is the unit kept, so a small region costs the disk its frame. On six
-hours of sealed requests, a count per service from the synopsis tables of the time took 12 requests in two
-round trips cold and none warm, where every question read them again before. Questions that miss the same frames of a
-sealed object at once read them each.
+of frames whose segments' frames the cache keeps all: a frame of a gap the group's runs read across is
+not asked, so a group whose regions lie a frame apart is served too. The reader decrypts them as it
+decrypts the store's: a frame whose tag fails, or a region whose plaintext fails its checksum, is dropped
+with its group and read again from the store, and a trailer that does not open the object is dropped and
+read again too. No key reaches the disk: the session unwraps the data key as it does for a read from the
+store, from its keyring or from the keys it holds in memory. A frame of 64 KiB is the unit kept, so a
+small region costs the disk its frame. On six hours of sealed requests, a count per service from the
+synopsis tables of the time took 12 requests in two round trips cold and none warm, where every question
+read them again before. Questions that miss the same frames of a sealed object at once read them each.
+
+Given a quota for data, the cache keeps a sealed object's data the same way: the frames of every
+segment its reader reads that is no declared region, and the last frames the open of the object
+decrypted with its trailer, each a file named by the object's uid and the frame's place and suffixed
+`-sealed-data`, so that the walk of the directory puts it within the data's quota. They are written
+behind their reader, as a plain object's data is, the buffer the store's bytes came in held until then,
+and a frame whose write would wait past the bytes waiting is not kept. No checksum follows them: a
+frame's tag authenticates its bytes, and its nonce and its key its place in the object and the object.
+An object the dataset opens then opens from its trailer kept and reads its tail from those frames, and a
+range read alone, as the open of an object read whole reads it, comes from them too: the same question
+asked again, by this process or the next, reads no data object from the store. A read from the disk pays
+the cipher's pass where a plain object's data is a view of its file: 64 MiB of sealed scratch read back
+from the system's cache in about 18 ms on arm64 against 4 ms plain ([18-encryption.md](18-encryption.md#64-scratch)),
+the store's round trip saved either way.
 
 Past its capacity it drops entries as S3-FIFO does, counting bytes. A new region waits in a small
 queue of a tenth of the capacity, and only one read again there moves on to the main queue, which

@@ -298,8 +298,13 @@ internal sealed class ObjectCache : IAsyncDisposable
         // opened through a sealed reader, its object id checked against the entry's uid.
         // A plain object's regions of indexes, those its table of contents declares and the pages and segments its lookups
         // name, and its data when the cache keeps data, come from the session's synopsis cache as they do with no open: a lookup through an open object asked the
-        // store for its fence page and segments at every question.
-        ISegmentReader source = await SealedObjectStore.OpenDataAsync(_store, entry.Key, entry.Uid, entry.Bytes, cancellationToken).ConfigureAwait(false);
+        // store for its fence page and segments at every question. A sealed object's reader keeps its trailer and its frames
+        // in that cache when it keeps data, as the store holds them, and decrypts them at each read: its open then reads
+        // nothing from the store once the cache holds the object's tail.
+        SynopsisCache? synopses = _session.Options.SynopsisCache;
+        ISegmentReader source = await SealedObjectStore.OpenDataAsync(
+            _store, entry.Key, entry.Uid, entry.Bytes, cancellationToken,
+            _store is SealedObjectStore { Seals: true } && synopses is { KeepsData: true } ? SealedSynopsisCache.Over(synopses, entry.Uid, entry.Contents) : null).ConfigureAwait(false);
         try
         {
             ISegmentReader read = source is ObjectStoreSource

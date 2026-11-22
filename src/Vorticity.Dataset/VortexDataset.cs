@@ -1104,7 +1104,8 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// </summary>
     private async Task<long> WarmSealedAsync(SynopsisCache cache, ObjectEntry entry, Indexes.ObjectContents contents, CancellationToken cancellationToken)
     {
-        if (SealedSynopsisCache.Over(cache, entry.Uid, contents) is not { } kept)
+        // A cache that keeps data would keep the object's reader with no region to warm: nothing to read.
+        if (contents.DeclaredRegions.Count == 0 || SealedSynopsisCache.Over(cache, entry.Uid, contents) is not { } kept)
         {
             return 0;
         }

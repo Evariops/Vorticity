@@ -214,10 +214,10 @@ public sealed partial class DatasetDataCacheTests
         }
     }
 
-    /// <summary>Four objects of 20 000 samples each, appended, their values random enough not to compress to nothing.</summary>
-    private static async Task FillAsync(IObjectStore store)
+    /// <summary>Four objects of 20 000 samples each, appended, their values random enough not to compress to nothing; created with <paramref name="options"/> when given.</summary>
+    private static async Task FillAsync(IObjectStore store, DatasetOptions? options = null)
     {
-        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Sample.Schema, new DatasetOptions { Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Sample.Id))] } }, Ct);
+        await using VortexDataset dataset = await VortexDataset.CreateAsync(store, Sample.Schema, options ?? new DatasetOptions { Layout = Layout }, Ct);
         Random random = new Random(0xCA5E);
         for (int part = 0; part < 4; part++)
         {
@@ -244,10 +244,13 @@ public sealed partial class DatasetDataCacheTests
         return answer;
     }
 
-    /// <summary>The sum of the values past a quarter, which reads every object's values.</summary>
-    private static async Task<double> AskAsync(IObjectStore store, VortexSession session)
+    /// <summary>The objects' layout: sorted by id.</summary>
+    private static DatasetLayout Layout => new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Sample.Id))] };
+
+    /// <summary>The sum of the values past a quarter, which reads every object's values, of a dataset <paramref name="encrypted"/> or not.</summary>
+    private static async Task<double> AskAsync(IObjectStore store, VortexSession session, bool encrypted = false)
     {
-        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session }, Ct);
+        await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { Session = session, Encrypted = encrypted }, Ct);
         List<double> values = await dataset.Scan<Sample>().Where(r => r.Value > 0.25).Select(r => r.Value).ToListAsync(Ct);
         return values.Sum();
     }

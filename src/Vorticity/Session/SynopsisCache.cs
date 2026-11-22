@@ -31,10 +31,10 @@ namespace Vorticity;
 /// <para>
 /// Given a quota of its own (<see cref="DataCapacityBytes"/>), the cache keeps besides the other segments its readers
 /// read of a plain object, its data and its footer, under the object's uid and the segment's place alone: no directory
-/// gives their checksum, so their file holds their XXH3-64 after them, which every read from the disk checks. They leave
-/// as the regions do, within their quota, and never push a region out. A sealed object's are never kept, nor are those
-/// whose writes would hold up the read past the bytes waiting: no plaintext reaches the disk, and no question waits on
-/// the cache's writes for its data.
+/// gives their checksum, so their file holds their XXH3-64 after them, which every read from the disk checks. Of a sealed
+/// object it keeps, within the same quota, the frames those segments lie in, as the store holds them (below). They leave
+/// as the regions do, within their quota, and never push a region out. Those whose writes would hold up the read past
+/// the bytes waiting are not kept: no question waits on the cache's writes for its data.
 /// </para>
 /// <para>
 /// A page of a dataset's tree is kept by the XXH3-128 hash of its bytes, which the page or the header naming
@@ -55,7 +55,10 @@ namespace Vorticity;
 /// region its table of contents declares, the bytes its store holds, and its reader decrypts them at each
 /// read: a frame whose tag fails, or a region whose plaintext fails its checksum, is dropped and read again
 /// from the store. No key is kept: the session unwraps the object's data key as it does for a read from the
-/// store.
+/// store. With a quota for data, the frames of the object's other segments are kept so too, within that quota,
+/// written behind their reader as a plain object's data is, their file named apart (<c>-sealed-data</c>) so
+/// that the walk of the directory knows their quota. A frame's tag authenticates it, its place in the object
+/// with it: no checksum follows it.
 /// </para>
 /// <para>
 /// An entry is a file, in directories sharded by the object's uid, written under a temporary name and
@@ -178,11 +181,12 @@ public sealed class SynopsisCache : IAsyncDisposable
 
     /// <summary>
     /// Opens the cache in <paramref name="directory"/>, as <see cref="SynopsisCache(string, long)"/> does, keeping besides up
-    /// to <paramref name="dataCapacityBytes"/> of the data segments its readers read of plain objects.
+    /// to <paramref name="dataCapacityBytes"/> of the data its readers read: the segments of plain objects, and the frames
+    /// of sealed ones as their store holds them.
     /// </summary>
     /// <param name="directory">The directory, which this cache owns while it is open.</param>
     /// <param name="capacityBytes">The bytes of regions it keeps at most.</param>
-    /// <param name="dataCapacityBytes">The bytes of data segments it keeps at most, beside the regions; 0 keeps none.</param>
+    /// <param name="dataCapacityBytes">The bytes of data it keeps at most, beside the regions; 0 keeps none.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="capacityBytes"/> is not positive, or <paramref name="dataCapacityBytes"/> is negative.</exception>
     /// <exception cref="InvalidOperationException">Another cache, in this process or another, owns the directory.</exception>
     public SynopsisCache(string directory, long capacityBytes, long dataCapacityBytes)
@@ -238,12 +242,12 @@ public sealed class SynopsisCache : IAsyncDisposable
 
     /// <summary>
     /// Opens a cache that shares <paramref name="root"/>, as <see cref="OpenShared(string, long)"/> does, keeping besides up to
-    /// <paramref name="dataCapacityBytes"/> of the data segments its readers read of plain objects, which it too reads from
-    /// the other caches' directories before the store sends them.
+    /// <paramref name="dataCapacityBytes"/> of the data its readers read, the segments of plain objects and the frames of
+    /// sealed ones, which it too reads from the other caches' directories before the store sends them.
     /// </summary>
     /// <param name="root">The directory the caches share, created if it does not exist.</param>
     /// <param name="capacityBytes">The bytes of regions this cache keeps at most in the directory it takes.</param>
-    /// <param name="dataCapacityBytes">The bytes of data segments it keeps at most there, beside the regions; 0 keeps none.</param>
+    /// <param name="dataCapacityBytes">The bytes of data it keeps at most there, beside the regions; 0 keeps none.</param>
     /// <returns>The cache; its <see cref="Directory"/> is the directory it took, which it owns while it is open.</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="capacityBytes"/> is not positive, or <paramref name="dataCapacityBytes"/> is negative.</exception>
     /// <exception cref="InvalidOperationException">A cache of its own owns the root, or 64 caches share it already.</exception>
@@ -288,7 +292,7 @@ public sealed class SynopsisCache : IAsyncDisposable
     /// <summary>The bytes of regions the cache keeps at most.</summary>
     public long CapacityBytes { get; }
 
-    /// <summary>The bytes of data segments the cache keeps at most, beside its regions; 0 when it keeps none.</summary>
+    /// <summary>The bytes of data the cache keeps at most, beside its regions, plain objects' segments and sealed ones' frames; 0 when it keeps none.</summary>
     public long DataCapacityBytes => _data.Capacity;
 
     /// <summary>The bytes the cache holds now, its regions' and its data segments', on the disk or waiting for their write.</summary>
@@ -303,7 +307,7 @@ public sealed class SynopsisCache : IAsyncDisposable
         }
     }
 
-    /// <summary>The bytes of data segments the cache holds now, on the disk or waiting for their write.</summary>
+    /// <summary>The bytes of data the cache holds now, segments and frames, on the disk or waiting for their write.</summary>
     public long DataHeldBytes
     {
         get
@@ -460,7 +464,7 @@ public sealed class SynopsisCache : IAsyncDisposable
         return true;
     }
 
-    /// <summary>Whether the cache keeps the data segments of plain objects: whether it has a quota for them.</summary>
+    /// <summary>Whether the cache keeps the data its readers read, the segments of plain objects and the frames of sealed ones: whether it has a quota for them.</summary>
     internal bool KeepsData => _data.Capacity > 0;
 
     /// <summary>
@@ -542,8 +546,137 @@ public sealed class SynopsisCache : IAsyncDisposable
     {
         if (KeepsData && bytes.Length == segment.Length && bytes.Length > 0)
         {
-            _ = TryQueue(uid, DataNameOf(uid, segment), owner, bytes, page: null, data: true);
+            _ = TryQueue(uid, DataNameOf(uid, segment), owner, bytes, page: null, _data, checksum: true);
         }
+    }
+
+    /// <summary>
+    /// Whether the cache holds the frame of <paramref name="length"/> bytes at <paramref name="cipherOffset"/> of the sealed
+    /// object <paramref name="uid"/>, kept for a region or for the data, on the disk or waiting for its write, or, when it
+    /// shares a root, another cache of the root does: no read counted, no string made.
+    /// </summary>
+    internal bool HoldsFrame(UInt128 uid, long cipherOffset, int length)
+    {
+        Span<char> room = stackalloc char[MaxFrameNameLength];
+        return HoldsFrameNamed(FrameNameOf(uid, cipherOffset, length, data: false, room))
+            || HoldsFrameNamed(FrameNameOf(uid, cipherOffset, length, data: true, room));
+    }
+
+    /// <summary>Whether the frame named <paramref name="name"/> is held (<see cref="HoldsFrame"/>): its entry found without the gate, which only a write waiting takes.</summary>
+    private bool HoldsFrameNamed(ReadOnlySpan<char> name)
+    {
+        if (_entries.GetAlternateLookup<ReadOnlySpan<char>>().ContainsKey(name))
+        {
+            return true;
+        }
+
+        if (Volatile.Read(ref _pendingCount) != 0)
+        {
+            lock (_gate)
+            {
+                if (_pending.GetAlternateLookup<ReadOnlySpan<char>>().ContainsKey(name))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return _root is not null && PeersHold(name);
+    }
+
+    /// <summary>
+    /// The frame of <paramref name="length"/> bytes at <paramref name="cipherOffset"/> of the sealed object
+    /// <paramref name="uid"/>, kept for a region or for the data, as its store holds it, for the caller to release: a view of
+    /// its file, mapped as a region's is, of the buffer it waits in for its write, or its bytes read from the directory of
+    /// another cache of the root. False when no one holds it, or its file is torn, which the cache then drops. Its reader
+    /// authenticates it, and drops it through <see cref="DropFrame"/> when it fails.
+    /// </summary>
+    internal bool TryReadFrame(UInt128 uid, long cipherOffset, int length, out SegmentOwner frame)
+    {
+        Span<char> room = stackalloc char[MaxFrameNameLength];
+        for (int kind = 0; kind < 2; kind++)
+        {
+            ReadOnlySpan<char> name = FrameNameOf(uid, cipherOffset, length, data: kind == 1, room);
+            if (TryPending(name, out frame))
+            {
+                return true;
+            }
+
+            if (Lookup(name) is { } entry)
+            {
+                return TryReadFrameOf(entry, length, out frame);
+            }
+        }
+
+        for (int kind = 0; _root is not null && kind < 2; kind++)
+        {
+            ReadOnlySpan<char> name = FrameNameOf(uid, cipherOffset, length, data: kind == 1, room);
+            if (PeersHold(name) && TryPeerFrame(name, length, out frame))
+            {
+                return true;
+            }
+        }
+
+        Missed();
+        frame = null!;
+        return false;
+    }
+
+    /// <summary>The frame <paramref name="entry"/> keeps, of <paramref name="length"/> bytes: a view of its file's mapping, or its bytes read; false, the entry dropped, when its file is torn.</summary>
+    private bool TryReadFrameOf(Entry entry, int length, out SegmentOwner frame)
+    {
+        frame = null!;
+        if (entry.Bytes == length && length > 0 && LeaseMap(entry) is { } map)
+        {
+            try
+            {
+                frame = new IO.SliceSegmentOwner(map, map.View(0, length, 0));
+            }
+            finally
+            {
+                map.Release();
+            }
+
+            Served(length);
+            return true;
+        }
+
+        BlockOwner block = MemoryAccount.Kept.Rent(length, VortexLimits.MaxAlignment);
+        try
+        {
+            Span<byte> bytes = block.WritableSpan[..length];
+            if (!ReadWhole(entry, bytes))
+            {
+                Drop(entry, corrupt: true);
+                return false;
+            }
+
+            frame = new IO.SliceSegmentOwner(block, VortexBuffer.FromPinned(bytes, 0));
+            Served(length);
+            return true;
+        }
+        finally
+        {
+            block.Release();
+        }
+    }
+
+    /// <summary>
+    /// Keeps the frame <paramref name="frame"/> at <paramref name="cipherOffset"/> of the sealed object <paramref name="uid"/>,
+    /// read from its store for a segment that is no declared region and authenticated, within the data's quota and behind its
+    /// caller, as a plain object's data segment is (<see cref="AdmitData"/>): <paramref name="owner"/>, whose memory holds the
+    /// frame, is held until the cache's writer has written it. Whether it was handed over: not when the cache keeps no data,
+    /// holds the frame already, or another cache of the root does, nor past the bytes waiting for their write.
+    /// </summary>
+    internal bool AdmitDataFrame(UInt128 uid, long cipherOffset, SegmentOwner owner, VortexBuffer frame) =>
+        KeepsData && frame.Length > 0 && !HoldsFrame(uid, cipherOffset, frame.Length)
+            && TryQueue(uid, DataFrameNameOf(uid, cipherOffset, frame.Length), owner, frame, page: null, _data, checksum: false);
+
+    /// <summary>Drops the frame kept at <paramref name="cipherOffset"/> of the sealed object <paramref name="uid"/>, for a region or for the data, which did not authenticate: a corrupt entry.</summary>
+    internal void DropFrame(UInt128 uid, long cipherOffset, int length)
+    {
+        DropSealed(FrameNameOf(uid, cipherOffset, length));
+        DropSealed(DataFrameNameOf(uid, cipherOffset, length));
     }
 
     /// <summary>As <see cref="TryBeginRead"/>, for a data segment.</summary>
@@ -584,7 +717,7 @@ public sealed class SynopsisCache : IAsyncDisposable
         }
 
         string name = NameOf(uid, region);
-        if (!TryQueue(uid, name, owner, bytes, page: null))
+        if (!TryQueue(uid, name, owner, bytes, page: null, _regions, checksum: false))
         {
             Keep(uid, name, bytes.Span);
         }
@@ -615,19 +748,19 @@ public sealed class SynopsisCache : IAsyncDisposable
     }
 
     /// <summary>
-    /// Puts a region read from the store to wait for its write, a writer started if fewer than <see cref="MaxWriters"/>
-    /// run; false when the caller writes it, past the bytes waiting or the capacity. A page of a tree comes as
-    /// <paramref name="page"/>, with no owner nor buffer.
+    /// Puts a region read from the store to wait for its write within <paramref name="tier"/>, a writer started if fewer
+    /// than <see cref="MaxWriters"/> run; false when the caller writes it, past the bytes waiting or the capacity. A page of a
+    /// tree comes as <paramref name="page"/>, with no owner nor buffer. A plain object's data segment is written with its
+    /// XXH3-64 after it (<paramref name="checksum"/>); a sealed object's frame, which its tag authenticates, alone.
     /// </summary>
-    private bool TryQueue(UInt128 uid, string name, SegmentOwner? owner, VortexBuffer bytes, byte[]? page, bool data = false)
+    private bool TryQueue(UInt128 uid, string name, SegmentOwner? owner, VortexBuffer bytes, byte[]? page, Tier tier, bool checksum)
     {
         if (Volatile.Read(ref _disposed) != 0)
         {
             return true;
         }
 
-        Tier tier = data ? _data : _regions;
-        int length = (page?.Length ?? bytes.Length) + (data ? DataTrailerBytes : 0);
+        int length = (page?.Length ?? bytes.Length) + (checksum ? DataTrailerBytes : 0);
         if (length > tier.Capacity)
         {
             return false;
@@ -646,7 +779,7 @@ public sealed class SynopsisCache : IAsyncDisposable
                 return false;
             }
 
-            Pending pending = new Pending(new Entry(name, ShardOf(uid), length, tier), owner?.Retain(), bytes, page) { Data = data };
+            Pending pending = new Pending(new Entry(name, ShardOf(uid), length, tier), owner?.Retain(), bytes, page) { Checksummed = checksum };
             _pending[name] = pending;
             Volatile.Write(ref _pendingCount, _pending.Count);
             _queue.Enqueue(pending);
@@ -711,7 +844,7 @@ public sealed class SynopsisCache : IAsyncDisposable
         try
         {
             WriteFault?.Invoke(PathOf(pending.Entry));
-            written = Write(pending.Entry, pending.Span, pending.Data);
+            written = Write(pending.Entry, pending.Span, pending.Checksummed);
         }
         finally
         {
@@ -784,7 +917,7 @@ public sealed class SynopsisCache : IAsyncDisposable
     internal void AdmitPage(UInt128 hash, byte[] page)
     {
         string name = PageNameOf(hash, page.Length);
-        if (!TryQueue(hash, name, owner: null, default, page))
+        if (!TryQueue(hash, name, owner: null, default, page, _regions, checksum: false))
         {
             Keep(hash, name, page);
         }
@@ -868,7 +1001,7 @@ public sealed class SynopsisCache : IAsyncDisposable
             }
         }
 
-        return _root is not null && PeersHold(name.ToString());
+        return _root is not null && PeersHold(name);
     }
 
     /// <summary>
@@ -886,13 +1019,23 @@ public sealed class SynopsisCache : IAsyncDisposable
     /// </remarks>
     private Entry? Find(ReadOnlySpan<char> name)
     {
+        Entry? entry = Lookup(name);
+        if (entry is null && _root is null)
+        {
+            Missed();
+        }
+
+        return entry;
+    }
+
+    /// <summary>
+    /// The entry kept under <paramref name="name"/>, a read of it counted, as <see cref="Find(ReadOnlySpan{char})"/> finds
+    /// it; null when there is none, with no miss counted: a frame is looked for under two names before it is missed.
+    /// </summary>
+    private Entry? Lookup(ReadOnlySpan<char> name)
+    {
         if (!_entries.GetAlternateLookup<ReadOnlySpan<char>>().TryGetValue(name, out Entry? entry))
         {
-            if (_root is null)
-            {
-                Missed();
-            }
-
             return null;
         }
 
@@ -1342,8 +1485,42 @@ public sealed class SynopsisCache : IAsyncDisposable
         return null;
     }
 
+    /// <summary>
+    /// As <see cref="TryPeerBytes"/>, for a frame of a sealed object, its bytes read into a block for the caller to release,
+    /// the file kept open as a data segment's is (<see cref="LeasePeer"/>). Its reader authenticates it. It stays in that
+    /// directory, so that a frame the caches read lies once on the disk.
+    /// </summary>
+    private bool TryPeerFrame(ReadOnlySpan<char> name, int length, out SegmentOwner frame)
+    {
+        frame = null!;
+        if (LeasePeer(name, length) is not { } file)
+        {
+            return false;
+        }
+
+        BlockOwner block = MemoryAccount.Kept.Rent(length, VortexLimits.MaxAlignment);
+        try
+        {
+            Span<byte> bytes = block.WritableSpan[..length];
+            if (ReadPeer(file, bytes))
+            {
+                frame = new IO.SliceSegmentOwner(block, VortexBuffer.FromPinned(bytes, 0));
+                ServedByPeer(length);
+                return true;
+            }
+
+            ForgetPeer(file);
+            return false;
+        }
+        finally
+        {
+            block.Release();
+            file.Handle.DangerousRelease();
+        }
+    }
+
     /// <summary>Whether another cache of the root keeps a file named <paramref name="name"/>, without reading it.</summary>
-    private bool PeersHold(string name)
+    private bool PeersHold(ReadOnlySpan<char> name)
     {
         foreach (string peer in Peers())
         {
@@ -1714,9 +1891,26 @@ public sealed class SynopsisCache : IAsyncDisposable
     /// <summary>The tier an entry's name says it belongs to: a data segment's, or a region's and a page's.</summary>
     private Tier TierOf(string name) => name.EndsWith(DataSuffix, StringComparison.Ordinal) ? _data : _regions;
 
-    /// <summary>The file name of a frame of a sealed object: its uid, the frame's place in the object and its length.</summary>
-    internal static string FrameNameOf(UInt128 uid, long cipherOffset, int length) => string.Create(
-        CultureInfo.InvariantCulture, $"{uid:x32}-{cipherOffset:x}-{length:x}-sealed");
+    /// <summary>The file name of a frame of a sealed object kept for a region: its uid, the frame's place in the object and its length.</summary>
+    internal static string FrameNameOf(UInt128 uid, long cipherOffset, int length) =>
+        new string(FrameNameOf(uid, cipherOffset, length, data: false, stackalloc char[MaxFrameNameLength]));
+
+    /// <summary>The file name of a frame of a sealed object kept for the data, which the walk of the directory puts within the data's quota.</summary>
+    internal static string DataFrameNameOf(UInt128 uid, long cipherOffset, int length) =>
+        new string(FrameNameOf(uid, cipherOffset, length, data: true, stackalloc char[MaxFrameNameLength]));
+
+    /// <summary>
+    /// A frame's file name written into <paramref name="room"/>, of <see cref="MaxFrameNameLength"/> characters: the one
+    /// place its form is spelt, which a lookup reads as it lies, with no string made. A frame kept for the data ends with
+    /// <see cref="DataSuffix"/>, as a plain object's data segment does.
+    /// </summary>
+    private static ReadOnlySpan<char> FrameNameOf(UInt128 uid, long cipherOffset, int length, bool data, Span<char> room) =>
+        room.TryWrite(CultureInfo.InvariantCulture, $"{uid:x32}-{cipherOffset:x}-{length:x}-sealed{(data ? DataSuffix : "")}", out int written)
+            ? room[..written]
+            : throw new InvalidOperationException($"A frame's name takes more than the {MaxFrameNameLength} characters made for it.");
+
+    /// <summary>The characters of a frame's name at most: a uid's 32, a place's 16, a length's 8, two dashes, <c>-sealed</c> and the data's suffix.</summary>
+    private const int MaxFrameNameLength = 32 + 16 + 8 + 2 + 7 + 5;
 
     /// <summary>The file name of a sealed object's trailer.</summary>
     internal static string TrailerNameOf(UInt128 uid) => string.Create(CultureInfo.InvariantCulture, $"{uid:x32}-trailer");
@@ -2101,8 +2295,8 @@ public sealed class SynopsisCache : IAsyncDisposable
         /// <summary>The bytes its write writes.</summary>
         internal ReadOnlySpan<byte> Span => Page is null ? Bytes.Span : new ReadOnlySpan<byte>(Page);
 
-        /// <summary>Whether it is a data segment, whose file holds its checksum after its bytes.</summary>
-        internal bool Data { get; init; }
+        /// <summary>Whether its file holds its checksum after its bytes: a plain object's data segment's.</summary>
+        internal bool Checksummed { get; init; }
 
         internal int Hits { get; set; }
     }
