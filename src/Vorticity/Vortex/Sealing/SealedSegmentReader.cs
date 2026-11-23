@@ -34,10 +34,13 @@ namespace Vorticity.Sealing;
 /// </para>
 /// <para>
 /// A reader given a cache of sealed bytes (<see cref="ISealedFrameCache"/>) opens from the trailer it
-/// keeps, with no read, and reads from the disk every group of frames it keeps whole. It decrypts them
-/// as it does the store's, and checks each declared region's plaintext against its checksum: what
-/// fails is dropped and read from the store. The frames of each declared region the store sends go to
-/// the cache once they authenticate.
+/// keeps, with no read, and reads from the disk every group of frames whose segments' frames it keeps
+/// all: a frame of a gap a run reads across is not asked. It decrypts them as it does the store's, and
+/// checks each declared region's plaintext against its checksum: what fails is dropped and read from the
+/// store. The frames of each declared region the store sends go to the cache once they authenticate,
+/// written at once. When the cache keeps data, so do the frames of every other segment, and those of the
+/// tail an open decrypted, written behind the read; a range read alone, as an open reads its tail, comes
+/// from the disk too when the cache keeps its frames.
 /// </para>
 /// </remarks>
 internal sealed class SealedSegmentReader : ISegmentReader
@@ -204,6 +207,14 @@ internal sealed class SealedSegmentReader : ISegmentReader
             {
                 Trailer = !keepTrailer ? null : longTrailer ?? end.Buffer.Span[^trailerLength..].ToArray(),
             };
+
+            // The last frames, authenticated as they were decrypted: the next open, from the trailer kept, reads its tail
+            // from them.
+            if (cache is { KeepsData: true } && tailStart < layout.PlainLength)
+            {
+                reader.KeepRange(cache, end, end.Buffer, endStart, tailStart, layout.PlainLength);
+            }
+
             ciphers = null;
             tail = null;
             return reader;
@@ -387,9 +398,11 @@ internal sealed class SealedSegmentReader : ISegmentReader
         Block<SegmentSpec> sorted = scratch.Sorted;
         Block<CoalescedRun> runs = scratch.Runs;
 
-        // A group's first run, then the slot its frames take among the store's ranges.
+        // A group's first run, then the slot its frames take among the store's ranges; with a cache, the stretches of frames
+        // a group's segments lie in, a start and an end each, at most one a segment.
         Block<int> groups = Blocks.Rent<int>(registered + 1);
         Block<int> stored = Blocks.Rent<int>(registered);
+        Block<long> stretches = _cache is null ? default : Blocks.Rent<long>(2 * registered);
         SegmentRequestSet ciphertext = RentSet();
         ciphertext.Account = requests.Account;
         try
@@ -409,7 +422,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
             // batch: stored[g] is group g's slot among the store's ranges, or -1 when the disk served it.
             for (int g = 0; g < groupCount; g++)
             {
-                stored[g] = _cache is not null && ServeKept(requests, runs, groups[g], groups[g + 1], sorted, order)
+                stored[g] = _cache is not null && ServeKept(requests, runs, groups[g], groups[g + 1], sorted, order, stretches.AsSpan())
                     ? -1
                     : Register(ciphertext, FrameStart(runs[groups[g]].Start), FrameEnd(runs[groups[g + 1] - 1].End - 1));
             }
@@ -423,7 +436,9 @@ internal sealed class SealedSegmentReader : ISegmentReader
             {
                 if (stored[g] >= 0)
                 {
-                    Publish(requests, ciphertext.GetBuffer(stored[g]).Span, runs, groups[g], groups[g + 1], sorted, order);
+                    Publish(
+                        requests, ciphertext.GetOwner(stored[g]), ciphertext.GetBuffer(stored[g]), runs, groups[g], groups[g + 1], sorted, order,
+                        stretches.AsSpan());
                 }
             }
 
@@ -437,6 +452,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
         finally
         {
             ReturnSet(ciphertext);
+            Blocks.Return(stretches);
             Blocks.Return(stored);
             Blocks.Return(groups);
             scratch.Return();
@@ -573,42 +589,17 @@ internal sealed class SealedSegmentReader : ISegmentReader
         SealedLayout layout, EpochCipher[] ciphers, ReadOnlySpan<byte> ciphertext, long cipherBase, long frameStart, long frameEnd,
         MemoryAccount account)
     {
-        int pad = (int)(frameStart & (VortexLimits.MaxAlignment - 1));
-        int plainBytes = checked((int)(frameEnd - frameStart));
-        BlockOwner block = plainBytes + pad <= SegmentReadOptions.DefaultMaxPooledBytes
-            ? account.Rent(plainBytes + pad, VortexLimits.MaxAlignment)
-            : BlockOwner.Allocate(plainBytes + pad, VortexLimits.MaxAlignment);
-        Span<byte> plain = block.WritableSpan.Slice(pad, plainBytes);
-        int frameSize = layout.FrameSize;
+        BlockOwner block = RentPlain(frameStart, frameEnd, account);
+        Span<byte> plain = block.WritableSpan[(int)(frameStart & (VortexLimits.MaxAlignment - 1))..];
         int current = -1;
         AesGcm? aes = null;
         try
         {
-            long at = frameStart;
-            while (at < frameEnd)
+            for (long at = frameStart; at < frameEnd;)
             {
-                int e = layout.EpochOf(at);
-                SealedEpoch epoch = layout.Epochs[e];
-                if (e != current)
-                {
-                    if (aes is not null)
-                    {
-                        ciphers[current].Return(aes);
-                    }
-
-                    aes = ciphers[e].Rent();
-                    current = e;
-                }
-
-                long index = (at - epoch.PlainStart) / frameSize;
-                int length = (int)Math.Min(frameSize, epoch.PlainEnd - at);
-                bool final = at + length == epoch.PlainEnd;
-                long cipherOffset = epoch.FramesStart + (index * (frameSize + SealedFormat.TagBytes));
-                int relative = checked((int)(cipherOffset - cipherBase));
-                EpochCipher.Open(
-                    aes!, index, final, ciphertext.Slice(relative, length), ciphertext.Slice(relative + length, SealedFormat.TagBytes),
-                    plain.Slice((int)(at - frameStart), length), cipherOffset);
-                at += length;
+                (long cipherOffset, int length) = FrameOf(layout, at);
+                OpenFrame(layout, ciphers, ref current, ref aes, at, ciphertext.Slice(checked((int)(cipherOffset - cipherBase)), length), plain[(int)(at - frameStart)..]);
+                at += length - SealedFormat.TagBytes;
             }
 
             return block;
@@ -628,27 +619,81 @@ internal sealed class SealedSegmentReader : ISegmentReader
         }
     }
 
-    /// <summary>Reads plaintext <c>[offset, offset + length)</c> on its own: its frames in one ciphertext range, decrypted into a block.</summary>
+    /// <summary>
+    /// A 64-byte aligned block for the plaintext <c>[frameStart, frameEnd)</c>, which keeps each offset's alignment: the
+    /// plaintext starts <c>frameStart % 64</c> bytes into it.
+    /// </summary>
+    private static BlockOwner RentPlain(long frameStart, long frameEnd, MemoryAccount account)
+    {
+        int pad = (int)(frameStart & (VortexLimits.MaxAlignment - 1));
+        int plainBytes = checked((int)(frameEnd - frameStart));
+        return plainBytes + pad <= SegmentReadOptions.DefaultMaxPooledBytes
+            ? account.Rent(plainBytes + pad, VortexLimits.MaxAlignment)
+            : BlockOwner.Allocate(plainBytes + pad, VortexLimits.MaxAlignment);
+    }
+
+    /// <summary>
+    /// Decrypts the frame that starts at plaintext <paramref name="at"/>, <paramref name="frame"/> its bytes and its tag as
+    /// the store holds them, into the start of <paramref name="plain"/>: <paramref name="aes"/> is the instance of epoch
+    /// <paramref name="current"/>'s cipher the caller holds, rented anew when the frame's epoch is another.
+    /// </summary>
+    /// <exception cref="VortexEncryptionException">The frame does not authenticate.</exception>
+    private static void OpenFrame(
+        SealedLayout layout, EpochCipher[] ciphers, ref int current, ref AesGcm? aes, long at, ReadOnlySpan<byte> frame, Span<byte> plain)
+    {
+        int e = layout.EpochOf(at);
+        SealedEpoch epoch = layout.Epochs[e];
+        if (e != current)
+        {
+            if (aes is not null)
+            {
+                ciphers[current].Return(aes);
+                aes = null;
+            }
+
+            aes = ciphers[e].Rent();
+            current = e;
+        }
+
+        long index = (at - epoch.PlainStart) / layout.FrameSize;
+        int length = frame.Length - SealedFormat.TagBytes;
+        bool final = at + length == epoch.PlainEnd;
+        EpochCipher.Open(
+            aes!, index, final, frame[..length], frame.Slice(length, SealedFormat.TagBytes), plain[..length],
+            epoch.FramesStart + (index * (layout.FrameSize + SealedFormat.TagBytes)));
+    }
+
+    /// <summary>
+    /// Reads plaintext <c>[offset, offset + length)</c> on its own: its frames from the disk when the cache keeps data and holds
+    /// them all, otherwise in one ciphertext range from the store, handed then to such a cache; decrypted into a block.
+    /// </summary>
     private async ValueTask<SegmentOwner> ReadPlainAsync(long offset, int length, int alignment, CancellationToken cancellationToken)
     {
         long frameStart = FrameStart(offset);
         long frameEnd = FrameEnd(offset + length - 1);
-        (long cipherStart, long cipherEnd) = CipherRange(frameStart, frameEnd);
-        int cipherLength = checked((int)(cipherEnd - cipherStart));
-        SegmentOwner cipher = await _inner.ReadRangeAsync(cipherStart, cipherLength, 1, cancellationToken).ConfigureAwait(false);
-        BlockOwner block;
-        try
+        BlockOwner? block = _cache is { KeepsData: true } kept ? ReadKeptRange(kept, frameStart, frameEnd, MemoryAccount.Kept) : null;
+        if (block is null)
         {
-            if (cipher.Length != cipherLength)
+            (long cipherStart, long cipherEnd) = CipherRange(frameStart, frameEnd);
+            int cipherLength = checked((int)(cipherEnd - cipherStart));
+            SegmentOwner cipher = await _inner.ReadRangeAsync(cipherStart, cipherLength, 1, cancellationToken).ConfigureAwait(false);
+            try
             {
-                SegmentIo.ThrowTruncatedRead(cipherStart, cipherLength, cipher.Length);
-            }
+                if (cipher.Length != cipherLength)
+                {
+                    SegmentIo.ThrowTruncatedRead(cipherStart, cipherLength, cipher.Length);
+                }
 
-            block = Decrypt(_layout, _ciphers, cipher.Buffer.Span, cipherStart, frameStart, frameEnd, MemoryAccount.Kept);
-        }
-        finally
-        {
-            cipher.Release();
+                block = Decrypt(_layout, _ciphers, cipher.Buffer.Span, cipherStart, frameStart, frameEnd, MemoryAccount.Kept);
+                if (_cache is { KeepsData: true } keeping)
+                {
+                    KeepRange(keeping, cipher, cipher.Buffer, cipherStart, frameStart, frameEnd);
+                }
+            }
+            finally
+            {
+                cipher.Release();
+            }
         }
 
         try
@@ -730,22 +775,32 @@ internal sealed class SealedSegmentReader : ISegmentReader
 
     /// <summary>
     /// Decrypts the group of runs <c>[firstRun, endRun)</c> from <paramref name="cipher"/>, the store's bytes of its
-    /// frames, and publishes the segments of its runs; the frames of each declared region go to the cache.
+    /// frames, which <paramref name="owner"/> holds, and publishes the segments of its runs; the frames of each declared
+    /// region go to the cache, and, when it keeps data, those of the other segments, written behind the read.
     /// </summary>
     private void Publish(
-        SegmentRequestSet requests, ReadOnlySpan<byte> cipher, ReadOnlySpan<CoalescedRun> runs, int firstRun, int endRun,
-        ReadOnlySpan<SegmentSpec> sorted, ReadOnlySpan<int> order)
+        SegmentRequestSet requests, SegmentOwner owner, VortexBuffer cipher, ReadOnlySpan<CoalescedRun> runs, int firstRun, int endRun,
+        ReadOnlySpan<SegmentSpec> sorted, ReadOnlySpan<int> order, Span<long> stretches)
     {
         long frameStart = FrameStart(runs[firstRun].Start);
         long frameEnd = FrameEnd(runs[endRun - 1].End - 1);
         long cipherStart = CipherOffset(_layout, frameStart);
-        BlockOwner block = Decrypt(_layout, _ciphers, cipher, cipherStart, frameStart, frameEnd, requests.Account);
+        BlockOwner block = Decrypt(_layout, _ciphers, cipher.Span, cipherStart, frameStart, frameEnd, requests.Account);
         try
         {
             SetResults(requests, block, frameStart, runs, firstRun, endRun, sorted, order, kept: false);
             if (_cache is not null)
             {
-                Keep(_cache, cipher, cipherStart, block, frameStart, runs, firstRun, endRun, sorted);
+                Keep(_cache, cipher.Span, cipherStart, block, frameStart, runs, firstRun, endRun, sorted);
+                if (_cache.KeepsData)
+                {
+                    // The frames the declared regions share with the data's segments are the regions', kept just before.
+                    int count = Stretches(runs, firstRun, endRun, sorted, stretches, skipDeclared: _cache);
+                    for (int s = 0; s < count; s += 2)
+                    {
+                        KeepRange(_cache, owner, cipher, cipherStart, stretches[s], stretches[s + 1]);
+                    }
+                }
             }
         }
         finally
@@ -755,60 +810,31 @@ internal sealed class SealedSegmentReader : ISegmentReader
     }
 
     /// <summary>
-    /// Publishes the group of runs <c>[firstRun, endRun)</c> from the frames the cache keeps, when it keeps every
-    /// one, decrypted as the store's are, each declared region's plaintext checked against its checksum. False
-    /// when a frame is not kept; when a frame or a region fails, the group's frames are dropped, and the store
-    /// sends them again.
+    /// Publishes the group of runs <c>[firstRun, endRun)</c> from the frames the cache keeps, when it keeps every one its
+    /// segments lie in, decrypted as the store's are, each declared region's plaintext checked against its checksum. A frame
+    /// of a gap the group's runs read across is not asked: the cache keeps only frames a segment lay in. False when a frame is
+    /// not kept; when a frame or a region fails, the frames are dropped, and the store sends them again.
     /// </summary>
     private bool ServeKept(
         SegmentRequestSet requests, ReadOnlySpan<CoalescedRun> runs, int firstRun, int endRun, ReadOnlySpan<SegmentSpec> sorted,
-        ReadOnlySpan<int> order)
+        ReadOnlySpan<int> order, Span<long> stretches)
     {
         ISealedFrameCache cache = _cache!;
         long frameStart = FrameStart(runs[firstRun].Start);
         long frameEnd = FrameEnd(runs[endRun - 1].End - 1);
-        for (long at = frameStart; at < frameEnd; at = FrameEnd(at))
+        ReadOnlySpan<long> needed = stretches[..Stretches(runs, firstRun, endRun, sorted, stretches, skipDeclared: null)];
+
+        // The scan's, as the plaintext read from the store is.
+        if (ReadKept(cache, needed, frameStart, frameEnd, requests.Account) is not { } block)
         {
-            (long offset, int length) = FrameAt(at);
-            if (!cache.HoldsFrame(offset, length))
-            {
-                return false;
-            }
+            return false;
         }
 
-        (long cipherStart, long cipherEnd) = CipherRange(frameStart, frameEnd);
-        int cipherLength = checked((int)(cipherEnd - cipherStart));
-        // The scan's, as the plaintext is: a sealed read holds its two blocks under the account of the scan that asks.
-        BlockOwner cipher = cipherLength <= _options.MaxPooledBytes
-            ? requests.Account.Rent(cipherLength, VortexLimits.MaxAlignment)
-            : BlockOwner.Allocate(cipherLength, VortexLimits.MaxAlignment);
-        BlockOwner? block = null;
         try
         {
-            Span<byte> bytes = cipher.WritableSpan[..cipherLength];
-            for (long at = frameStart; at < frameEnd; at = FrameEnd(at))
-            {
-                // A frame whose file is torn is dropped by the cache itself.
-                (long offset, int length) = FrameAt(at);
-                if (!cache.TryReadFrame(offset, bytes.Slice((int)(offset - cipherStart), length)))
-                {
-                    return false;
-                }
-            }
-
-            try
-            {
-                block = Decrypt(_layout, _ciphers, bytes, cipherStart, frameStart, frameEnd, requests.Account);
-            }
-            catch (VortexEncryptionException)
-            {
-                DropKept(cache, frameStart, frameEnd);
-                return false;
-            }
-
             if (!DeclaredHold(cache, block, frameStart, runs, firstRun, endRun, sorted))
             {
-                DropKept(cache, frameStart, frameEnd);
+                DropKept(cache, needed);
                 return false;
             }
 
@@ -817,9 +843,130 @@ internal sealed class SealedSegmentReader : ISegmentReader
         }
         finally
         {
-            block?.Release();
-            cipher.Release();
+            block.Release();
         }
+    }
+
+    /// <summary>
+    /// The plaintext <c>[frameStart, frameEnd)</c> from the frames the cache keeps, in a block as <see cref="Decrypt"/> makes
+    /// one, those of <paramref name="stretches"/> decrypted and the rest of the block left as it came: null when the cache
+    /// does not hold every one, or one does not authenticate, the stretches' frames then dropped.
+    /// </summary>
+    /// <param name="cache">The cache.</param>
+    /// <param name="stretches">The plaintext stretches to read, a start and an end each at frame bounds, in order, within the range.</param>
+    /// <param name="frameStart">The plaintext start of the block, at a frame's start.</param>
+    /// <param name="frameEnd">The plaintext end of the block, at a frame's end.</param>
+    /// <param name="account">What the block is rented under.</param>
+    private BlockOwner? ReadKept(ISealedFrameCache cache, ReadOnlySpan<long> stretches, long frameStart, long frameEnd, MemoryAccount account)
+    {
+        for (int s = 0; s < stretches.Length; s += 2)
+        {
+            for (long at = stretches[s]; at < stretches[s + 1]; at = FrameEnd(at))
+            {
+                (long offset, int length) = FrameAt(at);
+                if (!cache.HoldsFrame(offset, length))
+                {
+                    return null;
+                }
+            }
+        }
+
+        BlockOwner block = RentPlain(frameStart, frameEnd, account);
+        Span<byte> plain = block.WritableSpan[(int)(frameStart & (VortexLimits.MaxAlignment - 1))..];
+        int current = -1;
+        AesGcm? aes = null;
+        bool read = false;
+        try
+        {
+            for (int s = 0; s < stretches.Length; s += 2)
+            {
+                for (long at = stretches[s]; at < stretches[s + 1]; at = FrameEnd(at))
+                {
+                    // A frame whose file is torn is dropped by the cache itself.
+                    (long offset, int length) = FrameAt(at);
+                    if (!cache.TryReadFrame(offset, length, out SegmentOwner frame))
+                    {
+                        return null;
+                    }
+
+                    try
+                    {
+                        OpenFrame(_layout, _ciphers, ref current, ref aes, at, frame.Buffer.Span, plain[(int)(at - frameStart)..]);
+                    }
+                    catch (VortexEncryptionException)
+                    {
+                        DropKept(cache, stretches);
+                        return null;
+                    }
+                    finally
+                    {
+                        frame.Release();
+                    }
+                }
+            }
+
+            read = true;
+            return block;
+        }
+        finally
+        {
+            if (aes is not null)
+            {
+                _ciphers[current].Return(aes);
+            }
+
+            // No decoder sees a byte that was not authenticated: a block that failed is wiped.
+            if (!read)
+            {
+                CryptographicOperations.ZeroMemory(block.WritableSpan);
+                block.Release();
+            }
+        }
+    }
+
+    /// <summary>As <see cref="ReadKept"/>, for the one stretch <c>[frameStart, frameEnd)</c>.</summary>
+    private BlockOwner? ReadKeptRange(ISealedFrameCache cache, long frameStart, long frameEnd, MemoryAccount account)
+    {
+        Span<long> stretch = [frameStart, frameEnd];
+        return ReadKept(cache, stretch, frameStart, frameEnd, account);
+    }
+
+    /// <summary>
+    /// The stretches of frames the segments of the runs <c>[firstRun, endRun)</c> lie in, written into
+    /// <paramref name="into"/> as a start and an end each at frame bounds, in order, those that touch joined; how many
+    /// longs it wrote. A frame of a gap the runs read across lies in none. The segments <paramref name="skipDeclared"/>
+    /// declares as regions are left out.
+    /// </summary>
+    private int Stretches(
+        ReadOnlySpan<CoalescedRun> runs, int firstRun, int endRun, ReadOnlySpan<SegmentSpec> sorted, Span<long> into, ISealedFrameCache? skipDeclared)
+    {
+        int count = 0;
+        for (int r = firstRun; r < endRun; r++)
+        {
+            for (int k = runs[r].FirstIndex; k < runs[r].FirstIndex + runs[r].Count; k++)
+            {
+                SegmentSpec spec = sorted[k];
+                if (spec.Length == 0 || (skipDeclared is not null && skipDeclared.Declares(spec.Offset, spec.Length)))
+                {
+                    continue;
+                }
+
+                // The segments come by their offsets: a stretch starts no earlier than the last.
+                long start = FrameStart((long)spec.Offset);
+                long end = FrameEnd((long)spec.Offset + spec.Length - 1);
+                if (count > 0 && start <= into[count - 1])
+                {
+                    into[count - 1] = Math.Max(into[count - 1], end);
+                    continue;
+                }
+
+                into[count] = start;
+                into[count + 1] = end;
+                count += 2;
+            }
+        }
+
+        return count;
     }
 
     /// <summary>Publishes the segments of the runs <c>[firstRun, endRun)</c> from <paramref name="block"/>, their plaintext from <paramref name="frameStart"/> on.</summary>
@@ -921,23 +1068,44 @@ internal sealed class SealedSegmentReader : ISegmentReader
         }
     }
 
-    /// <summary>Drops every frame the cache keeps of plaintext <c>[frameStart, frameEnd)</c>.</summary>
-    private void DropKept(ISealedFrameCache cache, long frameStart, long frameEnd)
+    /// <summary>
+    /// Hands the cache, as the data's, the frames of plaintext <c>[frameStart, frameEnd)</c>, authenticated, from
+    /// <paramref name="cipher"/>, the store's bytes from <paramref name="cipherStart"/> on, which <paramref name="owner"/>
+    /// holds until the cache's writer has written them; the cache keeps none it holds already.
+    /// </summary>
+    private void KeepRange(ISealedFrameCache cache, SegmentOwner owner, VortexBuffer cipher, long cipherStart, long frameStart, long frameEnd)
     {
         for (long at = frameStart; at < frameEnd; at = FrameEnd(at))
         {
             (long offset, int length) = FrameAt(at);
-            cache.DropFrame(offset, length);
+            cache.AdmitDataFrame(offset, owner, cipher.Slice(checked((int)(offset - cipherStart)), length));
+        }
+    }
+
+    /// <summary>Drops every frame the cache keeps of the plaintext <paramref name="stretches"/>, a start and an end each.</summary>
+    private void DropKept(ISealedFrameCache cache, ReadOnlySpan<long> stretches)
+    {
+        for (int s = 0; s < stretches.Length; s += 2)
+        {
+            for (long at = stretches[s]; at < stretches[s + 1]; at = FrameEnd(at))
+            {
+                (long offset, int length) = FrameAt(at);
+                cache.DropFrame(offset, length);
+            }
         }
     }
 
     /// <summary>Where the frame that starts at plaintext <paramref name="frameStart"/> lies in the object, and its bytes, its tag with them.</summary>
-    private (long Offset, int Length) FrameAt(long frameStart)
+    private (long Offset, int Length) FrameAt(long frameStart) => FrameOf(_layout, frameStart);
+
+    /// <summary>Where the frame that starts at plaintext <paramref name="frameStart"/> lies in an object of <paramref name="layout"/>, and its bytes, its tag with them.</summary>
+    private static (long Offset, int Length) FrameOf(SealedLayout layout, long frameStart)
     {
-        SealedEpoch epoch = _layout.Epochs[_layout.EpochOf(frameStart)];
-        long index = (frameStart - epoch.PlainStart) / _frameSize;
-        int length = (int)Math.Min(_frameSize, epoch.PlainEnd - frameStart);
-        return (epoch.FramesStart + (index * (_frameSize + SealedFormat.TagBytes)), length + SealedFormat.TagBytes);
+        SealedEpoch epoch = layout.Epochs[layout.EpochOf(frameStart)];
+        int frameSize = layout.FrameSize;
+        long index = (frameStart - epoch.PlainStart) / frameSize;
+        int length = (int)Math.Min(frameSize, epoch.PlainEnd - frameStart);
+        return (epoch.FramesStart + (index * (frameSize + SealedFormat.TagBytes)), length + SealedFormat.TagBytes);
     }
 
     private static long Useful(in CoalescedRun run, ReadOnlySpan<SegmentSpec> sorted)

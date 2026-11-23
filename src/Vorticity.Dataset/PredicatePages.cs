@@ -11,9 +11,9 @@ namespace Vorticity.Dataset;
 /// The granules of an object where a filter evaluated on its rows kept one, a filter's pages (spec D, 5): a bit a granule of
 /// the object's scan, kept by the session's synopsis cache when it has one, by the handle otherwise, what it holds above a
 /// floor taken back by the registry of kept memory (no table that grows for the handle's life), so that the filter asked
-/// again starts its scan's
-/// pruning from them, a source of the granules' algebra (spec D, 4.1), the granules between never read. An object never
-/// changes, so its pages stay exact as long as it lives, under the identity its postscript carries.
+/// again starts its scan's pruning from them, a source of the granules' algebra (spec D, 4.1), the granules between never
+/// read. A sealed dataset's are drawn from its rows' plaintext: its handle keeps them, and its caller hands no cache. An
+/// object never changes, so its pages stay exact as long as it lives, under the identity its postscript carries.
 /// </summary>
 /// <remarks>
 /// A filter that kept rows in more than half the object's granules keeps no pages, which would spare little; and when they

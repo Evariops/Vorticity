@@ -1097,7 +1097,8 @@ internal sealed partial class DatasetScanBuilder
     private async IAsyncEnumerable<RecordBatch> FilteredAsync(
         VortexFile file, PositionedObject held, VortexExpr filter, Task<Indexes.ColumnMarks?[]>? marks, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
-        SynopsisCache? cache = _dataset.Session.Options.SynopsisCache;
+        // The pages of a sealed dataset's filters say where rows of its plaintext lie: the handle keeps them, the disk none.
+        SynopsisCache? cache = _dataset.PlaintextDisk;
         long rows = held.Entry.PhysicalRows;
         long granuleRows = Scanning.SplitPlan.NaturalBatchRows(file.LayoutTree);
         int granules = granuleRows <= 0 ? 0 : (int)((rows + granuleRows - 1) / granuleRows);

@@ -10,6 +10,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Dataset;
+using Vorticity.IO;
 using Xunit;
 
 namespace Vorticity.Tests.Dataset;
@@ -31,37 +32,11 @@ public sealed partial class DatasetPredicatePagesTests
     [Fact]
     public async Task ASelectiveFilterAskedAgainReadsItsPagesAlone()
     {
-        Random random = new Random(0xF4);
-        HashSet<int> rare = [];
-        while (rare.Count < 30)
-        {
-            rare.Add(random.Next(100_000));
-        }
-
-        Event[] rows = [.. Enumerable.Range(0, 100_000).Select(i => new Event(
-            Start.AddSeconds(i), rare.Contains(i) ? Rare : Other(random), Convert.ToBase64String(RandomBytes(random, 225))))];
+        Event[] rows = Events();
         await using MemoryObjectStore memory = new MemoryObjectStore();
         await using CountingObjectStore store = new CountingObjectStore(memory);
-        DatasetOptions options = new DatasetOptions
-        {
-            Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Event.At))], ObjectBytes = 32 << 20 },
-            ContentsObjectBytes = 1,
-            ChunkBytes = 64 << 10,
-            Write = new VortexWriteOptions { BlockRows = 512, ChunkTargetBytes = 64 << 10 },
-        };
-        await using (VortexDataset writing = await VortexDataset.CreateAsync(store, Event.Schema, options, Ct))
-        {
-            for (int from = 0; from < rows.Length; from += 25_000)
-            {
-                await using ObjectDraft draft = writing.StartObject();
-                await draft.Writer.WriteAsync<Event>(rows.AsSpan(from, 25_000).ToArray(), Ct);
-                await writing.AppendAsync(draft, Ct);
-            }
-
-            while (await writing.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1 }, Ct) is not null)
-            {
-            }
-        }
+        DatasetOptions options = Options();
+        await WriteAsync(store, rows, options);
 
         string directory = Directory.CreateTempSubdirectory("vortex-pages-").FullName;
         try
@@ -100,6 +75,91 @@ public sealed partial class DatasetPredicatePagesTests
         finally
         {
             Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>
+    /// The same events in a sealed dataset: which batches held a row the filter kept is drawn from its plaintext, so its pages
+    /// stay in the handle's memory and never reach the disk cache, and the filter asked again by the same handle still reads
+    /// them alone.
+    /// </summary>
+    [Fact]
+    public async Task ASealedDatasetKeepsItsFiltersPagesOffTheDisk()
+    {
+        Event[] rows = Events();
+        using VortexKeyring keyring = Sealing.SealedObjects.Keyring();
+        await using MemoryObjectStore memory = new MemoryObjectStore();
+        await using CountingObjectStore store = new CountingObjectStore(memory);
+        string directory = Directory.CreateTempSubdirectory("vortex-pages-").FullName;
+        try
+        {
+            await using VortexSession session = VortexSession.Create(o =>
+            {
+                o.Keyring = keyring;
+                o.SynopsisCache = new SynopsisCache(directory, 64L << 20);
+            });
+            DatasetOptions options = Options() with { Session = session, Encrypted = true };
+            await WriteAsync(store, rows, options);
+
+            long[] bytes = new long[2];
+            List<string>[] answers = new List<string>[2];
+            await using (VortexDataset dataset = await VortexDataset.OpenAsync(store, options, Ct))
+            {
+                for (int ask = 0; ask < 2; ask++)
+                {
+                    store.Reset();
+                    answers[ask] = await AskAsync(dataset);
+                    bytes[ask] = store.BytesRead;
+                }
+            }
+
+            await session.Options.SynopsisCache!.FlushAsync();
+            Assert.Equal(answers[0], answers[1]);
+            Assert.True(bytes[1] * 4 < bytes[0], $"{bytes[1]} bytes asked again, {bytes[0]} the first time");
+            Assert.Empty(Directory.GetFiles(directory, "*-granules", SearchOption.AllDirectories));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>100 000 events a second apart, bodies of 300 bytes, thirty rows of the rare code scattered among them.</summary>
+    private static Event[] Events()
+    {
+        Random random = new Random(0xF4);
+        HashSet<int> rare = [];
+        while (rare.Count < 30)
+        {
+            rare.Add(random.Next(100_000));
+        }
+
+        return [.. Enumerable.Range(0, 100_000).Select(i => new Event(
+            Start.AddSeconds(i), rare.Contains(i) ? Rare : Other(random), Convert.ToBase64String(RandomBytes(random, 225))))];
+    }
+
+    /// <summary>Objects that carry their table of contents, in chunks of 512 rows.</summary>
+    private static DatasetOptions Options() => new DatasetOptions
+    {
+        Layout = new DatasetLayout { SortKey = [LayoutValue.Column(nameof(Event.At))], ObjectBytes = 32 << 20 },
+        ContentsObjectBytes = 1,
+        ChunkBytes = 64 << 10,
+        Write = new VortexWriteOptions { BlockRows = 512, ChunkTargetBytes = 64 << 10 },
+    };
+
+    /// <summary>Writes <paramref name="rows"/> in four objects, then compacts them into one level.</summary>
+    private static async Task WriteAsync(IObjectStore store, Event[] rows, DatasetOptions options)
+    {
+        await using VortexDataset writing = await VortexDataset.CreateAsync(store, Event.Schema, options, Ct);
+        for (int from = 0; from < rows.Length; from += 25_000)
+        {
+            await using ObjectDraft draft = writing.StartObject();
+            await draft.Writer.WriteAsync<Event>(rows.AsSpan(from, 25_000).ToArray(), Ct);
+            await writing.AppendAsync(draft, Ct);
+        }
+
+        while (await writing.CompactAsync(new CompactionOptions { LevelZeroCeiling = 1 }, Ct) is not null)
+        {
         }
     }
 

@@ -42,7 +42,10 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
     /// declares, and for the object's other segments when the cache keeps data; <paramref name="inner"/> itself
     /// without a cache, an object's uid, or anything the cache would keep of it.
     /// </summary>
-    /// <param name="inner">The store's reader of a plain object: a sealed one's data never reaches the cache.</param>
+    /// <param name="inner">
+    /// The store's reader of a plain object: a sealed one's reader keeps its frames in the cache itself, as the store holds
+    /// them (<see cref="SealedSynopsisCache"/>), and never hands it plaintext.
+    /// </param>
     /// <param name="cache">The session's cache, or null.</param>
     /// <param name="uid">The object's uid.</param>
     /// <param name="contents">The object's table of contents, or null when it has none.</param>
