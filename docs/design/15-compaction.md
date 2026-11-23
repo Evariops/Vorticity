@@ -464,12 +464,9 @@ late, the exits read 7 785 rows of the level below and rewrote 17 100 rows, 1.78
 
 ### Rollups
 
-Once no job is due, the background loop sums the counts of the deepest level's objects into rollups
-(`RollUpAsync`): runs of about `DatasetOptions.RollupFanout` consecutive objects, 64 by default, cut
-where the partition changes, a rollup of rank 1 each, then runs of as many rollups a rank up,
-each summed from what its children keep, with no row read. The tree of rollups lies beside the levels,
-and the header carries its root (field 26). A commit that puts or takes away an object takes away
-every rollup whose range holds a key it changes, which a later call sums again.
+Once no job is due, the background loop sums the counts of the deepest level's objects into rollups (`RollUpAsync`): runs of about `DatasetOptions.RollupFanout` consecutive objects, 64 by default, cut where the partition changes, a rollup of rank 1 each, then runs of as many rollups a rank up, each summed from what its children keep, with no row read. The tree of rollups lies beside the levels, and the header carries its root (field 26). A commit that puts or takes away an object takes away every rollup whose range holds a key it changes, which a later call sums again.
+
+An encrypted dataset's rollups are sealed as its data objects are ([datasets](18-encryption.md#63-datasets)): each bound to the uid its entry records, which its reader checks, and its entry records the bytes the store holds, as a data object's does. A rollup is read through the same sealed reader as a data object, so a reader of 0.14, which already opened rollups that way, reads them too. Before, a sealed store wrote none: a question over a long range of an encrypted dataset read the counts of each object.
 
 A question takes a whole rollup, from the highest rank down, when the union of its objects' summaries
 proves the filter and the constant keys as one object's would, and its totals carry what the question

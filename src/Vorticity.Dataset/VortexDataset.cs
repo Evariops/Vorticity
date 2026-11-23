@@ -2485,7 +2485,8 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// runs of about <see cref="DatasetOptions.RollupFanout"/> consecutive objects, then of as many rollups, each summed
     /// from what its children keep, with no row read. A question over a long range of the key then reads a rollup where it
     /// would read the counts of its objects. A commit that puts or takes away an object takes away the rollups over it,
-    /// which a later call sums again; <see cref="RunCompactionAsync"/> calls this when no job is due.
+    /// which a later call sums again; <see cref="RunCompactionAsync"/> calls this when no job is due. An encrypted dataset's
+    /// rollups are sealed as its data objects are, each bound to the uid its entry names.
     /// </summary>
     /// <param name="cancellationToken">Stops the work between rollups or inside one; a rollup written and not put is swept by a vacuum.</param>
     /// <returns>The rollups put.</returns>
