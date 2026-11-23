@@ -85,6 +85,7 @@ files.
   hints](08-semantics.md#5-untrusted-hints-a-three-class-policy)).
 - The caps are invariants too. A file declaring a `2²⁵⁵` alignment, or a segment that expands to
   100 GiB, must fail cleanly and fast.
+- A row count is not a cap. A constant or a sparse array holds no buffer its rows must fit in, so a mutation that writes `2³¹ − 1` in its count, the most one layout node carries, leaves a valid file that the scan serves batch by batch. The fuzzer reads the first `2²⁴` rows of a file and stops there, 128 batches in and 256 times the largest corpus file, so that the five seconds a file may take measure the reader and not the fuzzer's own walk of two billion slots.
 - A smoke campaign runs in every test run (`FuzzSmokeTests`), and CI runs 100 000 mutations with a
   fixed seed, so any finding reproduces from the log.
 
