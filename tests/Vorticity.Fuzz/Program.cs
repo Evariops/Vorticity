@@ -52,6 +52,21 @@ internal static class Program
     /// </remarks>
     private static readonly TimeSpan Budget = TimeSpan.FromSeconds(5);
 
+    /// <summary>
+    /// How many rows of one mutated file are read before the read stops.
+    /// </summary>
+    /// <remarks>
+    /// A constant or a sparse array holds no buffer that its row count must fit in. A mutation that
+    /// writes 2^31 - 1 in the count, the most rows one layout node carries, therefore leaves a file
+    /// that is valid, and that the scan serves batch by batch in a memory that does not grow. Read
+    /// whole, an <c>i32</c> column of that many rows took 5.2 s on a CI runner, past the budget.
+    /// On a laptop the scan of that file takes 0.3 s and this program's walk of each slot 3 s more:
+    /// the time measured the fuzzer, and said nothing of a cap. The bound is 256 times the largest
+    /// corpus file, which holds 65 536 rows, so no seed is cut short, and it lies 128 batches into
+    /// the file, so the cuts between batches are read as well.
+    /// </remarks>
+    private const long RowsRead = 1L << 24;
+
     private static async Task<int> Main(string[] args)
     {
         if (args.Length > 0 && args[0] == "--parquet")
@@ -101,6 +116,7 @@ internal static class Program
             {
                 case Reach.RejectedAtOpen: totals.RejectedAtOpen++; break;
                 case Reach.RejectedWhileDecoding: totals.RejectedWhileDecoding++; break;
+                case Reach.ReadToTheBound: totals.ReadToTheBound++; break;
                 default: totals.Read++; break;
             }
 
@@ -128,12 +144,13 @@ internal static class Program
             $"{totals.Findings} findings");
         Console.Out.WriteLine(
             $"  reach: {totals.RejectedAtOpen} refused at open, " +
-            $"{totals.RejectedWhileDecoding} refused while decoding, {totals.Read} read to the end");
+            $"{totals.RejectedWhileDecoding} refused while decoding, {totals.Read} read to the end, " +
+            $"{totals.ReadToTheBound} read to their first {RowsRead.ToString(CultureInfo.InvariantCulture)} rows");
 
         // A campaign whose mutations all died in the postscript exercised the tail parser and
         // nothing else, and reporting "0 findings" for it would be misleading rather than merely
         // uninformative.
-        int deep = totals.RejectedWhileDecoding + totals.Read;
+        int deep = totals.RejectedWhileDecoding + totals.Read + totals.ReadToTheBound;
         if (deep * 10 < iterations)
         {
             Console.Error.WriteLine(
@@ -381,15 +398,24 @@ internal static class Program
             await using VortexFile file = await VortexSession.Default.OpenAsync(new MemorySegmentSource(bytes));
 
             reach = Reach.RejectedWhileDecoding;
+            long rows = 0;
+            bool bounded = false;
             await foreach (BatchView batch in file.Scan())
             {
                 if (Touch(batch) is { } wrong)
                 {
                     return (new Finding("WrongValue", wrong), reach);
                 }
+
+                rows += batch.RowCount;
+                if (rows >= RowsRead)
+                {
+                    bounded = true;
+                    break;
+                }
             }
 
-            reach = Reach.Read;
+            reach = bounded ? Reach.ReadToTheBound : Reach.Read;
         }
         catch (VortexFormatException)
         {
@@ -622,6 +648,9 @@ internal static class Program
 
         /// <summary>Read to the end. The mutation landed somewhere that changes no structure.</summary>
         Read = 2,
+
+        /// <summary>Read as far as <see cref="RowsRead"/> rows, of a file that declares more.</summary>
+        ReadToTheBound = 3,
     }
 
     private struct Outcome
@@ -631,5 +660,6 @@ internal static class Program
         internal int RejectedAtOpen;
         internal int RejectedWhileDecoding;
         internal int Read;
+        internal int ReadToTheBound;
     }
 }
