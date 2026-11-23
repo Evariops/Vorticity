@@ -721,19 +721,9 @@ no writer changes: a region hashed at each read, then again by the decode of its
 of a question at sixteen lanes, whose reads of the disk's cache contend for the memory's bandwidth
 (11 ms a question against 5.7 once). Questions that miss the same region at once wait for one read.
 
-A sealed object leaves no plaintext on the disk. The cache keeps the bytes the store holds: the
-object's trailer, which names its data key wrapped and its epochs, and the frames that hold a region its
-table of contents declares, each a file named by the object's uid and the frame's place. A read with no
-open of the object opens it from the trailer kept, with no request, and reads from the disk every group
-of frames whose segments' frames the cache keeps all: a frame of a gap the group's runs read across is
-not asked, so a group whose regions lie a frame apart is served too. The reader decrypts them as it
-decrypts the store's: a frame whose tag fails, or a region whose plaintext fails its checksum, is dropped
-with its group and read again from the store, and a trailer that does not open the object is dropped and
-read again too. No key reaches the disk: the session unwraps the data key as it does for a read from the
-store, from its keyring or from the keys it holds in memory. A frame of 64 KiB is the unit kept, so a
-small region costs the disk its frame. On six hours of sealed requests, a count per service from the
-synopsis tables of the time took 12 requests in two round trips cold and none warm, where every question
-read them again before. Questions that miss the same frames of a sealed object at once read them each.
+A sealed object leaves no plaintext on the disk. The cache keeps the bytes the store holds: the object's trailer, which names its data key wrapped and its epochs, and the frames that hold a region its table of contents declares, each a file named by the object's uid and the frame's place. A read with no open of the object opens it from the trailer kept, with no request, and reads from the disk every group of frames whose segments' frames the cache keeps all: a frame of a gap the group's runs read across is not asked, so a group whose regions lie a frame apart is served too. The reader decrypts them as it decrypts the store's: a frame whose tag fails, or a region whose plaintext fails its checksum, is dropped with its group and read again from the store, and a trailer that does not open the object is dropped and read again too. No key reaches the disk: the session unwraps the data key as it does for a read from the store, from its keyring or from the keys it holds in memory. A frame of 64 KiB is the unit kept, so a small region costs the disk its frame. On six hours of sealed requests, a count per service from the synopsis tables of the time took 12 requests in two round trips cold and none warm, where every question read them again before.
+
+Questions that miss the same frames of a sealed object at once wait for one read, as those that miss a plain object's region do. The cache notes which frames a read fetches from the store, by the object's uid and the frame's place, and a group of frames whose every frame another read fetches waits for that read, then reads them from the disk. It waits only for frames the cache keeps once read: a declared region's, or any frame given a quota for data. A read fetches its own frames and lets them go before it waits for another's, so two reads whose groups cross never wait for each other, and what the other read did not leave on the disk, a frame its quota refused or a read that failed, is read from the store. A group that shares only some of its frames with another read is read whole, so its shared frames come twice, never those of two questions asking the same segments. A range read alone, as the open of an object read whole reads it, does not wait: a dataset's handle opens an object once for the questions that ask it at once.
 
 Given a quota for data, the cache keeps a sealed object's data the same way: the frames of every
 segment its reader reads that is no declared region, and the last frames the open of the object

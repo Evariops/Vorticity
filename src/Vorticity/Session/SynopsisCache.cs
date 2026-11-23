@@ -65,7 +65,7 @@ namespace Vorticity;
 /// then renamed, so a reader never sees half a file. The cache walks its directory when it opens to know
 /// what it holds. One cache owns a directory, through a lock of the operating system: a second one, in
 /// this process or another, is refused. Questions that miss the same region of a plain object at once wait
-/// for one read. Those that miss the same frames of a sealed object at once read them each.
+/// for one read, and so do those that miss the same frames of a sealed object, when the cache keeps them.
 /// </para>
 /// <para>
 /// The caches of several processes share a root through <see cref="OpenShared(string, long)"/>: each owns a directory under
@@ -144,6 +144,10 @@ public sealed class SynopsisCache : IAsyncDisposable
     private readonly Tier _regions;
     private readonly Tier _data;
     private readonly Dictionary<string, TaskCompletionSource> _reading = new Dictionary<string, TaskCompletionSource>(StringComparer.Ordinal);
+
+    // The frames of sealed objects a reader is fetching from the store, by the object's uid and the frame's place in it: no
+    // string is made for one, a read of a megabyte asking sixteen.
+    private readonly Dictionary<(UInt128 Uid, long Frame), TaskCompletionSource> _framesReading = new Dictionary<(UInt128, long), TaskCompletionSource>();
     private readonly Dictionary<string, Pending> _pending = new Dictionary<string, Pending>(StringComparer.Ordinal);
 
     // How many writes wait, as the gate last left them: what a read asks before it takes the gate to look among them.
@@ -1773,6 +1777,49 @@ public sealed class SynopsisCache : IAsyncDisposable
 
     /// <summary>Ends a read <see cref="TryBeginRead"/> handed to the caller: those who wait on it look again.</summary>
     internal void EndRead(UInt128 uid, IndexSegment region, TaskCompletionSource mine) => EndReadOf(NameOf(uid, region), mine);
+
+    /// <summary>
+    /// Makes <paramref name="mine"/> the read of each frame of the sealed object <paramref name="uid"/>, at the places
+    /// <paramref name="frames"/> gives, that no other read is fetching, and adds its place to <paramref name="registered"/>;
+    /// adds to <paramref name="theirs"/> the reads that fetch the others. Every place registered is the caller's to end with
+    /// <see cref="EndReadFrames"/>.
+    /// </summary>
+    internal void BeginReadFrames(UInt128 uid, ReadOnlySpan<long> frames, TaskCompletionSource mine, List<long> registered, List<Task> theirs)
+    {
+        lock (_gate)
+        {
+            foreach (long frame in frames)
+            {
+                if (!_framesReading.TryGetValue((uid, frame), out TaskCompletionSource? other))
+                {
+                    _framesReading.Add((uid, frame), mine);
+                    registered.Add(frame);
+                }
+                else if (theirs.Count == 0 || !ReferenceEquals(theirs[^1], other.Task))
+                {
+                    // A read fetches the frames of a group, which follow one another: one wait for them.
+                    theirs.Add(other.Task);
+                }
+            }
+        }
+    }
+
+    /// <summary>Ends the reads of the frames <see cref="BeginReadFrames"/> registered to <paramref name="mine"/>, and lets those who wait on it look again.</summary>
+    internal void EndReadFrames(UInt128 uid, ReadOnlySpan<long> frames, TaskCompletionSource mine)
+    {
+        lock (_gate)
+        {
+            foreach (long frame in frames)
+            {
+                if (_framesReading.TryGetValue((uid, frame), out TaskCompletionSource? held) && ReferenceEquals(held, mine))
+                {
+                    _framesReading.Remove((uid, frame));
+                }
+            }
+        }
+
+        mine.TrySetResult();
+    }
 
     private void EndReadOf(string name, TaskCompletionSource mine)
     {
