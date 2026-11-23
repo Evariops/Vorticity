@@ -401,7 +401,7 @@ public sealed partial class VortexFileWriter
     private async ValueTask<ArrayBlobWriter.BlobLease> WriteLeavesAsync(
         VariantShredder.Shredding shredding, int field, ArrayBlobWriter.Workspace blobs, EncodingDictionary encodings, CoreBatch fan)
     {
-        int leaves = shredding.PrepareLeaves(blobs.EncodesValidity, _compress);
+        int leaves = shredding.PrepareLeaves(blobs.EncodesValidity, _compress, encodings.Target);
         LeafWork work = _leafWork ??= new LeafWork(this);
         work.Shredding = shredding;
         work.Field = field;
@@ -706,7 +706,7 @@ public sealed partial class VortexFileWriter
                 return;
             }
 
-            int leaves = shredding.PrepareLeaves(lane.Blobs.EncodesValidity, _compress);
+            int leaves = shredding.PrepareLeaves(lane.Blobs.EncodesValidity, _compress, lane.Encodings.Target);
             chunk.Lane = lane;
             chunk.Shredding = shredding;
             chunk.Batch = CoreBatch.Rent(_core, LeavesAtOnce(chunk, shredding, leaves));

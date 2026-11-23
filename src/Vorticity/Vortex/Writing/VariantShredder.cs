@@ -696,23 +696,36 @@ internal static class VariantShredder
         /// Lists the leaves of the chunk taken, in the order its blob comes to them as <see cref="Write"/> writes it: each
         /// variant node's metadata and values and each typed column, with the validity encoding the blob writes each under,
         /// a variant's typed tree's under <paramref name="compress"/>, the rest under <paramref name="encodesValidity"/>. The
-        /// rows' metadata, which every variant node names, is written once a validity encoding. Their count.
+        /// rows' metadata, which every variant node names, is written once a validity encoding. A struct the blob writes
+        /// whole in <paramref name="target"/>, nulls only, has none of its leaves listed: the blob never comes to them. Their
+        /// count.
         /// </summary>
-        internal int PrepareLeaves(bool encodesValidity, bool compress)
+        internal int PrepareLeaves(bool encodesValidity, bool compress, VortexEdition target)
         {
             _jobCount = 0;
             _metadataJobs = default;
             _listCompress = compress;
+            _listTarget = target;
+
+            // The dtypes of the structs the list asks about are made in the arena the blob is grafted in (WriteGrafted): a
+            // struct keeps its dtype, and no other arena takes it as a field.
+            _types = new DTypeArena();
             ListVariant(_root, encodesValidity);
             return _jobCount;
         }
 
-        // The leaf of the rows' metadata written under each validity encoding, which the others name again; and the validity
-        // encoding of a variant's typed tree, as the blob writer sets it there (ArrayBlobWriter.WriteShredded).
+        // The leaf of the rows' metadata written under each validity encoding, which the others name again; the validity
+        // encoding of a variant's typed tree, as the blob writer sets it there (ArrayBlobWriter.WriteShredded); and the
+        // edition the blob is written in.
         private (LeafJob? Plain, LeafJob? Encoded) _metadataJobs;
         private bool _listCompress;
+        private VortexEdition _listTarget;
 
-        /// <summary>A variant node's leaves: its metadata and values under <paramref name="validity"/>, its typed tree under the blob's compression.</summary>
+        /// <summary>
+        /// A variant node's leaves: its metadata and values under <paramref name="validity"/>, its typed tree under the blob's
+        /// compression. A variant node is never written whole, nulls only being no constant of a variant
+        /// (<see cref="CanonicalFill.CanBuild(DType)"/>): its leaves are always listed.
+        /// </summary>
         private void ListVariant(Group group, bool validity)
         {
             LeafJob metadata = List(LeafKind.Metadata, null, validity);
@@ -730,12 +743,20 @@ internal static class VariantShredder
             ListTyped(group, _listCompress);
         }
 
-        /// <summary>A typed node's leaves, under <paramref name="validity"/>: its column, or each field of its object's in order (<see cref="WriteTyped"/>, <see cref="WriteField"/>).</summary>
+        /// <summary>
+        /// A typed node's leaves, under <paramref name="validity"/>: its column, or each field of its object's in order
+        /// (<see cref="WriteTyped"/>, <see cref="WriteField"/>), and none of a struct the blob writes whole.
+        /// </summary>
         private void ListTyped(Group group, bool validity)
         {
             if (group is not ObjectGroup objects)
             {
                 List(LeafKind.Typed, group, validity);
+                return;
+            }
+
+            if (WritesWhole(objects, _listTarget, _listCompress))
+            {
                 return;
             }
 
@@ -882,13 +903,15 @@ internal static class VariantShredder
         /// its tree written again node by node in the blob's builder, its buffers past the blob's, its ids the dictionary's in
         /// the order the blob meets them; the same bytes as the chunk written as one blob.
         /// </summary>
-        /// <exception cref="InvalidOperationException">A leaf the blob comes to was not listed there, or not written.</exception>
+        /// <exception cref="InvalidOperationException">
+        /// A leaf the blob comes to was not listed there, or not written; or the blob came to fewer leaves than were listed.
+        /// </exception>
         internal ArrayBlobWriter.BlobLease WriteGrafted(ArrayBlobWriter.Workspace blob, EncodingDictionary encodings, bool compress)
         {
             _cursor = 0;
             try
             {
-                return Write(blob, encodings, compress);
+                return Written(blob, encodings, compress);
             }
             finally
             {
@@ -909,16 +932,23 @@ internal static class VariantShredder
         /// <summary>The leaf the blob comes to next, as <see cref="PrepareLeaves"/> listed it: grafted into <paramref name="blob"/>.</summary>
         private int Graft(ArrayBlobWriter.Workspace blob, EncodingDictionary encodings, LeafKind kind, Group? group)
         {
-            LeafJob job = _cursor < _jobCount ? _jobs[_cursor++] : throw new InvalidOperationException("The blob came to a leaf no list holds.");
+            if (_cursor >= _jobCount)
+            {
+                throw new InvalidOperationException($"The blob came to {Describe(kind, group)}, past the {_jobCount} leaves listed.");
+            }
+
+            LeafJob job = _jobs[_cursor++];
             if (job.Kind != kind || !ReferenceEquals(job.Group, group))
             {
-                throw new InvalidOperationException("The leaves were listed in another order than the blob comes to them.");
+                throw new InvalidOperationException(
+                    $"The leaves were listed in another order than the blob comes to them: the blob came to {Describe(kind, group)} " +
+                    $"where leaf {_cursor - 1} of {_jobCount} is {Describe(job.Kind, job.Group)}.");
             }
 
             LeafJob made = job.Same ?? job;
             if (!made.Done)
             {
-                throw new InvalidOperationException("A leaf the blob comes to was not written.");
+                throw new InvalidOperationException($"A leaf the blob comes to was not written: {Describe(kind, group)}.");
             }
 
             // Its buffers past the blob's: the leaf's own the first time, the blob's then, copies of them each time the rows'
@@ -995,7 +1025,17 @@ internal static class VariantShredder
         /// </summary>
         internal ArrayBlobWriter.BlobLease Write(ArrayBlobWriter.Workspace blob, EncodingDictionary encodings, bool compress)
         {
-            DTypeArena types = _types = new DTypeArena();
+            _types = new DTypeArena();
+            return Written(blob, encodings, compress);
+        }
+
+        /// <summary>
+        /// <see cref="Write"/> in the dtype arena already made: <see cref="Write"/>'s own, or the one the leaves grafted were
+        /// listed in (<see cref="PrepareLeaves"/>), each leaf grafted from the list then, every leaf listed.
+        /// </summary>
+        private ArrayBlobWriter.BlobLease Written(ArrayBlobWriter.Workspace blob, EncodingDictionary encodings, bool compress)
+        {
+            DTypeArena types = _types;
             CanonicalNode variant = _arena.GetNode(_node);
             int frame = _arena.AddStruct(variant.DType, _rows, variant.Validity, []);
             blob.Builder.Clear();
@@ -1005,6 +1045,15 @@ internal static class VariantShredder
             {
                 int root = ArrayBlobWriter.WriteShredded(
                     blob, _arena, frame, encodings, compress, residualNullable: true, _root.TypedType(types), new Children(this, _root, variant: true));
+
+                // A leaf listed that the blob never came to was written apart for nothing, and says the list and the blob
+                // took two different trees.
+                if (_cursor >= 0 && _cursor < _jobCount)
+                {
+                    throw new InvalidOperationException(
+                        $"The blob came to {_cursor} of the {_jobCount} leaves listed, not to {Describe(_jobs[_cursor].Kind, _jobs[_cursor].Group)}.");
+                }
+
                 return ArrayBlobWriter.Assemble(blob, root);
             }
             finally
@@ -1081,9 +1130,58 @@ internal static class VariantShredder
                 return WriteLeaf(blob, group, values: false, encodings, compress);
             }
 
-            int frame = _arena.AddStruct(objects.TypedType(_types), _rows, objects.ObjectsValidity(_arena, _types, _rows), []);
             return ArrayBlobWriter.WriteStruct(
-                blob, _arena, frame, encodings, compress, objects.WrittenCount, new Children(this, objects, variant: false));
+                blob, _arena, Frame(objects), encodings, compress, objects.WrittenCount, new Children(this, objects, variant: false));
+        }
+
+        /// <summary>The node <paramref name="objects"/>'s struct is written from: its dtype, the validity of the rows that hold an object, no field.</summary>
+        private int Frame(ObjectGroup objects) =>
+            _arena.AddStruct(objects.TypedType(_types), _rows, objects.ObjectsValidity(_arena, _types, _rows), []);
+
+        /// <summary>
+        /// Whether the blob writes <paramref name="objects"/>'s struct whole, and none of its fields
+        /// (<see cref="ArrayBlobWriter.WritesWhole(CanonicalArena, int, VortexEdition, bool)"/>, which <see cref="WriteTyped"/>
+        /// meets in <see cref="ArrayBlobWriter.WriteStruct{TChildren}"/>). A struct of which a row holds an object is never
+        /// nulls only, and its frame is not made to ask.
+        /// </summary>
+        private bool WritesWhole(ObjectGroup objects, VortexEdition target, bool compress) =>
+            compress && !objects.HoldsObjects && ArrayBlobWriter.WritesWhole(_arena, Frame(objects), target, compress);
+
+        /// <summary>
+        /// The leaf of <paramref name="kind"/> of <paramref name="group"/>, for a message: what it is, and the path from the
+        /// column of the key whose node it is, by the plan's names.
+        /// </summary>
+        private string Describe(LeafKind kind, Group? group)
+        {
+            if (kind == LeafKind.Metadata)
+            {
+                return "the rows' metadata";
+            }
+
+            string path = group is null ? "no key" : PathOf(_root, group, "$") ?? "a key of no path";
+            return kind == LeafKind.Values ? $"the values of {path}" : $"the typed column of {path}";
+        }
+
+        /// <summary>The path of <paramref name="group"/> below <paramref name="at"/>, whose path is <paramref name="path"/>; null when it is not below.</summary>
+        private static string? PathOf(Group at, Group group, string path)
+        {
+            if (ReferenceEquals(at, group))
+            {
+                return path;
+            }
+
+            if (at is ObjectGroup objects)
+            {
+                for (int i = 0; i < objects.KeyCount; i++)
+                {
+                    if (PathOf(objects.Field(i), group, $"{path}.{objects.KeyName(i)}") is { } found)
+                    {
+                        return found;
+                    }
+                }
+            }
+
+            return null;
         }
 
         /// <summary>
@@ -1747,6 +1845,15 @@ internal static class VariantShredder
         }
 
         internal override bool HeldAny => _objects.Count > 0 || Values.HoldsAny;
+
+        /// <summary>Whether a row of the chunk holds an object: when none does, the struct of its objects is nulls only.</summary>
+        internal bool HoldsObjects => _objects.Count > 0;
+
+        /// <summary>The count of the plan's keys, each a field whether the chunk's struct holds it or not.</summary>
+        internal int KeyCount => _fields.Length;
+
+        /// <summary>The name of the plan's key <paramref name="index"/>.</summary>
+        internal string KeyName(int index) => _plan.Keys[index].Name;
 
         /// <remarks>
         /// The chunk shreds only the keys its rows hold: a key no row holds would cost its nodes and a
