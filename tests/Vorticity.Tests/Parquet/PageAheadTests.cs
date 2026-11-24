@@ -131,6 +131,33 @@ public sealed class PageAheadTests : IDisposable
     }
 
     /// <summary>
+    /// A hard budget too small for the pages a column takes ahead refuses a block after the column
+    /// took a lane for the page, and one of the session's with it: the scan fails, and gives both back.
+    /// </summary>
+    [Theory]
+    [InlineData(1 << 20)]
+    [InlineData(2 << 20)]
+    public async Task AScanRefusedMemoryGivesBackEveryLaneItTook(long ceiling)
+    {
+        await WriteAsync(ParquetCompression.Zstd, DataPageVersion.V2);
+        await using VortexSession session = VortexSession.Create(options =>
+        {
+            options.MaxDegreeOfParallelism = 4;
+            options.MemoryBudget = new QueryMemoryBudget(ceiling, new QueryMemoryBudget(1L << 30, null)) { Hard = true };
+        });
+        await using ParquetFile file = await session.OpenParquetAsync(_path, null, Ct);
+        await Assert.ThrowsAsync<VortexMemoryException>(async () =>
+        {
+            await foreach (RecordBatch batch in file.Scan().ToBatchesAsync(Ct))
+            {
+                batch.Dispose();
+            }
+        });
+
+        Assert.Equal(0, session.Lanes.Held);
+    }
+
+    /// <summary>
     /// The rows, pages of 16 384 of them in a row group of them all: five pages a column, those of the
     /// payloads, the notes and the lines, text that seldom repeats, large enough to be worth a lane
     /// under every codec, the notes and the lines PLAIN.

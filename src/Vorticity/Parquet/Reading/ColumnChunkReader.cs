@@ -1419,8 +1419,23 @@ internal sealed partial class ColumnChunkReader : IDisposable
                 }
 
                 int values = ViewsAt(header);
-                BlockOwner block = _account.Rent(size, 64);
-                BlockOwner? views = values == NoViews ? null : _account.Rent(header.ValueCount * CanonicalSupport.ViewSize, 64);
+                BlockOwner? block = null;
+                BlockOwner? views = null;
+                try
+                {
+                    block = _account.Rent(size, 64);
+                    views = values == NoViews ? null : _account.Rent(header.ValueCount * CanonicalSupport.ViewSize, 64);
+                }
+                catch
+                {
+                    // The account refused a block: the page is not queued, so nothing else gives back
+                    // the lane, the session's lane taken with it, or the bytes reserved for it.
+                    block?.Dispose();
+                    lanes.Give(entered);
+                    lanes.Unreserve(size);
+                    throw;
+                }
+
                 AheadPage page = new(this, position, header, at, stored, _chunk.Slice(at + offset, stored - offset), _codec, block, lanes, size, views, values);
                 page.Queue(entered);
                 Counters?.AddAhead();
