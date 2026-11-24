@@ -390,8 +390,12 @@ internal sealed class KeyPruning
             // reads them in any order, each from its run's whole key otherwise.
             foreach ((int from, int to) in Merge(within))
             {
+                // The granules times the longest key, in 64 bits: in 32, many granules of long keys wrapped to a small block.
                 int last = Math.Min(to + 1, keys.Granules);
-                Block<byte> rangeKeys = Blocks.Rent<byte>((last - from) * Math.Max(keys.Longest(from, last), 1));
+                long keyBytes = (long)(last - from) * Math.Max(keys.Longest(from, last), 1);
+                Block<byte> rangeKeys = Blocks.Rent<byte>(keyBytes <= Array.MaxLength
+                    ? (int)keyBytes
+                    : throw new NotSupportedException($"The keys of granules {from} to {last} take {keyBytes} bytes, past what a block holds."));
                 Block<int> ends = Blocks.Rent<int>(last - from);
                 try
                 {

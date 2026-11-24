@@ -80,7 +80,8 @@ internal sealed partial class DatasetScanBuilder
     {
         SortKey tree = _version.Schema.Tree!;
         int last = order.Positions[count - 1] + skip;
-        Span<int> ends = stackalloc int[tree.Count];
+        using Vorticity.Arrays.Decoders.Canonical.Scratch<int> endScratch = new(tree.Count, stackalloc int[64]);
+        Span<int> ends = endScratch.Span;
         if (key.IsEmpty || !tree.Ends(key.Span, ends[..(last + 1)]))
         {
             return default;
@@ -126,7 +127,8 @@ internal sealed partial class DatasetScanBuilder
     private ReadOnlyMemory<byte> HighBound(ReadOnlyMemory<byte> last, ColumnOrder order, int skip, int count, SortKey merged)
     {
         SortKey tree = _version.Schema.Tree!;
-        Span<int> ends = stackalloc int[tree.Count];
+        using Vorticity.Arrays.Decoders.Canonical.Scratch<int> endScratch = new(tree.Count, stackalloc int[64]);
+        Span<int> ends = endScratch.Span;
         if (last.IsEmpty || !tree.Ends(last.Span, ends[..(order.Positions[count - 1] + skip + 1)]))
         {
             return default;

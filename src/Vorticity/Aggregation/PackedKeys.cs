@@ -7,6 +7,7 @@ using System.Runtime.Intrinsics.X86;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Buffers;
 using Vorticity.Writing;
 
@@ -177,6 +178,9 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         return false;
     }
 
+    /// <summary>The parts of a key whose cursors <see cref="Cut"/> keeps on the stack, a quarter of a kibibyte each.</summary>
+    private const int StackParts = 64;
+
     /// <summary>The parts' ranges cut at the union of their boundaries: a group a piece every part covers and the selection reaches.</summary>
     private void Cut(ReadOnlySpan<ulong> selection, GroupRanges ranges)
     {
@@ -186,8 +190,11 @@ internal sealed class PackedKeys<TKey> : GroupKeys
             return;
         }
 
-        Span<int> at = stackalloc int[_parts.Length];
-        Span<int> ids = stackalloc int[_parts.Length];
+        // On the stack for the keys of a few parts, a block of the pool past them: a key of the caller's, of any parts.
+        using Scratch<int> atScratch = new(_parts.Length, stackalloc int[StackParts]);
+        using Scratch<int> idScratch = new(_parts.Length, stackalloc int[StackParts]);
+        Span<int> at = atScratch.Span;
+        Span<int> ids = idScratch.Span;
         at.Clear();
         int lastGroup = -1;
         TKey last = default;
@@ -300,7 +307,8 @@ internal sealed class PackedKeys<TKey> : GroupKeys
             return;
         }
 
-        Span<int> ids = stackalloc int[_parts.Length];
+        using Scratch<int> idScratch = new(_parts.Length, stackalloc int[StackParts]);
+        Span<int> ids = idScratch.Span;
         while (cursor.Next(out int row))
         {
             for (int p = 0; p < _parts.Length; p++)
@@ -352,7 +360,8 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         }
 
         Block<int> table = _table;
-        Span<int> tuple = stackalloc int[_parts.Length];
+        using Scratch<int> tupleScratch = new(_parts.Length, stackalloc int[StackParts]);
+        Span<int> tuple = tupleScratch.Span;
         int start = selection.IsEmpty && Avx2.IsSupported ? Gathered(table, slots, rowGroups, tuple) : 0;
         RowCursor cursor = new RowCursor(selection, start, rows);
         while (cursor.Next(out int row))
@@ -507,7 +516,8 @@ internal sealed class PackedKeys<TKey> : GroupKeys
 
         Block<int> table = !_table.IsDefault && _table.Length == 1 << shift ? _table : NewTable(1 << shift);
         table.Fill(-1);
-        Span<int> ids = stackalloc int[_parts.Length];
+        using Scratch<int> idScratch = new(_parts.Length, stackalloc int[StackParts]);
+        Span<int> ids = idScratch.Span;
         for (int g = 0; g < Count; g++)
         {
             for (int p = 0; p < _parts.Length; p++)
@@ -640,7 +650,8 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     {
         // Each part keeps the numbers the kept groups hold, numbered again in their order, so that
         // no part holds more values than the open groups do; the words are packed again from them.
-        Span<int> ids = stackalloc int[_parts.Length];
+        using Scratch<int> idScratch = new(_parts.Length, stackalloc int[StackParts]);
+        Span<int> ids = idScratch.Span;
         for (int p = 0; p < _parts.Length; p++)
         {
             int count = _parts[p].Count;
@@ -719,7 +730,8 @@ internal sealed class PackedKeys<TKey> : GroupKeys
         // no slot, and its next batch covers its parts' new numbers first. The parts' maps lie in one
         // block rented for the merge, where every lane's merge made one a part, a tenth of what a
         // question answered at sixteen lanes allocated.
-        Span<int> starts = stackalloc int[_parts.Length + 1];
+        using Scratch<int> startScratch = new(_parts.Length + 1, stackalloc int[StackParts + 1]);
+        Span<int> starts = startScratch.Span;
         for (int p = 0; p < _parts.Length; p++)
         {
             starts[p + 1] = starts[p] + _parts[p].Count;
@@ -733,7 +745,8 @@ internal sealed class PackedKeys<TKey> : GroupKeys
                 _parts[p].MergeInto(into._parts[p], partMaps.AsSpan(starts[p], _parts[p].Count));
             }
 
-            Span<int> ids = stackalloc int[_parts.Length];
+            using Scratch<int> idScratch = new(_parts.Length, stackalloc int[StackParts]);
+            Span<int> ids = idScratch.Span;
             for (int i = 0; i < groups.Length; i++)
             {
                 TKey key = _keys[groups[i]];
@@ -798,7 +811,8 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     internal override void Hashes(Span<ulong> hashes)
     {
         // Every column's hashes in one block of the pool, a column after the other.
-        Span<int> starts = stackalloc int[_parts.Length + 1];
+        using Scratch<int> startScratch = new(_parts.Length + 1, stackalloc int[StackParts + 1]);
+        Span<int> starts = startScratch.Span;
         for (int p = 0; p < _parts.Length; p++)
         {
             starts[p + 1] = starts[p] + _parts[p].Count;
@@ -899,7 +913,8 @@ internal sealed class PackedKeys<TKey> : GroupKeys
             }
         }
 
-        Span<int> tuple = stackalloc int[_parts.Length];
+        using Scratch<int> tupleScratch = new(_parts.Length, stackalloc int[StackParts]);
+        Span<int> tuple = tupleScratch.Span;
         for (int i = 0; i < count; i++)
         {
             for (int p = 0; p < _parts.Length; p++)
@@ -1016,7 +1031,8 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     /// <summary>Every word with each part's number taken through <paramref name="maps"/>, and the indexes of the columns those numbers are in.</summary>
     private void Rewrite(Block<int>[] maps, GroupKeys[] parts)
     {
-        Span<int> ids = stackalloc int[_parts.Length];
+        using Scratch<int> idScratch = new(_parts.Length, stackalloc int[StackParts]);
+        Span<int> ids = idScratch.Span;
         for (int g = 0; g < Count; g++)
         {
             for (int p = 0; p < _parts.Length; p++)
