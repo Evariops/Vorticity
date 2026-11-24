@@ -721,18 +721,15 @@ internal static class DatasetCommitter
             return false;
         }
 
-        const int Chunk = 1 << 20;
+        // Copied once into its bytes, one request a store that streams answers, where a read of a mebibyte at a time was a
+        // request each; an object that ends short is not whole.
         byte[] bytes = new byte[objectLength];
-        for (int at = 0; at < bytes.Length; at += Chunk)
+        using (System.IO.MemoryStream into = new System.IO.MemoryStream(bytes, writable: true))
         {
-            int length = Math.Min(Chunk, bytes.Length - at);
-            using ObjectRange range = await store.GetRangeAsync(key, at, length, cancellationToken).ConfigureAwait(false);
-            if (range.Length != length)
+            if (await store.CopyToAsync(key, 0, bytes.Length, into, null, cancellationToken).ConfigureAwait(false) != bytes.Length)
             {
                 return false;
             }
-
-            range.Bytes.CopyTo(bytes.AsSpan(at));
         }
 
         // A sealed commit read without the dataset's keys is judged by its envelope, which is whole

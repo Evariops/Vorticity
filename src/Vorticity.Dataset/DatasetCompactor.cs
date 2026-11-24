@@ -1190,17 +1190,30 @@ internal static partial class DatasetCompactor
         VortexDataset dataset, DatasetSchema schema, CompactionJob job, JobMemory memory, CancellationToken cancellationToken)
     {
         int fields = schema.DType.FieldCount;
-        List<ObjectDictionary>?[] held = new List<ObjectDictionary>?[fields];
-        long[] rowBytes = new long[fields];
-        bool first = true;
         foreach (CompactionInput input in job.Inputs)
         {
             if (input.Entry.Contents is not { Dictionaries.Count: > 0 } contents || contents.Dictionaries.Count != fields)
             {
                 return [];
             }
+        }
 
-            ObjectDictionary?[] dictionaries = await dataset.DictionariesAsync(input.Entry, contents, cancellationToken).ConfigureAwait(false);
+        // Every input's dictionaries read side by side, as many at once as the session reads: one request each, whose
+        // latencies added up when they were read one after the other.
+        ObjectDictionary?[][] read = new ObjectDictionary?[job.Inputs.Count][];
+        await Execution.Waits.ForAsync(
+            read.Length,
+            dataset.Session.Options.MaxConcurrentReads,
+            async (i, token) => read[i] = await dataset.DictionariesAsync(job.Inputs[i].Entry, job.Inputs[i].Entry.Contents!, token).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+
+        List<ObjectDictionary>?[] held = new List<ObjectDictionary>?[fields];
+        long[] rowBytes = new long[fields];
+        bool first = true;
+        for (int i = 0; i < read.Length; i++)
+        {
+            CompactionInput input = job.Inputs[i];
+            ObjectDictionary?[] dictionaries = read[i];
             for (int field = 0; field < fields; field++)
             {
                 if (dictionaries[field] is not { } dictionary)
@@ -2788,33 +2801,58 @@ internal static partial class DatasetCompactor
 
         IO.ISegmentReader file = lease.File;
 
+        // Each column's region, the first the table names for it, read in one request set: one after the other, their
+        // round trips added up.
+        IndexSegment?[] wanted = new IndexSegment?[variants.Length];
+        int asked = 0;
+        for (int v = 0; v < variants.Length; v++)
+        {
+            foreach ((int column, IndexSegment region) in regions)
+            {
+                if (column == variants[v])
+                {
+                    wanted[v] = region;
+                    asked++;
+                    break;
+                }
+            }
+        }
+
+        if (asked == 0)
+        {
+            return directories;
+        }
+
         try
         {
+            using IO.SegmentRequestSet requests = new IO.SegmentRequestSet(asked);
+            int[] slots = new int[variants.Length];
             for (int v = 0; v < variants.Length; v++)
             {
-                foreach ((int column, IndexSegment region) in regions)
+                slots[v] = wanted[v] is { } region
+                    ? requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0))
+                    : -1;
+            }
+
+            await file.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            for (int v = 0; v < variants.Length; v++)
+            {
+                if (slots[v] < 0)
                 {
-                    if (column != variants[v])
-                    {
-                        continue;
-                    }
+                    continue;
+                }
 
-                    using Buffers.SegmentOwner bytes = await file
-                        .ReadAsync(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken)
-                        .ConfigureAwait(false);
-                    if (region.Holds(bytes.Buffer.Span) && VariantDirectory.Open(bytes.Buffer.Span) is { } body)
+                ReadOnlySpan<byte> bytes = requests.GetBuffer(slots[v]).Span;
+                if (wanted[v]!.Value.Holds(bytes) && VariantDirectory.Open(bytes) is { } body)
+                {
+                    if (PathCensus.Tells(body))
                     {
-                        if (PathCensus.Tells(body))
-                        {
-                            directories[v] = body;
-                        }
-                        else
-                        {
-                            body.Dispose();
-                        }
+                        directories[v] = body;
                     }
-
-                    break;
+                    else
+                    {
+                        body.Dispose();
+                    }
                 }
             }
         }

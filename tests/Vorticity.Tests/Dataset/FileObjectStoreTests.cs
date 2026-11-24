@@ -37,6 +37,33 @@ public sealed class FileObjectStoreTests : IDisposable
     }
 
     /// <summary>
+    /// A durable store flushes the directory that names each object it creates, however it shows it: by an exclusive rename,
+    /// by a link, by a claim of the key, or by a rename over the object. Each put succeeds, the native calls found and
+    /// answering, and a second creation of the key is told it exists.
+    /// </summary>
+    [Fact]
+    public async Task ADurableStoreFlushesTheNameOfEachObjectItCreates()
+    {
+        foreach ((string name, Func<string, FileObjectStore> open) in (IEnumerable<(string, Func<string, FileObjectStore>)>)
+        [
+            ("rename", root => new FileObjectStore(root) { Durable = true }),
+            ("link", root => new FileObjectStore(root) { Durable = true, LinksKeys = true }),
+            ("claim", root => new FileObjectStore(root) { Durable = true, ClaimsKeys = true }),
+        ])
+        {
+            await using FileObjectStore store = open(Path.Combine(_root, name));
+            Assert.Equal(PutOutcome.Created, await store.PutIfAbsentAsync("commits/1", Encoding.UTF8.GetBytes("version one"), Ct));
+            Assert.Equal(PutOutcome.Exists, await store.PutIfAbsentAsync("commits/1", Encoding.UTF8.GetBytes("another one"), Ct));
+            IObjectStore objects = store;
+            await objects.PutAsync("data/a.vortex", new System.Buffers.ReadOnlySequence<byte>(Encoding.UTF8.GetBytes("first")), PutCondition.None, Ct);
+            await objects.PutAsync("data/a.vortex", new System.Buffers.ReadOnlySequence<byte>(Encoding.UTF8.GetBytes("second")), PutCondition.None, Ct);
+            byte[] buffer = new byte[16];
+            ObjectRead read = await store.ReadAsync("data/a.vortex", 0, buffer, null, Ct);
+            Assert.Equal("second", Encoding.UTF8.GetString(buffer, 0, read.BytesRead));
+        }
+    }
+
+    /// <summary>
     /// An object read once, its file then deleted under the store: a read that names its token reads it whole from the file
     /// held open, and a read with no token finds no object; a store that keeps no file finds none either way.
     /// </summary>
