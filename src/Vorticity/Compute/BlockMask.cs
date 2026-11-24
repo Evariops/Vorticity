@@ -138,6 +138,36 @@ internal sealed class BlockMask
         return (word << 6) + BitOperations.TrailingZeroCount(bits);
     }
 
+    /// <summary>The last live block at or before <paramref name="block"/>, a word at a time; -1 when none is.</summary>
+    /// <param name="block">A block index, negative for none; one past the last block is read as the last.</param>
+    internal int PreviousLive(int block)
+    {
+        if (block < 0)
+        {
+            return -1;
+        }
+
+        block = Math.Min(block, BlockCount - 1);
+        if (block < 0)
+        {
+            return -1;
+        }
+
+        int word = block >> 6;
+        ulong bits = _bits[word] & (ulong.MaxValue >> (63 - (block & 63)));
+        while (bits == 0)
+        {
+            if (--word < 0)
+            {
+                return -1;
+            }
+
+            bits = _bits[word];
+        }
+
+        return (word << 6) + 63 - BitOperations.LeadingZeroCount(bits);
+    }
+
     /// <summary>Marks block <paramref name="block"/> as proven to hold no matching row.</summary>
     /// <param name="block">A block index below <see cref="BlockCount"/>.</param>
     internal void Kill(int block)
