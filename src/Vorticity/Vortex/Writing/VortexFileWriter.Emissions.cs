@@ -1258,7 +1258,7 @@ public sealed partial class VortexFileWriter
                 {
                     await EmittedAsync(chunk).ConfigureAwait(false);
                 }
-                catch (Exception)
+                catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "writer.given_up_piece"))
                 {
                     // Given up with the writer: its failure has no one to report to.
                 }

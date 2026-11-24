@@ -172,8 +172,9 @@ internal sealed class CoreParts : ResultParts
                 }
             }
         }
-        catch (Exception)
+        catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "aggregation.release"))
         {
+            // The parts' build failed or was called off: the release gives back what it built, and has no one to report to.
         }
 
         _built = null;

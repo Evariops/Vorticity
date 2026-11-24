@@ -637,7 +637,7 @@ internal sealed partial class DatasetScanBuilder
             ObjectLease lease = await _version.RentAsync(held.Entry, cancellationToken, rows).ConfigureAwait(false);
             await lease.DisposeAsync().ConfigureAwait(false);
         }
-        catch (Exception)
+        catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "dataset.open_ahead"))
         {
             // The read that comes to the object opens it again, and reports what fails then.
         }

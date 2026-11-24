@@ -3231,7 +3231,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
                 {
                     await staging.Assembly!.RunOrWaitAsync(_core).ConfigureAwait(false);
                 }
-                catch (Exception)
+                catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "writer.block_after_failure"))
                 {
                     // The writer fails with the block before's failure, which the caller meets.
                 }

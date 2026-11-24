@@ -898,7 +898,7 @@ internal sealed partial class DatasetScanBuilder
             await (await opening.ConfigureAwait(false)).DisposeAsync().ConfigureAwait(false);
 #pragma warning restore VSTHRD003
         }
-        catch (Exception)
+        catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "dataset.give_back"))
         {
             // An object never reached: its failure, if it is one, is met by whoever reaches it.
         }

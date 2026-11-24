@@ -1126,7 +1126,7 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
                 await read.ConfigureAwait(false);
                 lane.Context.ResetBatch();
             }
-            catch (Exception)
+            catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "scan.read_ahead"))
             {
                 // Disposal must not throw, and a read nobody waits for has no one to report to.
             }
@@ -3644,7 +3644,7 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
             {
                 await lane.Completion.ConfigureAwait(false);
             }
-            catch (Exception)
+            catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "scan.split"))
             {
                 // Disposal must not throw, and an abandoned split's failure has no one to report to.
             }

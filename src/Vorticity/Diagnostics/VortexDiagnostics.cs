@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
@@ -67,6 +68,31 @@ internal static class VortexTelemetry
     private static readonly Counter<long> SynopsisRefused = Meter.CreateCounter<long>("vortex.synopsis_cache.refused", "{region}", "Regions a synopsis cache refused, larger than its capacity.");
     private static readonly Counter<long> SynopsisCorrupt = Meter.CreateCounter<long>("vortex.synopsis_cache.corrupt", "{region}", "Regions whose file on the disk failed its checksum, dropped and read again.");
     private static readonly UpDownCounter<long> SynopsisHeld = Meter.CreateUpDownCounter<long>("vortex.synopsis_cache.held", "By", "Bytes the synopsis caches hold on the local disk.");
+
+    private static readonly Counter<long> Swallowed = Meter.CreateCounter<long>(
+        "vortex.failures.swallowed", "{failure}",
+        "Failures a path of comfort let go, a read ahead, a cache, a give-back, a periodic vacuum, by where: one that repeats shows here, where it slowed the work and stopped nothing.");
+
+    /// <summary>
+    /// Whether a path of comfort lets <paramref name="failure"/> go, where nobody waits for it and the work goes on without:
+    /// any failure but an out-of-memory, which goes on to what the process does with it, kept quiet nowhere. One let go is
+    /// counted by <paramref name="site"/> where something listens, so that a failure that repeats is seen.
+    /// </summary>
+    /// <remarks>An exception filter: <c>catch (Exception e) when (VortexTelemetry.LetsGo(e, "…"))</c>, which leaves the rest uncaught.</remarks>
+    internal static bool LetsGo(Exception failure, string site)
+    {
+        if (failure is OutOfMemoryException)
+        {
+            return false;
+        }
+
+        if (Swallowed.Enabled)
+        {
+            Swallowed.Add(1, new KeyValuePair<string, object?>("vortex.site", site));
+        }
+
+        return true;
+    }
 
     // The memory the library holds, by sort, read when a listener collects: the same numbers as MemoryReport.
     private static readonly ObservableGauge<long> MemoryLimit = Meter.CreateObservableGauge(

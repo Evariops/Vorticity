@@ -280,7 +280,7 @@ internal sealed class LevelZeroMemo : IAsyncDisposable
                 await made.DropAsync().ConfigureAwait(false);
             }
         }
-        catch (Exception)
+        catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "dataset.level_zero_copy"))
         {
             // A copy that fails, or that the memo's close stops, leaves the questions to parse the object as it lies.
         }

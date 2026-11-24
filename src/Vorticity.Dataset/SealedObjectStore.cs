@@ -1317,7 +1317,7 @@ internal sealed class SealedObjectStore : IObjectStore
             ObjectRead read = await store.ReadTailAsync(key, end, cancellationToken).ConfigureAwait(false);
             return read.BytesRead == end.Length && end.AsSpan().SequenceEqual("VTXF"u8);
         }
-        catch (Exception unread) when (unread is not OperationCanceledException)
+        catch (Exception unread) when (unread is not OperationCanceledException && VortexTelemetry.LetsGo(unread, "sealed.plain_end"))
         {
             // The object cannot even be read back to tell: the format error says more. A cancellation is the caller's, and
             // goes on: told as a plain end, it became a format error.

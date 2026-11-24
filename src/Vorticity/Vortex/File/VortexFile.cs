@@ -295,7 +295,7 @@ public sealed partial class VortexFile : IAsyncDisposable
                 {
                     await source.DisposeAsync().ConfigureAwait(false);
                 }
-                catch (Exception)
+                catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "file.close_failed_open"))
                 {
                     // Ignored: the open is already failing, and its diagnosis is worth more.
                 }
@@ -493,7 +493,7 @@ public sealed partial class VortexFile : IAsyncDisposable
             {
                 tail?.Release();
             }
-            catch (Exception)
+            catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "file.close_failed_open"))
             {
                 // Ignored: the open is already failing.
             }
