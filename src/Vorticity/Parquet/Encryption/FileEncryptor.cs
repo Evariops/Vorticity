@@ -25,12 +25,16 @@ internal sealed class FileEncryptor : IDisposable
     private readonly ModuleCipher _footer;
     private readonly Dictionary<string, ColumnEncryptor> _columns = new(StringComparer.Ordinal);
 
+    /// <summary>The footer's AAD: on the heap, since its length is the caller's prefix's.</summary>
+    private readonly byte[] _footerAad;
+
     internal FileEncryptor(ParquetEncryption options)
     {
         _options = options;
         _footer = new ModuleCipher(options.FooterKey.Span);
         Unique = RandomNumberGenerator.GetBytes(UniqueBytes);
         FileAad = [.. options.AadPrefix.Span, .. Unique];
+        _footerAad = new byte[FileAad.Length + ModuleAad.SuffixBytes];
     }
 
     /// <summary>Whether the footer is in plaintext, signed.</summary>
@@ -111,21 +115,19 @@ internal sealed class FileEncryptor : IDisposable
 
         writer.EndStruct(saved);
         writer.Flush();
-        Span<byte> aad = stackalloc byte[FileAad.Length + ModuleAad.SuffixBytes];
-        int length = ModuleAad.Write(aad, FileAad, ModuleType.Footer, -1, -1, -1);
+        int length = ModuleAad.Write(_footerAad, FileAad, ModuleType.Footer, -1, -1, -1);
         Span<byte> module = into.GetSpan(footer.Length + ModuleCipher.GcmOverhead)[..(footer.Length + ModuleCipher.GcmOverhead)];
-        _footer.Encrypt(footer, aad[..length], module);
+        _footer.Encrypt(footer, _footerAad.AsSpan(0, length), module);
         into.Advance(module.Length);
     }
 
     /// <summary>The 28 bytes that sign a plaintext <paramref name="footer"/>: a fresh nonce, and the tag GCM gives the footer under it.</summary>
     internal void Sign(ReadOnlySpan<byte> footer, Span<byte> signature)
     {
-        Span<byte> aad = stackalloc byte[FileAad.Length + ModuleAad.SuffixBytes];
-        int length = ModuleAad.Write(aad, FileAad, ModuleType.Footer, -1, -1, -1);
+        int length = ModuleAad.Write(_footerAad, FileAad, ModuleType.Footer, -1, -1, -1);
         Span<byte> nonce = signature[..ModuleCipher.NonceLength];
         RandomNumberGenerator.Fill(nonce);
-        _footer.Sign(footer, nonce, aad[..length], signature.Slice(ModuleCipher.NonceLength, ModuleCipher.TagLength));
+        _footer.Sign(footer, nonce, _footerAad.AsSpan(0, length), signature.Slice(ModuleCipher.NonceLength, ModuleCipher.TagLength));
     }
 
     public void Dispose()

@@ -1,17 +1,20 @@
 using System;
+using System.Buffers;
+using System.Buffers.Binary;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Vorticity.Parquet;
 using Vorticity.Parquet.Metadata;
+using Vorticity.Parquet.Thrift;
 using Xunit;
 
 namespace Vorticity.Tests.Parquet;
 
 /// <summary>
-/// A count a page declares sizes what its decode allocates, so a hostile one is refused as a format
-/// error before anything is sized from it: never multiplied into a size that wraps past 2^31 and
-/// leaves a block too small for the values written into it.
+/// A count or a length the file declares sizes what its read allocates, so a hostile one is refused
+/// as a format error before anything is sized from it: never multiplied into a size that wraps past
+/// 2^31 and leaves a block too small for the values written into it, never laid out on the stack.
 /// </summary>
 public sealed class DeclaredCountTests : IDisposable
 {
@@ -51,6 +54,41 @@ public sealed class DeclaredCountTests : IDisposable
 
         ParquetFormatException refused = await ScanAsync();
         Assert.Contains("the reader allows", refused.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RefusesAnAadPartPastItsBoundBeforeItSizesAnything()
+    {
+        // An encrypted footer whose algorithm stores 2 MB of unique AAD bytes: more than a thread's
+        // stack, where the AAD of the footer's module was once laid out.
+        ArrayBufferWriter<byte> tail = new();
+        ThriftCompactWriter writer = new(tail);
+        short crypto = writer.BeginStruct();
+        short algorithm = writer.BeginStructField(1);
+        short gcm = writer.BeginStructField(1);
+        writer.WriteBinaryField(2, new byte[2 * 1024 * 1024]);
+        writer.EndStruct(gcm);
+        writer.EndStruct(algorithm);
+        writer.EndStruct(crypto);
+        writer.Flush();
+        byte[] module = new byte[4 + 12 + 16];
+        BinaryPrimitives.WriteInt32LittleEndian(module, 12 + 16);
+        tail.Write(module);
+
+        ArrayBufferWriter<byte> file = new();
+        file.Write("PARE"u8);
+        file.Write(tail.WrittenSpan);
+        BinaryPrimitives.WriteInt32LittleEndian(file.GetSpan(4), tail.WrittenCount);
+        file.Advance(4);
+        file.Write("PARE"u8);
+        await System.IO.File.WriteAllBytesAsync(_path, file.WrittenSpan.ToArray(), Ct);
+
+        ParquetOpenOptions options = new() { Decryption = new ParquetDecryption { FooterKey = "footer-key-16byt"u8.ToArray() } };
+        ParquetFormatException refused = await Assert.ThrowsAsync<ParquetFormatException>(async () =>
+        {
+            await using ParquetFile opened = await VortexSession.Default.OpenParquetAsync(_path, options, Ct);
+        });
+        Assert.Contains("aad_file_unique is 2097152 bytes", refused.Message, StringComparison.Ordinal);
     }
 
     private async Task<ParquetFormatException> ScanAsync()
