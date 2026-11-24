@@ -259,7 +259,8 @@ internal sealed class AwsChain : AwsKeySource
                 }
             }
         }
-        catch (Exception malformed) when (malformed is JsonException or FormatException or InvalidOperationException)
+        // A null expiration, which the parser refuses as an argument, among the rest.
+        catch (Exception malformed) when (malformed is JsonException or FormatException or InvalidOperationException or ArgumentException)
         {
             throw new ObjectStoreException("A credentials endpoint answered with keys that could not be read.", malformed);
         }

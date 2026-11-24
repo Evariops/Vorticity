@@ -13,21 +13,38 @@ namespace Vorticity.ObjectStorage.Http;
 /// The whole content of a put held on disk, in the spool directory a store was given, so that every
 /// attempt, of a part, of the whole object, or of the upload itself, sends it again without holding it
 /// in memory. It is written as the content is read, then mapped read-only and handed out as a sequence,
-/// and the file is deleted when the spool is disposed, its put ended.
+/// and the file is deleted once the spool is disposed, its put ended, and the last request that sends it is done.
 /// </summary>
 /// <remarks>
+/// <para>
 /// The mapped pages are the file's, in the system's cache: the operating system reads them back as a
 /// request sends them and drops them under pressure, which no pooled buffer of the process does.
+/// </para>
+/// <para>
+/// The mapping is held by the spool until it is disposed, and by each request while it sends
+/// (<see cref="IBodyHolder"/>): the handler can hand a response back, an early one or a failure, while
+/// its write of the body goes on, and that write read pages the put's end had unmapped, a fault no
+/// handler catches. The file and its mapping go with the last hold.
+/// </para>
 /// </remarks>
-internal sealed unsafe class SpoolFile : IDisposable
+internal sealed unsafe class SpoolFile : IDisposable, IBodyHolder
 {
     /// <summary>The most one segment of the sequence spans: a span's length is an <see cref="int"/>.</summary>
     private const long SegmentBytes = 1L << 30;
 
     private readonly FileStream _file;
+
+    // Disposed by Unmap at the last hold, Dispose's or a send's, not by Dispose itself: a send the handler did not wait for
+    // may still read them.
+#pragma warning disable CA2213
     private MemoryMappedFile? _map;
     private MemoryMappedViewAccessor? _view;
+#pragma warning restore CA2213
     private bool _acquired;
+
+    // The spool's hold, then one a send; none once the mapping is gone.
+    private int _holds = 1;
+    private int _disposed;
 
     private SpoolFile(FileStream file) => _file = file;
 
@@ -93,9 +110,46 @@ internal sealed unsafe class SpoolFile : IDisposable
         }
     }
 
+    /// <summary>Lets go of the spool's hold: the mapping and the file go now, or when the last send ends.</summary>
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+
         Bytes = ReadOnlySequence<byte>.Empty;
+        ((IBodyHolder)this).LetGo();
+    }
+
+    bool IBodyHolder.TryHold()
+    {
+        int held = Volatile.Read(ref _holds);
+        while (held > 0)
+        {
+            int seen = Interlocked.CompareExchange(ref _holds, held + 1, held);
+            if (seen == held)
+            {
+                return true;
+            }
+
+            held = seen;
+        }
+
+        return false;
+    }
+
+    void IBodyHolder.LetGo()
+    {
+        if (Interlocked.Decrement(ref _holds) == 0)
+        {
+            Unmap();
+        }
+    }
+
+    /// <summary>Unmaps the file and deletes it, the last hold let go.</summary>
+    private void Unmap()
+    {
         if (_acquired)
         {
             _view!.SafeMemoryMappedViewHandle.ReleasePointer();
@@ -124,7 +178,7 @@ internal sealed unsafe class SpoolFile : IDisposable
         _acquired = true;
         byte* start = pointer + _view.PointerOffset;
 
-        SequenceSegment first = new SequenceSegment(new Mapped(start, (int)Math.Min(length, SegmentBytes)).Memory, 0);
+        SequenceSegment first = new SequenceSegment(new Mapped(start, (int)Math.Min(length, SegmentBytes)).Memory, 0) { Holder = this };
         SequenceSegment last = first;
         for (long offset = SegmentBytes; offset < length; offset += SegmentBytes)
         {

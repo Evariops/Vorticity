@@ -689,6 +689,14 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
 
     private async ValueTask<PutOutcome> ConsumeCompleteAsync(HttpResponseMessage response, string key, CancellationToken cancellationToken)
     {
+        // A completion sent again after its answer was lost finds its upload gone: the object's metadata says whether this
+        // put made it, as S3's NoSuchUpload is settled. Mapped by its status alone, it was a missing object.
+        if (response.StatusCode == HttpStatusCode.NotFound
+            && await ReadErrorAsync(response, cancellationToken).ConfigureAwait(false) is { Code: "NoSuchUpload" } gone)
+        {
+            throw new StoreAnswerLostException($"CompleteMultipartUpload of '{key}' found its upload gone: {gone}", new ObjectStoreException(gone.ToString()));
+        }
+
         if (response.StatusCode != HttpStatusCode.OK)
         {
             throw await FailureAsync(response, "CompleteMultipartUpload", key, null, cancellationToken).ConfigureAwait(false);
@@ -867,7 +875,7 @@ public sealed partial class GoogleCloudStorageObjectStore : IObjectStore, IUploa
     {
         int status = (int)response.StatusCode;
         string? requestId = HttpAnswers.Header(response, "x-guploader-uploadid");
-        TimeSpan? retryAfter = HttpAnswers.RetryAfter(response);
+        TimeSpan? retryAfter = HttpAnswers.RetryAfter(response, _options.Transport.TimeProvider);
         if (response.RequestMessage?.Method == HttpMethod.Head || response.Content.Headers.ContentLength == 0)
         {
             return new ServiceError(status, null, null, requestId, retryAfter);

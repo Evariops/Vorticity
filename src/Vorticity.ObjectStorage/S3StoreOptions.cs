@@ -104,6 +104,11 @@ public sealed class S3StoreOptions
     /// The size past which a put goes up in parts sent in parallel rather than whole, 32 MiB by default.
     /// A put whose condition the service takes on no part, on R2, goes whole whatever its size.
     /// </summary>
+    /// <remarks>
+    /// An upload in parts that fails is aborted, but one whose start the service took and whose answer was lost is known
+    /// to nobody, and its parts stay billed: give the bucket a lifecycle rule that aborts incomplete multipart uploads after
+    /// a day or so, as every service that speaks S3 takes.
+    /// </remarks>
     public long PartThreshold { get; init; } = UploadLimits.DefaultPartThreshold;
 
     /// <summary>

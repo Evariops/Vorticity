@@ -59,10 +59,13 @@ internal sealed class SequenceSegment : ReadOnlySequenceSegment<byte>
         RunningIndex = runningIndex;
     }
 
-    /// <summary>Chains <paramref name="memory"/> after this segment and returns its segment.</summary>
+    /// <summary>What keeps the segment's memory valid while a request sends it, or none for memory the collector keeps.</summary>
+    internal IBodyHolder? Holder { get; init; }
+
+    /// <summary>Chains <paramref name="memory"/> after this segment, held as it is, and returns its segment.</summary>
     internal SequenceSegment Append(ReadOnlyMemory<byte> memory)
     {
-        SequenceSegment next = new SequenceSegment(memory, RunningIndex + Memory.Length);
+        SequenceSegment next = new SequenceSegment(memory, RunningIndex + Memory.Length) { Holder = Holder };
         Next = next;
         return next;
     }
