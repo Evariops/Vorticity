@@ -28,15 +28,15 @@ namespace Vorticity.Dataset;
 /// </para>
 /// <para>
 /// What it seals: the commit objects, each bound to the dataset's id and its version, and the data
-/// objects, each bound to the uid its key and its entry name. Anything else under the store stays as
-/// it is, since the dataset neither writes nor reads it. A writer seals under the
+/// objects and the rollups' objects, each bound to the uid its key and its entry name. Anything else
+/// under the store stays as it is, since the dataset neither writes nor reads it. A writer seals under the
 /// data key of the newest commit object it has read, so the writers of a dataset share one, and
 /// <see cref="RekeyAsync"/> draws another for the next commit.
 /// </para>
 /// <para>
 /// What it opens: the commit objects only, by their head, in the one request a plain one costs when the
-/// store gives the object's length with its answer. A data object is opened by the dataset's object
-/// cache through a sealed reader over the store's own bytes (<see cref="OpenDataAsync(string, UInt128, long, CancellationToken, ISealedFrameCache?, bool)"/>),
+/// store gives the object's length with its answer. A data object, and a rollup's object, is opened through
+/// a sealed reader over the store's own bytes (<see cref="OpenDataAsync(string, UInt128, long, CancellationToken, ISealedFrameCache?, bool)"/>),
 /// which serves the Vortex open from the read that brought the trailer. A read with no open keeps the
 /// trailer and the frames of the declared regions in the session's synopsis cache, the sealed bytes as
 /// the store holds them. A head says what the store holds: the sealed length.
@@ -340,7 +340,7 @@ internal sealed class SealedObjectStore : IObjectStore
             Interlocked.CompareExchange(ref _kind, Plain, Unknown);
         }
 
-        if (!Seals || (!commit && !TryUid(key, out _)))
+        if (!Seals || (!commit && !TryUid(key, out _) && !TryRollupUid(key, out _)))
         {
             return (await _inner.PutAsync(key, content, condition, cancellationToken).ConfigureAwait(false), content.Length);
         }
@@ -366,13 +366,15 @@ internal sealed class SealedObjectStore : IObjectStore
     {
         bool commit = CommitKey.TryParse(key, out ulong version);
         bool data = !commit && TryUid(key, out _);
+        UInt128 rollup = default;
+        bool rolledUp = !commit && !data && TryRollupUid(key, out rollup);
         if (commit)
         {
             // The first commit of a dataset created plain in a session that holds a keyring.
             Interlocked.CompareExchange(ref _kind, Plain, Unknown);
         }
 
-        if (!Seals || (!commit && !data))
+        if (!Seals || (!commit && !data && !rolledUp))
         {
             return (await _inner.PutAsync(key, content, length, maxLength, condition, cancellationToken).ConfigureAwait(false), length);
         }
@@ -389,6 +391,11 @@ internal sealed class SealedObjectStore : IObjectStore
         if (commit)
         {
             RandomNumberGenerator.Fill(objectId);
+        }
+        else if (rolledUp)
+        {
+            // Bound as a data object is, to the uid its entry names, which its reader checks (OpenDataAsync).
+            UidBytes(rollup).CopyTo(objectId, 0);
         }
         else
         {
@@ -1243,6 +1250,16 @@ internal sealed class SealedObjectStore : IObjectStore
             && key.StartsWith(CommitKey.DataPrefix, StringComparison.Ordinal)
             && key.EndsWith(CommitKey.DataSuffix, StringComparison.Ordinal)
             && Guid.TryParseExact(key.AsSpan(CommitKey.DataPrefix.Length, 32), "N", out uid);
+    }
+
+    /// <summary>The uid a rollup's key names: <c>rollups/&lt;uid&gt;.vxr</c>, the uid in 32 hexadecimal digits (<see cref="CommitKey.ForRollup"/>).</summary>
+    internal static bool TryRollupUid(string key, out UInt128 uid)
+    {
+        uid = default;
+        return key.Length == CommitKey.RollupPrefix.Length + 32 + CommitKey.RollupSuffix.Length
+            && key.StartsWith(CommitKey.RollupPrefix, StringComparison.Ordinal)
+            && key.EndsWith(CommitKey.RollupSuffix, StringComparison.Ordinal)
+            && UInt128.TryParse(key.AsSpan(CommitKey.RollupPrefix.Length, 32), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out uid);
     }
 
     /// <summary>The 16 bytes of an entry's uid as a sealed object's id holds them: the identity's own bytes.</summary>
