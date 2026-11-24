@@ -668,7 +668,9 @@ internal static class ColumnStores
             {
                 // A variant is the struct of its metadata and its value wearing the variant dtype:
                 // the shape a read delivers, and the one the writer writes as vortex.parquet.variant.
-                DType binary = dtype.Arena.Binary(Nullability.NonNullable);
+                // Their binary dtype is the store's own, never derived in the schema's arena, which a
+                // dataset's writers share as they start side by side.
+                DType binary = new DTypeArena().Binary(Nullability.NonNullable);
                 return new StructStore(dtype, [new VarBinStore(binary, account), new VarBinStore(binary, account)], account);
             }
 
@@ -680,7 +682,9 @@ internal static class ColumnStores
             {
                 // A map is its list of entries, each a non-nullable {key, value}: the shape the
                 // decoder reads a map back as, so the node this builds is the one a read delivers.
-                DType entries = dtype.Arena.Struct(["key", "value"], [dtype.KeyType, dtype.ValueType], Nullability.NonNullable);
+                // The entries' struct is composed in an arena of the store's, never in the schema's.
+                DTypeArena types = new DTypeArena();
+                DType entries = types.Struct(["key", "value"], [DTypeImport.Into(types, dtype.KeyType), DTypeImport.Into(types, dtype.ValueType)], Nullability.NonNullable);
                 return new ListStore(dtype, Create(entries, account), account);
             }
             case DTypeKind.Extension:
