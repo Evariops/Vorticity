@@ -251,7 +251,9 @@ public sealed class VortexSessionOptions
     /// <summary>
     /// The keys the session seals files with and opens sealed files with; null, the default, opens
     /// none and seals none. A sealed file opens whenever its key is in the ring, whatever
-    /// <see cref="EncryptFiles"/> and <see cref="RefusePlaintext"/> say.
+    /// <see cref="EncryptFiles"/> and <see cref="RefusePlaintext"/> say, and a plain file opens too
+    /// unless <see cref="RefusePlaintext"/> is set: a ring alone does not tell sealed data from bytes
+    /// put in its place.
     /// </summary>
     /// <remarks>
     /// The keyring is the host's: disposing the session leaves it alone, and wipes only the data keys

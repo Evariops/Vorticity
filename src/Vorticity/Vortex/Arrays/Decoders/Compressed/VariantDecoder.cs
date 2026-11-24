@@ -346,7 +346,7 @@ internal ref struct ShreddedSlices
         }
 
         CanonicalArena destination = context.Canonical;
-        VortexBuffer views = destination.AllocateUninitialized(checked(rows * ViewSize), 64, out Span<byte> into);
+        VortexBuffer views = destination.AllocateUninitialized(ArrayDecodeContext.CheckedMultiply(rows, ViewSize, "a variant's views"), 64, out Span<byte> into);
         if (!context.Scan.BeginSlice())
         {
             return false;
@@ -619,7 +619,7 @@ internal static class ShreddedTree
 
             int rows = arena.GetNode(node).Length;
             Validity validity = arena.GetNode(node).Validity;
-            int bytes = checked(rows * CanonicalSupport.ViewSize);
+            int bytes = ArrayDecodeContext.CheckedMultiply(rows, CanonicalSupport.ViewSize, "a variant's views");
             VortexBuffer views = arena.AllocateUninitialized(Math.Max(bytes, 1), 64, out Span<byte> into).Slice(0, bytes);
             bool sized;
             plan.BeginHollow();

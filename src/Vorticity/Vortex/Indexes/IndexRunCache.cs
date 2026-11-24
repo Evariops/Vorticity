@@ -177,6 +177,8 @@ internal sealed class IndexRunCache
                 return held.Value.Segment;
             }
 
+            // A segment past the budget is not held: the caller reads it and lets it go, its blocks the collector's as an
+            // evicted one's are, since nothing tells when its last reader is done.
             if (bytes > _budget)
             {
                 return segment;

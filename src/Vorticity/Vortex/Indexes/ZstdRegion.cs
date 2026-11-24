@@ -96,20 +96,23 @@ internal static class ZstdRegion
             int size = (int)declared;
             Block<byte> body = Blocks.Rent<byte>(size);
             ZstdDecompressor decoder = ZstdDecoders.Rent();
+            bool decoded = false;
             try
             {
-                if (decoder.Decompress(frame, body, out _, out int produced) != OperationStatus.Done || produced != size)
-                {
-                    Blocks.Return(body);
-                    return null;
-                }
+                decoded = decoder.Decompress(frame, body, out _, out int produced) == OperationStatus.Done && produced == size;
             }
             finally
             {
                 ZstdDecoders.Return(decoder);
+
+                // A frame refused, or one the decoder threw on, gives its body back either way.
+                if (!decoded)
+                {
+                    Blocks.Return(body);
+                }
             }
 
-            return body;
+            return decoded ? body : null;
         }
         catch (VortexFormatException)
         {

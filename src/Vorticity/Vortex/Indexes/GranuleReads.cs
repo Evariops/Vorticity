@@ -245,7 +245,9 @@ internal sealed class GranulePlans(
         }
 
         (long Start, long Length)[] layout = ArrayBlobReader.BufferLayout(chunk.Tree.Span, out long regionLength);
-        if (regionLength <= 0 || regionLength > spec.Length)
+        // A region past what one buffer holds, of a segment of up to 4 GiB, is read whole as the chunk: planned, the read cast
+        // its length to an int, checked, and threw the arithmetic's overflow.
+        if (regionLength <= 0 || regionLength > spec.Length || regionLength > Array.MaxLength)
         {
             return false;
         }
@@ -300,7 +302,7 @@ internal sealed class GranulePlans(
         }
 
         (long Start, long Length)[] layout = ArrayBlobReader.BufferLayout(part.Tree.Span, out long regionLength);
-        if (regionLength <= 0 || regionLength > part.Length)
+        if (regionLength <= 0 || regionLength > part.Length || regionLength > Array.MaxLength)
         {
             return false;
         }

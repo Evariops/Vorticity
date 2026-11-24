@@ -23,8 +23,13 @@ namespace Vorticity.Indexes;
 /// </para>
 /// <para>
 /// An encoding whose geometry is not known here makes the chunk be read whole: the plan is a hint for the reads, and a
-/// decode that reads a byte the plan left out would read zeros, so the plan holds every byte the range decode touches or
-/// it gives up.
+/// decode that reads a byte the plan left out would read whatever the arena left there, without an error, so the plan
+/// holds every byte the range decode touches or it gives up. What says each encoding's geometry is each decoder's
+/// <c>DecodeRange</c>, read again here: the dataset's reads of a few granules, checked against LINQ, take every
+/// encoding the plan walks, and are what tells a decoder changed without this.
+/// </para>
+/// <para>
+/// A zigzag walks as a frame of reference does, the same branch; a column of nulls holds no buffer.
 /// </para>
 /// </remarks>
 internal sealed class GranuleBytes

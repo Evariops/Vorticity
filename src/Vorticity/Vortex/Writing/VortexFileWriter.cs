@@ -37,6 +37,12 @@ namespace Vorticity;
 /// </remarks>
 public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, IBatchWork
 {
+    /// <summary>
+    /// The root fields whose scratch a step keeps on the stack, a kibibyte of indexes: a schema wider takes a pooled block,
+    /// since the fields are the caller's and a stack sized by them overflows at a few hundred thousand.
+    /// </summary>
+    private const int StackFields = 256;
+
     private readonly ISegmentSink _sink;
     private readonly DType _schema;
     private readonly int _fieldCount;
@@ -2928,7 +2934,8 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         DType dtype = block.DType;
         int rows = block.Length;
         Validity validity = block.Validity;
-        Span<int> fields = stackalloc int[_fieldCount];
+        using Scratch<int> fieldScratch = new Scratch<int>(_fieldCount, stackalloc int[StackFields]);
+        Span<int> fields = fieldScratch.Span;
         for (int field = 0; field < _fieldCount; field++)
         {
             fields[field] = block.GetFieldIndex(field);
@@ -5866,43 +5873,51 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         ScalarStore scalars = Blobs.Scalars();
         int fields = _isTabular ? _fieldCount : 1;
         Buffers.Block<int> entries = Buffers.Blocks.Rent<int>(Math.Max(fields, 1));
-        for (int field = 0; field < fields; field++)
+        int vector;
+        try
         {
-            ColumnWriter writer = _columns[field];
-            BlockStats merged = writer.Chunk(0, writer.Blocks.Count);
-
-            // An extension's blocks are its storage's: a timestamp's bounds are its integers'.
-            DType stored = Stored(_isTabular ? _schema.GetField(field) : _schema);
-
-            ArrayStatsValues values = default;
-            values.MinPrecision = StatPrecision.Exact;
-            values.MaxPrecision = StatPrecision.Exact;
-            if (_append is not null)
+            for (int field = 0; field < fields; field++)
             {
-                AppendStatistics(field, ref values);
-            }
-            else if (merged.IsPresent)
-            {
-                values.NullCount = (ulong)merged.NullCount;
-                values.IsSorted = merged.IsSorted;
-                values.IsStrictSorted = merged.IsStrictSorted;
-                if (merged.HasBounds && stored.Kind == DTypeKind.Primitive)
+                ColumnWriter writer = _columns[field];
+                BlockStats merged = writer.Chunk(0, writer.Blocks.Count);
+
+                // An extension's blocks are its storage's: a timestamp's bounds are its integers'.
+                DType stored = Stored(_isTabular ? _schema.GetField(field) : _schema);
+
+                ArrayStatsValues values = default;
+                values.MinPrecision = StatPrecision.Exact;
+                values.MaxPrecision = StatPrecision.Exact;
+                if (_append is not null)
                 {
-                    values.Min = ScalarProtobuf.SerializeValue(Bound(scalars, stored.PType, merged.Min));
-                    values.Max = ScalarProtobuf.SerializeValue(Bound(scalars, stored.PType, merged.Max));
+                    AppendStatistics(field, ref values);
+                }
+                else if (merged.IsPresent)
+                {
+                    values.NullCount = (ulong)merged.NullCount;
+                    values.IsSorted = merged.IsSorted;
+                    values.IsStrictSorted = merged.IsStrictSorted;
+                    if (merged.HasBounds && stored.Kind == DTypeKind.Primitive)
+                    {
+                        values.Min = ScalarProtobuf.SerializeValue(Bound(scalars, stored.PType, merged.Min));
+                        values.Max = ScalarProtobuf.SerializeValue(Bound(scalars, stored.PType, merged.Max));
+                    }
+
+                    if (stored.Kind == DTypeKind.Primitive && stored.PType.IsFloat() && !merged.NansUnknown)
+                    {
+                        values.NanCount = (ulong)merged.NanCount;
+                    }
                 }
 
-                if (stored.Kind == DTypeKind.Primitive && stored.PType.IsFloat() && !merged.NansUnknown)
-                {
-                    values.NanCount = (ulong)merged.NanCount;
-                }
+                entries[field] = ArrayWriter.WriteStats(builder, in values);
             }
 
-            entries[field] = ArrayWriter.WriteStats(builder, in values);
+            vector = builder.CreateOffsetVector(entries.AsSpan(0, fields));
+        }
+        finally
+        {
+            Buffers.Blocks.Return(entries);
         }
 
-        int vector = builder.CreateOffsetVector(entries.AsSpan(0, fields));
-        Buffers.Blocks.Return(entries);
         builder.StartTable();
         builder.AddOffset(SchemaFieldIds.FileStatisticsFieldStats, vector);
         int table = builder.EndTable();

@@ -75,7 +75,7 @@ internal sealed class PcoDecoder : ArrayDecoder
         if (valid == length)
         {
             output = CompressedValues.AllocateUninitialized(context, outputBytes, width, Id, out Span<byte> destination);
-            DecodeValues(node, wrapper, number, destination, ranks: default);
+            DecodeValues(node, wrapper, number, destination, ranks: default, context.Canonical.Account);
         }
         else
         {
@@ -84,7 +84,7 @@ internal sealed class PcoDecoder : ArrayDecoder
             Block<byte> dense = Blocks.Rent<byte>(denseBytes);
             try
             {
-                DecodeValues(node, wrapper, number, dense, ranks: default);
+                DecodeValues(node, wrapper, number, dense, ranks: default, context.Canonical.Account);
                 ValidityMask mask = ValidityMask.From(context, validity);
                 ValidRows.Spread(dense.AsSpan(0, valid * width), destination, in mask, length, width, Id);
             }
@@ -128,7 +128,7 @@ internal sealed class PcoDecoder : ArrayDecoder
             : CompressedValues.Allocate(context, outputBytes, width, Id, out destination);
         if (valid != 0)
         {
-            DecodeValues(node, wrapper, number, destination, ranks.Span);
+            DecodeValues(node, wrapper, number, destination, ranks.Span, context.Canonical.Account);
         }
 
         Validity selected = context.DecodeValiditySelected(in node, 0, dtype.Nullability, length, wanted);
@@ -222,7 +222,7 @@ internal sealed class PcoDecoder : ArrayDecoder
     /// value copied into its row of <paramref name="destination"/>.
     /// </summary>
     private static void DecodeValues(
-        in ArrayNode node, PcoWrapperMetadata wrapper, PcoNumber number, Span<byte> destination, ReadOnlySpan<int> ranks)
+        in ArrayNode node, PcoWrapperMetadata wrapper, PcoNumber number, Span<byte> destination, ReadOnlySpan<int> ranks, MemoryAccount account)
     {
         int width = number.LatentBits / 8;
         bool selected = !ranks.IsEmpty;
@@ -245,6 +245,13 @@ internal sealed class PcoDecoder : ArrayDecoder
         // kept for the next decode rather than built by each, since neither holds a file's data
         // past the page or the chunk that refills it.
         Reused reused = TakeSpare();
+
+        // The windows of lookbacks rented under the decode's account while it holds the states, never past it.
+        foreach (PcoLatentState state in reused.States)
+        {
+            state.Account = account;
+        }
+
         try
         {
             PcoBatchScratch batchScratch = new PcoBatchScratch(
@@ -326,8 +333,13 @@ internal sealed class PcoDecoder : ArrayDecoder
         }
         finally
         {
-            // A dictionary is rented by its chunk; the metadata kept for the next decode holds none.
+            // A dictionary is rented by its chunk; the metadata kept for the next decode holds none, and the states no account.
             reused.Meta.Release();
+            foreach (PcoLatentState state in reused.States)
+            {
+                state.Account = null;
+            }
+
             GiveSpare(reused);
             Blocks.Return(pageRental);
 

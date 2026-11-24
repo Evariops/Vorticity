@@ -107,8 +107,10 @@ internal sealed class GranuleKeyRuns
 
             return bytes[0] == Version ? Values(ref reader, (int)granules, bytes.Length) : Runs(ref reader, (int)granules, bytes.Length);
         }
-        catch (VortexFormatException)
+        catch (Exception e) when (e is VortexFormatException or OverflowException)
         {
+            // A row read past a long by a checked conversion costs the runs, as a malformed varint does: the neighbours'
+            // filter, where the overflow went past this one.
             return null;
         }
     }

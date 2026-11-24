@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Threading.Tasks.Sources;
 using Vorticity.Arrays;
+using Vorticity.Arrays.Decoders.Canonical;
 using Vorticity.Execution;
 using Vorticity.Types.Variants;
 using Vorticity.Writing;
@@ -318,7 +319,8 @@ public sealed partial class VortexFileWriter
         }
 
         CanonicalNode root = arena.GetNode(node);
-        Span<int> nodes = stackalloc int[_fieldCount];
+        using Scratch<int> nodeScratch = new Scratch<int>(_fieldCount, stackalloc int[StackFields]);
+        Span<int> nodes = nodeScratch.Span;
         for (int field = 0; field < _fieldCount; field++)
         {
             nodes[field] = root.GetFieldIndex(field);
@@ -399,7 +401,8 @@ public sealed partial class VortexFileWriter
         ShredChain?[]? chains = Chains();
         IndexWriter? indexes = _indexes is { AsksNothing: false, Streams: true } streaming ? streaming : null;
         bool apart = indexes is not null && KeysApart(indexes) > 0;
-        Span<bool> which = stackalloc bool[taken.Length];
+        using Scratch<bool> whichScratch = new Scratch<bool>(taken.Length, stackalloc bool[StackFields]);
+        Span<bool> which = whichScratch.Span;
         bool any = false;
         for (int field = 0; field < taken.Length; field++)
         {
@@ -755,7 +758,8 @@ public sealed partial class VortexFileWriter
 
         // Each shredded column's rows read alone, beside anything, then taken along its chain after the flight before's: the
         // chain adds what the block's read took, a copy.
-        Span<int> blocks = stackalloc int[_fieldCount];
+        using Scratch<int> blockScratch = new Scratch<int>(_fieldCount, stackalloc int[StackFields]);
+        Span<int> blocks = blockScratch.Span;
         blocks.Fill(-1);
         for (int field = 0; field < flight.ShredAt.Length; field++)
         {
@@ -779,7 +783,8 @@ public sealed partial class VortexFileWriter
             }
         }
 
-        Span<int> reads = stackalloc int[_fieldCount];
+        using Scratch<int> readScratch = new Scratch<int>(_fieldCount, stackalloc int[StackFields]);
+        Span<int> reads = readScratch.Span;
         reads.Fill(-1);
         for (int field = 0; groups > 0 && field < _fieldCount; field++)
         {
@@ -802,7 +807,8 @@ public sealed partial class VortexFileWriter
             }
         }
 
-        Span<int> ingest = stackalloc int[(_fieldCount * 3) + 1];
+        using Scratch<int> ingestScratch = new Scratch<int>((_fieldCount * 3) + 1, stackalloc int[(StackFields * 3) + 1]);
+        Span<int> ingest = ingestScratch.Span;
         int count = IngestItems(flight.Arena, flight.FieldNodes, ingest);
         for (int i = 0; i < count; i++)
         {
@@ -1513,6 +1519,13 @@ public sealed partial class VortexFileWriter
                 {
                     if (!quietly && Volatile.Read(ref _error) is { } failure)
                     {
+                        // A writer given up throws an exception of its own: the marker is every line's, and a throw writes
+                        // its stack into it.
+                        if (ReferenceEquals(failure, GivenUp))
+                        {
+                            throw new OperationCanceledException(GivenUp.Message);
+                        }
+
                         ExceptionDispatchInfo.Throw(failure);
                     }
 

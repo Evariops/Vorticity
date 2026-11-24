@@ -73,7 +73,7 @@ public sealed partial class VortexFileWriter
         CancellationToken cancellationToken) =>
         await AppendAsync(path, options, wrap, VortexSession.Default, cancellationToken).ConfigureAwait(false);
 
-    private static async ValueTask<VortexFileWriter> AppendAsync(
+    internal static async ValueTask<VortexFileWriter> AppendAsync(
         string path,
         VortexWriteOptions? options,
         Func<Stream, long, ISegmentSink>? wrap,
@@ -106,9 +106,39 @@ public sealed partial class VortexFileWriter
             }
 
             plan = await AppendPlan.ReadAsync(file, options, sealedLayout is not null, cancellationToken).ConfigureAwait(false);
-            metadata = await UserMetadata.ReadAsync(file, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                metadata = await UserMetadata.ReadAsync(file, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                plan.Release();
+                throw;
+            }
         }
 
+        // What the plan holds goes back once the writer is made and has written the reopened rows, or failed to.
+        try
+        {
+            return await OpenAppendWriterAsync(path, options, wrap, session, plan, metadata, sealedLayout, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            plan.Release();
+        }
+    }
+
+    /// <summary>The append's writer over <paramref name="plan"/>, the reopened rows written.</summary>
+    private static async ValueTask<VortexFileWriter> OpenAppendWriterAsync(
+        string path,
+        VortexWriteOptions? options,
+        Func<Stream, long, ISegmentSink>? wrap,
+        VortexSession session,
+        AppendPlan plan,
+        ImmutableDictionary<string, ReadOnlyMemory<byte>> metadata,
+        Sealing.SealedLayout? sealedLayout,
+        CancellationToken cancellationToken)
+    {
         VortexWriteOptions effective = (options ?? VortexWriteOptions.Default).ForAppend(
             plan.BlockRows,
             options is null ? plan.Policy ?? WritePolicy.Auto : options.WritePolicy,
@@ -206,8 +236,8 @@ public sealed partial class VortexFileWriter
                 pipe.Complete();
             }
 
+            // The plan's scratch, which no writer took, goes back with the plan.
             account.Dispose();
-            plan.AbsorbedScratch?.Dispose();
             throw;
         }
     }
@@ -230,8 +260,8 @@ public sealed partial class VortexFileWriter
         }
         catch
         {
+            // The plan's scratch, which no writer took, goes back with the plan.
             await stream.DisposeAsync().ConfigureAwait(false);
-            plan.AbsorbedScratch?.Dispose();
             throw;
         }
     }
@@ -510,6 +540,12 @@ public sealed partial class VortexFileWriter
 
         internal required List<RecordBatch> Reopened { get; init; }
 
+        /// <summary>The arenas the reopened rows are copied into, reset by <see cref="Release"/> whether written or not.</summary>
+        internal List<CanonicalArena> ReopenedArenas { get; init; } = [];
+
+        /// <summary>The account the reopened rows count under until <see cref="Release"/>, or none when no chunk is reopened.</summary>
+        internal WorkAccount? ReopenedAccount { get; init; }
+
         internal required IReadOnlyList<IndexEntry> Entries { get; init; }
 
         internal WritePolicy? Policy { get; init; }
@@ -687,79 +723,110 @@ public sealed partial class VortexFileWriter
             }
 
             // The re-opened chunk, owned: the file is closed before the append writes. Its blocks count under an account
-            // of the append's own until the writer has absorbed them; the collector closes it once nothing holds them.
+            // of the append's own until the writer has absorbed them, when the plan gives them back and closes it; a
+            // failure before gives them back here. Closed by the collector alone, the account was left to a finalizer.
             List<RecordBatch> reopened = [];
-            if (reopen)
-            {
-                WorkAccount reopening = new WorkAccount(QueryMemoryBudget.JobsOf(file.Session), "append");
-                await foreach (RecordBatch batch in file.ScanBuilder()
-                    .Rows(new RowRange(keptRows, rows))
-                    .WithPruning(false)
-                    .WithIndexes(false)
-                    .ExecuteAsync()
-                    .WithCancellation(cancellationToken)
-                    .ConfigureAwait(false))
-                {
-                    CanonicalArena owned = new CanonicalArena(64, reopening);
-                    int root = owned.CopyFrom(batch.Arena, batch.RootIndex);
-                    reopened.Add(new RecordBatch(owned, root, batch.StartRow));
-                }
-            }
-
-            List<long> keptChunkRows = [];
-            for (int c = 0; c < keptChunks; c++)
-            {
-                long end = c + 1 < first.Count ? first[c + 1].Start : rows;
-                keptChunkRows.Add(end - first[c].Start);
-            }
-
-            // The run tails the append will merge are read now, while the file is still open for
-            // reading, into a scratch the writer takes over.
+            List<CanonicalArena> reopenedArenas = [];
+            WorkAccount? reopening = reopen ? new WorkAccount(QueryMemoryBudget.JobsOf(file.Session), "append") : null;
             RunScratch? scratch = null;
-            List<AbsorbedEntry>? absorbed = null;
-            if (directory is { Entries.Count: > 0 })
+            try
             {
-                scratch = new RunScratch(
-                    options?.ScratchMemoryBytes ?? IndexWriter.DefaultScratchMemoryBytes, options?.ScratchDirectory, sealScratch);
-                try
+                if (reopening is not null)
                 {
-                    absorbed = await RunAbsorb.ReadAsync(file, directory.Entries, boundary, scratch, cancellationToken).ConfigureAwait(false);
-                }
-                catch
-                {
-                    scratch.Dispose();
-                    throw;
+                    await foreach (RecordBatch batch in file.ScanBuilder()
+                        .Rows(new RowRange(keptRows, rows))
+                        .WithPruning(false)
+                        .WithIndexes(false)
+                        .ExecuteAsync()
+                        .WithCancellation(cancellationToken)
+                        .ConfigureAwait(false))
+                    {
+                        CanonicalArena owned = new CanonicalArena(64, reopening);
+                        reopenedArenas.Add(owned);
+                        int root = owned.CopyFrom(batch.Arena, batch.RootIndex);
+                        reopened.Add(new RecordBatch(owned, root, batch.StartRow));
+                    }
                 }
 
-                if (absorbed.Count == 0)
+                List<long> keptChunkRows = [];
+                for (int c = 0; c < keptChunks; c++)
                 {
-                    scratch.Dispose();
-                    scratch = null;
-                    absorbed = null;
+                    long end = c + 1 < first.Count ? first[c + 1].Start : rows;
+                    keptChunkRows.Add(end - first[c].Start);
                 }
+
+                // The run tails the append will merge are read now, while the file is still open for
+                // reading, into a scratch the writer takes over.
+                List<AbsorbedEntry>? absorbed = null;
+                if (directory is { Entries.Count: > 0 })
+                {
+                    scratch = new RunScratch(
+                        options?.ScratchMemoryBytes ?? IndexWriter.DefaultScratchMemoryBytes, options?.ScratchDirectory, sealScratch);
+                    absorbed = await RunAbsorb.ReadAsync(file, directory.Entries, boundary, scratch, cancellationToken).ConfigureAwait(false);
+                    if (absorbed.Count == 0)
+                    {
+                        scratch.Dispose();
+                        scratch = null;
+                        absorbed = null;
+                    }
+                }
+
+                // Read before the plan is made, so that its failure disposes the scratch as the others' do.
+                PlanSeed?[] seeds = await SeedsAsync(file, schema, chunks, cancellationToken).ConfigureAwait(false);
+                return new AppendPlan
+                {
+                    Schema = schema,
+                    FileLength = file.FileLength,
+                    BlockRows = blockRows,
+                    Boundary = boundary,
+                    Rows = rows,
+                    KeptRows = keptRows,
+                    KeptChunkRows = keptChunkRows,
+                    ArrayEncodings = encodings,
+                    Segments = [.. file.SegmentSpecs],
+                    Columns = columns,
+                    Seeds = seeds,
+                    Reopened = reopened,
+                    ReopenedArenas = reopenedArenas,
+                    ReopenedAccount = reopening,
+                    Entries = directory?.Entries ?? [],
+                    Policy = directory?.Policy,
+                    BudgetPerMille = directory?.BudgetPerMille ?? IndexDirectory.DefaultBudgetPerMille,
+                    Statistics = statistics,
+                    Absorbed = absorbed,
+                    AbsorbedScratch = scratch,
+                };
+            }
+            catch
+            {
+                scratch?.Dispose();
+                ReleaseReopened(reopenedArenas, reopening);
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Gives back what the plan holds that the writer did not take: the reopened rows' blocks, written or not, their
+        /// account, and the scratch of the run tails while no writer took it. Called once the append's writer is made and has
+        /// written the reopened rows, or failed to.
+        /// </summary>
+        internal void Release()
+        {
+            ReleaseReopened(ReopenedArenas, ReopenedAccount);
+            RunScratch? scratch = AbsorbedScratch;
+            AbsorbedScratch = null;
+            scratch?.Dispose();
+        }
+
+        /// <summary>Resets <paramref name="arenas"/>, a reset arena untouched, then closes <paramref name="account"/>.</summary>
+        private static void ReleaseReopened(List<CanonicalArena> arenas, WorkAccount? account)
+        {
+            foreach (CanonicalArena arena in arenas)
+            {
+                arena.Reset();
             }
 
-            return new AppendPlan
-            {
-                Schema = schema,
-                FileLength = file.FileLength,
-                BlockRows = blockRows,
-                Boundary = boundary,
-                Rows = rows,
-                KeptRows = keptRows,
-                KeptChunkRows = keptChunkRows,
-                ArrayEncodings = encodings,
-                Segments = [.. file.SegmentSpecs],
-                Columns = columns,
-                Seeds = await SeedsAsync(file, schema, chunks, cancellationToken).ConfigureAwait(false),
-                Reopened = reopened,
-                Entries = directory?.Entries ?? [],
-                Policy = directory?.Policy,
-                BudgetPerMille = directory?.BudgetPerMille ?? IndexDirectory.DefaultBudgetPerMille,
-                Statistics = statistics,
-                Absorbed = absorbed,
-                AbsorbedScratch = scratch,
-            };
+            account?.Dispose();
         }
 
         /// <summary>

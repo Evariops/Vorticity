@@ -109,6 +109,9 @@ internal sealed class ColumnLocate : IValueGranules
     internal void Or(int place, Span<ulong> granules)
     {
         int count = Granules;
+
+        // The vector loop stores unchecked: a map shorter than the locate's granules would be written past.
+        ArgumentOutOfRangeException.ThrowIfLessThan(granules.Length, (count + 63) / 64, nameof(granules));
         switch (_kinds[place])
         {
             case Everywhere:

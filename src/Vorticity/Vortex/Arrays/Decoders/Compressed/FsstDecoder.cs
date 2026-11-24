@@ -118,8 +118,9 @@ internal sealed class FsstDecoder : ArrayDecoder
     /// <para>
     /// Equal values compress to equal codes, and equal codes decompress to equal values, so code
     /// equality is value equality. The first half holds because compression takes the longest
-    /// symbol that matches at each position, whatever order the symbols are examined in; the second
-    /// is decompression being a function.
+    /// symbol that matches at each position, where the table leaves no choice, which the literal's
+    /// compression checks at each of its positions and declines otherwise; the second is
+    /// decompression being a function.
     /// </para>
     /// <para>
     /// Only equality and its negation. An ordering on codes is not an ordering on the bytes they
@@ -332,12 +333,12 @@ internal sealed class FsstDecoder : ArrayDecoder
     {
         ReadOnlySpan<T> offsets = System.Runtime.InteropServices.MemoryMarshal
             .Cast<byte, T>(raw)[..(length + 1)];
-        long origin = long.CreateChecked(offsets[0]);
+        long origin = Origin(offsets[0], stream.Length);
         long previous = origin;
         bool allValid = rows.IsAllValid;
         for (int row = 0; row < length; row++)
         {
-            long next = long.CreateChecked(offsets[row + 1]);
+            long next = long.CreateSaturating(offsets[row + 1]);
             if (next < previous || next - origin > stream.Length)
             {
                 BadSpan(row, previous, next, stream.Length);
@@ -752,14 +753,14 @@ internal sealed class FsstDecoder : ArrayDecoder
     {
         ReadOnlySpan<T> offsets = System.Runtime.InteropServices.MemoryMarshal
             .Cast<byte, T>(raw)[..(length + 1)];
-        long origin = long.CreateChecked(offsets[0]);
+        long origin = Origin(offsets[0], stream.Length);
         long previous = origin;
 
         // Asked once: a column with no nulls, the common one, costs no call a row to say so.
         bool allValid = rows.IsAllValid;
         for (int row = 0; row < length; row++)
         {
-            long next = long.CreateChecked(offsets[row + 1]);
+            long next = long.CreateSaturating(offsets[row + 1]);
             if (next < previous || next - origin > stream.Length)
             {
                 BadSpan(row, previous, next, stream.Length);
@@ -790,6 +791,23 @@ internal sealed class FsstDecoder : ArrayDecoder
     private static void BadSpan(int row, long previous, long next, int stream) =>
         CompressedThrow.Format($"{Id} row {row} spans codes [{previous}, {next}) of a {stream}-byte stream.");
 
+    /// <summary>
+    /// The first offset of the rows' codes as a long. Every offset is read saturated, so that one past a long, of 64-bit
+    /// unsigned offsets, falls past the stream and into <see cref="BadSpan"/>, where a checked conversion threw the
+    /// arithmetic's overflow; the first one alone, which the others are measured from, is refused here.
+    /// </summary>
+    private static long Origin<T>(T first, int stream)
+        where T : System.Numerics.IBinaryInteger<T>
+    {
+        long origin = long.CreateSaturating(first);
+        if (origin == long.MaxValue)
+        {
+            BadSpan(0, origin, origin, stream);
+        }
+
+        return origin;
+    }
+
     /// <summary>Marks the rows whose code slice is the needle's, with the offsets typed once.</summary>
     /// <typeparam name="T">The physical type of <c>codes_offsets</c>.</typeparam>
     /// <param name="raw">The offsets child's bytes.</param>
@@ -813,12 +831,12 @@ internal sealed class FsstDecoder : ArrayDecoder
     {
         ReadOnlySpan<T> offsets = System.Runtime.InteropServices.MemoryMarshal
             .Cast<byte, T>(raw)[..(length + 1)];
-        long origin = long.CreateChecked(offsets[0]);
+        long origin = Origin(offsets[0], stream.Length);
         long previous = origin;
         int needleLength = wanted.Length;
         for (int row = 0; row < length; row++)
         {
-            long next = long.CreateChecked(offsets[row + 1]);
+            long next = long.CreateSaturating(offsets[row + 1]);
             if (next < previous || next - origin > stream.Length)
             {
                 BadSpan(row, previous, next, stream.Length);

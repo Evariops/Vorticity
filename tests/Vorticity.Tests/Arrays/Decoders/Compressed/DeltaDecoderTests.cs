@@ -102,6 +102,23 @@ public sealed class DeltaDecoderTests
         }
     }
 
+    /// <summary>
+    /// An array of no row sums nothing: its last block, the one before its end, is block 0 and not none at an offset of 0,
+    /// and a block of deltas was sliced off its empty buffer, an argument out of range where a file gives a format error or a
+    /// value.
+    /// </summary>
+    [Fact]
+    public void AnArrayOfNoRowDecodesToNone()
+    {
+        TestNode root = new TestNode("fastlanes.delta")
+            .WithMetadata(TestMetadata.Delta(0, 0))
+            .WithChild(new TestNode("vortex.primitive").WithBuffer(0))
+            .WithChild(new TestNode("vortex.primitive").WithBuffer(1));
+        using DecodeHarness harness = DecodeHarness.Load(root, [], []);
+        DType u32 = harness.Types.Primitive(PType.U32, Nullability.NonNullable);
+        Assert.Equal(0, harness.Node(harness.DecodeRoot(u32, 0)).Length);
+    }
+
     private static ulong Read(ReadOnlySpan<byte> bytes, int index, int width) => width switch
     {
         1 => bytes[index],

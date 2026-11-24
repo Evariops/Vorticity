@@ -55,6 +55,10 @@ public static class VortexFileRepair
     /// <summary>
     /// Leaves a valid file alone, and truncates an invalid one to the longest prefix that opens.
     /// </summary>
+    /// <remarks>
+    /// The cut is made in place and the bytes past the prefix are lost: a caller that may want them, to look at a tear
+    /// rather than mend it, copies the file first, or opens it, which reads the prefix and leaves the file as it is.
+    /// </remarks>
     /// <param name="path">The file.</param>
     /// <param name="cancellationToken">Cancels the scan.</param>
     /// <returns>What was done.</returns>
