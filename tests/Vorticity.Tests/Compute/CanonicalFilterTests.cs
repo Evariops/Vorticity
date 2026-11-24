@@ -173,4 +173,39 @@ public sealed class CanonicalFilterTests
 
         return order;
     }
+
+    /// <summary>
+    /// A fixed-size list of elements with no nulls, a uuid's sixteen bytes or three 32-bit integers, keeps each row's
+    /// elements whole and in the order of the rows asked, a row asked twice included; one of nullable elements keeps
+    /// them too, element by element.
+    /// </summary>
+    [Theory]
+    [InlineData(PType.U8, 16u, false)]
+    [InlineData(PType.I32, 3u, false)]
+    [InlineData(PType.U8, 16u, true)]
+    internal void AFixedSizeListKeepsEachRowsElementsWhole(PType ptype, uint size, bool nullableElements)
+    {
+        DTypeArena types = new DTypeArena();
+        CanonicalArena arena = new CanonicalArena();
+        int width = ptype.ByteWidth();
+        int elementCount = Rows * (int)size;
+        VortexBuffer values = arena.Allocate(elementCount * width, width, out Span<byte> bytes);
+        new Random(5).NextBytes(bytes);
+        DType element = types.Primitive(ptype, nullableElements ? Nullability.Nullable : Nullability.NonNullable);
+        Validity elementValidity = nullableElements ? Validity.AllValid : Validity.NonNullable;
+        int elements = arena.AddPrimitive(element, elementCount, elementValidity, ptype, values);
+        int list = arena.AddFixedSizeList(types.FixedSizeList(element, size, Nullability.NonNullable), Rows, Validity.NonNullable, elements, size);
+        int[] indices = [0, 7, 7, 150, Rows - 1];
+        byte[] source = bytes.ToArray();
+
+        int filtered = CanonicalFilter.Apply(arena, list, indices);
+        CanonicalNode node = arena.GetNode(filtered);
+        Assert.Equal(indices.Length, node.Length);
+        ReadOnlySpan<byte> kept = arena.GetNode(node.ElementsIndex).Values.Span;
+        int row = (int)size * width;
+        for (int i = 0; i < indices.Length; i++)
+        {
+            Assert.Equal(source.AsSpan(indices[i] * row, row).ToArray(), kept.Slice(i * row, row).ToArray());
+        }
+    }
 }

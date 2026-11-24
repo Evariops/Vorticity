@@ -22,13 +22,14 @@ internal sealed class ZoneColumn
     /// <summary>The zones one by one, or null when <see cref="_table"/> holds them.</summary>
     private readonly ZoneBounds[]? _zones;
 
-    internal ZoneColumn(FieldExpr field, long zoneLength, long rowCount, ZoneBounds[] zones, bool isDecimal = false)
+    internal ZoneColumn(FieldExpr field, long zoneLength, long rowCount, ZoneBounds[] zones, bool isDecimal = false, int scale = 0)
     {
         Field = field;
         ZoneLength = zoneLength;
         RowCount = rowCount;
         _zones = zones;
         IsDecimal = isDecimal;
+        Scale = scale;
     }
 
     /// <summary>A numeric column's zones, held as columns.</summary>
@@ -48,6 +49,9 @@ internal sealed class ZoneColumn
     /// little-endian bytes -- which order as the numbers they are, never bytewise.
     /// </summary>
     internal bool IsDecimal { get; }
+
+    /// <summary>A decimal column's scale, which its unscaled bounds are read at; 0 for any other column.</summary>
+    internal int Scale { get; }
 
     /// <summary>Rows per zone; zero means the map is unusable.</summary>
     internal long ZoneLength { get; private set; }

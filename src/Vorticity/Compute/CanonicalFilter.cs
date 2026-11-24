@@ -253,6 +253,27 @@ internal static class CanonicalFilter
             return arena.AddFixedSizeList(node.DType, count, validity, node.ElementsIndex, 0);
         }
 
+        // Elements of a fixed width with no nulls, a uuid's sixteen bytes: each row's bytes copied at once. Spread into an
+        // index per element and gathered element by element, a filter of 21 845 uuids of 65 536 took 227 µs (2026-11-24).
+        CanonicalNode child = arena.GetNode(node.ElementsIndex);
+        if (child.Kind == CanonicalKind.Primitive && child.Validity.Kind is ValidityKind.NonNullable or ValidityKind.AllValid)
+        {
+            long rowBytes = (long)size * child.PType.ByteWidth();
+            if (rowBytes * count <= int.MaxValue)
+            {
+                ReadOnlySpan<byte> from = child.Values.Span;
+                int row = (int)rowBytes;
+                VortexBuffer gathered = arena.AllocateUninitialized(row * count, CanonicalSupport.MaxRequiredAlignment, out Span<byte> into);
+                for (int i = 0; i < count; i++)
+                {
+                    from.Slice(checked(indices[i] * row), row).CopyTo(into.Slice(i * row, row));
+                }
+
+                int values = arena.AddPrimitive(child.DType, count * size, child.Validity, child.PType, gathered.Slice(0, row * count));
+                return arena.AddFixedSizeList(node.DType, count, validity, values, node.FixedSize);
+            }
+        }
+
         // No offsets to gather: the elements themselves have to be, `size` at a time.
         int elementCount = checked(count * size);
         Block<int> rented = Blocks.Rent<int>(elementCount);
