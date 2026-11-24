@@ -367,7 +367,8 @@ public readonly struct Variant : IEquatable<Variant>
             throw new VortexFormatException($"A variant value of {size} bytes is followed by {value.Length - size} more.");
         }
 
-        Check(VariantDictionary.Read(metadata), value, depth: 1);
+        int visits = value.Length;
+        Check(VariantDictionary.Read(metadata), value, depth: 1, ref visits);
         return new Variant(metadata.ToArray(), value.ToArray());
     }
 
@@ -681,10 +682,15 @@ public readonly struct Variant : IEquatable<Variant>
         return true;
     }
 
-    /// <summary>Checks that every object of <paramref name="value"/> names ids its dictionary holds, and that its values fit.</summary>
-    private static void Check(VariantDictionary dictionary, ReadOnlySpan<byte> value, int depth)
+    /// <summary>
+    /// Checks that every object of <paramref name="value"/> names ids its dictionary holds, that its values fit, and that
+    /// it holds no more nodes than <paramref name="visits"/>, its bytes: a node takes one of its own at least, so a value
+    /// past it names the same bytes from many fields, and would unfold into exponentially many nodes.
+    /// </summary>
+    private static void Check(VariantDictionary dictionary, ReadOnlySpan<byte> value, int depth, ref int visits)
     {
         VortexLimits.CheckDepth(depth, VortexLimits.MaxArrayDepth, "Variant");
+        VariantEncoding.Visit(ref visits);
         VariantKind kind = VariantScalar.KindOf(value);
         if (kind is not (VariantKind.Object or VariantKind.Array))
         {
@@ -700,7 +706,7 @@ public readonly struct Variant : IEquatable<Variant>
                 _ = dictionary[nested.IdAt(i)];
             }
 
-            Check(dictionary, nested.ValueAt(i), depth + 1);
+            Check(dictionary, nested.ValueAt(i), depth + 1, ref visits);
         }
     }
 }

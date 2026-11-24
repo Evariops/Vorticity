@@ -56,6 +56,11 @@ internal static class ApartCensus
     /// <summary>The class a question reads the variant value <paramref name="value"/> as, from its header, as a census counts it.</summary>
     internal static PathClass ClassOf(ReadOnlySpan<byte> value)
     {
+        if (value.IsEmpty)
+        {
+            throw new VortexFormatException("A variant value holds no byte, not even its header.");
+        }
+
         byte header = value[0];
         switch (header & 0x03)
         {
@@ -233,7 +238,9 @@ internal static class ApartCensus
                         int bit = BitOperations.TrailingZeroCount(bits);
                         bits &= bits - 1;
                         int row = (w << 6) + bit;
-                        Walk(length, Metadata.At(row), values.At(row), kept, fieldsOnly: (underTyped & (1UL << bit)) != 0);
+                        ReadOnlySpan<byte> walked = values.At(row);
+                        int visits = walked.Length;
+                        Walk(length, Metadata.At(row), walked, kept, fieldsOnly: (underTyped & (1UL << bit)) != 0, ref visits);
                     }
 
                     if (root)
@@ -250,8 +257,17 @@ internal static class ApartCensus
         }
 
         /// <summary>A value as it lies at the path built so far: its class, and an object's keys below it; with <paramref name="fieldsOnly"/>, its keys alone.</summary>
-        private void Walk(int length, ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value, bool kept, bool fieldsOnly, int depth = 1)
+        /// <remarks>
+        /// <paramref name="visits"/> is the nodes the row's value may still hold, one a byte: only a value whose fields name
+        /// the same bytes over and over, which would unfold into exponentially many, runs out.
+        /// </remarks>
+        private void Walk(int length, ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value, bool kept, bool fieldsOnly, ref int visits, int depth = 1)
         {
+            if (--visits < 0)
+            {
+                throw new VortexFormatException("A variant value names more nodes than its bytes hold: its fields share their bytes.");
+            }
+
             PathClass @class = ClassOf(value);
             if (!fieldsOnly)
             {
@@ -268,7 +284,7 @@ internal static class ApartCensus
             for (int i = 0; i < fields.Count; i++)
             {
                 int at = _key.Append(length, dictionary[fields.IdAt(i)]);
-                Walk(at, metadata, fields.ValueAt(i), kept, fieldsOnly: false, depth + 1);
+                Walk(at, metadata, fields.ValueAt(i), kept, fieldsOnly: false, ref visits, depth + 1);
             }
         }
 

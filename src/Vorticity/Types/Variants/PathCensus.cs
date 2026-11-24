@@ -104,6 +104,10 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
     private int _lastLength = -1;
     private long _repeats;
 
+    // The nodes the value being counted may still hold: one a byte of it. A node takes a byte of its own at least, so only
+    // a value whose fields name the same bytes over and over, which unfolds into exponentially many, runs out.
+    private int _visits;
+
     /// <summary>
     /// Counts the rows that repeated the last value in its paths, all at once: each count takes them, each bound the value
     /// once, and each path's spans the rows they lie in, which follow each other.
@@ -118,6 +122,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         long times = _repeats;
         _repeats = 0;
         VariantDictionary dictionary = VariantDictionary.Read(_metadata.AsSpan(0, _metadataLength));
+        _visits = _lastLength;
         _root.Add(this, in dictionary, _last.AsSpan(0, _lastLength), depth: 1, times);
     }
 
@@ -332,6 +337,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
 
         _runRows++;
         VariantDictionary dictionary = VariantDictionary.Read(metadata);
+        _visits = value.Length;
         _root.Add(this, in dictionary, value, depth: 1);
         Remember(value);
     }
@@ -559,6 +565,12 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         if ((uint)id < (uint)_nameStamps.Length && _nameStamps[id] == _epoch)
         {
             return _nameNumbers[id];
+        }
+
+        // The id comes from the value's bytes: held to the dictionary before it sizes the arrays below.
+        if ((uint)id >= (uint)dictionary.Count)
+        {
+            throw new VortexFormatException($"A variant object names field id {id}, past the {dictionary.Count} keys of its metadata.");
         }
 
         if (_names.Count >= MaxNames)
@@ -940,6 +952,16 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         /// <param name="at">The first of the rows that hold the value, when they are not the census's last; -1 for the last.</param>
         internal void Add(PathCensus census, in VariantDictionary dictionary, ReadOnlySpan<byte> value, int depth, long times = 1, long at = -1)
         {
+            if (value.IsEmpty)
+            {
+                throw new VortexFormatException("A variant value holds no byte, not even its header.");
+            }
+
+            if (--census._visits < 0)
+            {
+                throw new VortexFormatException("A variant value names more nodes than its bytes hold: its fields share their bytes.");
+            }
+
             Values += times;
 
             // At the rows being counted, the census's last ones: one row, or the rows that repeated a value, which follow each
@@ -1178,8 +1200,11 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         /// <paramref name="row"/> on, as a row's value is counted: its class, and an object's keys below it, named by
         /// <paramref name="dictionary"/>.
         /// </summary>
-        internal void TakenValue(PathCensus census, long row, in VariantDictionary dictionary, ReadOnlySpan<byte> value, int depth, long times) =>
+        internal void TakenValue(PathCensus census, long row, in VariantDictionary dictionary, ReadOnlySpan<byte> value, int depth, long times)
+        {
+            census._visits = value.Length;
             Add(census, in dictionary, value, depth, times, row);
+        }
 
         /// <summary>
         /// Counts the keys of <paramref name="kept"/>, the object of the keys a shredding left of the object at
@@ -1191,6 +1216,8 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
             {
                 return;
             }
+
+            census._visits = kept.Length;
 
             VariantNested fields = VariantNested.Read(kept);
             for (int i = 0; i < fields.Count; i++)

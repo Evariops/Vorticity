@@ -289,9 +289,37 @@ internal static class VariantEncoding
         return result;
     }
 
+    /// <summary>
+    /// Counts one node of a value being walked against <paramref name="visits"/>, the nodes it may still hold, one a byte
+    /// of it: a node takes a byte of its own at least, so a value whose fields name the same bytes over and over, which
+    /// would unfold into exponentially many nodes, runs out.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The value holds more nodes than bytes.</exception>
+    internal static void Visit(ref int visits)
+    {
+        if (--visits < 0)
+        {
+            throw new VortexFormatException("A variant value names more nodes than its bytes hold: its fields share their bytes.");
+        }
+    }
+
+    /// <summary>Holds a walk at <paramref name="depth"/> to the nesting a value may have, and counts the node it comes to.</summary>
+    private static void Enter(ref int visits, int depth)
+    {
+        VortexLimits.CheckDepth(depth, VortexLimits.MaxArrayDepth, "Variant");
+        Visit(ref visits);
+    }
+
     /// <summary>Adds every key the objects of <paramref name="value"/> use to <paramref name="keys"/>.</summary>
     internal static void CollectKeys(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value, SortedSet<byte[]> keys)
     {
+        int visits = value.Length;
+        CollectKeys(metadata, value, keys, ref visits, depth: 1);
+    }
+
+    private static void CollectKeys(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value, SortedSet<byte[]> keys, ref int visits, int depth)
+    {
+        Enter(ref visits, depth);
         VariantKind kind = VariantScalar.KindOf(value);
         if (kind is not (VariantKind.Object or VariantKind.Array))
         {
@@ -308,7 +336,7 @@ internal static class VariantEncoding
                 _ = keys.Add(dictionary[nested.IdAt(i)].ToArray());
             }
 
-            CollectKeys(metadata, nested.ValueAt(i), keys);
+            CollectKeys(metadata, nested.ValueAt(i), keys, ref visits, depth + 1);
         }
     }
 
@@ -318,6 +346,13 @@ internal static class VariantEncoding
     /// </summary>
     internal static byte[] Rewrite(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value, List<byte[]> keys)
     {
+        int visits = value.Length;
+        return Rewrite(metadata, value, keys, ref visits, depth: 1);
+    }
+
+    private static byte[] Rewrite(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value, List<byte[]> keys, ref int visits, int depth)
+    {
+        Enter(ref visits, depth);
         VariantKind kind = VariantScalar.KindOf(value);
         if (kind == VariantKind.Array)
         {
@@ -325,7 +360,7 @@ internal static class VariantEncoding
             List<byte[]> elements = new(array.Count);
             for (int i = 0; i < array.Count; i++)
             {
-                elements.Add(Rewrite(metadata, array.ValueAt(i), keys));
+                elements.Add(Rewrite(metadata, array.ValueAt(i), keys, ref visits, depth + 1));
             }
 
             return Array(elements);
@@ -342,7 +377,7 @@ internal static class VariantEncoding
         for (int i = 0; i < nested.Count; i++)
         {
             int id = keys.BinarySearch(dictionary[nested.IdAt(i)].ToArray(), KeyOrder);
-            fields.Add((id, Rewrite(metadata, nested.ValueAt(i), keys)));
+            fields.Add((id, Rewrite(metadata, nested.ValueAt(i), keys, ref visits, depth + 1)));
         }
 
         // The new ids follow the keys' order, which is the order the fields are written in.
@@ -411,6 +446,14 @@ internal static class VariantEncoding
     /// </summary>
     internal static bool ValueEquals(ReadOnlySpan<byte> leftMetadata, ReadOnlySpan<byte> left, ReadOnlySpan<byte> rightMetadata, ReadOnlySpan<byte> right)
     {
+        int visits = left.Length + right.Length;
+        return ValueEquals(leftMetadata, left, rightMetadata, right, ref visits, depth: 1);
+    }
+
+    private static bool ValueEquals(
+        ReadOnlySpan<byte> leftMetadata, ReadOnlySpan<byte> left, ReadOnlySpan<byte> rightMetadata, ReadOnlySpan<byte> right, ref int visits, int depth)
+    {
+        Enter(ref visits, depth);
         VariantScalar a = VariantScalar.Read(left);
         VariantScalar b = VariantScalar.Read(right);
         if (IsExact(a.Kind) && IsExact(b.Kind))
@@ -443,8 +486,25 @@ internal static class VariantEncoding
                 VariantDictionary ys = VariantDictionary.Read(rightMetadata);
                 for (int i = 0; i < x.Count; i++)
                 {
-                    int id = ys.Find(xs[x.IdAt(i)]);
-                    if (id < 0 || !TryField(y, id, out ReadOnlySpan<byte> other) || !ValueEquals(leftMetadata, x.ValueAt(i), rightMetadata, other))
+                    // The encoding lists an object's fields in the order of their names, so two objects of the same keys
+                    // list them alike: the field at the same place is the one of the same name, and a search, a pass over
+                    // the other object's fields, is left to a writer that did not keep that order.
+                    ReadOnlySpan<byte> name = xs[x.IdAt(i)];
+                    ReadOnlySpan<byte> other;
+                    if (ys[y.IdAt(i)].SequenceEqual(name))
+                    {
+                        other = y.ValueAt(i);
+                    }
+                    else
+                    {
+                        int id = ys.Find(name);
+                        if (id < 0 || !TryField(y, id, out other))
+                        {
+                            return false;
+                        }
+                    }
+
+                    if (!ValueEquals(leftMetadata, x.ValueAt(i), rightMetadata, other, ref visits, depth + 1))
                     {
                         return false;
                     }
@@ -464,7 +524,7 @@ internal static class VariantEncoding
 
                 for (int i = 0; i < x.Count; i++)
                 {
-                    if (!ValueEquals(leftMetadata, x.ValueAt(i), rightMetadata, y.ValueAt(i)))
+                    if (!ValueEquals(leftMetadata, x.ValueAt(i), rightMetadata, y.ValueAt(i), ref visits, depth + 1))
                     {
                         return false;
                     }
@@ -481,9 +541,16 @@ internal static class VariantEncoding
         }
     }
 
-    /// <summary>A hash that equal values under <see cref="ValueEquals"/> share.</summary>
+    /// <summary>A hash that equal values under <see cref="ValueEquals(ReadOnlySpan{byte}, ReadOnlySpan{byte}, ReadOnlySpan{byte}, ReadOnlySpan{byte})"/> share.</summary>
     internal static int ValueHash(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value)
     {
+        int visits = value.Length;
+        return ValueHash(metadata, value, ref visits, depth: 1);
+    }
+
+    private static int ValueHash(ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value, ref int visits, int depth)
+    {
+        Enter(ref visits, depth);
         VariantScalar scalar = VariantScalar.Read(value);
         HashCode hash = default;
         if (IsExact(scalar.Kind))
@@ -512,7 +579,7 @@ internal static class VariantEncoding
                 {
                     HashCode field = default;
                     field.AddBytes(dictionary[nested.IdAt(i)]);
-                    field.Add(ValueHash(metadata, nested.ValueAt(i)));
+                    field.Add(ValueHash(metadata, nested.ValueAt(i), ref visits, depth + 1));
                     sum = unchecked(sum + field.ToHashCode());
                 }
 
@@ -527,7 +594,7 @@ internal static class VariantEncoding
                 hash.Add(VariantKind.Array);
                 for (int i = 0; i < nested.Count; i++)
                 {
-                    hash.Add(ValueHash(metadata, nested.ValueAt(i)));
+                    hash.Add(ValueHash(metadata, nested.ValueAt(i), ref visits, depth + 1));
                 }
 
                 return hash.ToHashCode();
@@ -573,6 +640,13 @@ internal static class VariantEncoding
     /// </summary>
     internal static void WriteJson(Utf8JsonWriter json, ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value)
     {
+        int visits = value.Length;
+        WriteJson(json, metadata, value, ref visits, depth: 1);
+    }
+
+    private static void WriteJson(Utf8JsonWriter json, ReadOnlySpan<byte> metadata, ReadOnlySpan<byte> value, ref int visits, int depth)
+    {
+        Enter(ref visits, depth);
         VariantScalar scalar = VariantScalar.Read(value);
         switch (scalar.Kind)
         {
@@ -632,7 +706,7 @@ internal static class VariantEncoding
                 for (int i = 0; i < nested.Count; i++)
                 {
                     json.WritePropertyName(dictionary[nested.IdAt(i)]);
-                    WriteJson(json, metadata, nested.ValueAt(i));
+                    WriteJson(json, metadata, nested.ValueAt(i), ref visits, depth + 1);
                 }
 
                 json.WriteEndObject();
@@ -645,7 +719,7 @@ internal static class VariantEncoding
                 json.WriteStartArray();
                 for (int i = 0; i < nested.Count; i++)
                 {
-                    WriteJson(json, metadata, nested.ValueAt(i));
+                    WriteJson(json, metadata, nested.ValueAt(i), ref visits, depth + 1);
                 }
 
                 json.WriteEndArray();
