@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Threading.Tasks;
 using Vorticity.Buffers;
 
 namespace Vorticity.Sealing;
@@ -53,4 +55,15 @@ internal interface ISealedFrameCache
 
     /// <summary>Drops the frame kept at <paramref name="cipherOffset"/>, which did not authenticate.</summary>
     void DropFrame(long cipherOffset, int length);
+
+    /// <summary>
+    /// Makes <paramref name="mine"/> the read of each frame at the places <paramref name="frames"/> gives that no other reader
+    /// of the object is fetching, the cache's readers of the object in every scan included, and adds its place to
+    /// <paramref name="registered"/>; adds to <paramref name="theirs"/> the reads that fetch the others. The caller ends what it
+    /// registered with <see cref="EndReadFrames"/> once the frames it read are kept, and before it waits for another's.
+    /// </summary>
+    void BeginReadFrames(ReadOnlySpan<long> frames, TaskCompletionSource mine, List<long> registered, List<Task> theirs);
+
+    /// <summary>Ends the reads <see cref="BeginReadFrames"/> registered to <paramref name="mine"/>: those who wait on it look again.</summary>
+    void EndReadFrames(ReadOnlySpan<long> frames, TaskCompletionSource mine);
 }
