@@ -378,7 +378,10 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         {
             if (SortedWindow() is not { } sorted)
             {
+                // The parts' merge workers started with them: stopped before their files and memory go, as a full window
+                // stops them, where a worker in flight would read closed files and reserve on memory given back.
                 int parts = _parts.Count;
+                await _parts.StopAsync().ConfigureAwait(false);
                 Release();
                 throw new VortexMemoryException(
                     $"The group by spilled {parts} parts of its groups to its scratch, its memory budget holding no more: an order over them sorts in runs with filters alone before it and windows alone after it, and a window without an order needs every group at once. Give its session a larger QueryMemoryBudget, or filter the rows first.");
