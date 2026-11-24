@@ -699,6 +699,10 @@ internal sealed partial class DatasetScanBuilder
         // The objects the walk keeps, less those whose keys the filter refutes, as a read of rows passes them over.
         KeyPruning? keys = _summaries && _indexes && _take is null ? KeyPruningOf(_filter) : null;
         Queue<(Planned Unit, Task<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> Reading)>? reading = null;
+
+        // The reads still on their way when the walk fails are called off and awaited, none reading past it.
+        ReadsAhead reads = new ReadsAhead(KeysAhead + 1, cancellationToken);
+        await using System.Runtime.CompilerServices.ConfiguredAsyncDisposable readsEnd = reads.ConfigureAwait(false);
         await foreach (PositionedObject held in _version.WalkAsync(
             Pruner(), _from, _to, read && _considers ? _metrics : null, cancellationToken, rollups is null ? null : rollups.Covers).ConfigureAwait(false))
         {
@@ -732,7 +736,8 @@ internal sealed partial class DatasetScanBuilder
                 // oldest awaited when as many wait: each awaited in turn cost QP-1 a round trip an object on one lane.
                 if (keys is not null && unit.Weight > _version.Costs.Weight(RowsCost(held, double.Epsilon)))
                 {
-                    ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> asked = KeptGranulesAsync(held, keys, first, read, cancellationToken);
+                    ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> asked =
+                        reads.BeginAsync(token => KeptGranulesAsync(held, keys, first, read, token));
                     if (asked.IsCompletedSuccessfully)
                     {
                         Refine(unit, await asked.ConfigureAwait(false), explain);

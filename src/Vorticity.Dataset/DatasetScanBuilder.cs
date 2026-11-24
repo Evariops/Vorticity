@@ -1095,8 +1095,11 @@ internal sealed partial class DatasetScanBuilder
         IAsyncEnumerable<PositionedObject> walk, KeyPruning pruning, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         // The indexes of the next objects are asked while the walk goes on, their reads in one wave rather than a round trip
-        // each; an index in hand, with nothing asked before it still waiting, answers at once and makes no task.
+        // each; an index in hand, with nothing asked before it still waiting, answers at once and makes no task. Those still
+        // on their way when the walk fails or its caller stops are called off and awaited (ReadsAhead), none reading past it.
         Queue<Ahead>? ahead = null;
+        ReadsAhead reads = new ReadsAhead(KeysAhead + 1, cancellationToken);
+        await using System.Runtime.CompilerServices.ConfiguredAsyncDisposable readsEnd = reads.ConfigureAwait(false);
         await foreach (PositionedObject held in walk.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             if (KeyRefutes(pruning, held, out ReadOnlyMemory<byte> first))
@@ -1109,7 +1112,8 @@ internal sealed partial class DatasetScanBuilder
                 continue;
             }
 
-            ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> asked = KeptGranulesAsync(held, pruning, first, read: true, cancellationToken);
+            ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> asked =
+                reads.BeginAsync(token => KeptGranulesAsync(held, pruning, first, read: true, token));
             if (asked.IsCompletedSuccessfully && (ahead is null || ahead.Count == 0))
             {
                 (List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)? kept = await asked.ConfigureAwait(false);
@@ -1171,7 +1175,7 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>The objects whose sparse indexes <see cref="KeyPrunedAsync"/> asks for ahead of the one it hands out.</summary>
-    private const int KeysAhead = 16;
+    internal const int KeysAhead = 16;
 
     /// <summary>An object whose index <see cref="KeyPrunedAsync"/> asked for ahead: what it kept, when in hand, or its read.</summary>
     private readonly record struct Ahead(

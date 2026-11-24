@@ -1053,20 +1053,29 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             return 0;
         }
 
-        List<Task<long>> reads = [];
-        await foreach (PositionedObject held in Snapshot.WalkAsync(filter is null ? null : new SummaryPruner(filter), 0, long.MaxValue, null, cancellationToken)
+        List<ObjectEntry> held = [];
+        await foreach (PositionedObject walked in Snapshot.WalkAsync(filter is null ? null : new SummaryPruner(filter), 0, long.MaxValue, null, cancellationToken)
             .ConfigureAwait(false))
         {
-            if (held.Entry.Contents is { } contents)
+            if (walked.Entry.Contents is not null)
             {
-                reads.Add(WarmObjectAsync(cache, held.Entry, contents, cancellationToken));
+                held.Add(walked.Entry);
             }
         }
 
+        // As many objects at once as the session reads, as AskByValuesAsync does: a task and a request each for every object
+        // of the version at once was a hundred thousand of each on a dataset of as many objects, their answers held until read.
+        long[] read = new long[held.Count];
+        await Execution.Waits.ForAsync(
+            held.Count,
+            Session.Options.MaxConcurrentReads,
+            async (i, token) => read[i] = await WarmObjectAsync(cache, held[i], held[i].Contents!, token).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+
         long bytes = 0;
-        foreach (long read in await Task.WhenAll(reads).ConfigureAwait(false))
+        foreach (long one in read)
         {
-            bytes += read;
+            bytes += one;
         }
 
         return bytes;
