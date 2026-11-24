@@ -169,6 +169,9 @@ public sealed class ParquetFile : IAsyncDisposable
         finally
         {
             _footerBytes?.Dispose();
+
+            // The file's keys are wiped with it, every read of it ended.
+            _footer.Decryptor?.Dispose();
         }
     }
 

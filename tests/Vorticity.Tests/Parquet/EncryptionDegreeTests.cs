@@ -63,7 +63,10 @@ public sealed class EncryptionDegreeTests : IDisposable
             await writer.CompleteAsync(Ct);
         }
 
-        await using ParquetFile file = await session.OpenParquetAsync(_path, new ParquetOpenOptions { Decryption = new ParquetDecryption { FooterKey = FooterKey } }, Ct);
+        ParquetFile file = await session.OpenParquetAsync(_path, new ParquetOpenOptions { Decryption = new ParquetDecryption { FooterKey = FooterKey } }, Ct);
+        byte[] held = file.Footer.Decryptor!.FooterKey!;
+        Assert.Equal(FooterKey, held);
+        Assert.NotSame(FooterKey, held);
         long seen = 0;
         await foreach (RecordBatch batch in file.Scan().ToBatchesAsync(Ct))
         {
@@ -83,6 +86,11 @@ public sealed class EncryptionDegreeTests : IDisposable
         }
 
         Assert.Equal(Rows, seen);
+
+        // The file's copy of the key is wiped as it closes; the caller's is left alone.
+        await file.DisposeAsync();
+        Assert.All(held, b => Assert.Equal(0, b));
+        Assert.Equal("footer-key-16byt"u8.ToArray(), FooterKey);
     }
 
     private static long Value(long row, int column) => (row * 2_654_435_761L) ^ ((long)column << 40);

@@ -145,13 +145,17 @@ internal sealed class FileCrypto
 /// from <see cref="ParquetDecryption.FooterKey"/>, else what <see cref="ParquetDecryption.KeyResolver"/>
 /// makes of the metadata the file stores for it. The ciphers made here decrypt the footer and the
 /// columns' metadata, under a lock; a column's reader makes its own from <see cref="ColumnKey"/>.
+/// Every key is held in an array of its own, pinned so that the collector leaves no copy of it, and
+/// wiped when the file is disposed.
 /// </remarks>
 [SkipLocalsInit]
-internal sealed class FileDecryptor
+internal sealed class FileDecryptor : IDisposable
 {
     private readonly ParquetDecryption _options;
     private readonly Dictionary<string, byte[]> _columnKeys = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, ModuleCipher> _ciphers = new(StringComparer.Ordinal);
+
+    // A cipher a key, the key named by its array, which this decryptor owns and never replaces.
+    private readonly Dictionary<byte[], ModuleCipher> _ciphers = new(ReferenceEqualityComparer.Instance);
     private readonly object _gate = new();
 
     /// <summary>The AAD of the module being decrypted, under <see cref="_gate"/>: on the heap, since its length is the file's.</summary>
@@ -204,7 +208,7 @@ internal sealed class FileDecryptor
             prefix = options.AadPrefix.ToArray();
         }
 
-        byte[] footerKey = options.FooterKey.IsEmpty ? Resolve(options, null, crypto.KeyMetadata) : options.FooterKey.ToArray();
+        byte[] footerKey = options.FooterKey.IsEmpty ? Resolve(options, null, crypto.KeyMetadata) : Pinned(options.FooterKey.Span);
         if (footerKey.Length == 0)
         {
             if (footerKeyRequired)
@@ -232,18 +236,36 @@ internal sealed class FileDecryptor
             return FooterKey;
         }
 
+        byte[]? key;
         lock (_gate)
         {
-            if (!_columnKeys.TryGetValue(path, out byte[]? key))
+            _columnKeys.TryGetValue(path, out key);
+        }
+
+        if (key is null)
+        {
+            // The caller's resolver may call a key service: out of the lock, which the scan's lanes
+            // take to decrypt the columns' metadata. Two lanes may both resolve a key; the first kept
+            // is the one every lane uses, and the other is wiped.
+            byte[] resolved = _options.ColumnKeys is { } keys && keys.TryGetValue(path, out ReadOnlyMemory<byte> given) && !given.IsEmpty
+                ? Pinned(given.Span)
+                : Resolve(_options, path, keyMetadata.ToArray());
+            lock (_gate)
             {
-                key = _options.ColumnKeys is { } keys && keys.TryGetValue(path, out ReadOnlyMemory<byte> given) && !given.IsEmpty
-                    ? given.ToArray()
-                    : Resolve(_options, path, keyMetadata.ToArray());
-                _columnKeys[path] = key;
+                if (!_columnKeys.TryGetValue(path, out key))
+                {
+                    key = resolved;
+                    _columnKeys[path] = key;
+                }
             }
 
-            return key.Length == 0 ? null : key;
+            if (!ReferenceEquals(key, resolved))
+            {
+                CryptographicOperations.ZeroMemory(resolved);
+            }
         }
+
+        return key.Length == 0 ? null : key;
     }
 
     /// <summary>
@@ -283,18 +305,54 @@ internal sealed class FileDecryptor
 
     private ModuleCipher Cipher(byte[] key)
     {
-        string id = Convert.ToBase64String(key);
-        if (!_ciphers.TryGetValue(id, out ModuleCipher? cipher))
+        if (!_ciphers.TryGetValue(key, out ModuleCipher? cipher))
         {
             cipher = new ModuleCipher(key);
-            _ciphers[id] = cipher;
+            _ciphers[key] = cipher;
         }
 
         return cipher;
     }
 
+    /// <summary>Wipes the keys and disposes the ciphers, once the file is closed and no read is left.</summary>
+    public void Dispose()
+    {
+        lock (_gate)
+        {
+            foreach (ModuleCipher cipher in _ciphers.Values)
+            {
+                cipher.Dispose();
+            }
+
+            _ciphers.Clear();
+            foreach (byte[] key in _columnKeys.Values)
+            {
+                CryptographicOperations.ZeroMemory(key);
+            }
+
+            _columnKeys.Clear();
+            if (FooterKey is { } footer)
+            {
+                CryptographicOperations.ZeroMemory(footer);
+            }
+        }
+    }
+
+    /// <summary>A copy of <paramref name="key"/> the collector never moves, so that wiping it leaves no other.</summary>
+    private static byte[] Pinned(ReadOnlySpan<byte> key)
+    {
+        if (key.IsEmpty)
+        {
+            return [];
+        }
+
+        byte[] copy = GC.AllocateArray<byte>(key.Length, pinned: true);
+        key.CopyTo(copy);
+        return copy;
+    }
+
     private static byte[] Resolve(ParquetDecryption options, string? column, byte[] keyMetadata) =>
-        options.KeyResolver is { } resolver ? resolver(new ParquetKeyRequest(column, keyMetadata)).ToArray() : [];
+        options.KeyResolver is { } resolver ? Pinned(resolver(new ParquetKeyRequest(column, keyMetadata)).Span) : [];
 
     /// <summary>The key metadata as text, where it is: what a message names a key by.</summary>
     internal static string Describe(ReadOnlySpan<byte> keyMetadata)
