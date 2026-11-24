@@ -19,10 +19,13 @@ namespace Vorticity.Expressions;
 ///            | field "is" ["not"] "null"
 ///            | field "like" text [ "escape" text ]
 ///            | field "starts" "with" text
+///            | field "has" "token" text
 ///            | field "contains" literal
 ///            | field "exists"
 /// op        := "=" | "!=" | "&lt;&gt;" | "&lt;" | "&lt;=" | "&gt;" | "&gt;="
-/// literal   := 'text' | number | true | false | null
+/// literal   := 'text' | number | true | false | null | ?N
+///              where a number without a point or an exponent is a long, or a ulong past it, and any other
+///              number a double, an integer past a ulong included; ?N is the parameter N given beside the text
 /// field     := name ( "." name )* step* [ "." read "(" ")" ]
 ///              where a name is an identifier or a "double-quoted" string
 /// step      := "[" 'key' "]" | "[" index "]"
@@ -175,7 +178,9 @@ internal static class ExprText
                 AppendLiteral(text, match.Pattern);
                 if (match.Op == StringMatchOp.Like && match.Escape != (byte)'\\')
                 {
-                    text.Append(" escape '").Append((char)match.Escape).Append('\'');
+                    // As a literal: a quote doubled, a byte past ASCII in hexadecimal, as the parser reads them back.
+                    text.Append(" escape ");
+                    AppendLiteral(text, FilterLiteral.From([match.Escape]));
                 }
 
                 return;
@@ -579,6 +584,18 @@ internal static class ExprText
             return VariantFilterExpr.Of(Expr.StartsWith(Read(field, FilterLiteralKind.Bytes, next.Position), ParseLiteral(tokens, ref at)));
         }
 
+        if (IsWord(tokens, at, "has") && IsWord(tokens, at + 1, "token"))
+        {
+            at += 2;
+            FilterLiteral token = ParseLiteral(tokens, ref at);
+            if (token.Kind != FilterLiteralKind.Bytes || !Indexes.Tokens.IsWord(token.BytesValue))
+            {
+                throw new FormatException($"'has token' at position {next.Position} looks for one word in quotes: letters, digits and non-ASCII characters, no separator.");
+            }
+
+            return VariantFilterExpr.Of(Expr.HasToken(Read(field, FilterLiteralKind.Bytes, next.Position), token));
+        }
+
         if (IsWord(tokens, at, "contains"))
         {
             at++;
@@ -593,7 +610,7 @@ internal static class ExprText
                 : Expr.ListContains(field, value);
         }
 
-        throw new FormatException($"Expected an operator, 'is', 'in', 'like', 'starts with' or 'contains' at position {next.Position}, not '{next.Text}'.");
+        throw new FormatException($"Expected an operator, 'is', 'in', 'like', 'starts with', 'has token' or 'contains' at position {next.Position}, not '{next.Text}'.");
     }
 
     private static FieldExpr ParseField(List<Token> tokens, ref int at)
@@ -787,8 +804,15 @@ internal static class ExprText
                     i++;
                 }
 
-                int index = int.Parse(text[(start + 1)..i], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture);
-                tokens.Add(new Token(TokenKind.Parameter, text[start..i].ToString(), start, index < parameters.Count ? parameters[index] : default));
+                // A marker past the parameters given is the caller's mistake, said as a format error rather than read as
+                // a null that keeps no row, and one past an int rather than an overflow.
+                if (!int.TryParse(text[(start + 1)..i], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int index)
+                    || index >= parameters.Count)
+                {
+                    throw new FormatException($"'{text[start..i]}' at position {start} names no parameter: {parameters.Count} were given.");
+                }
+
+                tokens.Add(new Token(TokenKind.Parameter, text[start..i].ToString(), start, parameters[index]));
                 continue;
             }
             if (c is '\'' or '"')
