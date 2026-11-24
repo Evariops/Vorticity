@@ -54,8 +54,11 @@ internal sealed class FileEncryptor : IDisposable
 
         if (!_columns.TryGetValue(path, out ColumnEncryptor? column))
         {
+            // A cipher of its own even under the footer's key: a writer of many lanes closes its
+            // columns' pages side by side, and a cipher's state (GCM's context, CTR's counters and
+            // keystream) is one operation's at a time.
             bool footer = key.Key.IsEmpty;
-            column = new ColumnEncryptor(this, footer ? _footer : new ModuleCipher(key.Key.Span), footer, key.KeyMetadata.ToArray(), names, ordinal);
+            column = new ColumnEncryptor(this, new ModuleCipher(footer ? _options.FooterKey.Span : key.Key.Span), footer, key.KeyMetadata.ToArray(), names, ordinal);
             _columns[path] = column;
         }
 
@@ -227,11 +230,5 @@ internal sealed class ColumnEncryptor : IDisposable
         writer.EndStruct(union);
     }
 
-    public void Dispose()
-    {
-        if (!FooterKey)
-        {
-            _cipher.Dispose();
-        }
-    }
+    public void Dispose() => _cipher.Dispose();
 }
