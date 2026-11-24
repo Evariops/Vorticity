@@ -637,11 +637,14 @@ internal sealed partial class GroupCore
         }
     }
 
-    /// <summary>A sub-table of a part, empty, holding the groups whose hashes share <paramref name="depth"/> bits past the part's.</summary>
-    internal SubTable NewTable(int depth)
+    /// <summary>
+    /// A sub-table of a part, empty, holding the groups whose hashes share <paramref name="depth"/> bits past the part's,
+    /// those bits <paramref name="prefix"/>.
+    /// </summary>
+    internal SubTable NewTable(int depth, int prefix = 0)
     {
         AggregateSlot[] slots = AggregationPartition.NewSlots(_plan, _settled, _source, out GroupRecords? records, _account, _layout);
-        return new SubTable(Kind.ForTable(_account), slots, records, depth);
+        return new SubTable(Kind.ForTable(_account), slots, records, depth) { Prefix = prefix };
     }
 
     /// <summary>The groups past which a sub-table splits.</summary>
@@ -852,8 +855,8 @@ internal sealed partial class GroupCore
         // Each half made at the bound, with a batch's room past it: it then never grows before it
         // splits in turn, and its arrays are the blocks the split before gave back.
         applier.Halves(table.Keys, PartShift - 1 - depth, out ReadOnlySpan<int> clear, out ReadOnlySpan<int> set);
-        SubTable lower = NewTable(depth + 1);
-        SubTable upper = NewTable(depth + 1);
+        SubTable lower = NewTable(depth + 1, table.Prefix << 1);
+        SubTable upper = NewTable(depth + 1, (table.Prefix << 1) | 1);
         int room = (int)_tableGroups + _batchEntries;
         lower.Reserve(room);
         upper.Reserve(room);
@@ -864,17 +867,14 @@ internal sealed partial class GroupCore
         part.Tables[index] = lower;
         part.Tables.Add(upper);
 
-        // The sub-table's places in the directory share its bits; the half of them past the next bit
-        // go to the upper half.
-        int bit = part.Depth - depth - 1;
+        // The directory is indexed by the hash's top bits (Grow doubles each place into two neighbours), so the sub-table's
+        // places are the run its bits begin, and its upper half's the second half of that run: written whole, where a walk
+        // of the whole directory, two to the twenty-fourth places at its deepest, met every split.
+        int below = part.Depth - depth - 1;
+        int start = upper.Prefix << below;
         Block<int> directory = part.Directory;
-        for (int j = 0; j < directory.Length; j++)
-        {
-            if (directory[j] == index && ((j >> bit) & 1) != 0)
-            {
-                directory[j] = added;
-            }
-        }
+        System.Diagnostics.Debug.Assert(directory[start] == index, "A sub-table's places are the run its prefix begins.");
+        directory.AsSpan(start, 1 << below).Fill(added);
 
         Interlocked.Increment(ref _splits);
         return added;
@@ -1700,6 +1700,9 @@ internal sealed class SubTable(GroupKeys keys, AggregateSlot[] slots, GroupRecor
 
     /// <summary>The bits of the hash past the part's its groups share; <see cref="GroupCore.MostDepth"/> for a paged part's, which never splits.</summary>
     internal int Depth { get; } = depth;
+
+    /// <summary>Those bits, its places in the part's directory the run they begin: 0 for a sub-table of no bits.</summary>
+    internal int Prefix { get; init; }
 
     internal long Footprint => Keys.Footprint + AggregateSlot.FootprintOf(Slots);
 

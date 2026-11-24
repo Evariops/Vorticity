@@ -937,7 +937,7 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
             return;
         }
 
-        if (_sets is null && source._sets is null && from.Length == source._groups)
+        if (_sets is null && source._sets is null && from.Length == source._groups && Numbers.AreUpto(from))
         {
             _pairs.MergeAll(source._pairs, into, _counts);
             return;

@@ -222,6 +222,9 @@ internal sealed class QueryMemory : IDisposable
     private object? _state;
     private System.Collections.Generic.List<(object Owner, object State)>? _moreStates;
 
+    // The lock of the states, made at the first ask: a lock on the query's memory itself was one any holder of it could take.
+    private Lock? _stateGate;
+
     /// <summary>
     /// What <paramref name="owner"/> keeps for this query, made by <paramref name="make"/> the first time it is asked for, the
     /// same for every lane after, and dropped with the query: a table keyed by the query would make a weak table's container
@@ -230,7 +233,14 @@ internal sealed class QueryMemory : IDisposable
     internal T StateOf<T>(object owner, Func<object, QueryMemory, T> make)
         where T : class
     {
-        lock (this)
+        Lock? gate = Volatile.Read(ref _stateGate);
+        if (gate is null)
+        {
+            Lock fresh = new Lock();
+            gate = Interlocked.CompareExchange(ref _stateGate, fresh, null) ?? fresh;
+        }
+
+        lock (gate)
         {
             if (ReferenceEquals(_stateOwner, owner))
             {

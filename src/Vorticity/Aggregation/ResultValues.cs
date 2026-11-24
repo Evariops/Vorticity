@@ -67,7 +67,15 @@ internal static class ResultValues
         Span<T> into = destination[..arena.RecordRef(node).Length];
         if (IsPrimitive<T>())
         {
+            // The span made over the bytes is checked against them, once a batch: a T wider than the column's values would
+            // have read past its buffer, where the decoders' lengths (every column a batch's rows) hold only for its own.
             ReadOnlySpan<byte> bytes = ColumnData.Values(arena, node);
+            if ((long)into.Length * Unsafe.SizeOf<T>() > bytes.Length)
+            {
+                throw new InvalidOperationException(
+                    $"A column of {type} holds {bytes.Length} bytes, short of {into.Length} values of {typeof(T).Name}.");
+            }
+
             MemoryMarshal.CreateReadOnlySpan(ref Unsafe.As<byte, T>(ref MemoryMarshal.GetReference(bytes)), into.Length).CopyTo(into);
             return;
         }

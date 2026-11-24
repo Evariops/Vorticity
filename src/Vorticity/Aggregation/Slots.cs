@@ -391,6 +391,23 @@ internal static class Numbers
     /// <summary>The numbers every thread shares now, at most <see cref="Shared"/>.</summary>
     internal static int SharedCount => s_numbers.Length;
 
+    /// <summary>
+    /// Whether <paramref name="groups"/> are 0, 1, 2 and on: a merge's every group taken in order, which a slot merges whole
+    /// rather than group by group. Checked, not assumed from the count alone: one pass, less than the merge it allows.
+    /// </summary>
+    internal static bool AreUpto(ReadOnlySpan<int> groups)
+    {
+        for (int i = 0; i < groups.Length; i++)
+        {
+            if (groups[i] != i)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     /// <summary>The first <paramref name="count"/> numbers: shared, or past <see cref="Shared"/> in an array of the call's own.</summary>
     internal static ReadOnlySpan<int> Upto(int count)
     {

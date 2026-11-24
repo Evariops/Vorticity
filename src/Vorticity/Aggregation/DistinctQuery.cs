@@ -207,6 +207,9 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
     private SpillRun[] _runs = [];
     private int _part = -1;
     private int _bits;
+
+    // The most bytes of a run's sections a part's read takes at once (NextToldAsync).
+    private int _readBytes;
     private GroupKeys? _set;
     private TableArrays? _setAccount;
     private int _next;
@@ -346,6 +349,9 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
                 _bits++;
             }
 
+            // A part's sections read a slice at a time, as a group by's spilled runs are: a part of several gigabytes, which
+            // a large budget allows, read whole had its length past what one read takes.
+            _readBytes = (int)Math.Clamp(room / 16, SpillBuffer.PageOf(memory, 1), 64L << 20);
             _part = 0;
         }
 
@@ -429,12 +435,25 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
                     _next = set.Count;
                 }
 
+                // As many of the run's sections at a time as a read of _readBytes takes, one at least.
                 SpillRun run = _runs[r];
-                int length = checked((int)(run.Starts[past] - run.Starts[first]));
-                if (length > 0)
+                int section = first;
+                while (section < past)
                 {
-                    await run.File.ReadAsync(run.Starts[first], buffer.Ensure(length), _cancellationToken).ConfigureAwait(false);
-                    ReadSections(run, first, past, buffer.Span(length), set);
+                    int end = section + 1;
+                    while (end < past && run.Starts[end + 1] - run.Starts[section] <= _readBytes)
+                    {
+                        end++;
+                    }
+
+                    int length = checked((int)(run.Starts[end] - run.Starts[section]));
+                    if (length > 0)
+                    {
+                        await run.File.ReadAsync(run.Starts[section], buffer.Ensure(length), _cancellationToken).ConfigureAwait(false);
+                        ReadSections(run, section, end, buffer.Span(length), set);
+                    }
+
+                    section = end;
                 }
             }
 
