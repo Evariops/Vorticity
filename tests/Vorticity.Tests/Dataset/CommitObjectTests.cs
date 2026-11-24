@@ -361,6 +361,68 @@ public sealed class CommitObjectTests
         }
     }
 
+    /// <summary>
+    /// A commit object and an object's entry whose bytes were changed, a few thousand mutations of a fixed seed: each fails
+    /// with a format error or reads, its table, its summaries, its last key, its deletions; nothing else comes out.
+    /// </summary>
+    [Fact]
+    public void MutatedCommitsAndEntriesFailCleanlyOrRead()
+    {
+        byte[] commit = Build().Bytes;
+        ObjectSummaries summaries = ObjectSummaries.From(
+            [new Vorticity.Scanning.ColumnSummary("k", Vorticity.Expressions.FilterLiteral.From(3L), true, Vorticity.Expressions.FilterLiteral.From(90L), true, true, 0, true)]);
+        byte[] entry = new ObjectEntry("data/0001.vortex", 11, 1_000, 5_000_000, 22, [new PageReference(7, 100, 40, 0xFEED)], summaries)
+            .WithFooterBytes(300_000)
+            .WithDeletions(DeletionVector.Of([4, 5, 6, 7, 8, 40]))
+            .ToBytes();
+        Random random = new Random(20261124);
+        for (int i = 0; i < 3_000; i++)
+        {
+            bool isCommit = i % 2 == 0;
+            byte[] bytes = (byte[])(isCommit ? commit : entry).Clone();
+            int at = random.Next(bytes.Length);
+            switch (random.Next(3))
+            {
+                case 0:
+                    bytes[at] ^= (byte)(1 << random.Next(8));
+                    break;
+                case 1:
+                    bytes[at] = 0xFF;
+                    break;
+                default:
+                    bytes.AsSpan(at, Math.Min(5, bytes.Length - at)).Fill(0xFF);
+                    break;
+            }
+
+            try
+            {
+                if (isCommit)
+                {
+                    CommitObject opened = CommitObject.Open(bytes);
+                    foreach (CommitLevel level in opened.Header.Levels)
+                    {
+                        _ = level.Top;
+                    }
+                }
+                else
+                {
+                    ObjectEntry read = ObjectEntry.FromBytes(bytes.AsSpan());
+                    _ = read.Summaries;
+                    _ = read.Deletions.IsEmpty ? null : read.Deletions;
+                    _ = ObjectEntry.SummaryOf(bytes);
+                    _ = ObjectEntry.LastKeyOf(bytes);
+                }
+            }
+            catch (Exception expected) when (expected is CommitFormatException or VortexFormatException)
+            {
+            }
+            catch (Exception error)
+            {
+                Assert.Fail($"mutation {i} of the {(isCommit ? "commit" : "entry")} at byte {at} threw {error.GetType().Name}: {error.Message}\n{error.StackTrace}");
+            }
+        }
+    }
+
     // An entry that records its object's footer length: the same bytes as before up to its summaries, the
     // fields after them, read back whole and read in place, with its deleted rows in line or out of line.
     // Under what an open reads first, nothing is recorded and the entry keeps an earlier format's bytes.
