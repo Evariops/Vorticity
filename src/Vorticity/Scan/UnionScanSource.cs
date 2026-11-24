@@ -44,6 +44,14 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
     private readonly long[] _starts;
     private readonly bool _states;
 
+    // The places last moved for each member past the first, with the take and the question's memory they were moved for: a
+    // question asks its capabilities one after another (its cost, its parts, its batches) with the same take, and each ask
+    // moved the places again and held them again in the question's memory.
+    private readonly MovedPlaces?[] _moved;
+
+    /// <summary>A member's places, counted from its first row, and the take and the memory they were moved and held for.</summary>
+    private sealed record MovedPlaces(ReadOnlyMemory<long> Take, Aggregating.QueryMemory? Memory, long[] Places);
+
     /// <param name="members">The sources, in the order of their rows: one or more, of one session and one schema, each knowing its rows before a read.</param>
     /// <exception cref="ArgumentException">No source, sources of two sessions or two schemas, or one that does not know its rows.</exception>
     internal UnionScanSource(ReadOnlySpan<ScanSource> members)
@@ -55,6 +63,7 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
 
         _members = members.ToArray();
         _starts = new long[_members.Length + 1];
+        _moved = new MovedPlaces?[_members.Length];
         ScanSource first = _members[0];
         for (int m = 0; m < _members.Length; m++)
         {
@@ -293,18 +302,26 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
             }
 
             // The first member reads its places where they lie; another one a copy counted from its first row, held in the
-            // question's memory until the question ends.
+            // question's memory until the question ends, and made once for the question's asks of the same take.
             ReadOnlyMemory<long> own = take.Slice(first, last - first);
             if (start != 0)
             {
-                spec.Memory?.Hold((long)(last - first) * sizeof(long), "a union member's places");
-                long[] moved = new long[last - first];
-                for (int i = 0; i < moved.Length; i++)
+                if (Volatile.Read(ref _moved[m]) is { } kept && kept.Take.Equals(take) && ReferenceEquals(kept.Memory, spec.Memory))
                 {
-                    moved[i] = places[first + i] - start;
+                    own = kept.Places;
                 }
+                else
+                {
+                    spec.Memory?.Hold((long)(last - first) * sizeof(long), "a union member's places");
+                    long[] moved = new long[last - first];
+                    for (int i = 0; i < moved.Length; i++)
+                    {
+                        moved[i] = places[first + i] - start;
+                    }
 
-                own = moved;
+                    Volatile.Write(ref _moved[m], new MovedPlaces(take, spec.Memory, moved));
+                    own = moved;
+                }
             }
 
             asked = asked with { Take = own };

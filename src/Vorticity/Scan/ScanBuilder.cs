@@ -1902,15 +1902,36 @@ internal sealed class ScanBuilder
             }
         }
 
-        // Clears the bits of rows [from, to) of a batch whose first row is `first`.
-        static void Clear(Span<ulong> words, long first, long from, long to)
+        static void Clear(Span<ulong> words, long first, long from, long to) => ClearRows(words, first, from, to);
+    }
+
+    /// <summary>
+    /// Clears the bits of rows [<paramref name="from"/>, <paramref name="to"/>) of a batch whose first row is
+    /// <paramref name="first"/>, a word at a time: the two edge words masked, the words between cleared whole, where a bit at
+    /// a time walked a group of rows left out bit by bit.
+    /// </summary>
+    internal static void ClearRows(Span<ulong> words, long first, long from, long to)
+    {
+        if (to <= from)
         {
-            for (long row = from; row < to; row++)
-            {
-                int at = (int)(row - first);
-                words[at >> 6] &= ~(1UL << (at & 63));
-            }
+            return;
         }
+
+        int start = (int)(from - first);
+        int last = (int)(to - first - 1);
+        int startWord = start >> 6;
+        int lastWord = last >> 6;
+        ulong head = ulong.MaxValue << (start & 63);
+        ulong tail = ulong.MaxValue >> (63 - (last & 63));
+        if (startWord == lastWord)
+        {
+            words[startWord] &= ~(head & tail);
+            return;
+        }
+
+        words[startWord] &= ~head;
+        words[(startWord + 1)..lastWord].Clear();
+        words[lastWord] &= ~tail;
     }
 
     /// <summary>The top-level field of the file that <paramref name="column"/> names, when it is a variant column; -1 otherwise.</summary>
@@ -2017,7 +2038,8 @@ internal sealed class ScanBuilder
         return new TerminalScan(
             _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded, keys, _granules, _degree)
         {
-            Account = _account ?? QueryMemoryBudget.Process.Account,
+            // Under its session's budget, as a scan counts: a session that sets its own held its terminals to the process's.
+            Account = _account ?? QueryMemoryBudget.Of(_file.Session).Account,
         };
     }
 
