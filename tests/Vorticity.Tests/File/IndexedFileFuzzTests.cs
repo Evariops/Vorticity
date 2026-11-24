@@ -1,9 +1,9 @@
 // A short, deterministic fuzz campaign over a file this library wrote with its own indexes.
 //
 // The corpus the campaign and FuzzSmokeTests mutate comes from Vortex's own writer: it holds none of the regions this
-// library adds, the sorted runs, the postings, the Bloom trees, the fences and their directory. Those are where the audit
-// found most of its escapes. Here a file carries every kind, and a few hundred mutations, with a fixed seed, are read by
-// filters that walk each index: only a format or an unsupported error may come out.
+// library adds, the sorted runs, the postings, the Bloom trees, the fences and their directory, whose readers hold most of
+// the counts and lengths a file declares. Here a file carries every kind, and a few hundred mutations, with a fixed seed,
+// are read by filters that walk each index: only a format or an unsupported error may come out.
 using System;
 using System.IO;
 using System.Linq;
