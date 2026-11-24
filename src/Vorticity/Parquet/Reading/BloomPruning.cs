@@ -88,20 +88,44 @@ internal static class BloomPruning
         ScanCounters.Note(metrics, asked, bytes);
         await file.Reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
         uint[]?[] words = new uint[columns][];
-        for (int i = 0; i < columns; i++)
+
+        // A filter's words are copied out of the read, up to 128 MiB a column: the scan's account
+        // counts them until the group is judged.
+        MemoryAccount account = requests.Account;
+        long held = 0;
+        try
         {
-            if (slots[i] < 0)
+            for (int i = 0; i < columns; i++)
             {
-                continue;
+                if (slots[i] < 0)
+                {
+                    continue;
+                }
+
+                ColumnChunkMetadata chunk = footer.Chunk(group, filter.Columns[i]);
+                words[i] = chunk.IsEncrypted
+                    ? Decrypted(file, chunk, group, filter.Columns[i], requests.GetBuffer(slots[i]).Span, account)
+                    : await WordsAsync(file, chunk, requests.GetBuffer(slots[i]), metrics, account, cancellationToken).ConfigureAwait(false);
+                held += (long)(words[i]?.Length ?? 0) * sizeof(uint);
             }
 
-            ColumnChunkMetadata chunk = footer.Chunk(group, filter.Columns[i]);
-            words[i] = chunk.IsEncrypted
-                ? Decrypted(file, chunk, group, filter.Columns[i], requests.GetBuffer(slots[i]).Span)
-                : await WordsAsync(file, chunk, requests.GetBuffer(slots[i]), metrics, cancellationToken).ConfigureAwait(false);
+            return Absent(filter.Filter, filter, words);
+        }
+        finally
+        {
+            account.Give(held);
+        }
+    }
+
+    /// <summary>The words of <paramref name="bitset"/>, copied once <paramref name="account"/> took their bytes.</summary>
+    private static uint[] Copy(ReadOnlySpan<byte> bitset, MemoryAccount account)
+    {
+        if (!account.TryTake(bitset.Length))
+        {
+            throw account.Refused(bitset.Length);
         }
 
-        return Absent(filter.Filter, filter, words);
+        return SplitBlockBloom.Words(bitset).ToArray();
     }
 
     /// <summary>The words of a chunk's filter, read alone; null when it has none this build reads.</summary>
@@ -117,7 +141,7 @@ internal static class BloomPruning
         int slot = requests.Add(new SegmentSpec((ulong)chunk.BloomFilterOffset, (uint)length, 0, 0, 0));
         ScanCounters.Note(metrics, 1, length);
         await file.Reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-        uint[]? words = await WordsAsync(file, chunk, requests.GetBuffer(slot), metrics, cancellationToken).ConfigureAwait(false);
+        uint[]? words = await WordsAsync(file, chunk, requests.GetBuffer(slot), metrics, MemoryAccount.Kept, cancellationToken).ConfigureAwait(false);
         requests.Release();
         return words;
     }
@@ -144,7 +168,7 @@ internal static class BloomPruning
     /// The words of an encrypted chunk's filter, its header and its bitset each a module, which the
     /// chunk's <c>bloom_filter_length</c> spans; null where they are not a filter this build reads.
     /// </summary>
-    private static uint[]? Decrypted(ParquetFile file, in ColumnChunkMetadata chunk, int group, int column, ReadOnlySpan<byte> modules)
+    private static uint[]? Decrypted(ParquetFile file, in ColumnChunkMetadata chunk, int group, int column, ReadOnlySpan<byte> modules, MemoryAccount account)
     {
         int headerModule = Encryption.ModuleCipher.ModuleBytes(modules, Encryption.ModuleCipher.GcmOverhead);
         byte[]? header = file.Decrypt(chunk, group, column, modules[..headerModule], Encryption.ModuleType.BloomFilterHeader);
@@ -155,7 +179,7 @@ internal static class BloomPruning
 
         ReadOnlySpan<byte> rest = modules[headerModule..];
         byte[]? words = file.Decrypt(chunk, group, column, rest[..Encryption.ModuleCipher.ModuleBytes(rest, Encryption.ModuleCipher.GcmOverhead)], Encryption.ModuleType.BloomFilterBitset);
-        return words is null || words.Length != bitset ? null : SplitBlockBloom.Words(words).ToArray();
+        return words is null || words.Length != bitset ? null : Copy(words, account);
     }
 
     /// <summary>The bytes a filter's first read takes: its length, or, where a writer left it out, its header's worth short of the footer.</summary>
@@ -168,7 +192,7 @@ internal static class BloomPruning
     /// a writer left the filter's length out; null when the bytes are no filter this build reads, or
     /// its bitset would lie past the file's pages.
     /// </summary>
-    private static async ValueTask<uint[]?> WordsAsync(ParquetFile file, ColumnChunkMetadata chunk, VortexBuffer read, ScanCounters? metrics, CancellationToken cancellationToken)
+    private static async ValueTask<uint[]?> WordsAsync(ParquetFile file, ColumnChunkMetadata chunk, VortexBuffer read, ScanCounters? metrics, MemoryAccount account, CancellationToken cancellationToken)
     {
         if (!BloomFilterHeader.TryRead(read.Span, out int header, out int bitset))
         {
@@ -177,7 +201,7 @@ internal static class BloomPruning
 
         if (read.Length >= header + bitset)
         {
-            return SplitBlockBloom.Words(read.Span.Slice(header, bitset)).ToArray();
+            return Copy(read.Span.Slice(header, bitset), account);
         }
 
         if (!file.Holds(chunk.BloomFilterOffset + header, bitset))
@@ -189,7 +213,7 @@ internal static class BloomPruning
         int slot = again.Add(new SegmentSpec((ulong)chunk.BloomFilterOffset + (ulong)header, (uint)bitset, 0, 0, 0));
         ScanCounters.Note(metrics, 1, bitset);
         await file.Reader.ReadManyAsync(again, cancellationToken).ConfigureAwait(false);
-        uint[] words = SplitBlockBloom.Words(again.GetBuffer(slot).Span).ToArray();
+        uint[] words = Copy(again.GetBuffer(slot).Span, account);
         again.Release();
         return words;
     }

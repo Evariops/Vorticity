@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using Vorticity.Buffers;
 
 namespace Vorticity.Parquet.Encryption;
 
@@ -127,8 +128,16 @@ internal sealed class ModuleCipher : IDisposable
     /// </summary>
     internal void Sign(ReadOnlySpan<byte> plaintext, ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> aad, Span<byte> tag)
     {
-        byte[] scratch = new byte[plaintext.Length];
-        _gcm.Encrypt(nonce, plaintext, scratch, tag, aad);
+        // The ciphertext of a whole footer, which nothing keeps: a block of the pool's, given back.
+        Block<byte> scratch = Buffers.Blocks.Rent<byte>(plaintext.Length);
+        try
+        {
+            _gcm.Encrypt(nonce, plaintext, ((Span<byte>)scratch)[..plaintext.Length], tag, aad);
+        }
+        finally
+        {
+            Buffers.Blocks.Return(scratch);
+        }
     }
 
     /// <summary>Decrypts the CTR module that starts <paramref name="module"/> into <paramref name="plaintext"/>, its ciphertext's length.</summary>

@@ -413,7 +413,8 @@ internal sealed class ParquetFooter
 
     private static SchemaElement[] ReadSchema(ref ThriftCompactReader reader)
     {
-        int count = reader.ReadListHeader(out ThriftType element);
+        // An element's name is required: its field's header, its length and the struct's stop.
+        int count = reader.ReadListHeader(out ThriftType element, leastBytes: 3);
         ThriftCompactReader.Expect(element, ThriftType.Struct);
         if (count == 0)
         {
@@ -431,7 +432,9 @@ internal sealed class ParquetFooter
 
     private static RowGroupEntry[] ReadRowGroups(ref ThriftCompactReader reader)
     {
-        int count = reader.ReadListHeader(out ThriftType element);
+        // A group's columns, size and row count are required: three headers, a list's and two
+        // varints' first bytes, and the stop.
+        int count = reader.ReadListHeader(out ThriftType element, leastBytes: 7);
         ThriftCompactReader.Expect(element, ThriftType.Struct);
         RowGroupEntry[] groups = new RowGroupEntry[count];
         for (int i = 0; i < count; i++)
@@ -504,7 +507,8 @@ internal sealed class ParquetFooter
 
     private static (ByteRange, ByteRange)[] ReadKeyValues(ref ThriftCompactReader reader)
     {
-        int count = reader.ReadListHeader(out ThriftType element);
+        // A pair's key is required: its field's header, its length and the struct's stop.
+        int count = reader.ReadListHeader(out ThriftType element, leastBytes: 3);
         ThriftCompactReader.Expect(element, ThriftType.Struct);
         (ByteRange, ByteRange)[] pairs = new (ByteRange, ByteRange)[count];
         for (int i = 0; i < count; i++)
