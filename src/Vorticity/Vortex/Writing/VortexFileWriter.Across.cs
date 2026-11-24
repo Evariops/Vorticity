@@ -281,7 +281,7 @@ public sealed partial class VortexFileWriter
     /// process's spares for one column and given back after it. Kept between writers, its arenas count under the memory the
     /// process keeps, and under the writer's account while a writer holds it.
     /// </summary>
-    private sealed class CompressionLane
+    private sealed class CompressionLane : IDisposable
     {
         private ArrayBlobWriter.Workspace _blobs = new ArrayBlobWriter.Workspace { OwnTypes = true, Account = MemoryAccount.Kept };
 
@@ -334,8 +334,11 @@ public sealed partial class VortexFileWriter
             _blobs.ReturnCompressors();
             if (!SpareSlots<CompressionLane>.Give(this))
             {
-                _blobs.Dispose();
+                Dispose();
             }
         }
+
+        /// <summary>Releases what the lane's workspace holds, when the spares are full or the registry lets the lane go.</summary>
+        public void Dispose() => _blobs.Dispose();
     }
 }

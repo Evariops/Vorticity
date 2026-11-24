@@ -1550,12 +1550,19 @@ internal sealed class PartBatch
     // The batches cores let go of, linked by Next, for the next query's: a query of a group a row made
     // one for every 150 or so of its rows, 29 000 on 4M rows of six keys, which lived to its end on
     // the small object heap, copied by every collection.
-    private static readonly Lock s_gate = new Lock();
     private static PartBatch? s_kept;
     private static int s_keptCount;
 
+    // Kept as a holder of the registry of kept memory: all of them go when no query took one since the registry last asked,
+    // and when a reservation needs the room. Kept outside it, 6 MB stayed for the process's life.
+    private static readonly KeptWhole s_keeping = new KeptWhole(
+        "part batches", static () => Volatile.Read(ref s_keptCount) * KeptBatchBytes, static () => (s_kept, s_keptCount) = (null, 0));
+
     /// <summary>The batches the process keeps for the next queries at most: some 6 MB.</summary>
     private const int MostKept = 1 << 17;
+
+    /// <summary>What a batch kept holds, its slab let go: 6 MB for <see cref="MostKept"/> of them.</summary>
+    private const long KeptBatchBytes = 48;
 
     internal PartBatch(Block<ulong> slab, int start, int capacity)
     {
@@ -1596,8 +1603,9 @@ internal sealed class PartBatch
     internal static PartBatch Linked(Block<ulong> slab, int count, int words, int capacity)
     {
         PartBatch? kept;
-        lock (s_gate)
+        lock (s_keeping.Gate)
         {
+            s_keeping.Took();
             kept = s_kept;
             PartBatch? last = null;
             int taken = 0;
@@ -1674,7 +1682,7 @@ internal sealed class PartBatch
             return;
         }
 
-        lock (s_gate)
+        lock (s_keeping.Gate)
         {
             if (s_keptCount + count > MostKept)
             {
@@ -2410,8 +2418,12 @@ internal sealed class CoreApplier
     private ScratchBlock<int> _entryAt;
     private ScratchBlock<int> _batchAt;
 
-    /// <summary>The numbers 0, 1, 2 and on, as many as a batch of entries has held: shared by every applier, never written once made.</summary>
-    private static int[] s_identity = [];
+    /// <summary>
+    /// The numbers 0, 1, 2 and on past those every thread shares (<see cref="Numbers"/>), for a batch of more entries: a
+    /// part's share of a lane's table emptied under pressure. A table shared by every applier grew to the largest batch
+    /// a process met and stayed for its life.
+    /// </summary>
+    private int[]? _numbers;
 
     private ScratchBlock<byte> _bits;
     private ScratchBlock<int> _clear;
@@ -2449,6 +2461,7 @@ internal sealed class CoreApplier
     internal void Release()
     {
         _taken = [];
+        _numbers = null;
         Scratch.Return(ref _map);
         Scratch.Return(ref _keys);
         Scratch.Return(ref _tableOf);
@@ -2583,7 +2596,7 @@ internal sealed class CoreApplier
             for (int i = 0; i < count; i++)
             {
                 int length = _taken[i].Count;
-                Identity(length).CopyTo(_entryAt.AsSpan(place, length));
+                Numbers.Upto(length, ref _numbers).CopyTo(_entryAt.AsSpan(place, length));
                 _batchAt.AsSpan(place, length).Fill(i);
                 place += length;
             }
@@ -2635,25 +2648,6 @@ internal sealed class CoreApplier
         }
 
         return tables;
-    }
-
-    /// <summary>The first <paramref name="length"/> numbers from 0; two appliers that grow them at once make two equal arrays, either one right.</summary>
-    private static ReadOnlySpan<int> Identity(int length)
-    {
-        int[] identity = Volatile.Read(ref s_identity);
-        if (identity.Length < length)
-        {
-            int[] grown = new int[Math.Max(length, 2 * identity.Length)];
-            for (int i = 0; i < grown.Length; i++)
-            {
-                grown[i] = i;
-            }
-
-            Volatile.Write(ref s_identity, grown);
-            identity = grown;
-        }
-
-        return identity.AsSpan(0, length);
     }
 
     /// <summary>

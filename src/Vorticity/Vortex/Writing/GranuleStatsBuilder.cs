@@ -3,7 +3,6 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.Numerics;
 using System.Runtime.InteropServices;
-using System.Threading;
 using Vorticity.Aggregating;
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Canonical;
@@ -307,21 +306,9 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         _seenIn.AsSpan(old).Clear();
     }
 
-    // Zeros, the entries of a granule's rows, which every builder reads and none writes.
-    private static int[] s_zeros = new int[8_192];
-
-    /// <summary><paramref name="count"/> zeros.</summary>
-    private static ReadOnlySpan<int> Zeros(int count)
-    {
-        int[] zeros = Volatile.Read(ref s_zeros);
-        if (zeros.Length < count)
-        {
-            zeros = new int[BitOperations.RoundUpToPowerOf2((uint)count)];
-            Volatile.Write(ref s_zeros, zeros);
-        }
-
-        return zeros.AsSpan(0, count);
-    }
+    // Zeros, the entries of a granule's rows, which every builder reads and none writes: a batch's rows fold through them a
+    // piece at a time, where a table grown to the largest batch met stayed for the process's life.
+    private static readonly int[] s_zeros = new int[8_192];
 
     /// <summary>Gives <paramref name="block"/> back to the pool, once.</summary>
     private static void Give<T>(ref Block<T> block)
@@ -346,7 +333,13 @@ internal sealed class GranuleStatsBuilder : IndexBuilder
         ref long state = ref MemoryMarshal.GetArrayDataReference(_state);
         if (kind == MeasureKind.Float)
         {
-            ColumnCountsBuilder.FoldFloats(ref state, Zeros(count), measure.Splits.AsSpan(start, count), measure.Floats.AsSpan(start, count), valid);
+            for (int at = 0; at < count; at += s_zeros.Length)
+            {
+                int piece = Math.Min(s_zeros.Length, count - at);
+                ColumnCountsBuilder.FoldFloats(
+                    ref state, s_zeros.AsSpan(0, piece), measure.Splits.AsSpan(start + at, piece), measure.Floats.AsSpan(start + at, piece),
+                    valid.IsEmpty ? default : valid.Slice(at, piece));
+            }
         }
         else
         {

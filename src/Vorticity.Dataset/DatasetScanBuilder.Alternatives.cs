@@ -153,16 +153,16 @@ internal sealed partial class DatasetScanBuilder
     /// The units of a question's states, given back for the next question's (<see cref="StatesAsync"/>): the list its units
     /// fill, and the units, each made again for an object (<see cref="Planned.Of"/>), which a question of 512 objects made
     /// anew at 225 bytes each. A process keeps one shelf a processor at most, each of <see cref="KeptUnits"/> units, some
-    /// 230 KB, and a list of <see cref="KeptUnits"/> times four.
+    /// 230 KB, and a list of <see cref="KeptUnits"/> times four, as memory the registry of kept memory asks back: those no
+    /// question took since its last turn, and all of them when a reservation needs the room.
     /// </summary>
     private sealed class UnitShelf
     {
         /// <summary>The units a shelf keeps at most.</summary>
         private const int KeptUnits = 1024;
 
-        private static readonly UnitShelf?[] Kept = new UnitShelf?[Environment.ProcessorCount];
-        private static readonly Lock Gate = new Lock();
-        private static int _count;
+        private static readonly Vorticity.Buffers.KeptObjects<UnitShelf> Kept =
+            new Vorticity.Buffers.KeptObjects<UnitShelf>("unit shelves", Environment.ProcessorCount, bytesEach: 0);
 
         private readonly Stack<Planned> _free = new Stack<Planned>();
 
@@ -170,20 +170,7 @@ internal sealed partial class DatasetScanBuilder
         internal List<Planned> Units { get; private set; } = [];
 
         /// <summary>A shelf a question gave back, or a new one.</summary>
-        internal static UnitShelf Rent()
-        {
-            lock (Gate)
-            {
-                if (_count > 0)
-                {
-                    UnitShelf kept = Kept[--_count]!;
-                    Kept[_count] = null;
-                    return kept;
-                }
-            }
-
-            return new UnitShelf();
-        }
+        internal static UnitShelf Rent() => Kept.Take() ?? new UnitShelf();
 
         /// <summary>A unit of the object <paramref name="held"/>, a unit given back made again or a new one.</summary>
         internal Planned Of(in PositionedObject held, int? field) =>
@@ -212,13 +199,7 @@ internal sealed partial class DatasetScanBuilder
                 Units = [];
             }
 
-            lock (Gate)
-            {
-                if (_count < Kept.Length)
-                {
-                    Kept[_count++] = this;
-                }
-            }
+            Kept.Give(this);
         }
     }
 

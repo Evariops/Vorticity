@@ -2604,8 +2604,11 @@ internal static partial class DatasetCompactor
     private static class Censuses
     {
         private const int Most = 32;
-        private static readonly Lock Gate = new Lock();
-        private static readonly Stack<PathCensus> Kept = new Stack<PathCensus>();
+
+        // Kept as memory the registry of kept memory asks back, their blocks given back to the pool as they go: those no job
+        // took since its last turn, and all of them when a reservation needs the room.
+        private static readonly Vorticity.Buffers.KeptObjects<PathCensus> Kept =
+            new Vorticity.Buffers.KeptObjects<PathCensus>("censuses", Most, bytesEach: 0, static census => census.Release());
 
         /// <summary>A census of each of <paramref name="columns"/> variant columns, text bounds cut to <paramref name="textBound"/> bytes, counting nothing.</summary>
         internal static PathCensus[] Rent(int columns, int textBound)
@@ -2613,13 +2616,16 @@ internal static partial class DatasetCompactor
             PathCensus[] censuses = new PathCensus[columns];
             for (int c = 0; c < columns; c++)
             {
-                PathCensus? kept = null;
-                lock (Gate)
+                // The last given back, when it cuts texts at the same bound; kept for another bound otherwise.
+                PathCensus? kept = Kept.Take();
+                if (kept is not null && kept.StringBoundBytes != textBound)
                 {
-                    if (Kept.Count > 0 && Kept.Peek().StringBoundBytes == textBound)
+                    if (!Kept.Give(kept))
                     {
-                        kept = Kept.Pop();
+                        kept.Release();
                     }
+
+                    kept = null;
                 }
 
                 censuses[c] = kept ?? new PathCensus(textBound);
@@ -2628,23 +2634,21 @@ internal static partial class DatasetCompactor
             return censuses;
         }
 
-        /// <summary>Takes <paramref name="censuses"/> back, cleared, those the pool has room for.</summary>
+        /// <summary>Takes <paramref name="censuses"/> back, cleared, those the pool has room for; the others give their blocks back.</summary>
         internal static void Return(PathCensus[] censuses)
         {
             foreach (PathCensus census in censuses)
             {
                 if (census.HeldKeys > 2 * PathCensus.MaxKeys)
                 {
+                    census.Release();
                     continue;
                 }
 
                 census.Clear();
-                lock (Gate)
+                if (!Kept.Give(census))
                 {
-                    if (Kept.Count < Most)
-                    {
-                        Kept.Push(census);
-                    }
+                    census.Release();
                 }
             }
         }
