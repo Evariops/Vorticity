@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using Vorticity.Diagnostics;
 
 namespace Vorticity.Buffers;
 
@@ -143,7 +144,17 @@ internal static class HeldMemory
         long let = 0;
         foreach (KeyValuePair<IHeldMemory, object?> pair in Holders)
         {
-            let += pair.Key.LetGoUnused(collection);
+            IHeldMemory holder = pair.Key;
+            try
+            {
+                let += holder.LetGoUnused(collection);
+            }
+            catch (Exception e) when (e is not OutOfMemoryException)
+            {
+                // Asked from the slow timer or after a collection, where no caller hears of a failure and the process ends
+                // on it: said, and the other holders are asked still.
+                VortexEventSource.Log.UpkeepFailed(holder.Holder, e.ToString());
+            }
         }
 
         QueryMemoryBudget.Process.LetGoKept(let);
@@ -212,6 +223,12 @@ internal static class HeldMemory
                 try
                 {
                     GiveBack(long.MaxValue);
+                }
+                catch (Exception e) when (e is not OutOfMemoryException)
+                {
+                    // On a thread of the pool, where no caller hears of a failure and the process ends on it: said, and
+                    // the next high load asks again.
+                    VortexEventSource.Log.UpkeepFailed("kept memory", e.ToString());
                 }
                 finally
                 {

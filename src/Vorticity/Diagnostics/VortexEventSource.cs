@@ -134,6 +134,14 @@ internal sealed class VortexEventSource : EventSource
     [Event(1, Level = EventLevel.Informational, Message = "The temporary directory {0} lies on a file system in memory: the scratch goes to {1}.")]
     public void ScratchMoved(string temporary, string directory) => WriteEvent(1, temporary, directory);
 
+    /// <summary>
+    /// Letting go of what <paramref name="holder"/> keeps failed on a thread no caller waits on, the slow timer's or the
+    /// finalizer's, where the failure would end the process: said, and the upkeep went on with the other holders and
+    /// asks this one again at its next turn.
+    /// </summary>
+    [Event(2, Level = EventLevel.Error, Message = "Letting go of the memory {0} keeps failed, and the upkeep went on: {1}")]
+    public void UpkeepFailed(string holder, string error) => WriteEvent(2, holder, error);
+
     /// <inheritdoc/>
     protected override void OnEventCommand(EventCommandEventArgs command)
     {

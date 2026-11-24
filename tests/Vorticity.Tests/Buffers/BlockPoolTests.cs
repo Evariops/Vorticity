@@ -955,6 +955,77 @@ public sealed class SharedPoolTests
         }
     }
 
+    /// <summary>
+    /// A holder whose letting go fails, asked from the slow timer or after a collection where no caller hears of it and the
+    /// process would end, is said on the library's event source, and the holders after it are asked still.
+    /// </summary>
+    [Fact]
+    public void A_holder_that_fails_to_let_go_is_said_and_the_others_are_asked()
+    {
+        Letting failing = new Letting(fails: true);
+        Letting other = new Letting(fails: false);
+        using UpkeepListener listener = new UpkeepListener();
+        HeldMemory.Register(failing);
+        HeldMemory.Register(other);
+        try
+        {
+            HeldMemory.LetGoUnused(collection: false);
+
+            Assert.True(failing.Asked >= 1);
+            Assert.True(other.Asked >= 1);
+            Assert.Contains(Letting.Name, listener.Holders);
+        }
+        finally
+        {
+            HeldMemory.Unregister(failing);
+            HeldMemory.Unregister(other);
+        }
+    }
+
+    /// <summary>A holder that keeps nothing, notes each time it is asked to let go of what it did not use, and fails then when told to.</summary>
+    private sealed class Letting(bool fails) : IHeldMemory
+    {
+        internal const string Name = "upkeep-test";
+
+        private int _asked;
+
+        internal int Asked => Volatile.Read(ref _asked);
+
+        public string Holder => Name;
+
+        public long HeldBytes => 0;
+
+        public long GiveBack(KeptKind kind, long bytes) => 0;
+
+        public long LetGoUnused(bool collection)
+        {
+            Interlocked.Increment(ref _asked);
+            return fails ? throw new InvalidOperationException("A holder's upkeep failed.") : 0;
+        }
+    }
+
+    /// <summary>What the library's event source says of a failed upkeep: the holders named.</summary>
+    private sealed class UpkeepListener : System.Diagnostics.Tracing.EventListener
+    {
+        internal System.Collections.Concurrent.ConcurrentQueue<string> Holders { get; } = new System.Collections.Concurrent.ConcurrentQueue<string>();
+
+        protected override void OnEventSourceCreated(System.Diagnostics.Tracing.EventSource source)
+        {
+            if (source.Name == "Vorticity")
+            {
+                EnableEvents(source, System.Diagnostics.Tracing.EventLevel.Error);
+            }
+        }
+
+        protected override void OnEventWritten(System.Diagnostics.Tracing.EventWrittenEventArgs data)
+        {
+            if (data.EventName == "UpkeepFailed" && data.Payload is [string holder, ..])
+            {
+                Holders.Enqueue(holder);
+            }
+        }
+    }
+
     /// <summary>A holder of one kind, which gives back what it is asked of it, and notes each asking.</summary>
     private sealed class Kept(KeptKind kind, long held, string name, List<string> asked) : IHeldMemory
     {
