@@ -622,26 +622,49 @@ internal static class PairedParts
     /// pairs' hash otherwise. <paramref name="partsOf"/> fills lane <c>p</c>'s array of each of its pairs' parts, of
     /// <c>pairs[p]</c> entries, cut by group or not, and returns where each part starts once placed.
     /// </summary>
-    /// <returns>Each lane's pairs' numbers part after part and where each part starts, and whether they are cut by group.</returns>
-    internal static async Task<((int[] Placed, int[] Starts)[] Cuts, bool ByGroup)> CutAsync(
-        int[] pairs, Func<int, bool, int[], int[]> partsOf, int groups, int parts, Execution.Spread degree, CancellationToken cancellationToken)
+    /// <returns>
+    /// Each lane's pairs' numbers part after part and where each part starts, whether they are cut by group, and the bytes
+    /// held in <paramref name="memory"/> for them, which the caller lets go once the parts are counted.
+    /// </returns>
+    /// <exception cref="VortexMemoryException">The query's memory does not hold the cut, two numbers a pair.</exception>
+    internal static async Task<((int[] Placed, int[] Starts)[] Cuts, bool ByGroup, long Held)> CutAsync(
+        int[] pairs, Func<int, bool, int[], int[]> partsOf, int groups, int parts, Execution.Spread degree, QueryMemory? memory,
+        CancellationToken cancellationToken)
     {
         int lanes = pairs.Length;
-        bool byGroup = groups >= parts * GroupsPerPart;
-        int[][] partOf = new int[lanes][];
-        int[][] starts = new int[lanes][];
-        await SideBySide.RunAsync(
-            lanes, p => starts[p] = partsOf(p, byGroup, partOf[p] = GC.AllocateUninitializedArray<int>(pairs[p])), degree, cancellationToken)
-            .ConfigureAwait(false);
-        if (byGroup && Lopsided(starts, parts))
+
+        // Two numbers a pair, each lane's parts and its pairs placed by them: held before they are made, where they were
+        // made past the query's memory.
+        long held = 0;
+        foreach (int count in pairs)
         {
-            byGroup = false;
-            await SideBySide.RunAsync(lanes, p => starts[p] = partsOf(p, false, partOf[p]), degree, cancellationToken).ConfigureAwait(false);
+            held += 2L * count * sizeof(int);
         }
 
-        (int[] Placed, int[] Starts)[] cuts = new (int[], int[])[lanes];
-        await SideBySide.RunAsync(lanes, p => cuts[p] = (Place(partOf[p], starts[p]), starts[p]), degree, cancellationToken).ConfigureAwait(false);
-        return (cuts, byGroup);
+        memory?.Hold(held, "cut of a distinct count's pairs");
+        try
+        {
+            bool byGroup = groups >= parts * GroupsPerPart;
+            int[][] partOf = new int[lanes][];
+            int[][] starts = new int[lanes][];
+            await SideBySide.RunAsync(
+                lanes, p => starts[p] = partsOf(p, byGroup, partOf[p] = GC.AllocateUninitializedArray<int>(pairs[p])), degree, cancellationToken)
+                .ConfigureAwait(false);
+            if (byGroup && Lopsided(starts, parts))
+            {
+                byGroup = false;
+                await SideBySide.RunAsync(lanes, p => starts[p] = partsOf(p, false, partOf[p]), degree, cancellationToken).ConfigureAwait(false);
+            }
+
+            (int[] Placed, int[] Starts)[] cuts = new (int[], int[])[lanes];
+            await SideBySide.RunAsync(lanes, p => cuts[p] = (Place(partOf[p], starts[p]), starts[p]), degree, cancellationToken).ConfigureAwait(false);
+            return (cuts, byGroup, memory is null ? 0 : held);
+        }
+        catch
+        {
+            memory?.LetGo(held);
+            throw;
+        }
     }
 
     /// <summary>

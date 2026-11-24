@@ -1003,104 +1003,119 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         // count of every group a part, a gigabyte at a million groups and 128 parts, nor a sum of them all. Unless a group
         // holds so many pairs that its part outweighs the others (PairedParts.Lopsided): then by the pairs' hash.
         int shift = 64 - BitOperations.Log2((uint)parts);
-        ((int[] Placed, int[] Starts)[] cuts, bool byGroup) = await PairedParts.CutAsync(
+        ((int[] Placed, int[] Starts)[] cuts, bool byGroup, long cut) = await PairedParts.CutAsync(
             Array.ConvertAll(all, static lane => lane.Count),
             (p, group, partOf) => all[p].PartsOf(maps[p], shift, parts, group, partOf),
             groups,
             parts,
             degree,
+            memory,
             cancellationToken).ConfigureAwait(false);
-        if (byGroup)
+
+        // The parts' tables grow under one account of the query's memory, each block reserved as it is taken and given back
+        // as it is let go: they were built uncounted, and asked of the budget once released, after their peak.
+        TableArrays tables = TableArrays.OfParts(memory);
+        try
         {
-            EnsureGroups(groups);
-            _counts.AsSpan(0, groups).Clear();
-            Block<long> owned = _counts;
-            await SideBySide.RunAsync(
-                parts,
-                part =>
-                {
-                    DistinctPairs<TValue> distinct = new DistinctPairs<TValue>();
-                    for (int p = 0; p < all.Length; p++)
+            if (byGroup)
+            {
+                EnsureGroups(groups);
+                _counts.AsSpan(0, groups).Clear();
+                Block<long> owned = _counts;
+                await SideBySide.RunAsync(
+                    parts,
+                    part =>
                     {
-                        (int[] placed, int[] starts) = cuts[p];
-                        int[] map = maps[p];
-                        DistinctPairs<TValue> lane = all[p];
-                        for (int i = starts[part]; i < starts[part + 1]; i++)
+                        DistinctPairs<TValue> distinct = new DistinctPairs<TValue>();
+                        distinct.Govern(tables);
+                        try
                         {
-                            int group = map[lane.GroupAt(placed[i])];
-                            if (distinct.AddCounted(group, lane.ValueAt(placed[i])))
+                            for (int p = 0; p < all.Length; p++)
                             {
-                                owned[group]++;
+                                (int[] placed, int[] starts) = cuts[p];
+                                int[] map = maps[p];
+                                DistinctPairs<TValue> lane = all[p];
+                                for (int i = starts[part]; i < starts[part + 1]; i++)
+                                {
+                                    int group = map[lane.GroupAt(placed[i])];
+                                    if (distinct.AddCounted(group, lane.ValueAt(placed[i])))
+                                    {
+                                        owned[group]++;
+                                    }
+                                }
                             }
                         }
-                    }
-
-                    // The part's table, held until its pairs are counted.
-                    long bytes = distinct.Footprint;
-                    distinct.Release();
-                    if (memory is not null && !memory.TryGrow(bytes))
-                    {
-                        throw memory.Exceeded("merge of a distinct count", groups, bytes);
-                    }
-
-                    memory?.Shrink(bytes);
-                    memory?.Discard(bytes);
-                },
-                degree,
-                cancellationToken).ConfigureAwait(false);
-            ReleasePairs(groups);
-            return;
-        }
-
-        long[][] counts = new long[parts][];
-        await SideBySide.RunAsync(
-            parts,
-            part =>
-            {
-                DistinctPairs<TValue> distinct = new DistinctPairs<TValue>();
-                distinct.EnsureGroups(groups);
-                long[] count = new long[groups];
-                for (int p = 0; p < all.Length; p++)
-                {
-                    (int[] placed, int[] starts) = cuts[p];
-                    int[] map = maps[p];
-                    DistinctPairs<TValue> lane = all[p];
-                    for (int i = starts[part]; i < starts[part + 1]; i++)
-                    {
-                        int group = map[lane.GroupAt(placed[i])];
-                        if (distinct.Add(group, lane.ValueAt(placed[i])))
+                        finally
                         {
-                            count[group]++;
+                            distinct.Release();
                         }
+                    },
+                    degree,
+                    cancellationToken).ConfigureAwait(false);
+                ReleasePairs(groups);
+                return;
+            }
+
+            Block<long>[] counts = new Block<long>[parts];
+            try
+            {
+                await SideBySide.RunAsync(
+                    parts,
+                    part =>
+                    {
+                        DistinctPairs<TValue> distinct = new DistinctPairs<TValue>();
+                        distinct.Govern(tables);
+                        try
+                        {
+                            distinct.EnsureGroups(groups);
+                            Block<long> count = counts[part] = tables.Rent<long>(groups, zeroed: true);
+                            for (int p = 0; p < all.Length; p++)
+                            {
+                                (int[] placed, int[] starts) = cuts[p];
+                                int[] map = maps[p];
+                                DistinctPairs<TValue> lane = all[p];
+                                for (int i = starts[part]; i < starts[part + 1]; i++)
+                                {
+                                    int group = map[lane.GroupAt(placed[i])];
+                                    if (distinct.Add(group, lane.ValueAt(placed[i])))
+                                    {
+                                        count[group]++;
+                                    }
+                                }
+                            }
+                        }
+                        finally
+                        {
+                            distinct.Release();
+                        }
+                    },
+                    degree,
+                    cancellationToken).ConfigureAwait(false);
+
+                EnsureGroups(groups);
+                _counts.Clear();
+                foreach (Block<long> count in counts)
+                {
+                    for (int group = 0; group < groups; group++)
+                    {
+                        _counts[group] += count[group];
                     }
                 }
-
-                // The part's table, held until its pairs are counted.
-                long bytes = distinct.Footprint;
-                distinct.Release();
-                if (memory is not null && !memory.TryGrow(bytes))
-                {
-                    throw memory.Exceeded("merge of a distinct count", groups, bytes);
-                }
-
-                counts[part] = count;
-                memory?.Shrink(bytes);
-                memory?.Discard(bytes);
-            },
-            degree,
-            cancellationToken).ConfigureAwait(false);
-
-        EnsureGroups(groups);
-        _counts.Clear();
-        foreach (long[] count in counts)
-        {
-            for (int group = 0; group < groups; group++)
-            {
-                _counts[group] += count[group];
             }
-        }
+            finally
+            {
+                foreach (Block<long> count in counts)
+                {
+                    tables.Return(count);
+                }
+            }
 
-        ReleasePairs(groups);
+            ReleasePairs(groups);
+        }
+        finally
+        {
+            memory?.LetGo(cut);
+        }
     }
 
     /// <summary>The pairs, counted: let go, their arrays given back, a table for <paramref name="groups"/> groups made.</summary>
@@ -1158,27 +1173,30 @@ internal sealed class FixedDistinctSlot<TValue> : AggregateSlot<long>, IPairedSl
         int bits = BitOperations.Log2((uint)parts);
         int share = (int)Math.Min(union / parts, int.MaxValue / 4);
         long[] counts = new long[parts];
+
+        // Each part's table made empty, governed, then given its share: made at its share, its first slots were the
+        // table's own, outside the account that would have given them back.
+        TableArrays tables = TableArrays.OfParts(memory);
         await SideBySide.RunAsync(
             parts,
             part =>
             {
-                DistinctValues<TValue> distinct = new DistinctValues<TValue>(share, skip: bits);
-                foreach (DistinctValues<TValue> lane in all)
+                DistinctValues<TValue> distinct = new DistinctValues<TValue>(skip: bits);
+                distinct.Govern(tables);
+                try
                 {
-                    distinct.AddPart(lane, part, bits);
-                }
+                    distinct.Reserve(share);
+                    foreach (DistinctValues<TValue> lane in all)
+                    {
+                        distinct.AddPart(lane, part, bits);
+                    }
 
-                // The part's table, held until its values are counted.
-                long bytes = distinct.Footprint;
-                counts[part] = distinct.Count;
-                distinct.Release();
-                if (memory is not null && !memory.TryGrow(bytes))
+                    counts[part] = distinct.Count;
+                }
+                finally
                 {
-                    throw memory.Exceeded("merge of a distinct count", 1, bytes);
+                    distinct.Release();
                 }
-
-                memory?.Shrink(bytes);
-                memory?.Discard(bytes);
             },
             degree,
             cancellationToken).ConfigureAwait(false);

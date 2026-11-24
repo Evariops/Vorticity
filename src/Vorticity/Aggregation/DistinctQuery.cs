@@ -779,6 +779,11 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
         Scratch.Return(ref _open);
         LetPartGo();
         _spill?.Dispose();
+
+        // The partition's index back to the pool, as a group by's tables are: left to the collector, a distinct of millions
+        // of values made its index anew at every query. Its account forgets it, the query's memory going back whole.
+        _partition?.Delivered();
+        _partition = null;
         _memory?.Dispose();
         if (_begun && !_ended)
         {

@@ -777,33 +777,55 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     /// </summary>
     internal override void Sections(Span<byte> sections)
     {
-        ulong[] hashes = new ulong[Count];
-        Hashes(hashes);
-        for (int g = 0; g < Count; g++)
+        // A block of the pool, as the merge's maps are: a lane spills when its memory runs out, and an array of its groups
+        // made then was the heap's, past the query's count.
+        Block<ulong> hashes = Buffers.Blocks.Rent<ulong>(Math.Max(Count, 1));
+        try
         {
-            sections[g] = (byte)(hashes[g] >> (64 - SpillRun.SectionBits));
+            Hashes(hashes.AsSpan(0, Count));
+            for (int g = 0; g < Count; g++)
+            {
+                sections[g] = (byte)(hashes[g] >> (64 - SpillRun.SectionBits));
+            }
+        }
+        finally
+        {
+            Buffers.Blocks.Return(hashes);
         }
     }
 
     /// <summary>Each column's hash of the group's value, 0 for its null, folded into the next's: the same for one tuple in every lane, whatever its numbers.</summary>
     internal override void Hashes(Span<ulong> hashes)
     {
-        ulong[][] parts = new ulong[_parts.Length][];
+        // Every column's hashes in one block of the pool, a column after the other.
+        Span<int> starts = stackalloc int[_parts.Length + 1];
         for (int p = 0; p < _parts.Length; p++)
         {
-            parts[p] = new ulong[_parts[p].Count];
-            _parts[p].Hashes(parts[p]);
+            starts[p + 1] = starts[p] + _parts[p].Count;
         }
 
-        for (int g = 0; g < Count; g++)
+        Block<ulong> parts = Buffers.Blocks.Rent<ulong>(Math.Max(starts[^1], 1));
+        try
         {
-            ulong hash = parts[0][Id(_keys[g], 0)];
-            for (int p = 1; p < _parts.Length; p++)
+            for (int p = 0; p < _parts.Length; p++)
             {
-                hash = MergeHash.Of(hash, parts[p][Id(_keys[g], p)], MergeHash.Seed);
+                _parts[p].Hashes(parts.AsSpan(starts[p], _parts[p].Count));
             }
 
-            hashes[g] = hash;
+            for (int g = 0; g < Count; g++)
+            {
+                ulong hash = parts[starts[0] + Id(_keys[g], 0)];
+                for (int p = 1; p < _parts.Length; p++)
+                {
+                    hash = MergeHash.Of(hash, parts[starts[p] + Id(_keys[g], p)], MergeHash.Seed);
+                }
+
+                hashes[g] = hash;
+            }
+        }
+        finally
+        {
+            Buffers.Blocks.Return(parts);
         }
     }
 
@@ -949,34 +971,50 @@ internal sealed class PackedKeys<TKey> : GroupKeys
     internal override async Task RebaseAsync(GroupKeys[] partitions, Execution.FlowCore core, int lanes, CancellationToken cancellationToken)
     {
         _lentParts = true;
-        int[][][] maps = new int[partitions.Length][][];
+
+        // Each partition's maps of its columns' numbers in blocks of the pool, given back once every word is rewritten:
+        // arrays of a lane and a column each, made as the lanes' tables are merged, were the heap's.
+        Block<int>[][] maps = new Block<int>[partitions.Length][];
         for (int l = 1; l < partitions.Length; l++)
         {
-            maps[l] = new int[_parts.Length][];
+            maps[l] = new Block<int>[_parts.Length];
         }
 
-        await Execution.CoreFor.RunAsync(
-            core, lanes, _parts.Length,
-            part =>
-            {
-                for (int l = 1; l < partitions.Length; l++)
+        try
+        {
+            await Execution.CoreFor.RunAsync(
+                core, lanes, _parts.Length,
+                part =>
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    GroupKeys from = ((PackedKeys<TKey>)partitions[l])._parts[part];
-                    maps[l][part] = new int[from.Count];
-                    from.MergeInto(_parts[part], maps[l][part]);
-                }
-            },
-            cancellationToken).ConfigureAwait(false);
+                    for (int l = 1; l < partitions.Length; l++)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        GroupKeys from = ((PackedKeys<TKey>)partitions[l])._parts[part];
+                        Block<int> map = maps[l][part] = Buffers.Blocks.Rent<int>(Math.Max(from.Count, 1));
+                        from.MergeInto(_parts[part], map.AsSpan(0, from.Count));
+                    }
+                },
+                cancellationToken).ConfigureAwait(false);
 
-        await Execution.CoreFor.RunAsync(
-            core, lanes, partitions.Length - 1,
-            item => ((PackedKeys<TKey>)partitions[item + 1]).Rewrite(maps[item + 1], _parts),
-            cancellationToken).ConfigureAwait(false);
+            await Execution.CoreFor.RunAsync(
+                core, lanes, partitions.Length - 1,
+                item => ((PackedKeys<TKey>)partitions[item + 1]).Rewrite(maps[item + 1], _parts),
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            for (int l = 1; l < partitions.Length; l++)
+            {
+                foreach (Block<int> map in maps[l])
+                {
+                    Buffers.Blocks.Return(map);
+                }
+            }
+        }
     }
 
     /// <summary>Every word with each part's number taken through <paramref name="maps"/>, and the indexes of the columns those numbers are in.</summary>
-    private void Rewrite(int[][] maps, GroupKeys[] parts)
+    private void Rewrite(Block<int>[] maps, GroupKeys[] parts)
     {
         Span<int> ids = stackalloc int[_parts.Length];
         for (int g = 0; g < Count; g++)

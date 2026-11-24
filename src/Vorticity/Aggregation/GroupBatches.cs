@@ -1030,6 +1030,26 @@ internal static class GroupSelection
     /// <summary>Gives back a block of groups an operator made (<see cref="Order"/>, <see cref="Filter"/>) once read, when no result holds it.</summary>
     internal static void GiveBack(Block<int> groups) => Blocks.Return(groups);
 
+    /// <summary>
+    /// Gives back the <paramref name="count"/> groups <see cref="Order"/> made, read and not delivered, with what it held of
+    /// them in <paramref name="memory"/> and the block's rounding it measured past them: an operator that orders at every
+    /// batch it closes, or at every prune of a lane's top, let the held part go and left the rounding measured, up to a
+    /// quarter of a megabyte a call, until the query ended.
+    /// </summary>
+    internal static void LetGo(QueryMemory? memory, Block<int> groups, int count)
+    {
+        if (memory is not null)
+        {
+            memory.LetGo((long)count * sizeof(int));
+            if (!groups.IsDefault)
+            {
+                memory.Measure(-(((long)groups.Length - count) * sizeof(int)));
+            }
+        }
+
+        Blocks.Return(groups);
+    }
+
     private static long Saturated(long skip, long take) => take == long.MaxValue || skip > long.MaxValue - take ? long.MaxValue : skip + take;
 
     /// <summary>
