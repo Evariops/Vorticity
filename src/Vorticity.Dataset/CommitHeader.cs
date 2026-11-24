@@ -905,13 +905,13 @@ internal sealed record CommitHeader
             switch (field, wire)
             {
                 case (1, ProtoWireType.Varint):
-                    min = (int)reader.ReadVarint();
+                    min = ReadInt(ref reader, int.MaxValue, "chunker's floor");
                     break;
                 case (2, ProtoWireType.Varint):
-                    target = (int)reader.ReadVarint();
+                    target = ReadInt(ref reader, int.MaxValue, "chunker's target");
                     break;
                 case (3, ProtoWireType.Varint):
-                    max = (int)reader.ReadVarint();
+                    max = ReadInt(ref reader, int.MaxValue, "chunker's cap");
                     break;
                 default:
                     reader.SkipField(wire);
@@ -919,7 +919,35 @@ internal sealed record CommitHeader
             }
         }
 
+        // The rule refuses sizes out of this order, as an argument: read from a commit, they are a malformed header.
+        if (min != 0 && !(min > 0 && target > min && max > target))
+        {
+            throw new CommitFormatException($"The header's chunker cuts pages between {min} and {max} bytes aiming at {target}, which is no order of sizes.");
+        }
+
         return new ChunkerSettings(min, target, max);
+    }
+
+    /// <summary>
+    /// The most levels a header names, and the deepest tree: each level holds several times the one below it, and a tree's
+    /// page the references of many pages below it, as a level of a tree that did not shrink would never end, so that 64 of
+    /// either pass what a <see cref="long"/> counts. A header past them is no header a writer made, and what it sizes, an
+    /// array a level and a frame a depth, stays small.
+    /// </summary>
+    private const int MostLevels = 64;
+
+    /// <summary>A varint the header holds as an <see cref="int"/> up to <paramref name="most"/>: past it, a malformed header, where a cast wrapped it.</summary>
+    private static int ReadInt(ref ProtoReader reader, int most, string what)
+    {
+        ulong value = reader.ReadVarint();
+        return value <= (ulong)most ? (int)value : throw new CommitFormatException($"The header's {what} is {value}, past {most}.");
+    }
+
+    /// <summary>A varint the header holds as a <see cref="long"/>: past one, a malformed header, where a cast turned it negative.</summary>
+    private static long ReadLong(ref ProtoReader reader, string what)
+    {
+        ulong value = reader.ReadVarint();
+        return value <= long.MaxValue ? (long)value : throw new CommitFormatException($"The header's {what} is {value}, past a long.");
     }
 
     private static CompactionSettings ReadCompaction(ReadOnlySpan<byte> bytes)
@@ -933,13 +961,13 @@ internal sealed record CommitHeader
             switch (field, wire)
             {
                 case (1, ProtoWireType.Varint):
-                    levels = (int)reader.ReadVarint();
+                    levels = ReadInt(ref reader, MostLevels, "compaction's levels");
                     break;
                 case (2, ProtoWireType.Varint):
-                    target = (long)reader.ReadVarint();
+                    target = ReadLong(ref reader, "compaction's target");
                     break;
                 case (3, ProtoWireType.Varint):
-                    fanout = (int)reader.ReadVarint();
+                    fanout = ReadInt(ref reader, int.MaxValue, "compaction's fanout");
                     break;
                 default:
                     reader.SkipField(wire);
@@ -960,10 +988,10 @@ internal sealed record CommitHeader
             switch (field, wire)
             {
                 case (1, ProtoWireType.Varint):
-                    versions = (int)reader.ReadVarint();
+                    versions = ReadInt(ref reader, int.MaxValue, "retention's versions");
                     break;
                 case (2, ProtoWireType.Varint):
-                    seconds = (long)reader.ReadVarint();
+                    seconds = ReadLong(ref reader, "retention's seconds");
                     break;
                 default:
                     reader.SkipField(wire);
@@ -989,16 +1017,16 @@ internal sealed record CommitHeader
             switch (field, wire)
             {
                 case (LevelField.Level, ProtoWireType.Varint):
-                    level = (int)reader.ReadVarint();
+                    level = ReadInt(ref reader, MostLevels - 1, "level");
                     break;
                 case (LevelField.Entries, ProtoWireType.Varint):
-                    entries = (long)reader.ReadVarint();
+                    entries = ReadLong(ref reader, "level's entries");
                     break;
                 case (LevelField.Depth, ProtoWireType.Varint):
-                    depth = (int)reader.ReadVarint();
+                    depth = ReadInt(ref reader, MostLevels, "level's depth");
                     break;
                 case (LevelField.Rows, ProtoWireType.Varint):
-                    rows = (long)reader.ReadVarint();
+                    rows = ReadLong(ref reader, "level's rows");
                     break;
                 case (LevelField.Top, ProtoWireType.LengthDelimited):
                     top = PageReference.Read(reader.ReadLengthDelimited());

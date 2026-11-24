@@ -26,7 +26,7 @@ internal static class GoogleAnswers
             (ObjectHead head, string? putId, _) = ReadObject(ref reader);
             return (head, putId);
         }
-        catch (Exception malformed) when (malformed is JsonException or FormatException or InvalidOperationException or OverflowException)
+        catch (Exception malformed) when (Malformed(malformed))
         {
             throw new ObjectStoreException("The service answered with malformed JSON.", malformed);
         }
@@ -74,7 +74,7 @@ internal static class GoogleAnswers
                 }
             }
         }
-        catch (Exception malformed) when (malformed is JsonException or FormatException or InvalidOperationException or OverflowException)
+        catch (Exception malformed) when (Malformed(malformed))
         {
             throw new ObjectStoreException("The service answered with malformed JSON.", malformed);
         }
@@ -149,12 +149,12 @@ internal static class GoogleAnswers
             else if (reader.ValueTextEquals("timeCreated"u8))
             {
                 reader.Read();
-                created = Date(reader.GetString()!);
+                created = Date(reader.GetString());
             }
             else if (reader.ValueTextEquals("retentionExpirationTime"u8))
             {
                 reader.Read();
-                retainUntil = Date(reader.GetString()!);
+                retainUntil = Date(reader.GetString());
             }
             else if (reader.ValueTextEquals("temporaryHold"u8) || reader.ValueTextEquals("eventBasedHold"u8))
             {
@@ -197,8 +197,15 @@ internal static class GoogleAnswers
         }
     }
 
-    private static DateTimeOffset Date(string text) =>
+    private static DateTimeOffset Date(string? text) =>
         DateTimeOffset.TryParse(text, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out DateTimeOffset date)
             ? date
-            : throw new ObjectStoreException($"The service wrote a date that is not one: '{ServiceError.Clip(text)}'.");
+            : throw new ObjectStoreException($"The service wrote a date that is not one: '{ServiceError.Clip(text ?? "null")}'.");
+
+    /// <summary>
+    /// What a malformed answer throws as it is read: the reader's and the parsers' errors, a <c>null</c> where a number or
+    /// a text stands among them, which a parser refuses as an argument.
+    /// </summary>
+    private static bool Malformed(Exception error) =>
+        error is JsonException or FormatException or InvalidOperationException or OverflowException or ArgumentException;
 }

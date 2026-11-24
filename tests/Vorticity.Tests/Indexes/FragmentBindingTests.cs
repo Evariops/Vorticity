@@ -211,6 +211,28 @@ public sealed class FragmentBindingTests
         Assert.Empty(changed.Torn);
     }
 
+    /// <summary>
+    /// A trailer whose directory starts 8 bytes short of 2^64 and is 16 bytes long sums to 8, inside the fragment: the sum
+    /// passed the check, and the offset, cast to a long, was negative when the directory was sliced. Compared without a
+    /// sum, it is refused with its reason, as a directory outside the fragment is.
+    /// </summary>
+    [Fact]
+    public async Task AFragmentWhoseTrailerWrapsPastTheEndIsRefusedWithItsReason()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        using Temp temp = new Temp();
+        await WriteAsync(temp.Path, Guid.NewGuid());
+        byte[] fragment = await FragmentAsync(temp.Path);
+        Span<byte> trailer = fragment.AsSpan(fragment.Length - IndexContainer.TrailerSize);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt64LittleEndian(trailer, ulong.MaxValue - 7);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(trailer[8..], 16);
+
+        await using VortexFile file = await VortexFile.OpenAsync(temp.Path, With(fragment), ct);
+        await file.ReadIndexDirectoryAsync(ct);
+        Assert.Contains("outside", Assert.Single(file.IndexFragmentRefusals), StringComparison.Ordinal);
+    }
+
     // ------------------------------------------------------------------------------ helpers
 
     private static VortexOpenOptions With(byte[] fragment) =>

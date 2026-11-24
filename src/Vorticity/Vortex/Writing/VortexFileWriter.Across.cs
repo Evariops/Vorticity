@@ -40,10 +40,10 @@ public sealed partial class VortexFileWriter
     private bool CompressesAcross => _lanes > 1 && _isTabular && _fieldCount > 1 && (_gathering is null || !_mayShareChildren) && EmitsApart;
 
     /// <summary>
-    /// Whether a probe of the tests watches the plans the chooser makes, which rides the write's flow and not the core's
-    /// pumps: a chunk is then compressed on the writer's flow, which changes where, and not what, it writes.
+    /// Whether a probe of the tests watches the plans the chooser makes (<see cref="Probes"/>): a chunk is then compressed on
+    /// the writer's flow, one at a time, which changes where, and not what, it writes.
     /// </summary>
-    private static bool ProbesWatch => ColumnCompressor.Differential.Value is not null || ArrayBlobWriter.ElementsHanded.Value is not null;
+    private bool ProbesWatch => _probes is not null;
 
     /// <summary>
     /// Takes one chunk of the file, node <paramref name="rootIndex"/> of <paramref name="arena"/>, to emission: the columns
@@ -281,7 +281,7 @@ public sealed partial class VortexFileWriter
     /// process's spares for one column and given back after it. Kept between writers, its arenas count under the memory the
     /// process keeps, and under the writer's account while a writer holds it.
     /// </summary>
-    private sealed class CompressionLane
+    private sealed class CompressionLane : IDisposable
     {
         private ArrayBlobWriter.Workspace _blobs = new ArrayBlobWriter.Workspace { OwnTypes = true, Account = MemoryAccount.Kept };
 
@@ -314,6 +314,7 @@ public sealed partial class VortexFileWriter
             }
 
             lane._blobs.Account = writer.Account;
+            lane._blobs.Probes = writer._probes;
             lane.Arena.Account = writer.Account;
             return lane;
         }
@@ -328,12 +329,16 @@ public sealed partial class VortexFileWriter
             Arena.Reset();
             Arena.Account = MemoryAccount.Kept;
             _blobs.Account = MemoryAccount.Kept;
+            _blobs.Probes = null;
             _encodings.Clear();
             _blobs.ReturnCompressors();
             if (!SpareSlots<CompressionLane>.Give(this))
             {
-                _blobs.Dispose();
+                Dispose();
             }
         }
+
+        /// <summary>Releases what the lane's workspace holds, when the spares are full or the registry lets the lane go.</summary>
+        public void Dispose() => _blobs.Dispose();
     }
 }

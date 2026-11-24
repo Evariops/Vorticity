@@ -845,6 +845,13 @@ internal sealed class BloomPruner : IDisposable
                 {
                     foreach ((long relative, BloomWords leaf) in tree.Leaves)
                     {
+                        // A root may hold more leaves than its run has blocks (ParseRoot asks for as many at least): a leaf
+                        // past the run proves nothing of a block the run covers, and marked one past the file's mask.
+                        if (relative >= tree.Run.BlockCount)
+                        {
+                            continue;
+                        }
+
                         if (Proves(leaf.Span))
                         {
                             long block = first + relative;

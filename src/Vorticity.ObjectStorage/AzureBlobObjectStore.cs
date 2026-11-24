@@ -47,11 +47,12 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
 
     /// <summary>A store over <see cref="AzureBlobStoreOptions.Container"/>.</summary>
     /// <param name="options">The account, the container, the credentials and the connections.</param>
-    /// <exception cref="ArgumentException">The endpoint is plain HTTP off the loopback, or the credentials cannot authorize Azure requests.</exception>
+    /// <exception cref="ArgumentException">The endpoint is plain HTTP off the loopback, or the credentials cannot authorize Azure requests, or the account's name holds a character a host name does not take.</exception>
     public AzureBlobObjectStore(AzureBlobStoreOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentException.ThrowIfNullOrEmpty(options.Account);
+        Http.UriEncoding.RequireHostName(options.Account, "The account", nameof(options));
         ArgumentException.ThrowIfNullOrEmpty(options.Container);
         ArgumentNullException.ThrowIfNull(options.Credentials);
         Uri endpoint = options.Endpoint ?? new Uri($"https://{options.Account}.blob.core.windows.net");
@@ -523,7 +524,7 @@ public sealed partial class AzureBlobObjectStore : IObjectStore, IUploadService
         int status = (int)response.StatusCode;
         string? requestId = HttpAnswers.Header(response, "x-ms-request-id");
         string? code = HttpAnswers.Header(response, "x-ms-error-code");
-        TimeSpan? retryAfter = HttpAnswers.RetryAfter(response);
+        TimeSpan? retryAfter = HttpAnswers.RetryAfter(response, _options.Transport.TimeProvider);
         if (response.RequestMessage?.Method == HttpMethod.Head || response.Content.Headers.ContentLength == 0)
         {
             return new ServiceError(status, code, null, requestId, retryAfter);

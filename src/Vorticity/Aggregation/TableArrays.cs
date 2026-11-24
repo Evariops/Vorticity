@@ -83,6 +83,12 @@ internal sealed class TableArrays
     /// <summary>The core's account under its query's <paramref name="memory"/>; uncounted when there is none.</summary>
     internal static TableArrays OfCore(QueryMemory? memory) => memory is null ? Uncounted : new TableArrays(memory, lane: false);
 
+    /// <summary>
+    /// The account the tables of a merge's parts grow under, side by side: a core's, each block reserved exactly under
+    /// <paramref name="memory"/> as it is taken and given back as it is let go, none kept for the next; uncounted with none.
+    /// </summary>
+    internal static TableArrays OfParts(QueryMemory? memory) => memory is null ? Uncounted : new TableArrays(memory, lane: false) { Drops = true };
+
     /// <summary>The query's memory the account counts its blocks under; null for one that counts nothing.</summary>
     internal QueryMemory? Memory => _memory;
 

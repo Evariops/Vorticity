@@ -127,8 +127,11 @@ public sealed partial class VariantPathsFileTests
     public void APathPrintsAsAFilterWritesIt()
     {
         VariantPath path = new VariantPath(["http.route", "it's"], VariantPathClass.String, 3, Exact: false);
-        Assert.Equal("['http.route']['it\\'s']", path.Path);
-        Assert.Equal("['http.route']['it\\'s'] String: 3 rows (estimated)", path.ToString());
+        Assert.Equal("['http.route']['it''s']", path.Path);
+        Assert.Equal("['http.route']['it''s'] String: 3 rows (estimated)", path.ToString());
+
+        // The filter's grammar reads the path back as the keys it was made of.
+        Assert.Equal("Attributes['http.route']['it''s'].AsString() = 'a'", ExprText.Format(ExprText.Parse($"Attributes{path.Path} = 'a'")));
         Assert.Equal("(root) Object: 1 row", new VariantPath([], VariantPathClass.Object, 1, Exact: true).ToString());
     }
 

@@ -47,8 +47,11 @@ internal sealed class ExternalSort : IAsyncDisposable
     /// <summary>The fewest rows of a run's block.</summary>
     private const int LeastRunBlockRows = 256;
 
-    // The rows of each run's blocks, and the most bytes a row of the store held: what the merge reads and builds by.
+    // The rows of each run's blocks, and the most bytes a row of the store held: what the merge reads and builds by. Each
+    // run's rows and its file's bytes, which a level of the merge sums for the run it writes of several.
     private readonly List<int> _runBlockRows = [];
+    private readonly List<long> _runRows = [];
+    private readonly List<long> _runFileBytes = [];
     private long _rowBytes;
 
     private readonly VortexSession _session;
@@ -143,7 +146,8 @@ internal sealed class ExternalSort : IAsyncDisposable
             await WriteRunAsync(cancellationToken).ConfigureAwait(false);
         }
 
-        Merge merge = new Merge(this, cancellationToken);
+        await CascadeAsync(cancellationToken).ConfigureAwait(false);
+        Merge merge = new Merge(this, 0, _runs.Count, MergeRows, whole: false, cancellationToken);
         try
         {
             await merge.OpenAsync().ConfigureAwait(false);
@@ -183,6 +187,9 @@ internal sealed class ExternalSort : IAsyncDisposable
         }
 
         _runs.Clear();
+        _runBlockRows.Clear();
+        _runRows.Clear();
+        _runFileBytes.Clear();
         return ValueTask.CompletedTask;
     }
 
@@ -249,12 +256,14 @@ internal sealed class ExternalSort : IAsyncDisposable
         }
 
         _scratch += budget is null ? 0 : reserved;
-        string path = RunPath();
+        string path = RunPath(_held);
         _runs.Add(path);
 
         // Blocks of a RunBlocks-th of the run, a chunk each, which the merge reads back one at a time.
         int blockRows = Math.Clamp(rows / RunBlocks, LeastRunBlockRows, RunOptions.BlockRows);
         _runBlockRows.Add(blockRows);
+        _runRows.Add(rows);
+        _runFileBytes.Add(0);
         _rowBytes = Math.Max(_rowBytes, (store.CommittedBytes / rows) + 1);
         VortexFileWriter writer = _session.CreateWriter(path, _schema, RunOptions with { BlockRows = blockRows, ChunkTargetBytes = 1 });
         await using (writer.ConfigureAwait(false))
@@ -285,9 +294,10 @@ internal sealed class ExternalSort : IAsyncDisposable
             await writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
         }
 
+        _runFileBytes[^1] = new System.IO.FileInfo(path).Length;
         if (budget is not null)
         {
-            long written = new System.IO.FileInfo(path).Length;
+            long written = _runFileBytes[^1];
             if (written < reserved)
             {
                 budget.Release(reserved - written);
@@ -307,8 +317,167 @@ internal sealed class ExternalSort : IAsyncDisposable
         _held = 0;
     }
 
-    /// <summary>A run's file in the session's scratch directory, never one in memory, keeping a tenth of its free space.</summary>
-    private string RunPath()
+    /// <summary>
+    /// The runs merged by levels until one merge reads them all at once (<see cref="FanIn"/>): each level merges consecutive
+    /// groups of runs into one each, in order, so that rows of one key keep the order they came in, and writes the rows
+    /// once; the runs it read are deleted as it ends, a run left alone at a level's end carried to the next. One level held
+    /// a cursor, its block and its open file, for every run: past the hundreds, more than the budget, and more files than
+    /// the process may open.
+    /// </summary>
+    private async ValueTask CascadeAsync(CancellationToken cancellationToken)
+    {
+        while (true)
+        {
+            int fanIn = FanIn();
+            int count = _runs.Count;
+            if (count <= fanIn)
+            {
+                return;
+            }
+
+            bool[] carried = new bool[count];
+            for (int first = 0; first < count; first += fanIn)
+            {
+                int group = Math.Min(fanIn, count - first);
+                if (group == 1)
+                {
+                    carried[first] = true;
+                    _runs.Add(_runs[first]);
+                    _runBlockRows.Add(_runBlockRows[first]);
+                    _runRows.Add(_runRows[first]);
+                    _runFileBytes.Add(_runFileBytes[first]);
+                    continue;
+                }
+
+                await MergeRunsAsync(first, group, cancellationToken).ConfigureAwait(false);
+            }
+
+            // The level's runs read go, the new ones, appended after them, take their places.
+            ScratchBudget? budget = _session.Options.ScratchBudget;
+            for (int r = 0; r < count; r++)
+            {
+                if (carried[r])
+                {
+                    continue;
+                }
+
+                Delete(_runs[r]);
+                budget?.Release(_runFileBytes[r]);
+                _scratch -= budget is null ? 0 : _runFileBytes[r];
+            }
+
+            _runs.RemoveRange(0, count);
+            _runBlockRows.RemoveRange(0, count);
+            _runRows.RemoveRange(0, count);
+            _runFileBytes.RemoveRange(0, count);
+        }
+    }
+
+    /// <summary>
+    /// The runs a merge reads at once: as many cursors as half of the ceiling holds blocks of, the largest run's block each,
+    /// beside the batch it builds, a quarter, and its reads; two at least. Unbounded with no memory, whose sort writes no run.
+    /// </summary>
+    private int FanIn()
+    {
+        if (_memory is null)
+        {
+            return int.MaxValue;
+        }
+
+        long block = 1;
+        for (int r = 0; r < _runBlockRows.Count; r++)
+        {
+            block = Math.Max(block, _runBlockRows[r] * _rowBytes);
+        }
+
+        return (int)Math.Clamp(_memory.Ceiling / 2 / block, 2, int.MaxValue);
+    }
+
+    /// <summary>
+    /// Runs [<paramref name="first"/>, <paramref name="first"/> + <paramref name="count"/>) merged into one run appended to
+    /// the runs, in blocks of the largest of theirs, so that a cursor over it holds no more than over them.
+    /// </summary>
+    private async ValueTask MergeRunsAsync(int first, int count, CancellationToken cancellationToken)
+    {
+        long rows = 0;
+        long bytes = 0;
+        int blockRows = 0;
+        for (int r = first; r < first + count; r++)
+        {
+            rows += _runRows[r];
+            bytes += _runFileBytes[r];
+            blockRows = Math.Max(blockRows, _runBlockRows[r]);
+        }
+
+        // Under the host's scratch budget, the run reserved at what the runs it merges took, then at what it took.
+        ScratchBudget? budget = _session.Options.ScratchBudget;
+        if (budget is not null && !budget.TryReserve(bytes))
+        {
+            throw GroupCore.ScratchExceeded(budget, "sort of a result", bytes);
+        }
+
+        _scratch += budget is null ? 0 : bytes;
+        string path = RunPath(bytes);
+        _runs.Add(path);
+        _runBlockRows.Add(blockRows);
+        _runRows.Add(rows);
+        _runFileBytes.Add(bytes);
+        Merge merge = new Merge(this, first, count, blockRows, whole: true, cancellationToken);
+        try
+        {
+            await merge.OpenAsync().ConfigureAwait(false);
+            VortexFileWriter writer = _session.CreateWriter(path, _schema, RunOptions with { BlockRows = blockRows, ChunkTargetBytes = 1 });
+            await using (writer.ConfigureAwait(false))
+            {
+                // A block a batch, a chunk each, as the runs it reads were written.
+                while (await merge.MoveNextAsync().ConfigureAwait(false))
+                {
+                    await writer.WriteAsync(merge.Current, cancellationToken).ConfigureAwait(false);
+                }
+
+                await writer.CompleteAsync(cancellationToken).ConfigureAwait(false);
+            }
+        }
+        finally
+        {
+            await merge.DisposeAsync().ConfigureAwait(false);
+        }
+
+        long written = new System.IO.FileInfo(path).Length;
+        if (budget is not null)
+        {
+            if (written < bytes)
+            {
+                budget.Release(bytes - written);
+            }
+            else if (written > bytes && !budget.TryReserve(written - bytes))
+            {
+                throw GroupCore.ScratchExceeded(budget, "sort of a result", written - bytes);
+            }
+
+            _scratch += written - bytes;
+        }
+
+        _runFileBytes[^1] = written;
+    }
+
+    /// <summary>Deletes a run's file, whatever is left of it; one already gone, or held by another, is left.</summary>
+    private static void Delete(string run)
+    {
+        try
+        {
+            System.IO.File.Delete(run);
+        }
+        catch (IOException)
+        {
+        }
+        catch (UnauthorizedAccessException)
+        {
+        }
+    }
+
+    /// <summary>A run's file of about <paramref name="bytes"/> in the session's scratch directory, never one in memory, keeping a tenth of its free space.</summary>
+    private string RunPath(long bytes)
     {
         if (_directory is null)
         {
@@ -322,9 +491,9 @@ internal sealed class ExternalSort : IAsyncDisposable
             _directory = directory;
         }
 
-        if (GroupCore.Free(_directory) is long free && free - _held < free / 10)
+        if (GroupCore.Free(_directory) is long free && free - bytes < free / 10)
         {
-            throw new VortexMemoryException($"The sort needs to write a run of {_held:N0} bytes, and its scratch directory {_directory} keeps too little free space.");
+            throw new VortexMemoryException($"The sort needs to write a run of {bytes:N0} bytes, and its scratch directory {_directory} keeps too little free space.");
         }
 
         return Path.Combine(_directory, $"vorticity-sort-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
@@ -340,11 +509,21 @@ internal sealed class ExternalSort : IAsyncDisposable
         _held = 0;
     }
 
-    /// <summary>The delivered columns of <paramref name="root"/>'s rows [<paramref name="start"/>, <paramref name="start"/> + <paramref name="count"/>) appended to <paramref name="into"/>, cut through <paramref name="cut"/>.</summary>
-    private void Append(StructStore into, CanonicalArena arena, int root, int start, int count, CanonicalArena cut)
+    /// <summary>
+    /// The delivered columns of <paramref name="root"/>'s rows [<paramref name="start"/>, <paramref name="start"/> +
+    /// <paramref name="count"/>) appended to <paramref name="into"/>, cut through <paramref name="cut"/>; every column with
+    /// <paramref name="whole"/>, into a store of the sort's own.
+    /// </summary>
+    private void Append(StructStore into, CanonicalArena arena, int root, int start, int count, CanonicalArena cut, bool whole = false)
     {
         cut.ResetKeepingBlocks();
         int window = CanonicalSlice.SliceAcross(arena, cut, root, start, count);
+        if (whole)
+        {
+            StoreRows.Append(into, cut, window, validated: true);
+            return;
+        }
+
         CanonicalNode node = cut.GetNode(window);
         for (int c = 0; c < _delivered.Length; c++)
         {
@@ -417,10 +596,12 @@ internal sealed class ExternalSort : IAsyncDisposable
     }
 
     /// <summary>
-    /// The runs merged: a cursor a run, a batch of it at a time, in a heap by the row each stands on,
-    /// ties to the earlier run; the top's rows that come before the next cursor's appended at once.
+    /// The runs [<paramref name="first"/>, <paramref name="first"/> + <paramref name="count"/>) merged: a cursor a run, a
+    /// batch of it at a time, in a heap by the row each stands on, ties to the earlier run; the top's rows that come before
+    /// the next cursor's appended at once, <paramref name="most"/> rows a batch. The delivered columns, or with
+    /// <paramref name="whole"/> every column, for a run of a level of the merge.
     /// </summary>
-    private sealed class Merge(ExternalSort sort, CancellationToken cancellationToken) : IAsyncEnumerator<RecordBatch>
+    private sealed class Merge(ExternalSort sort, int first, int count, int most, bool whole, CancellationToken cancellationToken) : IAsyncEnumerator<RecordBatch>
     {
         private readonly List<Cursor> _heap = [];
         private readonly List<Cursor> _cursors = [];
@@ -436,10 +617,10 @@ internal sealed class ExternalSort : IAsyncDisposable
         internal async ValueTask OpenAsync()
         {
             VortexSessionOptions options = sort._session.Options;
-            _out = (StructStore)ColumnStores.Create(sort._deliveredType, sort.Account, options.Extensions);
+            _out = (StructStore)ColumnStores.Create(whole ? sort._dtype : sort._deliveredType, sort.Account, options.Extensions);
             _outArena = new CanonicalArena(64, sort.Account);
             _cut = new CanonicalArena(64, sort.Account);
-            for (int r = 0; r < sort._runs.Count; r++)
+            for (int r = first; r < first + count; r++)
             {
                 VortexFile file = await sort._session.OpenAsync(sort._runs[r], cancellationToken: cancellationToken).ConfigureAwait(false);
                 Cursor cursor = new Cursor(sort, file, r, cancellationToken);
@@ -458,7 +639,6 @@ internal sealed class ExternalSort : IAsyncDisposable
             StructStore output = _out!;
             output.Truncate(0);
             int rows = 0;
-            int most = sort.MergeRows;
             while (rows < most && _heap.Count > 0)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -478,7 +658,7 @@ internal sealed class ExternalSort : IAsyncDisposable
                     end = run;
                 }
 
-                sort.Append(output, top.Batch!.Arena, top.Batch.RootIndex, top.Row, end - top.Row, _cut!);
+                sort.Append(output, top.Batch!.Arena, top.Batch.RootIndex, top.Row, end - top.Row, _cut!, whole);
                 rows += end - top.Row;
                 top.Row = end;
                 if (top.Row == top.Rows && !await top.NextBatchAsync().ConfigureAwait(false))

@@ -33,6 +33,19 @@ public sealed class ScratchDirectoriesTests
     }
 
     /// <summary>
+    /// A home that is empty, as in a container without <c>HOME</c>, or a cache variable that is relative, names no cache:
+    /// the temporary directory stays, rather than a <c>.cache/vorticity</c> under the application's working directory.
+    /// </summary>
+    [Fact]
+    public void AnEmptyHomeOrARelativeCacheNamesNoCache()
+    {
+        bool InMemory(string directory) => directory == Temporary;
+        Assert.Equal(Temporary, ScratchDirectories.Choose(Temporary, null, string.Empty, InMemory));
+        Assert.Equal(Temporary, ScratchDirectories.Choose(Temporary, "relative/cache", string.Empty, InMemory));
+        Assert.Equal(Path.Combine(Home, ".cache", "vorticity"), ScratchDirectories.Choose(Temporary, "relative/cache", Home, InMemory));
+    }
+
+    /// <summary>
     /// On the Linux this runs on, <c>/tmp</c> is judged by its own mount, the last one <c>/proc/mounts</c> lists for it, and
     /// the scratch of a session that names none leaves it for the user's cache when it lies in memory, as it does on the
     /// CI's runners: the choice the test above holds to a map of mounts, on the machine's.

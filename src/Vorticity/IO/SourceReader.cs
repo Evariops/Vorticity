@@ -111,6 +111,8 @@ internal sealed class SourceReader : ISegmentReader
         }
         catch
         {
+            // The leases not yet adopted when an adoption failed; a source that failed left its slots default, as its
+            // contract says, and disposing those does nothing.
             for (int i = adopted; i < pending; i++)
             {
                 leases[i].Dispose();

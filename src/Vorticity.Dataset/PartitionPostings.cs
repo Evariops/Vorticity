@@ -61,13 +61,18 @@ internal sealed class PartitionPostings : IDisposable
     /// same order (spec C, 5), and where the values of the columns <paramref name="columns"/> names by place lie, their runs
     /// sealed in the scratch when <paramref name="seal"/> asks.
     /// </summary>
-    internal PartitionPostings(IReadOnlyList<string> identifiers, IReadOnlyList<int> unitBlocks, IReadOnlyList<string> columns, bool seal)
+    internal PartitionPostings(IReadOnlyList<string> identifiers, IReadOnlyList<int> unitBlocks, IReadOnlyList<string> columns, bool seal, QueryMemoryBudget budget)
     {
         _identifiers = [.. identifiers];
         _unitBlocks = [.. unitBlocks];
         _columns = [.. columns];
         _scratch = new RunScratch(ScratchMemoryBytes, null, seal);
+        _account = new WorkAccount(budget, "partition postings");
     }
+
+    // What the taps' pairs hold before their runs go to the scratch, up to 32 MiB an object and identifier: the job's,
+    // counted in its budget, and given back whole when the postings are disposed.
+    private readonly WorkAccount _account;
 
     /// <summary>The taps of the object of uid <paramref name="uid"/>, by identifier: what its writer hands its hashes to.</summary>
     internal Func<string, IHashTap?> TapsOf(UInt128 uid)
@@ -628,6 +633,7 @@ internal sealed class PartitionPostings : IDisposable
 
         _scratch.Dispose();
         _gate.Dispose();
+        _account.Dispose();
     }
 
     /// <summary>A sorted run of an object's pairs for an entry, an identifier's or a located column's, where it lies in the scratch.</summary>
@@ -700,7 +706,7 @@ internal sealed class PartitionPostings : IDisposable
             {
                 _bytes = null;
                 _count = 0;
-                Blocks.ReturnBytes(bytes);
+                Blocks.Return(owner._account, new Block<byte>(bytes, bytes.Length));
             }
         }
 
@@ -722,11 +728,11 @@ internal sealed class PartitionPostings : IDisposable
 
         private void Grow()
         {
-            byte[] grown = Blocks.Rent<byte>(Math.Max(64 << 10, (_bytes?.Length ?? 0) * 2)).Array();
+            byte[] grown = Blocks.Rent<byte>(owner._account, Math.Max(64 << 10, (_bytes?.Length ?? 0) * 2)).Array();
             if (_bytes is { } held)
             {
                 held.AsSpan(0, _count * PairBytes).CopyTo(grown);
-                Blocks.ReturnBytes(held);
+                Blocks.Return(owner._account, new Block<byte>(held, held.Length));
             }
 
             _bytes = grown;

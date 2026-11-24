@@ -253,6 +253,62 @@ public sealed class ScanExclusionTests
         }
     }
 
+    /// <summary>
+    /// A key-ordered scan on the sorted column passes the blocks its filter killed in one seek each way, to the next live
+    /// block's first row or the one before's last: it lands on the rows a walk an entry at a time keeps, with one block
+    /// live, with live blocks scattered by an index, and with every block live.
+    /// </summary>
+    [Theory]
+    [InlineData("band = 7", false)]
+    [InlineData("band = 7", true)]
+    [InlineData("rare group", false)]
+    [InlineData("rare group", true)]
+    [InlineData("noise < 100", false)]
+    [InlineData("noise < 100", true)]
+    public async Task AKeyOrderedScanSeeksPastTheDeadBlocks(string name, bool descending)
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string path = await WriteAsync(ct);
+        try
+        {
+            await using VortexFile file = await VortexFile.OpenAsync(path, ct);
+            List<(long Key, long Group)> read = [];
+            await foreach (RecordBatch batch in file.ScanBuilder()
+                .InKeyOrder("key", descending)
+                .Where(Filter(name))
+                .Project("key", "group")
+                .ExecuteAsync()
+                .WithCancellation(ct))
+            {
+                ReadOnlySpan<long> keys = batch.Column(0).AsPrimitive<long>().Values;
+                ReadOnlySpan<long> groups = batch.Column(1).AsPrimitive<long>().Values;
+                for (int i = 0; i < batch.RowCount; i++)
+                {
+                    read.Add((keys[i], groups[i]));
+                }
+            }
+
+            List<(long Key, long Group)> expected = [];
+            for (long row = 0; row < Rows; row++)
+            {
+                if (Matches(name, row))
+                {
+                    expected.Add((Key(row), Group(row)));
+                }
+            }
+
+            // Two rows hold each key, and they come in row order either way within it.
+            expected.Sort((left, right) => descending ? right.Key.CompareTo(left.Key) : left.Key.CompareTo(right.Key));
+            Assert.Equal(expected.Select(e => e.Key), read.Select(r => r.Key));
+            Assert.Equal(expected.Count, read.Count);
+            Assert.Equal(expected.Order(), read.Order());
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     [Fact]
     public async Task RowsLeftOutServeNoTakeAndNoScanInFileOrder()
     {

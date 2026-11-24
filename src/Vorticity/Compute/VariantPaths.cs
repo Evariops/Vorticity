@@ -1328,10 +1328,14 @@ internal sealed class VariantFieldExpr : FieldExpr
                 return arena.AddBool(PresentType, _rows, Validity.NonNullable, _values, 0);
             }
 
+            // The rows present are the bits set, not the writes counted: an object that holds a key twice writes its row twice,
+            // which would count a row absent elsewhere as present, and leave its slot holding what the pool's block held.
+            int present = _present >= _rows ? Arrays.Decoders.Canonical.BitmapKernels.CountSet(_validBits, 0, _rows) : _present;
+
             // The slots of the rows absent cleared, as the column was before its rows were written: a run of them at once,
             // found sixty-four rows at a time. A row at a time, a call each, took a seventh of a merge of log records, whose
             // attributes shred hundreds of keys each held by a few rows in ten (2026-11-16).
-            if (_width > 0 && _present < _rows)
+            if (_width > 0 && present < _rows)
             {
                 ReadOnlySpan<byte> bits = _validBits;
                 for (int row = Next(bits, 0, _rows, set: false); row < _rows;)
@@ -1342,8 +1346,8 @@ internal sealed class VariantFieldExpr : FieldExpr
                 }
             }
 
-            Validity validity = _present == _rows ? Validity.AllValid
-                : _present == 0 ? Validity.AllInvalid
+            Validity validity = present == _rows ? Validity.AllValid
+                : present == 0 ? Validity.AllInvalid
                 : Validity.Bitmap(arena.AddBool(BitmapType, _rows, Validity.NonNullable, _validity, 0));
             return Node(arena, _read, _rows, validity, _values, buffers);
         }

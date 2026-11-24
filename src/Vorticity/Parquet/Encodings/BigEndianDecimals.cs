@@ -30,7 +30,7 @@ internal static class BigEndianDecimals
     /// </summary>
     internal static void WidenFixed(ReadOnlySpan<byte> source, int width, Span<byte> into, int slot, int count)
     {
-        int i = slot == 16 && width > 0 && Vector128.IsHardwareAccelerated ? Registers(source, width, into, count) : 0;
+        int i = slot == 16 && width is > 0 and <= 16 && Vector128.IsHardwareAccelerated ? Registers(source, width, into, count) : 0;
         for (; i < count; i++)
         {
             Widen(source, i * width, width, into.Slice(i * slot, slot));
@@ -49,6 +49,12 @@ internal static class BigEndianDecimals
         if (width == 0)
         {
             into.Clear();
+            return;
+        }
+
+        if (width > slot)
+        {
+            Narrow(source.Slice(position, width), into);
             return;
         }
 
@@ -71,6 +77,24 @@ internal static class BigEndianDecimals
         }
 
         Bytes(source.Slice(position, width), into);
+    }
+
+    /// <summary>
+    /// A value stored in more bytes than its storage: other writers lay a decimal out in a fixed length
+    /// wider than its precision needs, its leading bytes the sign's extension, which are dropped. A
+    /// leading byte that is not is a value past the precision.
+    /// </summary>
+    /// <exception cref="ParquetFormatException">The value does not fit its storage.</exception>
+    private static void Narrow(ReadOnlySpan<byte> bigEndian, Span<byte> into)
+    {
+        int extra = bigEndian.Length - into.Length;
+        byte sign = (bigEndian[extra] & 0x80) != 0 ? (byte)0xFF : (byte)0;
+        if (bigEndian[..extra].ContainsAnyExcept(sign))
+        {
+            ParquetThrow.Format($"A decimal of {bigEndian.Length} bytes holds a value wider than the {into.Length} its precision allows.");
+        }
+
+        Bytes(bigEndian[extra..], into);
     }
 
     /// <summary>A value a byte at a time: its bytes reversed, and its sign repeated over the storage's bytes past them.</summary>

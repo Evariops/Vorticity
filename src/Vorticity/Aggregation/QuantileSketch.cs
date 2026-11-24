@@ -426,6 +426,20 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
     /// <exception cref="VortexFormatException">The bytes do not hold a sketch, or one of a coarser grid.</exception>
     public void MergeEncoded(ReadOnlySpan<byte> bytes)
     {
+        try
+        {
+            MergeEncodedChecked(bytes);
+        }
+        catch (OverflowException overflow)
+        {
+            // Bytes that count past a long, or name a bucket past an int, hold no sketch: a format error, as every other
+            // bytes that hold none, not the arithmetic's own.
+            throw new VortexFormatException("A sketch counts past a long, or names a bucket past an int.", overflow);
+        }
+    }
+
+    private void MergeEncodedChecked(ReadOnlySpan<byte> bytes)
+    {
         int at = 0;
         int bits = checked((int)ReadVarint(bytes, ref at));
         if (bits < Bits || bits > MaxBits)
@@ -521,8 +535,15 @@ internal sealed class QuantileSketch : IGroupSketch<QuantileSketch>
             long entries = words.NextWord();
             for (long e = 0; e < entries; e++)
             {
-                int index = checked((int)words.NextWord());
-                sketch.AddBucket(negative: side == 0, index, words.NextWord());
+                // A bucket's index is never negative, and a store's window never reaches below zero to hold one: a negative
+                // index, of a spill's file gone wrong, widened the window without end.
+                long index = words.NextWord();
+                if ((ulong)index > int.MaxValue)
+                {
+                    throw new VortexFormatException($"A sketch read back names bucket {index}, outside the indices a sketch holds.");
+                }
+
+                sketch.AddBucket(negative: side == 0, (int)index, words.NextWord());
             }
         }
 

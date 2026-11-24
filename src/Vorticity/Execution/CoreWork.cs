@@ -69,6 +69,11 @@ internal abstract class CoreUnit : CoreWork, IValueTaskSource
     /// Called once the unit's result is set, whoever ran it: from here on the unit may be offered again, so what lets its
     /// owner go on to offer it again goes here rather than in <see cref="Execute"/>.
     /// </summary>
+    /// <remarks>
+    /// It must not throw: the result is set already, so nobody awaits what it would throw, and a pump that runs it holds a
+    /// lane of the session's and a thread of the pool's, which an exception would take down. What may fail goes in
+    /// <see cref="Execute"/>, whose failure the unit keeps for its owner.
+    /// </remarks>
     protected virtual void Ended()
     {
     }
@@ -396,7 +401,10 @@ internal sealed class CoreBatch : CoreWork, IValueTaskSource
             }
             catch (Exception error)
             {
+                // The piece fails with its first error: the items no worker claimed yet are left, rather than run for a
+                // result nobody takes, and every worker's next claim finds none.
                 Interlocked.CompareExchange(ref _error, error, null);
+                Volatile.Write(ref _next, _count);
             }
         }
     }

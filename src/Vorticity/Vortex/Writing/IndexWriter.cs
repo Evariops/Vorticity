@@ -2811,6 +2811,9 @@ internal sealed class IndexWriter : IDisposable
     /// </summary>
     private sealed class VariantFeed(int[] slots, Compute.VariantFieldExpr.KeyReads? reads, Compute.VariantFieldExpr[] nested, MemoryAccount account)
     {
+        /// <summary>The most groups a column's keys are dealt into: the item that feeds a group holds its number plus one in ten bits.</summary>
+        private const int MostKeyGroups = 1022;
+
         private CanonicalArena? _rows;
 
         internal int[] Slots { get; } = slots;
@@ -2839,8 +2842,10 @@ internal sealed class IndexWriter : IDisposable
         /// <summary>Deals the top-level keys into at most <paramref name="lanes"/> groups; none below two keys read together.</summary>
         internal void Split(int lanes)
         {
+            // A group is numbered in ten bits of the item that feeds it, past the one a group's number is raised by:
+            // 1 022 groups at most, whatever the lanes.
             int keyed = Reads?.Paths.Length ?? 0;
-            Groups = lanes > 1 && keyed >= 2 ? Math.Min(lanes, keyed) : 0;
+            Groups = lanes > 1 && keyed >= 2 ? Math.Min(Math.Min(lanes, keyed), MostKeyGroups) : 0;
             if (_groupRows.Length < Groups)
             {
                 Array.Resize(ref _groupRows, Groups);

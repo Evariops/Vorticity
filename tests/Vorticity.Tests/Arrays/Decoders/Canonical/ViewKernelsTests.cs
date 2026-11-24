@@ -105,6 +105,34 @@ public sealed class ViewKernelsTests
         });
     }
 
+    /// <summary>
+    /// With nulls in play, as on the dense path, a u64 offset past 2^32 whose low half lands in the heap is refused: cut to
+    /// 32 bits before it was checked, it was read by its low half and the row taken from where that lands. A selection of
+    /// the rows does the same.
+    /// </summary>
+    [Fact]
+    public void AnOffsetPastTwoToTheThirtyTwoIsRefusedWithNulls()
+    {
+        byte[] heap = new byte[30];
+        byte[] offsets = new byte[4 * sizeof(ulong)];
+        ulong[] values = [0, 10, (1UL << 32) + 20, (1UL << 32) + 30];
+        for (int i = 0; i < values.Length; i++)
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(offsets.AsSpan(i * sizeof(ulong)), values[i]);
+        }
+
+        DTypeArena types = new DTypeArena();
+        CanonicalArena arena = new CanonicalArena();
+        Vorticity.Buffers.VortexBuffer bits = arena.Allocate(1, 1, out Span<byte> bitBytes);
+        bitBytes[0] = 0b101;
+        Validity validity = Validity.Bitmap(arena.AddBool(types.Bool(Nullability.NonNullable), 3, Validity.NonNullable, bits, 0));
+        Assert.Throws<VortexFormatException>(() =>
+        {
+            ValidityMask mask = ValidityMask.From(arena, validity);
+            ViewKernels.BuildFromOffsets(offsets, PType.U64, heap, new byte[3 * 16], 3, requireUtf8: false, in mask, VarBinDecoder.Id);
+        });
+    }
+
     [Fact]
     public void ARowPastTheHeapIsRefused()
     {

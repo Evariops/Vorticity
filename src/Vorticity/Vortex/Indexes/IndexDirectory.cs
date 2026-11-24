@@ -663,13 +663,20 @@ internal sealed record IndexDirectory(
     /// than one read takes, and a payload wherever the kind needs one. A failure costs that one
     /// entry, never the file.
     /// </summary>
+    /// <remarks>
+    /// A run's blocks name rows that every reader counts in a <see langword="long"/>: a run whose last
+    /// block wraps, or whose rows pass a long, names rows no file holds, and is refused here so that
+    /// no reader multiplies its way to an overflow.
+    /// </remarks>
     private static bool RunsAreSound(IndexEntry entry, ulong dataEnd)
     {
         bool needsPayload = IndexKinds.HasPayload(entry.Kind);
+        ulong mostBlocks = entry.BlockLength == 0 ? ulong.MaxValue : (ulong)long.MaxValue / entry.BlockLength;
         ulong nextBlock = 0;
         foreach (IndexRun run in entry.Runs)
         {
-            if (run.BlockCount == 0 || run.FirstBlock < nextBlock)
+            if (run.BlockCount == 0 || run.FirstBlock < nextBlock
+                || run.EndBlock < run.FirstBlock || run.EndBlock > mostBlocks)
             {
                 return false;
             }

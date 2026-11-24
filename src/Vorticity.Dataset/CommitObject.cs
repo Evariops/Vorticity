@@ -303,6 +303,13 @@ internal sealed class CommitObject
             throw new CommitFormatException("The reference names no page.");
         }
 
+        // A page is read whole before its hash is checked: a length of up to 2 GiB, which a header taken on its word
+        // names, is held to what one decoded structure takes, far past the pages a chunker cuts, entries of any width.
+        if (reference.Length > VortexLimits.DefaultMaxDecompressedBytes)
+        {
+            throw new CommitFormatException($"The page at {reference.Offset} claims {reference.Length} bytes, past what a page holds.");
+        }
+
         // A sealed dataset's page read for the disk: the frames that hold it come back with it, kept once it hashes.
         byte[]? kept = null;
         ObjectRange range;

@@ -108,7 +108,7 @@ internal static class StateWords
         sum.Sum.M0 = words[at];
         sum.Sum.M1 = words[at + 1];
         sum.Sum.M2 = words[at + 2];
-        sum.Sum.Meta = words[at + 3];
+        sum.Sum.Meta = IndexedSum.CheckedMeta(words[at + 3]);
         sum.High = words[at + 4];
         return sum;
     }

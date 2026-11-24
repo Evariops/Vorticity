@@ -1,62 +1,42 @@
 using System;
-using System.Threading;
+using Vorticity.Buffers;
 
 namespace Vorticity.Writing;
 
 /// <summary>
-/// The spare instances of a scratch the writer reuses, an FSST trainer's tables or a zone map's
-/// buffers: a few slots, each taken by an exchange that leaves null behind and given back by one
-/// that fills a null, so that threads taking and giving at once never share an instance and need no
-/// lock.
+/// The spare instances of a scratch the writer reuses, an FSST trainer's tables, an OnPair trainer, a
+/// chunk's columns or a compression lane: one stack a type, under one lock, that the registry of kept memory empties of those no
+/// writer took since its last turn, and of every one when a reservation needs the room
+/// (<see cref="KeptObjects{T}"/>). An instance that is <see cref="IDisposable"/> is disposed as it goes.
 /// </summary>
 /// <typeparam name="T">The scratch.</typeparam>
 /// <remarks>
-/// The columns of a chunk are written on several threads at once, so a single slot hands its one
-/// spare to the first and leaves every other thread to allocate its own, every chunk: with as many
-/// slots as columns written at once, each thread finds the instance it gave back the chunk before.
-/// The slots are scanned from the first, which costs a few exchanges for a scratch taken once a
-/// column chunk. What the slots hold is bounded by their count; past it an instance is not kept,
-/// and its giver releases it or leaves it to the collector.
+/// The columns of a chunk are written on several threads at once, so a single spare goes to the
+/// first and leaves every other thread to allocate its own, every chunk: with as many spares as
+/// columns written at once, each thread finds one the chunk before gave back. A scratch is taken
+/// once a column chunk. What is kept is bounded by the count; past it an instance is not kept, and
+/// its giver releases it or leaves it to the collector.
 /// </remarks>
 internal static class SpareSlots<T>
     where T : class
 {
     /// <summary>
     /// The instances kept: one a processor, since a chunk's columns are written on at most as many
-    /// threads, and sixteen at least.
+    /// threads, and sixteen at least. Their tables are not read for the registry's report: they count
+    /// for nothing there, as the arenas kept do.
     /// </summary>
-    private static readonly T?[] Kept = new T?[Math.Max(16, Environment.ProcessorCount)];
+    private static readonly KeptObjects<T> Kept = new KeptObjects<T>(
+        "writer spares: " + typeof(T).Name,
+        Math.Max(16, Environment.ProcessorCount),
+        bytesEach: 0,
+        typeof(IDisposable).IsAssignableFrom(typeof(T)) ? static spare => ((IDisposable)spare).Dispose() : null);
 
     /// <summary>A spare instance, which the caller owns outright until it gives it back, or null when none is kept.</summary>
-    internal static T? Take()
-    {
-        T?[] kept = Kept;
-        for (int i = 0; i < kept.Length; i++)
-        {
-            if (Volatile.Read(ref kept[i]) is not null && Interlocked.Exchange(ref kept[i], null) is { } spare)
-            {
-                return spare;
-            }
-        }
-
-        return null;
-    }
+    internal static T? Take() => Kept.Take();
 
     /// <summary>
-    /// Keeps <paramref name="spare"/> for a later taker; false when every slot holds one, and the
+    /// Keeps <paramref name="spare"/> for a later taker; false when as many are kept as the bound, and the
     /// caller is left to release what the instance holds.
     /// </summary>
-    internal static bool Give(T spare)
-    {
-        T?[] kept = Kept;
-        for (int i = 0; i < kept.Length; i++)
-        {
-            if (Volatile.Read(ref kept[i]) is null && Interlocked.CompareExchange(ref kept[i], spare, null) is null)
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
+    internal static bool Give(T spare) => Kept.Give(spare);
 }

@@ -17,9 +17,27 @@ internal sealed class BlockBytes : IBufferWriter<byte>, IDisposable
 {
     private const int MinimumCapacity = 4096;
 
+    // Whom the block's bytes are counted for, or null for none: a writer's account, which takes each
+    // block before it is rented and is given it back as it goes.
+    private readonly MemoryAccount? _account;
+
     // The block's bytes, every one of them room: a block of bytes is its own array.
     private byte[] _block = [];
     private int _length;
+
+    // The bytes the account took for the block, 0 when none did.
+    private int _counted;
+
+    /// <summary>A run whose block nothing counts.</summary>
+    internal BlockBytes()
+    {
+    }
+
+    /// <summary>A run whose block <paramref name="account"/> counts while it holds it.</summary>
+    internal BlockBytes(MemoryAccount account)
+    {
+        _account = account;
+    }
 
     /// <summary>The bytes written so far.</summary>
     internal int Length => _length;
@@ -49,11 +67,16 @@ internal sealed class BlockBytes : IBufferWriter<byte>, IDisposable
     }
 
     /// <summary>Drops the bytes past <paramref name="length"/>.</summary>
-    internal void Truncate(int length) => _length = Math.Min(_length, length);
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="length"/> is negative.</exception>
+    internal void Truncate(int length)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        _length = Math.Min(_length, length);
+    }
 
     public void Advance(int count)
     {
-        if (count < 0 || _length + count > _block.Length)
+        if ((uint)count > (uint)(_block.Length - _length))
         {
             throw new ArgumentOutOfRangeException(nameof(count));
         }
@@ -92,16 +115,45 @@ internal sealed class BlockBytes : IBufferWriter<byte>, IDisposable
             capacity *= 2;
         }
 
-        byte[] grown = Blocks.Rent<byte>((int)Math.Min(capacity, Array.MaxLength)).Array();
+        int length = (int)Math.Min(capacity, Array.MaxLength);
+        if (_account is { } account && !account.TryTake(length))
+        {
+            throw account.Refused(length);
+        }
+
+        byte[] grown;
+        try
+        {
+            grown = Blocks.Rent<byte>(length).Array();
+        }
+        catch
+        {
+            _account?.Give(length);
+            throw;
+        }
+
         _block.AsSpan(0, _length).CopyTo(grown);
-        Blocks.ReturnBytes(_block);
+        Give();
         _block = grown;
+        _counted = _account is null ? 0 : length;
+    }
+
+    /// <summary>Gives the block back to the pool, and the bytes taken for it to the account.</summary>
+    private void Give()
+    {
+        if (_counted > 0)
+        {
+            _account!.Give(_counted);
+            _counted = 0;
+        }
+
+        Blocks.ReturnBytes(_block);
     }
 
     /// <summary>Gives the block back to the pool.</summary>
     public void Dispose()
     {
-        Blocks.ReturnBytes(_block);
+        Give();
         _block = [];
         _length = 0;
     }

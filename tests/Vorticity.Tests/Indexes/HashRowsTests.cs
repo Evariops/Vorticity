@@ -10,11 +10,18 @@ namespace Vorticity.Tests.Indexes;
 public sealed class HashRowsTests
 {
     [Theory]
+    [InlineData(0)]
     [InlineData(1)]
     [InlineData(2)]
+    [InlineData(3)]
     [InlineData(4)]
+    [InlineData(5)]
+    [InlineData(6)]
+    [InlineData(7)]
     [InlineData(8)]
+    [InlineData(12)]
     [InlineData(16)]
+    [InlineData(32)]
     public void EachRowsHashIsTheHashOfItsBytes(int width)
     {
         Random random = new Random(width);
@@ -30,5 +37,13 @@ public sealed class HashRowsTests
                 Assert.Equal(XxHash3.HashToUInt64(values.AsSpan(row * width, width)), hashes[row - start]);
             }
         }
+    }
+
+    [Fact]
+    public void ATrigramHashesItsThreeBytesWhateverTheWordHoldsAboveThem()
+    {
+        byte[] three = [0x41, 0x42, 0x43];
+        Assert.Equal(XxHash3.HashToUInt64(three), XxHash3Fixed.Hash3(0x00434241));
+        Assert.Equal(XxHash3.HashToUInt64(three), XxHash3Fixed.Hash3(0xFF434241));
     }
 }

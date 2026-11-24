@@ -1,3 +1,4 @@
+using System;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
@@ -26,6 +27,13 @@ internal static class ParquetThrow
     [MethodImpl(MethodImplOptions.NoInlining)]
     internal static void Unsupported(string componentId, ParquetComponentKind kind, string detail) =>
         throw new ParquetUnsupportedException(componentId, kind, detail);
+
+    /// <summary>
+    /// <paramref name="bytes"/>, a size computed wide from what the file declares, narrowed to an
+    /// <see langword="int"/>: a format error past what one block holds, never a size that wraps.
+    /// </summary>
+    internal static int Size(long bytes, string what) =>
+        bytes >= 0 && bytes <= Array.MaxLength ? (int)bytes : Format<int>($"{what} takes {bytes} bytes, past what one block holds.");
 
     [DoesNotReturn]
     [MethodImpl(MethodImplOptions.NoInlining)]

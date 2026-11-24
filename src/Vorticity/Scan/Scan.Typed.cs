@@ -344,11 +344,12 @@ public sealed partial class Scan<TRecord>
         Begin();
         RecordBinding binding = Binding;
         TRecord[] rows = [];
+        RecordScratch scratch = new();
         try
         {
             await foreach (RecordBatch batch in _source.Rows.BatchesAsync(Spec(), _counters).WithCancellation(cancellationToken).ConfigureAwait(false))
             {
-                int count = Fill(batch, binding, ref rows);
+                int count = Fill(batch, binding, ref rows, scratch);
                 for (int i = 0; i < count; i++)
                 {
                     yield return rows[i];
@@ -505,7 +506,7 @@ public sealed partial class Scan<TRecord>
     /// record may hold references, which no block of the pool holds, and the collector takes the array when the
     /// enumeration ends.
     /// </remarks>
-    private static int Fill(RecordBatch batch, RecordBinding binding, ref TRecord[] rows)
+    private static int Fill(RecordBatch batch, RecordBinding binding, ref TRecord[] rows, RecordScratch scratch)
     {
         int count = batch.RowCount;
         if (rows.Length < count)
@@ -513,7 +514,7 @@ public sealed partial class Scan<TRecord>
             rows = new TRecord[count];
         }
 
-        Columns<TRecord> columns = new Columns<TRecord>(batch, batch.Arena, batch.RootIndex, binding, batch.StartRow, batch.SelectionWords, batch.SelectedRows, projected: true);
+        Columns<TRecord> columns = new Columns<TRecord>(batch, batch.Arena, batch.RootIndex, binding, batch.StartRow, batch.SelectionWords, batch.SelectedRows, projected: true, scratch);
         TRecord.ReadRows(columns, rows.AsSpan(0, count));
         if (batch.SelectionWords.IsEmpty)
         {

@@ -1,4 +1,3 @@
-using System.Threading;
 using Vorticity.Arrays;
 
 namespace Vorticity.Writing;
@@ -13,30 +12,21 @@ namespace Vorticity.Writing;
 /// dtypes cleared: the next writer may write another schema, and a context kept across schemas would
 /// otherwise hold every dtype it ever copied. The bound is what a few writers at once hold -- two
 /// for the transit, one for the small batches, one per column with a chunk target of its own -- and
-/// a context past it is disposed.
+/// a context past it is disposed. The registry of kept memory disposes those no writer took since its
+/// last turn, and every one when a reservation needs the room.
 /// </remarks>
 internal static class TransitContexts
 {
     private const int Capacity = 8;
 
-    private static readonly ScanContext?[] Contexts = new ScanContext?[Capacity];
-    private static readonly Lock Gate = new Lock();
-    private static int _count;
+    // Their record tables are not read for the registry's report: they count for nothing there, as the arenas kept do.
+    private static readonly Buffers.KeptObjects<ScanContext> Contexts =
+        new Buffers.KeptObjects<ScanContext>("transit contexts", Capacity, bytesEach: 0, static context => context.Dispose());
 
     /// <summary>A context an earlier writer gave back, or a new one when none waits, its blocks counted for <paramref name="account"/>, the writer's.</summary>
     internal static ScanContext Rent(Buffers.MemoryAccount account)
     {
-        ScanContext? context = null;
-        lock (Gate)
-        {
-            if (_count > 0)
-            {
-                context = Contexts[--_count]!;
-                Contexts[_count] = null;
-            }
-        }
-
-        context ??= new ScanContext([]);
+        ScanContext context = Contexts.Take() ?? new ScanContext([]);
         context.Account = account;
         return context;
     }
@@ -47,15 +37,9 @@ internal static class TransitContexts
         context.ResetBatch();
         context.Types.Clear();
         context.Account = Buffers.MemoryAccount.Kept;
-        lock (Gate)
+        if (!Contexts.Give(context))
         {
-            if (_count < Capacity)
-            {
-                Contexts[_count++] = context;
-                return;
-            }
+            context.Dispose();
         }
-
-        context.Dispose();
     }
 }

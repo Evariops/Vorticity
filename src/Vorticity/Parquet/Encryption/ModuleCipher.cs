@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using Vorticity.Buffers;
 
 namespace Vorticity.Parquet.Encryption;
 
@@ -58,7 +59,9 @@ internal sealed class ModuleCipher : IDisposable
     private const int Block = 16;
 
     private readonly AesGcm _gcm;
-    private readonly byte[] _key;
+
+    // Pinned and wiped at the end: CTR's cipher is made from it the first time a page needs it.
+    private readonly Sealing.SecretBytes _key;
     private Aes? _aes;
     private byte[]? _counters;
     private byte[]? _stream;
@@ -73,8 +76,8 @@ internal sealed class ModuleCipher : IDisposable
                 $"A key of {key.Length} bytes is given; AES takes 16, 24 or 32.");
         }
 
-        _key = key.ToArray();
-        _gcm = new AesGcm(_key, TagLength);
+        _key = new Sealing.SecretBytes(key);
+        _gcm = new AesGcm(key, TagLength);
     }
 
     /// <summary>The length a module at the start of <paramref name="bytes"/> declares, and the bytes it takes with it.</summary>
@@ -127,8 +130,16 @@ internal sealed class ModuleCipher : IDisposable
     /// </summary>
     internal void Sign(ReadOnlySpan<byte> plaintext, ReadOnlySpan<byte> nonce, ReadOnlySpan<byte> aad, Span<byte> tag)
     {
-        byte[] scratch = new byte[plaintext.Length];
-        _gcm.Encrypt(nonce, plaintext, scratch, tag, aad);
+        // The ciphertext of a whole footer, which nothing keeps: a block of the pool's, given back.
+        Block<byte> scratch = Buffers.Blocks.Rent<byte>(plaintext.Length);
+        try
+        {
+            _gcm.Encrypt(nonce, plaintext, ((Span<byte>)scratch)[..plaintext.Length], tag, aad);
+        }
+        finally
+        {
+            Buffers.Blocks.Return(scratch);
+        }
     }
 
     /// <summary>Decrypts the CTR module that starts <paramref name="module"/> into <paramref name="plaintext"/>, its ciphertext's length.</summary>
@@ -189,17 +200,28 @@ internal sealed class ModuleCipher : IDisposable
         }
     }
 
-    private static Aes Create(byte[] key)
+    private static Aes Create(Sealing.SecretBytes key)
     {
-        Aes aes = Aes.Create();
-        aes.Key = key;
-        return aes;
+        // The setter takes an array, which it copies: this one is pinned and wiped once given.
+        byte[] copy = GC.AllocateArray<byte>(key.Length, pinned: true);
+        try
+        {
+            key.Span.CopyTo(copy);
+            Aes aes = Aes.Create();
+            aes.Key = copy;
+            return aes;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(copy);
+        }
     }
 
     public void Dispose()
     {
         _gcm.Dispose();
         _aes?.Dispose();
+        _key.Dispose();
     }
 }
 

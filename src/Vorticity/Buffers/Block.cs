@@ -52,7 +52,22 @@ internal readonly struct Block<T>
     /// when there are none: for an owner that knows the length and so keeps <see cref="Bytes"/> alone,
     /// a field of 8 bytes rather than 16 in an object made for every write.
     /// </summary>
-    internal static Block<T> Over(byte[]? bytes, int length) => bytes is null ? default : new Block<T>(bytes, length);
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="length"/> is negative or past the elements the bytes hold.</exception>
+    internal static Block<T> Over(byte[]? bytes, int length)
+    {
+        if (bytes is null)
+        {
+            return default;
+        }
+
+        // Checked here, where the length comes from outside the block: the indexer reads past it without a bound.
+        if ((ulong)(uint)length * (uint)Unsafe.SizeOf<T>() > (ulong)bytes.Length)
+        {
+            ThrowRange();
+        }
+
+        return new Block<T>(bytes, length);
+    }
 
     /// <summary>The elements the block holds: the length it was rented at.</summary>
     public int Length => _length;

@@ -53,12 +53,13 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
     /// <param name="options">The bucket, its endpoint, its credentials and its connections.</param>
     /// <exception cref="ArgumentException">
     /// The endpoint is plain HTTP off the loopback, or carries a path, or the credentials cannot sign
-    /// S3 requests.
+    /// S3 requests, or the bucket's name holds a character a host name does not take.
     /// </exception>
     public S3ObjectStore(S3StoreOptions options)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentException.ThrowIfNullOrEmpty(options.Bucket);
+        Http.UriEncoding.RequireHostName(options.Bucket, "The bucket", nameof(options));
         ArgumentNullException.ThrowIfNull(options.Credentials);
         if (options.Endpoint is { } endpoint)
         {
@@ -571,7 +572,7 @@ public sealed partial class S3ObjectStore : IObjectStore, IUploadService
     {
         int status = (int)response.StatusCode;
         string? requestId = HttpAnswers.Header(response, "x-amz-request-id");
-        TimeSpan? retryAfter = HttpAnswers.RetryAfter(response);
+        TimeSpan? retryAfter = HttpAnswers.RetryAfter(response, _options.Transport.TimeProvider);
         if (response.RequestMessage?.Method == HttpMethod.Head || response.Content.Headers.ContentLength == 0)
         {
             return (new ServiceError(status, HttpAnswers.Header(response, "x-amz-error-code"), null, requestId, retryAfter), null);

@@ -26,7 +26,7 @@ internal sealed class CredentialHost
         ReadFile = readFile;
         Home = home;
         Time = time;
-        _client = handler is null ? null : new HttpClient(handler, disposeHandler: false) { Timeout = TimeSpan.FromSeconds(30) };
+        _client = handler is null ? null : new HttpClient(handler, disposeHandler: false) { Timeout = TimeSpan.FromSeconds(30), MaxResponseContentBufferSize = MostAnswerBytes };
     }
 
     /// <summary>The process: its environment, its files, the system clock and the network.</summary>
@@ -127,7 +127,8 @@ internal sealed class CredentialHost
                 }
             }
         }
-        catch (Exception malformed) when (malformed is JsonException or FormatException or InvalidOperationException)
+        // An expiry past the calendar, a null where a text stands: the arithmetic's and the parser's argument errors.
+        catch (Exception malformed) when (malformed is JsonException or FormatException or InvalidOperationException or ArgumentException or OverflowException)
         {
             throw new ObjectStoreException($"{what} answered with a token that could not be read.", malformed);
         }
@@ -153,5 +154,11 @@ internal sealed class CredentialHost
     })
     {
         Timeout = TimeSpan.FromSeconds(useProxy ? 30 : 5),
+
+        // A token, a set of keys or an error of a few kilobytes: a body past this is no answer of an identity service.
+        MaxResponseContentBufferSize = MostAnswerBytes,
     };
+
+    /// <summary>The most an identity service's answer is read to, where a client reads up to 2 GiB by default.</summary>
+    private const int MostAnswerBytes = 1 << 20;
 }

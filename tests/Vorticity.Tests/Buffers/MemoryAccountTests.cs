@@ -121,6 +121,28 @@ public sealed class MemoryAccountTests
         Assert.Equal(0, budget.ReservedBytes);
     }
 
+    /// <summary>
+    /// The pool a pipe rents from lends every byte of the block its account counts, refuses a size below -1 or past its
+    /// longest block as a memory pool does, and gives the account back the whole block.
+    /// </summary>
+    [Fact]
+    public void APipesPoolLendsTheWholeBlockItsAccountCounts()
+    {
+        TestAccount account = new TestAccount();
+        AccountMemoryPool pool = new AccountMemoryPool(account);
+        using (System.Buffers.IMemoryOwner<byte> lease = pool.Rent(5000))
+        {
+            Assert.Equal(8192, lease.Memory.Length);
+            Assert.Equal(8192, account.Held);
+            Assert.Equal(8192, pool.Rented);
+        }
+
+        Assert.Equal(0, account.Held);
+        Assert.Throws<System.ArgumentOutOfRangeException>(() => pool.Rent(-2));
+        Assert.Throws<System.ArgumentOutOfRangeException>(() => pool.Rent(pool.MaxBufferSize + 1));
+        Assert.Equal(0, account.Held);
+    }
+
     /// <summary>An account that refuses every rent.</summary>
     private sealed class Refusing : MemoryAccount
     {

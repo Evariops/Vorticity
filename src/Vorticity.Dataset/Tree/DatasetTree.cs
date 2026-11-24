@@ -486,14 +486,20 @@ internal sealed record DatasetTree(PageReference Root, int Depth, long Entries, 
         }
         finally
         {
-            // A walk stopped early leaves reads in flight: each is observed, so that one that fails
-            // after nobody wants it is not an unobserved exception.
+            // A walk stopped early leaves reads in flight: each is awaited, whatever it found, so that none reads past the
+            // walk and one that fails after nobody wants it is no unobserved exception.
             for (int i = 0; i < count; i++)
             {
-                _ = stack[i].Read?.ContinueWith(
-                    static read => read.Exception, CancellationToken.None,
-                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
-                    TaskScheduler.Default);
+                if (stack[i].Read is { } read)
+                {
+                    try
+                    {
+                        await read.ConfigureAwait(false);
+                    }
+                    catch (Exception) when (read.IsFaulted || read.IsCanceled)
+                    {
+                    }
+                }
             }
 
             // Every step past the count was cleared as it was taken.

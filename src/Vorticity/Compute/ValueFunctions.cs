@@ -945,7 +945,16 @@ internal sealed class ZoneOffsets
         _transitions = Transitions;
     }
 
-    internal static ZoneOffsets For(TimeZoneInfo zone) => Zones.GetOrAdd(zone.Id, _ => new ZoneOffsets(zone));
+    /// <summary>
+    /// The offsets of <paramref name="zone"/>, kept by its id: the system's zones are one instance an id. A zone made under
+    /// an id another zone of other rules holds, by <see cref="TimeZoneInfo.CreateCustomTimeZone(string, TimeSpan, string, string)"/>,
+    /// gets offsets of its own rather than the first one's.
+    /// </summary>
+    internal static ZoneOffsets For(TimeZoneInfo zone)
+    {
+        ZoneOffsets offsets = Zones.GetOrAdd(zone.Id, static (_, made) => new ZoneOffsets(made), zone);
+        return ReferenceEquals(offsets._zone, zone) || offsets._zone.HasSameRules(zone) ? offsets : new ZoneOffsets(zone);
+    }
 
     /// <summary>The zone's offset at <paramref name="instant"/>, in the instant's ticks.</summary>
     internal long OffsetAt(long instant, long second, ref ZoneCursor cursor) => OffsetSeconds(Civil.FloorDiv(instant, second), ref cursor) * second;

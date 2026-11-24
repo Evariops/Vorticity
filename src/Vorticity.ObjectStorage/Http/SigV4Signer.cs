@@ -30,6 +30,11 @@ internal sealed class SigV4Signer
 
     private readonly string _region;
     private readonly string _service;
+
+    // The scope's region and service as the day key hashes them, encoded once: on a stack of 64 bytes, a region named
+    // longer, which an S3-compatible service may name as it likes, threw at the first request.
+    private readonly byte[] _regionBytes;
+    private readonly byte[] _serviceBytes;
     private DayKey? _day;
 
     /// <summary>A signer for <paramref name="region"/> and <paramref name="service"/>.</summary>
@@ -38,6 +43,8 @@ internal sealed class SigV4Signer
         ArgumentException.ThrowIfNullOrEmpty(region);
         _region = region;
         _service = service;
+        _regionBytes = Encoding.UTF8.GetBytes(region);
+        _serviceBytes = Encoding.UTF8.GetBytes(service);
     }
 
     /// <summary><paramref name="utc"/> as <c>x-amz-date</c> writes it: <c>yyyyMMddTHHmmssZ</c>.</summary>
@@ -173,10 +180,10 @@ internal sealed class SigV4Signer
         }
 
         Span<byte> key = stackalloc byte[32];
-        Span<byte> text = stackalloc byte[64];
-        HMACSHA256.HashData(keys.SigningSecret, text[..Encoding.ASCII.GetBytes(amzDate.AsSpan(0, 8), text)], key);
-        HMACSHA256.HashData(key, text[..Encoding.UTF8.GetBytes(_region, text)], key);
-        HMACSHA256.HashData(key, text[..Encoding.UTF8.GetBytes(_service, text)], key);
+        Span<byte> date = stackalloc byte[8];
+        HMACSHA256.HashData(keys.SigningSecret, date[..Encoding.ASCII.GetBytes(amzDate.AsSpan(0, 8), date)], key);
+        HMACSHA256.HashData(key, _regionBytes, key);
+        HMACSHA256.HashData(key, _serviceBytes, key);
         HMACSHA256.HashData(key, "aws4_request"u8, key);
         DayKey derived = new DayKey(keys, amzDate[..8], key.ToArray());
         CryptographicOperations.ZeroMemory(key);

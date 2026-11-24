@@ -2,9 +2,10 @@
 // column's table yields the code sequence that column stores for an equal value.
 //
 // It is one rule -- take the longest symbol that matches here, escape the byte when none does --
-// and it does not depend on the order symbols are examined in, because two symbols of equal width
-// that both match the same bytes are the same symbol. So the rule is a function of the symbol set,
-// and any two implementations of it agree. This asserts that of the two the repository has: the
+// and it does not depend on the order symbols are examined in, because a trained table holds no
+// two symbols of the same bytes and no two of three bytes or more opening alike. So the rule is a
+// function of the symbol set, and any two implementations of it agree; a table that breaks either
+// condition is refused where a needle meets it. This asserts that of the two the repository has: the
 // writer's, which probes one slot per symbol and a table of every two-byte pair because it
 // compresses a whole column, and the reader's, which scans the symbols because it compresses one
 // needle.
@@ -116,6 +117,35 @@ public sealed class FsstCompressInvariantTests
                 byWriter.AsSpan(0, writerWritten).ToArray(),
                 byReader.AsSpan(0, readerWritten).ToArray());
         }
+    }
+
+    /// <summary>
+    /// A table no trainer of the format makes, which leaves its writer a choice, is refused where the needle meets the
+    /// choice: two symbols of three bytes or more opening alike, which a writer looking them up by their first three bytes
+    /// cannot both hold, or two symbols of the same bytes. Compressed by the longest symbol, the needle "abcd" is one code
+    /// where a writer that held "abc" alone wrote two, and the equality said no row held it.
+    /// </summary>
+    [Theory]
+    [InlineData(new[] { "abc", "abcd" }, "xabcd", false)]
+    [InlineData(new[] { "ab", "ab" }, "abz", false)]
+    [InlineData(new[] { "abc", "abd" }, "abd", true)]
+    [InlineData(new[] { "ab", "ab", "abc" }, "abc", true)]
+    [InlineData(new[] { "abc", "abcd" }, "xyz", true)]
+    public void ATableThatLeavesTheWriterAChoiceDeclinesTheNeedleThatMeetsIt(string[] symbolTexts, string needle, bool compresses)
+    {
+        byte[] symbols = new byte[symbolTexts.Length * 8];
+        byte[] lengths = new byte[symbolTexts.Length];
+        for (int code = 0; code < symbolTexts.Length; code++)
+        {
+            byte[] text = Encoding.ASCII.GetBytes(symbolTexts[code]);
+            text.CopyTo(symbols.AsSpan(code * 8));
+            lengths[code] = (byte)text.Length;
+        }
+
+        FsstSymbolTable table = FsstSymbolTable.Create(symbols, lengths, "vortex.fsst");
+        byte[] value = Encoding.ASCII.GetBytes(needle);
+        byte[] codes = new byte[FsstSymbolTable.MaxCompressedLength(value.Length) + 1];
+        Assert.Equal(compresses, table.TryCompress(value, codes, out _));
     }
 
     /// <summary>

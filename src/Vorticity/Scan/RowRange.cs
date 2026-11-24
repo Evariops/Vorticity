@@ -117,6 +117,7 @@ public readonly struct RowRange : IEquatable<RowRange>
         string.Create(CultureInfo.InvariantCulture, $"[{_start}, {_end})");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowLengthOverflow(long start, long length) =>
         throw new ArgumentOutOfRangeException(
             nameof(length),

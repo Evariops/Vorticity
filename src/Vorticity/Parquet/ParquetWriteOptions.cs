@@ -200,6 +200,12 @@ public sealed record ParquetWriteOptions
     public IReadOnlyList<ParquetSortingColumn>? SortingColumns { get; init; }
 
     /// <summary>Whether completing the file puts it on the device before the call returns.</summary>
+    /// <remarks>
+    /// A created file is written beside its path and renamed over it once on the device. The rename itself is not flushed:
+    /// .NET has no managed call that flushes a directory, so a power cut right after the completion may leave the path
+    /// holding what was there before, whole, until the file system writes its directory; a caller that must know flushes it
+    /// itself.
+    /// </remarks>
     public bool Durable { get; init; }
 
     /// <summary>

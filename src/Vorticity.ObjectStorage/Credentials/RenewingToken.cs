@@ -32,20 +32,34 @@ internal sealed class RenewingToken : TokenSource
 }
 
 /// <summary>
-/// A credential from a source, kept until five minutes before it expires and renewed then by one
-/// caller while the others keep using it; a renewal that fails is tried again by a later request until
-/// the credential actually expires. A request waits for a renewal only when no credential is held or
-/// the one held has expired. A credential replaced may still be signing a request: it is left to the
-/// collector, never wiped.
+/// A credential from a source, kept until five minutes before it expires and renewed then in the
+/// background while every request keeps using it; a renewal that fails is tried again after a pause
+/// until the credential actually expires. A request waits for a renewal only when no credential is
+/// held or the one held has expired, and its cancellation ends its wait, never the renewal others wait
+/// for. A credential replaced may still be signing a request: it is left to the collector, never wiped.
 /// </summary>
+/// <remarks>
+/// A request that renewed in the margin itself waited out the identity service's timeout when the service did not answer,
+/// 5 to 30 seconds with a valid credential in hand, and the next request did the same at once: through an outage of the
+/// service, a request of data was always held.
+/// </remarks>
 internal sealed class Renewing<T>(Func<CancellationToken, ValueTask<T>> source, Func<T, DateTimeOffset> expiresOn, TimeProvider time)
 {
     /// <summary>How long before its expiry a credential is renewed.</summary>
     private static readonly TimeSpan Margin = TimeSpan.FromMinutes(5);
 
-    // Never disposed: its wait handle is never asked for, so it holds nothing to release.
-    private readonly SemaphoreSlim _renewing = new SemaphoreSlim(1, 1);
+    /// <summary>
+    /// How long after a renewal failed in the margin the next one waits: Azure.Core's own delay before it retries a token's
+    /// refresh, within a margin of five minutes alike, so that an outage costs the service a call a request every 30 s.
+    /// </summary>
+    private static readonly TimeSpan RetryPause = TimeSpan.FromSeconds(30);
+
+    private readonly Lock _gate = new Lock();
     private Held? _held;
+
+    // The renewal under way, or the last one; and, after one failed in the margin, when the next may start.
+    private Task<Renewal>? _renewal;
+    private DateTimeOffset _retryAt;
 
     /// <summary>The current credential, renewed when it is due.</summary>
     internal async ValueTask<T> GetAsync(CancellationToken cancellationToken)
@@ -57,38 +71,78 @@ internal sealed class Renewing<T>(Func<CancellationToken, ValueTask<T>> source, 
             return current.Value;
         }
 
-        // None held, or expired: every caller waits for the renewal. Within the margin: one renews, the others go on.
-        bool expired = current is null || current.ExpiresOn <= now;
-        if (!expired && !await _renewing.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+        // Within the margin: the one held serves, and a renewal starts behind it unless one runs or a failed one asked
+        // for a pause.
+        if (current is not null && current.ExpiresOn > now)
         {
-            return current!.Value;
+            // A source that answers at once has renewed it already: the fresh one serves this request too.
+            StartRenewal(now);
+            return (Volatile.Read(ref _held) ?? current).Value;
         }
 
-        if (expired)
+        // None held, or expired: the request waits for a renewal, a pause or not, its cancellation ending its wait alone.
+        Renewal renewal = await RenewalAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+        if (renewal.Failure is { } failure)
         {
-            await _renewing.WaitAsync(cancellationToken).ConfigureAwait(false);
+            failure.Throw();
         }
 
-        try
+        return renewal.Held!.Value;
+    }
+
+    /// <summary>Starts a renewal behind the credential held, unless one runs or a failed one's pause lasts.</summary>
+    private void StartRenewal(DateTimeOffset now)
+    {
+        lock (_gate)
         {
-            if (Volatile.Read(ref _held) is { } renewed && renewed.ExpiresOn > time.GetUtcNow() + Margin)
+            if (_renewal is not { IsCompleted: false } && now >= _retryAt)
             {
-                return renewed.Value;
+                // Kept, and awaited by the next request that needs it: its failure is a value, never thrown at nobody.
+                _renewal = RenewAsync();
             }
-
-            T fresh = await source(cancellationToken).ConfigureAwait(false);
-            Volatile.Write(ref _held, new Held(fresh, expiresOn(fresh)));
-            return fresh;
-        }
-        catch (Exception failed) when (failed is not OperationCanceledException && !expired && Volatile.Read(ref _held) is { } stillValid)
-        {
-            return stillValid.Value;
-        }
-        finally
-        {
-            _renewing.Release();
         }
     }
+
+    /// <summary>The renewal under way, or one started now.</summary>
+    private Task<Renewal> RenewalAsync()
+    {
+        lock (_gate)
+        {
+            if (_renewal is { IsCompleted: false } running)
+            {
+                return running;
+            }
+
+            _renewal = RenewAsync();
+            return _renewal;
+        }
+    }
+
+    /// <summary>
+    /// Takes a credential from the source, on a token of its own: what it failed with is kept for the requests that wait,
+    /// never thrown at a task nobody awaits.
+    /// </summary>
+    private async Task<Renewal> RenewAsync()
+    {
+        try
+        {
+            T fresh = await source(CancellationToken.None).ConfigureAwait(false);
+            Held held = new Held(fresh, expiresOn(fresh));
+            Volatile.Write(ref _held, held);
+            return new Renewal(held, null);
+        }
+        catch (Exception failed)
+        {
+            lock (_gate)
+            {
+                _retryAt = time.GetUtcNow() + RetryPause;
+            }
+
+            return new Renewal(null, System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failed));
+        }
+    }
+
+    private sealed record Renewal(Held? Held, System.Runtime.ExceptionServices.ExceptionDispatchInfo? Failure);
 
     /// <summary>
     /// Drops the credential held when <paramref name="matches"/> says it is the one the service refused,

@@ -104,7 +104,9 @@ internal static class Blocks
 
     /// <summary>
     /// A block of <paramref name="length"/> elements that no pool lent, zeroed, at its exact size: for a
-    /// result a caller keeps, held where rented blocks are. Given back, it is let go.
+    /// result a caller keeps, held where rented blocks are, or a table's first room. Given back, it is a
+    /// rented block's like: its bytes join the pool when their length is a class's, so no view of it may
+    /// be read after.
     /// </summary>
     internal static Block<T> Allocate<T>(int length)
         where T : unmanaged
@@ -114,15 +116,15 @@ internal static class Blocks
     }
 
     /// <summary>
-    /// Gives <paramref name="block"/> back: neither it nor any copy of it may be read after. A block no
-    /// pool lent, or the default, is let go.
+    /// Gives <paramref name="block"/> back: neither it nor any copy of it may be read after. Its bytes join
+    /// the pool when their length is a class's, wherever they came from; others, and the default, are let go.
     /// </summary>
     internal static void Return<T>(Block<T> block)
         where T : unmanaged => ReturnBytes(block.Bytes);
 
     /// <summary>
     /// Gives back the bytes behind a block, for a holder that kept them alone, its own offset and length beside: the
-    /// buffers a blob queues, which are many and small. Null, or bytes no pool lent, are let go.
+    /// buffers a blob queues, which are many and small. Bytes whose length is no class's, or null, are let go.
     /// </summary>
     internal static void ReturnBytes(byte[]? bytes)
     {
@@ -170,15 +172,20 @@ internal static class Blocks
     /// <summary>
     /// The length a block of <paramref name="held"/> elements grows to for <paramref name="needed"/>: twice it at least,
     /// <paramref name="least"/> at the fewest, and a power of two, so that the bytes are a class's whole and the next
-    /// growth as far finds them again.
+    /// growth as far finds them again. Past 2^30 elements, where the next power of two is no array's length, the longest
+    /// array's, or <paramref name="needed"/> when it passes that, which the rent then refuses with the bytes it asked.
     /// </summary>
-    internal static int Grown(int needed, int held, int least = 1_024) =>
-        (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(needed, Math.Max(least, 2 * held)));
+    internal static int Grown(int needed, int held, int least = 1_024)
+    {
+        long wanted = Math.Max(needed, Math.Max(least, 2L * held));
+        return wanted <= 1 << 30 ? (int)BitOperations.RoundUpToPowerOf2((uint)wanted) : Math.Max(needed, Array.MaxLength);
+    }
 
     /// <summary>
     /// <paramref name="block"/> made <paramref name="length"/> elements long at least, what it held let go: within its
     /// bytes when they have room, as long as they go, otherwise a block rented for it, the old one given back.
     /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The block's bytes would pass the longest array: the block is empty then.</exception>
     internal static void Ensure<T>(ref Block<T> block, int length)
         where T : unmanaged
     {
@@ -193,7 +200,9 @@ internal static class Blocks
             return;
         }
 
+        // Emptied before the rent, which may fail: the owner would give back a second time bytes the pool lends again.
         Return(block);
+        block = default;
         block = Rent<T>(length);
     }
 
@@ -233,18 +242,32 @@ internal static class Blocks
     internal static bool TryRent<T>(QueryMemory? memory, int length, out Block<T> block)
         where T : unmanaged
     {
-        if (memory is not null && BytesFor<T>(length) is long bytes and >= LeastCounted)
+        long bytes = BytesFor<T>(length);
+        if (memory is null || bytes < LeastCounted)
         {
-            if (!memory.TryGrow(bytes))
-            {
-                block = default;
-                return false;
-            }
-
-            memory.Measure(bytes);
+            block = Rent<T>(length);
+            return true;
         }
 
-        block = Rent<T>(length);
+        if (!memory.TryGrow(bytes))
+        {
+            block = default;
+            return false;
+        }
+
+        memory.Measure(bytes);
+        try
+        {
+            block = Rent<T>(length);
+        }
+        catch
+        {
+            // The heap or the longest array refused what the budget granted: the bytes go back with the failure.
+            memory.Shrink(bytes);
+            memory.Measure(-bytes);
+            throw;
+        }
+
         return true;
     }
 
@@ -273,12 +296,26 @@ internal static class Blocks
         where T : unmanaged
     {
         long bytes = BytesFor<T>(length);
-        if (bytes >= LeastCounted && !account.TryTake(bytes))
+        if (bytes < LeastCounted)
+        {
+            return Rent<T>(length);
+        }
+
+        if (!account.TryTake(bytes))
         {
             throw account.Refused(bytes);
         }
 
-        return Rent<T>(length);
+        try
+        {
+            return Rent<T>(length);
+        }
+        catch
+        {
+            // The heap or the longest array refused what the account granted: the bytes go back with the failure.
+            account.Give(bytes);
+            throw;
+        }
     }
 
     /// <summary>A block <see cref="Rent{T}(MemoryAccount, int)"/> handed out, given back, its bytes given back to <paramref name="account"/>.</summary>
@@ -389,13 +426,17 @@ internal static class Blocks
         return given;
     }
 
-    /// <summary>Lets go, in each class, of the blocks that sat kept since the last time, above the floors.</summary>
-    internal static void LetGoUnused()
+    /// <summary>Lets go, in each class, of the blocks that sat kept since the last time, above the floors: the bytes let go.</summary>
+    internal static long LetGoUnused()
     {
-        foreach (Stack stack in s_classes)
+        long let = 0;
+        for (int i = 0; i < s_classes.Length; i++)
         {
-            stack.LetGo(stack.Unused(), aboveFloor: true);
+            Stack stack = s_classes[i];
+            let += stack.LetGo(stack.Unused(), aboveFloor: true) * SizeOf(i);
         }
+
+        return let;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -555,6 +596,6 @@ internal static class Blocks
 
         public long GiveBack(KeptKind kind, long bytes) => kind == KeptKind.Blocks && bytes > 0 ? Blocks.GiveBack(bytes) : 0;
 
-        public void LetGoUnused(bool collection) => Blocks.LetGoUnused();
+        public long LetGoUnused(bool collection) => Blocks.LetGoUnused();
     }
 }

@@ -299,15 +299,22 @@ internal sealed class SynopsisCacheReader : ISegmentReader, IIndexRegionReader
     private void Release(
         List<(int Slot, IndexSegment Region, bool Data, TaskCompletionSource Mine)> mine, SegmentRequestSet read, List<(int Slot, int Own)>? placed)
     {
+        // Both lists follow the slots in order, mine's among placed's: one pass finds each, where a search of placed for each
+        // of mine cost the square of a set's regions.
+        int p = 0;
         foreach ((int slot, IndexSegment region, bool data, _) in mine)
         {
             int at = slot;
-            for (int p = 0; placed is not null && p < placed.Count; p++)
+            if (placed is not null)
             {
-                if (placed[p].Slot == slot)
+                while (p < placed.Count && placed[p].Slot < slot)
+                {
+                    p++;
+                }
+
+                if (p < placed.Count && placed[p].Slot == slot)
                 {
                     at = placed[p].Own;
-                    break;
                 }
             }
 

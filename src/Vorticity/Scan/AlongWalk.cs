@@ -179,15 +179,21 @@ internal sealed class AlongWalk
     {
         private Block<(ulong Offset, uint Length)> _items;
 
+        // Where the last search found its segment: the next split asks for its segments in the same column order, so its
+        // next one is found just past it, where a search from the start cost the square of the columns read a split.
+        private int _hint;
+
         internal int Count;
 
-        internal readonly bool Contains(in SegmentSpec spec)
+        internal bool Contains(in SegmentSpec spec)
         {
             ReadOnlySpan<(ulong Offset, uint Length)> items = _items.AsSpan(0, Count);
-            foreach ((ulong offset, uint length) in items)
+            int from = _hint < items.Length ? _hint : 0;
+            for (int n = 0, i = from; n < items.Length; n++, i = i + 1 == items.Length ? 0 : i + 1)
             {
-                if (offset == spec.Offset && length == spec.Length)
+                if (items[i].Offset == spec.Offset && items[i].Length == spec.Length)
                 {
+                    _hint = i + 1;
                     return true;
                 }
             }

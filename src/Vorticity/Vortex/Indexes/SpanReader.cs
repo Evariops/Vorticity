@@ -119,6 +119,12 @@ internal sealed class SpanReader : IDisposable
 
         internal ChunkSpan[]?[]?[] Pages { get; } = new ChunkSpan[]?[]?[columns];
 
+        /// <summary>
+        /// Per column, the chunks of the last run of pages a span crossed, end to end: the same span's chunks are asked four
+        /// times a column, each a list and an array of them before, and its pages, once read, never change.
+        /// </summary>
+        internal JoinedPages?[] Joined { get; } = new JoinedPages?[columns];
+
         /// <summary>Column <paramref name="field"/>'s page table, this reader's or the contents' when an earlier read loaded it; null when none did.</summary>
         internal SliceChunks.PageTable? Table(int field)
         {
@@ -506,7 +512,7 @@ internal sealed class SpanReader : IDisposable
         int start = (int)(from - chunk.FirstRow);
         int count = (int)(to - from);
         if (!context.Decode.DecodesRange(in root)
-            || !granules.TryPlan(in root, width, checked((int)chunk.Rows), start, count, layout, geometry, marks.GranuleRows)
+            || !granules.TryPlan(in root, width, RowsOf(chunk), start, count, layout, geometry, marks.GranuleRows)
             || granules.Bytes > WholeShare * chunk.Length)
         {
             return null;
@@ -642,15 +648,33 @@ internal sealed class SpanReader : IDisposable
             return SliceChunks.Overlapping(System.Threading.Volatile.Read(ref pages[from]) ?? throw Unloaded(field, from), first, rows);
         }
 
-        // A span across pages: their chunks end to end.
-        List<ChunkSpan> joined = [];
-        for (int page = from; page <= to; page++)
+        // A span across pages: their chunks end to end, joined once for the run of pages.
+        if (System.Threading.Volatile.Read(ref _paged!.Joined[field]) is not { } joined || joined.From != from || joined.To != to)
         {
-            joined.AddRange(System.Threading.Volatile.Read(ref pages[page]) ?? throw Unloaded(field, page));
+            int count = 0;
+            for (int page = from; page <= to; page++)
+            {
+                count += (System.Threading.Volatile.Read(ref pages[page]) ?? throw Unloaded(field, page)).Length;
+            }
+
+            ChunkSpan[] chunks = new ChunkSpan[count];
+            int at = 0;
+            for (int page = from; page <= to; page++)
+            {
+                ChunkSpan[] held = pages[page]!;
+                held.CopyTo(chunks, at);
+                at += held.Length;
+            }
+
+            joined = new JoinedPages(from, to, chunks);
+            System.Threading.Volatile.Write(ref _paged!.Joined[field], joined);
         }
 
-        return SliceChunks.Overlapping(joined.ToArray(), first, rows);
+        return SliceChunks.Overlapping(joined.Chunks, first, rows);
     }
+
+    /// <summary>The chunks of pages <paramref name="From"/> to <paramref name="To"/> of a column, end to end.</summary>
+    private sealed record JoinedPages(int From, int To, ChunkSpan[] Chunks);
 
     private static InvalidOperationException Unloaded(int field, int page) => new($"Page {page} of column {field}'s chunk directory was not loaded.");
 
@@ -699,6 +723,7 @@ internal sealed class SpanReader : IDisposable
         // when its table is known, which the synopsis cache keeps it by. A read whose directories are all in hand, as a warm
         // question's, asks nothing and makes no set.
         List<(int Field, int Page, IndexSegment Region)>? asked = null;
+        HashSet<long>? seen = null;
         foreach (int field in fields)
         {
             IndexSegment region = _regions[field];
@@ -706,7 +731,7 @@ internal sealed class SpanReader : IDisposable
             SliceChunks.PageTable? table = paged ? _paged!.Table(field) : null;
             if (paged ? table is null : System.Threading.Volatile.Read(ref _columns[field]) is null)
             {
-                Ask(ref asked, field, -1, region);
+                Ask(ref asked, ref seen, field, -1, region);
             }
 
             if (!paged)
@@ -727,7 +752,7 @@ internal sealed class SpanReader : IDisposable
                     }
 
                     (long offset, int length) = _paged.Paging.Page(page);
-                    Ask(ref asked, field, page, new IndexSegment(region.Offset + region.Length + (ulong)offset, (uint)length, 0, table?.Checksums[page]));
+                    Ask(ref asked, ref seen, field, page, new IndexSegment(region.Offset + region.Length + (ulong)offset, (uint)length, 0, table?.Checksums[page]));
                 }
             }
         }
@@ -875,17 +900,18 @@ internal sealed class SpanReader : IDisposable
     }
 
     /// <summary>Asks <paramref name="region"/>, page <paramref name="page"/> of <paramref name="field"/> or its directory, once.</summary>
-    private static void Ask(ref List<(int Field, int Page, IndexSegment Region)>? asked, int field, int page, IndexSegment region)
+    /// <remarks>
+    /// Told apart by a set of those asked, made with the first: a walk over them, a wide schema's cold read of a thousand
+    /// columns of a page or two each walked half a million times, and the set is one object beside the list and the
+    /// requests a read that asks anything makes.
+    /// </remarks>
+    private static void Ask(
+        ref List<(int Field, int Page, IndexSegment Region)>? asked, ref HashSet<long>? seen, int field, int page, IndexSegment region)
     {
-        for (int i = 0; asked is not null && i < asked.Count; i++)
+        if ((seen ??= []).Add(((long)field << 32) | (uint)page))
         {
-            if (asked[i].Field == field && asked[i].Page == page)
-            {
-                return;
-            }
+            (asked ??= []).Add((field, page, region));
         }
-
-        (asked ??= []).Add((field, page, region));
     }
 
     /// <summary>Takes column <paramref name="field"/>'s whole chunk directory, or a paged column's page table, read as <paramref name="bytes"/>.</summary>
@@ -946,8 +972,18 @@ internal sealed class SpanReader : IDisposable
         return arena.Struct(names, types, _schema.Nullability);
     }
 
-    /// <summary>The scope a chunk of column <paramref name="field"/> is decoded under, its own among the file's: the column, then the chunk's place in it.</summary>
-    private static uint ScopeOf(int field, ChunkSpan chunk) => ((uint)field << 20) | (uint)(chunk.Ordinal & 0xFFFFF);
+    /// <summary>
+    /// The scope a chunk of column <paramref name="field"/> is decoded under, its own among the file's: the column, then the
+    /// chunk's place in it; null, and no scope, past the bits each takes, as a variant key's past its own
+    /// (<see cref="VariantKeyReads"/>): masked, columns 0 and 4 096 shared a scope for a chunk of one place, and a table
+    /// one kept served the other's. Below 2^30, the variant keys' scopes past it.
+    /// </summary>
+    private static uint? ScopeOf(int field, ChunkSpan chunk) =>
+        (uint)field < 1u << 10 && (uint)chunk.Ordinal < 1u << 20 ? ((uint)field << 20) | (uint)chunk.Ordinal : null;
+
+    /// <summary>A chunk's rows as an int, as a decode takes them: past it, a format error, where a checked cast threw the arithmetic's overflow.</summary>
+    private static int RowsOf(ChunkSpan chunk) =>
+        chunk.Rows is >= 0 and <= int.MaxValue ? (int)chunk.Rows : throw new VortexFormatException($"A chunk of {chunk.Rows} rows, past what a decode takes.");
 
     /// <summary>
     /// One column's rows of the span: its <paramref name="chunks"/> chunks that overlap it, each decoded whole and cut to the
@@ -978,7 +1014,9 @@ internal sealed class SpanReader : IDisposable
             long to = Math.Min(span.End, chunk.EndRow);
 
             // Under a scope of the chunk's own, which the children every range reads whole are retained under for the spans.
-            uint? outer = field >= 0 ? context.Decode.BeginNodeCheckScope(ScopeOf(field, chunk)) : null;
+            uint? scope = field >= 0 ? ScopeOf(field, chunk) : null;
+            bool scoped = scope is not null;
+            uint? outer = scope is uint own ? context.Decode.BeginNodeCheckScope(own) : null;
             try
             {
                 if (read.Ranges.Length == 0)
@@ -991,19 +1029,19 @@ internal sealed class SpanReader : IDisposable
                     int start = (int)(from - chunk.FirstRow);
                     int count = (int)(to - from);
                     parts[i] = count < chunk.Rows && context.Decode.DecodesRange(in root)
-                        ? context.Decode.DecodeRootRange(in root, chunkType, checked((int)chunk.Rows), start, count, keepEncoding: false)
-                        : CanonicalSlice.Slice(context.Decode, context.Decode.DecodeRoot(in root, chunkType, checked((int)chunk.Rows)), start, count);
+                        ? context.Decode.DecodeRootRange(in root, chunkType, RowsOf(chunk), start, count, keepEncoding: false)
+                        : CanonicalSlice.Slice(context.Decode, context.Decode.DecodeRoot(in root, chunkType, RowsOf(chunk)), start, count);
                     continue;
                 }
 
                 context.Decode.LoadBlob(read.Tree.Span, read.Region);
                 ArrayNode ranged = context.Nodes.Root;
                 parts[i] = context.Decode.DecodeRootRange(
-                    in ranged, chunkType, checked((int)chunk.Rows), (int)(from - chunk.FirstRow), (int)(to - from), keepEncoding: false);
+                    in ranged, chunkType, RowsOf(chunk), (int)(from - chunk.FirstRow), (int)(to - from), keepEncoding: false);
             }
             finally
             {
-                if (field >= 0)
+                if (scoped)
                 {
                     context.Decode.EndNodeCheckScope(outer);
                 }

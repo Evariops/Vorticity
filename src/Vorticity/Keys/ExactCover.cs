@@ -112,6 +112,13 @@ internal sealed class ExactCover : IAsyncDisposable
             // and the scan's other tiers still answer.
             slices = null;
         }
+        catch
+        {
+            // A cancellation or a read that failed while the ranks were taken: the source goes back, its context and its
+            // segments, which nothing else would release, and the failure goes on.
+            await source.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
 
         if (slices is null)
         {
@@ -495,6 +502,10 @@ internal sealed class ExactCover : IAsyncDisposable
     /// The literals of an IN in key order, integers sorted by their values with no comparer, where a delegate's comparison
     /// a pair took a tenth of a long IN's scan; floats, texts and mixed kinds by the total order.
     /// </summary>
+    /// <remarks>
+    /// Mixed kinds are ordered by kind first: a comparer that called two kinds equal would not be an
+    /// order, and the sort could leave a kind's literals out of order, losing the merge join.
+    /// </remarks>
     private static FilterLiteral[] Ordered(IReadOnlyList<FilterLiteral> values)
     {
         FilterLiteral[] ordered = [.. values];
@@ -512,7 +523,9 @@ internal sealed class ExactCover : IAsyncDisposable
         }
         else
         {
-            Array.Sort(ordered, (left, right) => left.Kind == right.Kind ? KeyOrder.Total(left, right) : 0);
+            Array.Sort(ordered, (left, right) => left.Kind == right.Kind
+                ? KeyOrder.Total(left, right)
+                : ((int)left.Kind).CompareTo((int)right.Kind));
         }
 
         return ordered;

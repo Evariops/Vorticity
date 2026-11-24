@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
 namespace Vorticity.Types.Numerics;
@@ -164,17 +165,20 @@ internal static class DecimalStorage
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowPrecision(byte precision) =>
         throw new VortexFormatException(
             $"Decimal precision {precision} is outside the supported range " +
             $"[{MinPrecision}, {MaxPrecision}].");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowWidth(int width) =>
         throw new VortexFormatException(
             $"A decimal storage width of {width} bytes is not one of 1, 2, 4, 8, 16 and 32.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowStorage(DecimalStorageType storage) =>
         throw new VortexFormatException(
             $"Decimal storage type {(byte)storage} is not one of the six defined values 0..5.");

@@ -114,5 +114,20 @@ public sealed partial class DistributionTests
         QuantileSketch read = new QuantileSketch(6);
         read.MergeEncoded(whole);
         Assert.Equal(sketch.Buckets(), read.Buckets());
+
+        // Zeros counted past a long: the bytes hold no sketch, a format error, where the arithmetic's own overflow came out.
+        Assert.Throws<VortexFormatException>(() => new QuantileSketch(6).MergeEncoded([6, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01, 0, 0]));
+    }
+
+    /// <summary>
+    /// A sketch read back from words that name a negative bucket is refused: a store's window never reaches below zero to
+    /// hold one, and widened without end.
+    /// </summary>
+    [Fact]
+    public void WordsThatNameANegativeBucketAreRefused()
+    {
+        long[] words = [1, 0, 1, -5, 1, 0];
+        int at = 0;
+        Assert.Throws<VortexFormatException>(() => QuantileSketch.Read(6, () => words[at++]));
     }
 }

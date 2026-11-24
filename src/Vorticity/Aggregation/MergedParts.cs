@@ -194,74 +194,91 @@ internal sealed class PartMerge : PartSource
         }
 
         // The part's table from the pool, counted by no account, as the reservation above stands
-        // for it: given back once the part is built (LetPartGo), for the next part or query.
-        GroupKeys keys = _byValue ? _keysOf[0].ForValuePart(part, _partBits, TableArrays.Uncounted) : _keysOf[0].ForPart(TableArrays.Uncounted);
-        keys.Reserve(reserve);
-        AggregateSlot[] slots = AggregationPartition.NewSlots(_plan, _settled, _source, out _, TableArrays.Uncounted);
-        foreach (AggregateSlot slot in slots)
-        {
-            slot.EnsureGroups(reserve);
-        }
-
-        // Where each partition's groups land in the part, the largest partition's share at most, rented
-        // from the pool until the part is merged.
-        Block<int> map = Blocks.Rent<int>(Math.Max(1, most));
-        int merged = 0;
-        int sending = 0;
+        // for it: given back once the part is built (LetPartGo), for the next part or query; and here, with the
+        // reservation, when the part fails, its table refused past it among them, which went to the collector.
+        GroupKeys? keys = null;
+        AggregateSlot[]? slots = null;
+        long built = 0;
         try
         {
-            for (int p = 0; p < _partitions.Length; p++)
+            keys = _byValue ? _keysOf[0].ForValuePart(part, _partBits, TableArrays.Uncounted) : _keysOf[0].ForPart(TableArrays.Uncounted);
+            keys.Reserve(reserve);
+            slots = AggregationPartition.NewSlots(_plan, _settled, _source, out _, TableArrays.Uncounted);
+            foreach (AggregateSlot slot in slots)
             {
-                int from = _starts[p][part];
-                int count = _starts[p][part + 1] - from;
-                if (count == 0)
-                {
-                    continue;
-                }
+                slot.EnsureGroups(reserve);
+            }
 
-                ReadOnlySpan<int> groups = _placed[p].AsSpan(from, count);
-                Span<int> into = map.AsSpan(0, count);
-                int before = keys.Count;
-                _keysOf[p].MergeInto(keys, groups, into);
-                for (int s = 0; s < slots.Length; s++)
+            // Where each partition's groups land in the part, the largest partition's share at most, rented
+            // from the pool until the part is merged.
+            Block<int> map = Blocks.Rent<int>(Math.Max(1, most));
+            int merged = 0;
+            int sending = 0;
+            try
+            {
+                for (int p = 0; p < _partitions.Length; p++)
                 {
-                    slots[s].EnsureGroups(keys.Count);
-                    if (_inputs[s] != AggregationPartition.Settled)
+                    int from = _starts[p][part];
+                    int count = _starts[p][part + 1] - from;
+                    if (count == 0)
                     {
-                        slots[s].MoveFrom(_partitions[p].Slots[s], groups, into);
+                        continue;
+                    }
+
+                    ReadOnlySpan<int> groups = _placed[p].AsSpan(from, count);
+                    Span<int> into = map.AsSpan(0, count);
+                    int before = keys.Count;
+                    _keysOf[p].MergeInto(keys, groups, into);
+                    for (int s = 0; s < slots.Length; s++)
+                    {
+                        slots[s].EnsureGroups(keys.Count);
+                        if (_inputs[s] != AggregationPartition.Settled)
+                        {
+                            slots[s].MoveFrom(_partitions[p].Slots[s], groups, into);
+                        }
+                    }
+
+                    merged += count;
+                    if (++sending == 2 && merged < entries)
+                    {
+                        SizeFor(keys, slots, keys.Count + ((long)(entries - merged) * (keys.Count - before) / count), entries);
                     }
                 }
-
-                merged += count;
-                if (++sending == 2 && merged < entries)
-                {
-                    SizeFor(keys, slots, keys.Count + ((long)(entries - merged) * (keys.Count - before) / count), entries);
-                }
             }
-        }
-        finally
-        {
-            Blocks.Return(map);
-        }
+            finally
+            {
+                Blocks.Return(map);
+            }
 
-        // Twice what the part's table came to, beside the lanes', which live until the merge is done.
-        long built = keys.Footprint + AggregateSlot.FootprintOf(slots);
-        _memory.Measure(built);
-        long more = (2 * built) - ahead;
-        if (more > 0 && !_memory.TryGrow(more))
+            // Twice what the part's table came to, beside the lanes', which live until the merge is done.
+            built = keys.Footprint + AggregateSlot.FootprintOf(slots);
+            _memory.Measure(built);
+            long more = (2 * built) - ahead;
+            if (more > 0 && !_memory.TryGrow(more))
+            {
+                throw _memory.Exceeded("merge of a group by", keys.Count, more);
+            }
+
+            lock (_gate)
+            {
+                _doneGroups += keys.Count;
+                _doneEntries += entries;
+            }
+
+            return (keys, slots, ahead + Math.Max(0, more), built);
+        }
+        catch
         {
             _memory.Shrink(ahead);
             _memory.Measure(-built);
-            throw _memory.Exceeded("merge of a group by", keys.Count, more);
-        }
+            keys?.Release();
+            if (slots is not null)
+            {
+                AggregationPartition.ReleaseSlots(slots);
+            }
 
-        lock (_gate)
-        {
-            _doneGroups += keys.Count;
-            _doneEntries += entries;
+            throw;
         }
-
-        return (keys, slots, ahead + Math.Max(0, more), built);
     }
 }
 
@@ -381,8 +398,9 @@ internal sealed class MergedParts : ResultParts
                 }
             }
         }
-        catch (Exception)
+        catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "aggregation.release"))
         {
+            // The merge failed or was called off: the release gives back what it built, and has no one to report to.
         }
 
         _built = null;

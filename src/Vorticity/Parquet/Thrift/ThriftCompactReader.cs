@@ -197,6 +197,22 @@ internal ref struct ThriftCompactReader
     }
 
     /// <summary>
+    /// <see cref="ReadListHeader(out ThriftType)"/> for a list whose every element takes at least
+    /// <paramref name="leastBytes"/> bytes, its required fields and its stop: a count the bytes left
+    /// cannot hold is refused before an array of its elements, many times their bytes, is allocated.
+    /// </summary>
+    internal int ReadListHeader(out ThriftType elementType, int leastBytes)
+    {
+        int count = ReadListHeader(out elementType);
+        if (count > Remaining / leastBytes)
+        {
+            ParquetThrow.Format($"A Thrift list declares {count} elements of {leastBytes} bytes at least, where {Remaining} bytes remain.");
+        }
+
+        return count;
+    }
+
+    /// <summary>
     /// Checks that a field's wire type is <paramref name="expected"/>; a list's element type is
     /// checked against its own, a boolean list accepting either boolean type.
     /// </summary>

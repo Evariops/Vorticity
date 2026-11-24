@@ -80,6 +80,69 @@ public sealed partial class StoreRowsTests
         }
     }
 
+    /// <summary>
+    /// Lists whose views overlap, a row of more elements than a gathering window and 99 rows over the same thousand, are
+    /// appended whole, every element in its row's order, a window of indices at a time, and a null row holds none.
+    /// </summary>
+    [Fact]
+    public void ListsWhoseViewsOverlapAreGatheredAWindowAtATime()
+    {
+        DTypeArena types = new DTypeArena();
+        DType i64 = types.Primitive(PType.I64, Nullability.NonNullable);
+        DType list = types.List(i64, Nullability.Nullable);
+        const int Elements = 70_000;
+        const int Rows = 101;
+        CanonicalArena arena = new CanonicalArena();
+        VortexBuffer values = arena.Allocate(Elements * sizeof(long), sizeof(long), out Span<byte> valueBytes);
+        Span<long> elements = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, long>(valueBytes);
+        for (int e = 0; e < Elements; e++)
+        {
+            elements[e] = e * 3L;
+        }
+
+        int elementsNode = arena.AddPrimitive(i64, Elements, Validity.NonNullable, PType.I64, values);
+        VortexBuffer offsets = arena.Allocate(Rows * sizeof(int), sizeof(int), out Span<byte> offsetBytes);
+        VortexBuffer sizes = arena.Allocate(Rows * sizeof(int), sizeof(int), out Span<byte> sizeBytes);
+        VortexBuffer bits = arena.Allocate(16, 8, out Span<byte> bitBytes);
+        bitBytes.Clear();
+        Span<int> starts = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, int>(offsetBytes);
+        Span<int> lengths = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, int>(sizeBytes);
+        List<long[]> expected = [];
+        for (int row = 0; row < Rows; row++)
+        {
+            (starts[row], lengths[row]) = row == 0 ? (0, Elements) : row == Rows - 1 ? (0, 0) : (5, 1_000);
+            bool present = row != Rows - 1;
+            bitBytes[row >> 3] |= present ? (byte)(1 << (row & 7)) : (byte)0;
+            expected.Add(present ? elements.Slice(starts[row], lengths[row]).ToArray() : []);
+        }
+
+        int valid = arena.AddBool(types.Bool(Nullability.NonNullable), Rows, Validity.NonNullable, bits, 0);
+        int node = arena.AddListView(list, Rows, Validity.Bitmap(valid), elementsNode, offsets, PType.I32, sizes, PType.I32);
+        ColumnStore store = ColumnStores.Create(list, TestAccount.Shared, VortexSession.Default.Options.Extensions);
+        CanonicalArena built = new CanonicalArena(16, TestAccount.Shared);
+        try
+        {
+            StoreRows.Append(store, arena, node);
+            Assert.Equal(Rows, store.Rows);
+            CanonicalNode read = built.GetNode(store.Build(built, Rows));
+            long[] at = new long[Rows];
+            long[] counts = new long[Rows];
+            Vorticity.Arrays.Decoders.Canonical.CanonicalSupport.ReadIntegers(read.Offsets.Span, read.OffsetPType, 0, at);
+            Vorticity.Arrays.Decoders.Canonical.CanonicalSupport.ReadIntegers(read.Sizes.Span, read.SizePType, 0, counts);
+            ReadOnlySpan<long> stored = built.GetNode(read.ElementsIndex).Values.Cast<long>();
+            for (int row = 0; row < Rows; row++)
+            {
+                Assert.Equal(expected[row], stored.Slice((int)at[row], (int)counts[row]).ToArray());
+            }
+        }
+        finally
+        {
+            store.Release();
+            built.Reset();
+            arena.Reset();
+        }
+    }
+
     [Fact]
     public void ATextThatIsNotUtf8LeavesTheRowsBeforeItWithTheirNulls()
     {

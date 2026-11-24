@@ -203,6 +203,14 @@ internal static class SymLowering
 
         VortexType element = list.Type.ElementType ?? throw new VortexSchemaException($"'{list.Field.Path}' is not a list.");
         ColumnSym elementColumn = new ColumnSym(list.Field, element, list.Extensions, null, -1, list.FieldPath);
+
+        // A decimal at the element's scale, as a comparison rescales it: placed as any other value, it fell to the literal
+        // of no decimal, and a list of decimals filtered by Contains threw that a list is filtered by Contains.
+        if (IsDecimal(ClrShape.For<T>.Value.Kind))
+        {
+            return TryExactDecimal(elementColumn, value, out FilterLiteral exact) ? new Predicate(Expr.ListContains(list.Field, exact)) : Predicate.None;
+        }
+
         Placement at = Place(elementColumn, ClrShape.For<T>.Value, value);
         return at.Exact && at.Beyond == 0 ? new Predicate(Expr.ListContains(list.Field, at.Floor)) : Predicate.None;
     }

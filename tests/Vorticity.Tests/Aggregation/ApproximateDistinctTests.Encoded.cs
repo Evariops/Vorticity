@@ -91,6 +91,9 @@ public sealed partial class ApproximateDistinctTests
             [1, 1, 0x80, 0x80, 0x01, 1],
             [1, 1, 0, 0],
             [2, 0, 0],
+
+            // A gap of 2^63 wraps the index to a long's least, which register 0 took in silence.
+            [1, 1, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01, 1],
         ];
         foreach (byte[] bytes in broken)
         {

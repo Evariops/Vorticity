@@ -198,6 +198,7 @@ internal sealed class ColumnSheet
 
         byte[] ranks = new byte[Registers];
         HyperLogLog.Unpack(bytes.Slice(at, RegisterBytes), ranks);
+        HyperLogLog.RequireRanks(ranks, Registers);
         at += RegisterBytes;
 
         ulong count = Varint.Read64<Errors>(bytes, ref at);

@@ -587,12 +587,12 @@ internal static class DatasetVerifier
                         length = await sealedStore.CommitLengthAsync(key, cancellationToken).ConfigureAwait(false);
                     }
 
+                    // Copied once into its bytes, one request a store that streams answers, where a read of a mebibyte at a
+                    // time was a request each.
                     byte[] bytes = new byte[length];
-                    for (long at = 0; at < length; at += HashChunk)
+                    using (System.IO.MemoryStream into = new System.IO.MemoryStream(bytes, writable: true))
                     {
-                        using ObjectRange range = await store
-                            .GetRangeAsync(key, at, (int)Math.Min(HashChunk, length - at), cancellationToken).ConfigureAwait(false);
-                        range.Bytes.CopyTo(bytes.AsSpan((int)at));
+                        await store.CopyToAsync(key, 0, length, into, null, cancellationToken).ConfigureAwait(false);
                     }
 
                     CommitObject.Open(bytes, bytes.Length);
@@ -613,16 +613,9 @@ internal static class DatasetVerifier
             XxHash128 hash = new XxHash128();
             if (store is not SealedObjectStore { Seals: true })
             {
-                for (long at = 0; at < length; at += HashChunk)
-                {
-                    using ObjectRange range = await store
-                        .GetRangeAsync(entry.Key, at, (int)Math.Min(HashChunk, length - at), cancellationToken).ConfigureAwait(false);
-                    foreach (ReadOnlyMemory<byte> segment in range.Bytes)
-                    {
-                        hash.Append(segment.Span);
-                    }
-                }
-
+                // Copied once through the hash, a short object hashing to what its entry does not name.
+                using HashingStream hashing = new HashingStream(hash);
+                await store.CopyToAsync(entry.Key, 0, length, hashing, null, cancellationToken).ConfigureAwait(false);
                 return hash.GetCurrentHashAsUInt128();
             }
 

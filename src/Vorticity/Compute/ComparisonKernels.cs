@@ -659,11 +659,20 @@ internal static partial class ComparisonKernels
         ExpandBits(mask.Bits, mask.BitOffset, destination, Trilean.Unknown, state);
     }
 
-    /// <summary>An extension node's storage; anything else unchanged.</summary>
-    internal static int Unwrap(CanonicalArena arena, int nodeIndex) =>
-        arena.GetNode(nodeIndex).Kind == CanonicalKind.Extension
-            ? arena.GetNode(nodeIndex).StorageIndex
-            : nodeIndex;
+    /// <summary>
+    /// An extension node's storage, through every extension over another, as <see cref="Column{T}"/> and the zone
+    /// pruner's storage read it; anything else unchanged. One level alone, an extension over an extension reached the
+    /// kernels as an extension, and a <see cref="NotSupportedException"/>.
+    /// </summary>
+    internal static int Unwrap(CanonicalArena arena, int nodeIndex)
+    {
+        while (arena.GetNode(nodeIndex).Kind == CanonicalKind.Extension)
+        {
+            nodeIndex = arena.GetNode(nodeIndex).StorageIndex;
+        }
+
+        return nodeIndex;
+    }
 
     private static void CompareBool(
         CanonicalArena arena, CanonicalNode node, ComparisonOp op, FilterLiteral literal,

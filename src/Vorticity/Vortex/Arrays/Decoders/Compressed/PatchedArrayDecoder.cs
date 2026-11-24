@@ -52,11 +52,25 @@ internal sealed class PatchedArrayDecoder : ArrayDecoder
         PType ptype = dtype.PType;
         PatchedArrayMetadata metadata = PatchedArrayMetadata.Read(node.Metadata);
 
-        int patches = checked((int)metadata.PatchCount);
+        // Counts of the file's, each refused past an int as a format error: a cast of one past 2^31 read it as negative, and a
+        // checked product of them came out as the arithmetic's overflow, past a caller that catches format errors.
+        if (metadata.PatchCount > int.MaxValue || metadata.LaneCount > int.MaxValue || metadata.Offset > int.MaxValue)
+        {
+            CompressedThrow.Format(
+                $"{Id} declares {metadata.PatchCount} patches over {metadata.LaneCount} lanes from offset {metadata.Offset}, past what an array holds.");
+        }
+
+        int patches = (int)metadata.PatchCount;
         int lanes = (int)metadata.LaneCount;
         int offset = (int)metadata.Offset;
         int chunks = (int)(((long)offset + length + ChunkSize - 1) / ChunkSize);
-        int laneOffsetCount = checked((chunks * lanes) + 1);
+        long declaredOffsets = ((long)chunks * lanes) + 1;
+        if (declaredOffsets > int.MaxValue)
+        {
+            CompressedThrow.Format($"{Id} declares {lanes} lanes over {chunks} chunks, {declaredOffsets} lane offsets, past what an array holds.");
+        }
+
+        int laneOffsetCount = (int)declaredOffsets;
 
         int innerIndex = context.DecodeChild(in node, 0, dtype, length);
         int laneOffsetsIndex = context.DecodeChild(
@@ -105,18 +119,21 @@ internal sealed class PatchedArrayDecoder : ArrayDecoder
         int patchCount = values.Length / width;
         for (int chunk = 0; chunk < chunks; chunk++)
         {
-            int start = (int)BinaryPrimitives.ReadUInt32LittleEndian(
+            uint first = BinaryPrimitives.ReadUInt32LittleEndian(
                 laneOffsets.Slice(chunk * lanes * sizeof(uint), sizeof(uint)));
-            int stop = (int)BinaryPrimitives.ReadUInt32LittleEndian(
+            uint past = BinaryPrimitives.ReadUInt32LittleEndian(
                 laneOffsets.Slice(((chunk * lanes) + lanes) * sizeof(uint), sizeof(uint)));
 
-            // File-supplied, so checked: a descending or out-of-range pair would index the patch
-            // children outside their own length.
-            if (start > stop || stop > patchCount)
+            // File-supplied, so checked, unsigned: a descending or out-of-range pair would index the patch children outside
+            // their own length, and one past 2^31, read as an int, went negative and passed the check.
+            if (first > past || past > (uint)patchCount)
             {
                 CompressedThrow.Format(
-                    $"{Id}'s lane offsets give chunk {chunk} the patch range [{start}, {stop}) of {patchCount}.");
+                    $"{Id}'s lane offsets give chunk {chunk} the patch range [{first}, {past}) of {patchCount}.");
             }
+
+            int start = (int)first;
+            int stop = (int)past;
 
             for (int i = start; i < stop; i++)
             {

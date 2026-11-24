@@ -52,6 +52,29 @@ public sealed class RequestBudgetTests
         await second[100].WaitAsync(TimeSpan.FromSeconds(10), Ct);
     }
 
+    /// <summary>
+    /// Past the burst, the requests that wait are served in the order they came, each at its own turn's time, a hundredth of
+    /// a second apart, none before.
+    /// </summary>
+    [Fact]
+    public async Task RequestsThatWaitAreServedInTheOrderTheyCame()
+    {
+        StepClock clock = new StepClock();
+        RequestBudget budget = new RequestBudget(maxInFlight: 1_000, requestsPerSecond: 100, clock);
+        for (int burst = 0; burst < 10; burst++)
+        {
+            await budget.EnterAsync(Ct);
+        }
+
+        Task[] waiting = [.. Enumerable.Range(0, 4).Select(_ => budget.EnterAsync(Ct).AsTask())];
+        for (int turn = 0; turn < waiting.Length; turn++)
+        {
+            clock.Advance(TimeSpan.FromMilliseconds(10));
+            await waiting[turn].WaitAsync(TimeSpan.FromSeconds(10), Ct);
+            Assert.All(waiting[(turn + 1)..], later => Assert.False(later.IsCompleted, $"a request went at the turn of request {turn}"));
+        }
+    }
+
     /// <summary>Two in flight: a third waits until one of them leaves.</summary>
     [Fact]
     public async Task ABudgetHoldsItsRequestsInFlight()

@@ -291,6 +291,16 @@ public sealed class ThriftCompactTests
     }
 
     [Fact]
+    public void AListOfMoreElementsThanItsBytesCanHoldIsRefused()
+    {
+        // Ten structs of three bytes at least, where twelve bytes remain: four could fit, ten cannot.
+        byte[] bytes = new byte[13];
+        bytes[0] = (10 << 4) | (byte)ThriftType.Struct;
+        Assert.Equal(10, new ThriftCompactReader(bytes).ReadListHeader(out _));
+        Assert.Throws<ParquetFormatException>(() => new ThriftCompactReader(bytes).ReadListHeader(out _, leastBytes: 3));
+    }
+
+    [Fact]
     public void ABooleanElementOfThreeIsMalformed() =>
         Assert.Throws<ParquetFormatException>(() => new ThriftCompactReader([3]).ReadBooleanElement());
 

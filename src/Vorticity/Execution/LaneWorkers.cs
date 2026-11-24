@@ -179,17 +179,22 @@ internal static class LaneWorkers
     /// <paramref name="lanes"/> free now (<see cref="Start"/>), and waits for all; the first failure cancels
     /// <paramref name="failed"/>, which the workers watch, and is thrown once every worker ended.
     /// </summary>
+    /// <remarks>
+    /// The failure thrown is the one that caused the others: a worker's fault rather than the cancellation that
+    /// <paramref name="failed"/> made every other worker meet, wherever the faulted one lies among them. A cancellation is
+    /// thrown only when nothing else failed.
+    /// </remarks>
     internal static async Task RunAsync(LaneBudget lanes, int workers, Func<int, Task> worker, CancellationTokenSource failed)
     {
         Task[] others = Start(lanes, workers - 1, w => GuardedAsync(worker, w, failed));
-        Exception? first = null;
+        Exception? chosen = null;
         try
         {
             await worker(0).ConfigureAwait(false);
         }
         catch (Exception error)
         {
-            first = error;
+            chosen = error;
             await failed.CancelAsync().ConfigureAwait(false);
         }
 
@@ -197,20 +202,37 @@ internal static class LaneWorkers
         {
             await Task.WhenAll(others).ConfigureAwait(false);
         }
-        catch (Exception error) when (first is null)
-        {
-            first = error;
-        }
         catch (Exception)
         {
-            // The caller's failure came first.
+            // Each worker's own failure is read from its task below.
         }
 
-        if (first is not null)
+        foreach (Task other in others)
         {
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(first);
+            if (other.Exception is { } faults)
+            {
+                foreach (Exception fault in faults.InnerExceptions)
+                {
+                    chosen = Cause(chosen, fault);
+                }
+            }
         }
+
+        if (chosen is not null)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(chosen);
+        }
+
+        // Only cancellations, which leave a task no exception of its own: awaited again, the first throws.
+        await Task.WhenAll(others).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Of the failure kept so far and <paramref name="next"/>, the one to throw: the first that is no cancellation, since a
+    /// worker's fault cancels the others, which then meet a cancellation that says nothing of what went wrong.
+    /// </summary>
+    private static Exception Cause(Exception? kept, Exception next) =>
+        kept is null || (kept is OperationCanceledException && next is not OperationCanceledException) ? next : kept;
 
     private static async Task GuardedAsync(Func<int, Task> worker, int number, CancellationTokenSource failed)
     {

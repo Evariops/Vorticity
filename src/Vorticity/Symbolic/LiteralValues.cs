@@ -62,11 +62,19 @@ internal static class LiteralValues
     }
 
     /// <summary>An unscaled value as a decimal of the column's scale; the column holds at most 28 digits, as a decimal does.</summary>
+    /// <exception cref="VortexFormatException">The value passes the 96 bits a decimal holds: a claim the file cannot make of a column of 28 digits.</exception>
     internal static decimal Decimal(Int128 unscaled, VortexType column)
     {
         bool negative = unscaled < 0;
         UInt128 magnitude = (UInt128)(negative ? -unscaled : unscaled);
-        Debug.Assert(magnitude >> 96 == 0, "A decimal reads a column of at most 28 digits.");
+
+        // The binding holds the column to 28 digits, not the file to its column: a value past them read as its low 96
+        // bits alone, a wrong decimal without a word, where the temporal reads of the same file refuse such a claim.
+        if (magnitude >> 96 != 0)
+        {
+            throw new VortexFormatException($"A value of a column of {column} holds {unscaled} unscaled, past the 28 digits it declares.");
+        }
+
         return new decimal((int)(uint)magnitude, (int)(uint)(magnitude >> 32), (int)(uint)(magnitude >> 64), negative, (byte)column.Scale);
     }
 

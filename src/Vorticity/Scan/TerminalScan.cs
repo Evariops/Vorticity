@@ -36,8 +36,9 @@ namespace Vorticity.Scanning;
 internal sealed class TerminalScan
 {
     /// <summary>
-    /// Whom the pass's blocks are counted for: the question it serves, or the process's, since the pass gives every
-    /// context back before it returns and delivers a value, not a batch.
+    /// Whom the pass's blocks are counted for: the question it serves, or its session's budget, whose own account the work
+    /// that gives its blocks back itself counts under, since the pass gives every context back before it returns and
+    /// delivers a value, not a batch.
     /// </summary>
     internal required Buffers.MemoryAccount Account { get; init; }
 
@@ -331,140 +332,179 @@ internal sealed class TerminalScan
         long total = 0;
         using ScanSegments held = new ScanSegments(_degree);
         Decodes decodes = new Decodes(plan, held, blockRows, live);
-        List<RowRange> undecided = [];
-        SplitCursor cursor = plan.CreateCursor();
-        while (cursor.TryNext(out RowRange split))
+
+        // The undecided splits, their runs of one window, and which of them are counted: blocks of the pool counted in the
+        // pass's account, since their number grows with the file's splits (132 000 in a day's object), where a list of
+        // them, its runs and its marks were allocated past the governor at every count on lanes.
+        Block<RowRange> undecided = default;
+        Block<int> runs = default;
+        Block<bool> done = default;
+        int splits = 0;
+        try
         {
-            if (_take is not null && !_take.Touches(split))
+            SplitCursor cursor = plan.CreateCursor();
+            while (cursor.TryNext(out RowRange split))
             {
-                continue;
-            }
-
-            _metrics?.AddBlocksPruned(decodes.Pruned.Add(split, _take, live, alive: false));
-            if (live is not null && !live.AnyLive(split))
-            {
-                continue;
-            }
-
-            long blocks = (split.Length + blockRows - 1) / blockRows;
-            if (zones is not null && TryProve(zones, split, out long proven))
-            {
-                Diagnostics.VortexEventSource.Counted(blocks, 0);
-                total += proven;
-                if (stopAtFirst && total > 0)
+                if (_take is not null && !_take.Touches(split))
                 {
-                    return total;
+                    continue;
                 }
 
-                continue;
-            }
-
-            Diagnostics.VortexEventSource.Counted(0, blocks);
-            undecided.Add(split);
-        }
-
-        if (undecided.Count == 0)
-        {
-            return total;
-        }
-
-        // The filter's variant columns read as a scan reads them, the keys' reads loaded once for every lane.
-        Indexes.VariantKeyReads? keys = _variantKeys is null
-            ? null
-            : await Indexes.VariantKeyReads.LoadAsync(_file, _variantKeys, cancellationToken).ConfigureAwait(false);
-        int capacity = (int)Math.Min(plan.MaxRows, int.MaxValue);
-
-        // The undecided splits in runs of one window each: a chunk larger than a split is decoded a window at a time, so a
-        // lane takes a whole run and decodes its window once, where lanes taking splits in turn waited for one of them to
-        // decode the window they all wanted, then decoded the next one each.
-        List<int> runs = [];
-        long window = -1;
-        for (int i = 0; i < undecided.Count; i++)
-        {
-            plan.WindowOf(undecided[i].Start, out int lead, out _);
-            if (undecided[i].Start - lead != window)
-            {
-                window = undecided[i].Start - lead;
-                runs.Add(i);
-            }
-        }
-
-        runs.Add(undecided.Count);
-        LaneWork work = new LaneWork(runs.Count - 1, undecided.Count, stopAtFirst);
-        using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-
-        // The caller's lane and lanes of the session's free, the degree at most, each holding its lane until it ends. No
-        // lane throws: each keeps its failure in the work's state, the first of them thrown here.
-        Task[] running = Execution.LaneWorkers.Start(_file.Session.Lanes, Math.Min(_degree, runs.Count - 1) - 1, _ => LaneAsync());
-        await LaneAsync().ConfigureAwait(false);
-        await Task.WhenAll(running).ConfigureAwait(false);
-        if (work.Failure is { } failed && !work.Found)
-        {
-            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failed);
-        }
-
-        return total + work.Counted;
-
-        async Task LaneAsync()
-        {
-            ScanContext context = ScanContexts.Shared.Rent(_file, Account);
-            context.LiveBlocks = live;
-            context.Metrics = _metrics;
-            context.Granules = _granules is { } geometry ? new Indexes.GranulePlans(geometry, _file, _take, live, _rows, context.GranuleScratch) : null;
-            context.VariantKeys = keys;
-            Lane lane = new Lane();
-            Block<byte> states = Blocks.Rent<byte>(Math.Max(capacity, 1));
-            try
-            {
-                for (int run = work.Take(); run >= 0; run = work.Take())
+                _metrics?.AddBlocksPruned(decodes.Pruned.Add(split, _take, live, alive: false));
+                if (live is not null && !live.AnyLive(split))
                 {
-                    for (int i = runs[run]; i < runs[run + 1]; i++)
+                    continue;
+                }
+
+                long blocks = (split.Length + blockRows - 1) / blockRows;
+                if (zones is not null && TryProve(zones, split, out long proven))
+                {
+                    Diagnostics.VortexEventSource.Counted(blocks, 0);
+                    total += proven;
+                    if (stopAtFirst && total > 0)
                     {
-                        lane.Start(i);
-                        long rows = await DecodeAndCountAsync(context, decodes, undecided[i], states, stop.Token, lane).ConfigureAwait(false);
+                        return total;
+                    }
 
-                        // The segments no split from the first one still uncounted asked for, dropped: the splits finish out of
-                        // order, so the floor is the first unfinished one, never this one, whose own may serve a lane behind it.
-                        if (work.Done(i) is int floor and >= 0)
-                        {
-                            held.Release(Lane.FirstBatch(floor));
-                        }
+                    continue;
+                }
 
-                        if (work.Add(rows))
-                        {
-                            await stop.CancelAsync().ConfigureAwait(false);
-                            return;
-                        }
+                Diagnostics.VortexEventSource.Counted(0, blocks);
+                Append(ref undecided, splits++, split);
+            }
 
-                        if (work.Ended)
+            if (splits == 0)
+            {
+                return total;
+            }
+
+            // The filter's variant columns read as a scan reads them, the keys' reads loaded once for every lane.
+            Indexes.VariantKeyReads? keys = _variantKeys is null
+                ? null
+                : await Indexes.VariantKeyReads.LoadAsync(_file, _variantKeys, cancellationToken).ConfigureAwait(false);
+            int capacity = (int)Math.Min(plan.MaxRows, int.MaxValue);
+
+            // The undecided splits in runs of one window each: a chunk larger than a split is decoded a window at a time, so a
+            // lane takes a whole run and decodes its window once, where lanes taking splits in turn waited for one of them to
+            // decode the window they all wanted, then decoded the next one each. The last entry is one past the last split.
+            int runCount = 0;
+            long window = -1;
+            for (int i = 0; i < splits; i++)
+            {
+                plan.WindowOf(undecided[i].Start, out int lead, out _);
+                if (undecided[i].Start - lead != window)
+                {
+                    window = undecided[i].Start - lead;
+                    Append(ref runs, runCount++, i);
+                }
+            }
+
+            Append(ref runs, runCount, splits);
+            done = Blocks.Rent<bool>(Account, splits);
+            done.Clear();
+            LaneWork work = new LaneWork(runCount, done, stopAtFirst);
+            using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+
+            // The caller's lane and lanes of the session's free, the degree at most, each holding its lane until it ends. No
+            // lane throws: each keeps its failure in the work's state, the first of them thrown here.
+            Task[] running = Execution.LaneWorkers.Start(_file.Session.Lanes, Math.Min(_degree, runCount) - 1, _ => LaneAsync());
+            await LaneAsync().ConfigureAwait(false);
+            await Task.WhenAll(running).ConfigureAwait(false);
+            if (work.Failure is { } failed && !work.Found)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(failed);
+            }
+
+            return total + work.Counted;
+
+            async Task LaneAsync()
+            {
+                // Rented inside the guard, so that a lane short of its context or its block fails into the work's state, as
+                // its decode does, and never out of the lane.
+                ScanContext? context = null;
+                Block<byte> states = default;
+                try
+                {
+                    context = ScanContexts.Shared.Rent(_file, Account);
+                    context.LiveBlocks = live;
+                    context.Metrics = _metrics;
+                    context.Granules = _granules is { } geometry ? new Indexes.GranulePlans(geometry, _file, _take, live, _rows, context.GranuleScratch) : null;
+                    context.VariantKeys = keys;
+                    Lane lane = new Lane();
+                    states = Blocks.Rent<byte>(Math.Max(capacity, 1));
+                    for (int run = work.Take(); run >= 0; run = work.Take())
+                    {
+                        for (int i = runs[run]; i < runs[run + 1]; i++)
                         {
-                            return;
+                            lane.Start(i);
+                            long rows = await DecodeAndCountAsync(context, decodes, undecided[i], states, stop.Token, lane).ConfigureAwait(false);
+
+                            // The segments no split from the first one still uncounted asked for, dropped: the splits finish out
+                            // of order, so the floor is the first unfinished one, never this one, whose own may serve a lane
+                            // behind it.
+                            if (work.Done(i) is int floor and >= 0)
+                            {
+                                held.Release(Lane.FirstBatch(floor));
+                            }
+
+                            if (work.Add(rows))
+                            {
+                                await stop.CancelAsync().ConfigureAwait(false);
+                                return;
+                            }
+
+                            if (work.Ended)
+                            {
+                                return;
+                            }
                         }
                     }
                 }
-            }
-            catch (Exception failure)
-            {
-                if (work.Fail(failure))
+                catch (Exception failure)
                 {
-                    await stop.CancelAsync().ConfigureAwait(false);
+                    if (work.Fail(failure))
+                    {
+                        await stop.CancelAsync().ConfigureAwait(false);
+                    }
+                }
+                finally
+                {
+                    Blocks.Return(states);
+                    if (context is not null)
+                    {
+                        ScanContexts.Shared.Return(context);
+                    }
                 }
             }
-            finally
-            {
-                Blocks.Return(states);
-                ScanContexts.Shared.Return(context);
-            }
         }
+        finally
+        {
+            Blocks.Return(Account, undecided);
+            Blocks.Return(Account, runs);
+            Blocks.Return(Account, done);
+        }
+    }
+
+    /// <summary>Puts <paramref name="value"/> at <paramref name="at"/>, the block doubled in the pass's account when full.</summary>
+    private void Append<T>(ref Block<T> block, int at, T value)
+        where T : unmanaged
+    {
+        if (at >= block.Length)
+        {
+            Blocks.Grow(Account, ref block, (int)Math.Min(Math.Max(64L, 2L * block.Length), Array.MaxLength));
+        }
+
+        block[at] = value;
     }
 
     /// <summary>
     /// The runs of splits the lanes of a count take in turn, the rows they counted, the first split not counted yet, and how
     /// the count ended.
     /// </summary>
-    private sealed class LaneWork(int runs, int splits, bool stopAtFirst)
+    private sealed class LaneWork(int runs, Block<bool> done, bool stopAtFirst)
     {
-        private readonly bool[] _done = new bool[splits];
+        // One mark a split, cleared; the pass's block, given back by the pass once every lane ended.
+        private readonly Block<bool> _done = done;
         private readonly Lock _gate = new Lock();
         private int _floor;
         private int _next = -1;
@@ -1302,19 +1342,14 @@ internal sealed class TerminalScan
         }
 
         if (best.Kind == FilterLiteralKind.Null
-            || (numeric ? BeatsAsDecimal(candidate, best, wantMin) : Beats(candidate, best, wantMin)))
+            || (numeric ? ExtremeOrder.Beats(candidate, best, wantMin, decimals: true) : Beats(candidate, best, wantMin)))
         {
             best = candidate;
         }
     }
 
-    /// <summary>Whether one unscaled decimal is strictly better than another, compared as the numbers they are.</summary>
-    private static bool BeatsAsDecimal(FilterLiteral candidate, FilterLiteral best, bool wantMin) =>
-        ComparisonKernels.TryDecimal(candidate, out Int256 value) && ComparisonKernels.TryDecimal(best, out Int256 current)
-        && (wantMin ? value.CompareTo(current) < 0 : value.CompareTo(current) > 0);
-
     /// <summary>Whether <paramref name="path"/> names a decimal column, an extension over one included.</summary>
-    private static bool IsDecimal(DType schema, string path)
+    internal static bool IsDecimal(DType schema, string path)
     {
         if (schema.IsDefault)
         {

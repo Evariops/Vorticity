@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
 namespace Vorticity.Types;
@@ -118,6 +119,7 @@ internal static class PTypeExtensions
     public static bool IsDefined(PType p) => (uint)p <= MaxPType;
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowUndefined(PType p) =>
         throw new VortexFormatException(
             $"PType tag {(byte)p} is not defined; the schema defines 0..{MaxPType}.");

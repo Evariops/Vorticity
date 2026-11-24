@@ -423,6 +423,7 @@ internal sealed class ColumnWriter
         _widths.Release();
         _tableAtClose.Release();
         _stringZones?.Release();
+        _previous.Release();
         if (_children is { } children)
         {
             for (int i = 0; i < children.Length; i++)

@@ -1126,7 +1126,7 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
                 await read.ConfigureAwait(false);
                 lane.Context.ResetBatch();
             }
-            catch (Exception)
+            catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "scan.read_ahead"))
             {
                 // Disposal must not throw, and a read nobody waits for has no one to report to.
             }
@@ -2595,24 +2595,23 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
 
             if (_take is not null)
             {
-                // A row outside the take is not selected, whatever the filter says of it.
+                // A row outside the take is not selected, whatever the filter says of it: the take's rows keep their verdict,
+                // set aside while the window is filled false, where every row of the split was tested one at a time.
                 local = Blocks.Rent<int>(rows);
                 int wanted = _take.LocalIndices(split, local);
-                Block<byte> kept = Blocks.RentCleared<byte>(rows);
+                Block<byte> kept = Blocks.Rent<byte>(Math.Max(wanted, 1));
                 try
                 {
-                    Span<byte> taken = kept;
+                    Span<byte> verdicts = kept;
                     for (int i = 0; i < wanted; i++)
                     {
-                        taken[local[i]] = 1;
+                        verdicts[i] = window[local[i]];
                     }
 
-                    for (int row = 0; row < rows; row++)
+                    window[..rows].Fill(Trilean.False);
+                    for (int i = 0; i < wanted; i++)
                     {
-                        if (taken[row] == 0)
-                        {
-                            window[row] = Trilean.False;
-                        }
+                        window[local[i]] = verdicts[i];
                     }
                 }
                 finally
@@ -3318,6 +3317,22 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
     /// </remarks>
     private async Task LaneLoopAsync(Lane lane)
     {
+        try
+        {
+            await LaneStepsAsync(lane).ConfigureAwait(false);
+        }
+        catch (Exception error)
+        {
+            // A step outside the split's own guards threw: nobody awaits this loop, so the split in flight fails with the
+            // error, which its consumer then sees, rather than being waited for without end; the next split assigned
+            // starts a loop of its own.
+            lane.LoopFailed(error);
+        }
+    }
+
+    /// <summary>The splits of <see cref="LaneLoopAsync"/>, until the lane is stopped.</summary>
+    private async Task LaneStepsAsync(Lane lane)
+    {
         while (await lane.NextAsync().ConfigureAwait(false))
         {
             lane.Taken();
@@ -3629,7 +3644,7 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
             {
                 await lane.Completion.ConfigureAwait(false);
             }
-            catch (Exception)
+            catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "scan.split"))
             {
                 // Disposal must not throw, and an abandoned split's failure has no one to report to.
             }
@@ -4146,6 +4161,19 @@ internal sealed class BatchAsyncEnumerator : Buffers.WorkAccount, IAsyncEnumerat
         internal void Done(int root) => _done.SetResult(root);
 
         internal void Failed(Exception error) => _done.SetException(error);
+
+        /// <summary>
+        /// What the loop does when one of its own steps throws: the split in flight fails with the error unless it already
+        /// ended, and the loop is forgotten, so that the next split assigned starts a new one.
+        /// </summary>
+        internal void LoopFailed(Exception error)
+        {
+            _loop = null;
+            if (_done.GetStatus(_done.Version) == ValueTaskSourceStatus.Pending)
+            {
+                _done.SetException(error);
+            }
+        }
 
         bool IValueTaskSource<bool>.GetResult(short token) => _go.GetResult(token);
 

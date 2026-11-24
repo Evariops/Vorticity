@@ -144,6 +144,19 @@ internal sealed class ChunkedBuffer : IDisposable
 }
 
 /// <summary>
+/// What keeps a body's memory valid while a request sends it: memory a put lets go of at its end, a mapping, which a send
+/// the handler did not wait for would read once unmapped. Memory of the collector, an array, needs none.
+/// </summary>
+internal interface IBodyHolder
+{
+    /// <summary>Holds the memory for one send; false once it is let go for good.</summary>
+    bool TryHold();
+
+    /// <summary>Ends a hold <see cref="TryHold"/> took.</summary>
+    void LetGo();
+}
+
+/// <summary>
 /// A request body over a sequence the store holds, with its length declared; sent as many times as the
 /// request is, a new content for each attempt. It times its attempt: each slice the connection takes
 /// pushes the attempt's deadline back by the stall deadline, and the last sets it to the first-byte
@@ -215,19 +228,34 @@ internal sealed class SequenceContent(ReadOnlySequence<byte> bytes) : System.Net
 
     protected override async Task SerializeToStreamAsync(System.IO.Stream stream, System.Net.TransportContext? context, CancellationToken cancellationToken)
     {
-        Progressed(0, done: false);
-        foreach (ReadOnlyMemory<byte> segment in bytes)
+        // The handler may hand the response back, an early one or a failure, while this still writes: the body's memory is
+        // held until the last write, past the put's end if need be.
+        IBodyHolder? holder = (bytes.Start.GetObject() as SequenceSegment)?.Holder;
+        if (holder is not null && !holder.TryHold())
         {
-            for (int at = 0; at < segment.Length; at += Slice)
-            {
-                ReadOnlyMemory<byte> slice = segment[at..Math.Min(segment.Length, at + Slice)];
-                await stream.WriteAsync(slice, cancellationToken).ConfigureAwait(false);
-                Progressed(slice.Length, done: false);
-            }
+            throw new ObjectDisposedException("body", "The put ended before this request sent its body.");
         }
 
-        Progressed(0, done: true);
-        StoreTelemetry.Written(bytes.Length);
+        try
+        {
+            Progressed(0, done: false);
+            foreach (ReadOnlyMemory<byte> segment in bytes)
+            {
+                for (int at = 0; at < segment.Length; at += Slice)
+                {
+                    ReadOnlyMemory<byte> slice = segment[at..Math.Min(segment.Length, at + Slice)];
+                    await stream.WriteAsync(slice, cancellationToken).ConfigureAwait(false);
+                    Progressed(slice.Length, done: false);
+                }
+            }
+
+            Progressed(0, done: true);
+            StoreTelemetry.Written(bytes.Length);
+        }
+        finally
+        {
+            holder?.LetGo();
+        }
     }
 
     private void Progressed(int sent, bool done)

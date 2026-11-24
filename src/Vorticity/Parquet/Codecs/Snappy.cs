@@ -248,7 +248,13 @@ internal static class Snappy
 
             // The offset's one or two bytes, under the high bits a one-byte offset takes from the tag.
             uint element = Unsafe.Add(ref elements, (nint)tag);
-            nuint offset = (nuint)(Unsafe.ReadUnaligned<uint>(ip + 1) & ((1u << (int)(8 * type)) - 1)) | (element >> 8);
+            uint stored = Unsafe.ReadUnaligned<uint>(ip + 1);
+            if (!BitConverter.IsLittleEndian)
+            {
+                stored = BinaryPrimitives.ReverseEndianness(stored);
+            }
+
+            nuint offset = (nuint)(stored & ((1u << (int)(8 * type)) - 1)) | (element >> 8);
             if (offset - 1 >= (nuint)(op - output))
             {
                 throw Corrupt();

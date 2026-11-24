@@ -115,16 +115,21 @@ internal sealed class KeyCursorBuilder
     /// </summary>
     /// <param name="cancellationToken">Cancels the zone-map read this makes.</param>
     /// <returns>The plan, whose <see cref="KeyPlan.Source"/> is <see cref="KeySourceKind.None"/> when nothing serves.</returns>
+    /// <remarks>
+    /// The dictionaries are planned from the index directory and the file's tree alone: a source opened for the plan read
+    /// every chunk the probe claims, a column of gigabytes fetched to be dropped. A plan that names them says neither how
+    /// many keys they hold nor whether a chunk the probe claims is no dictionary, which an open refuses.
+    /// </remarks>
     public async ValueTask<KeyPlan> ExplainAsync(CancellationToken cancellationToken = default)
     {
-        Choice choice = await ChooseAsync(cancellationToken).ConfigureAwait(false);
+        Choice choice = await ChooseAsync(cancellationToken, planning: true).ConfigureAwait(false);
         try
         {
             KeySource? source = choice.Source;
             return new KeyPlan(
                 _path,
                 choice.Kind,
-                source?.Runs ?? 0,
+                source?.Runs ?? choice.PlannedRuns,
                 source?.EntryCount,
                 HasRows: source?.HasRows ?? false,
                 choice.Rejected);
@@ -278,75 +283,107 @@ internal sealed class KeyCursorBuilder
     /// </summary>
     /// <remarks>
     /// Rows: the sorted column, then the sorted runs; the sources that hold keys without rows are
-    /// rejected by name. Keys (<see cref="Distinct"/>): the sorted column, the postings, the
-    /// dictionaries, the sorted runs. A later source is opened only to say why it lost, which is what
-    /// <see cref="ExplainAsync"/> reports.
+    /// rejected by name. Keys (<see cref="Distinct"/>): the sorted column, the postings, the sorted
+    /// runs, the dictionaries: a walk of distinct keys over the runs costs a seek a key, the descent
+    /// going straight past a key's entries, where the dictionaries are read whole, every chunk the
+    /// probe claims. A later source is opened only to say why it lost, which is what
+    /// <see cref="ExplainAsync"/> reports; <paramref name="planning"/>, the dictionaries are not opened.
     /// </remarks>
-    private async ValueTask<Choice> ChooseAsync(CancellationToken cancellationToken)
+    private async ValueTask<Choice> ChooseAsync(CancellationToken cancellationToken, bool planning = false)
     {
         KeySourceKind[] order = _distinct
-            ? [KeySourceKind.SortedColumn, KeySourceKind.Postings, KeySourceKind.Dictionary, KeySourceKind.SortedRuns]
+            ? [KeySourceKind.SortedColumn, KeySourceKind.Postings, KeySourceKind.SortedRuns, KeySourceKind.Dictionary]
             : [KeySourceKind.SortedColumn, KeySourceKind.SortedRuns, KeySourceKind.Postings, KeySourceKind.Dictionary];
         List<KeySourceRejection> rejected = [];
         KeySource? chosen = null;
         KeySourceKind kind = KeySourceKind.None;
-        foreach (KeySourceKind candidate in order)
+        int plannedRuns = 0;
+        try
         {
-            if (_forced != KeySourceKind.None && _forced != candidate)
+            foreach (KeySourceKind candidate in order)
             {
-                rejected.Add(new KeySourceRejection(candidate, $"the caller forced {_forced}"));
-                continue;
-            }
+                if (Refusal(candidate, chosen is not null, kind) is { } refusal)
+                {
+                    rejected.Add(refusal);
+                    continue;
+                }
 
-            if (_composite is not null && candidate != KeySourceKind.SortedRuns)
-            {
-                rejected.Add(new KeySourceRejection(
-                    candidate,
-                    "a composite key is served only by the sorted runs of its row encoding"));
-                continue;
-            }
+                if (planning && candidate == KeySourceKind.Dictionary)
+                {
+                    // Planned from the directory and the tree alone: opened, the source read every chunk the probe claims.
+                    (int? runs, string? why) = await SortedRunsSource.PlanDictionaryAsync(_file, _path, cancellationToken).ConfigureAwait(false);
+                    if (runs is int planned)
+                    {
+                        kind = candidate;
+                        plannedRuns = planned;
+                    }
+                    else
+                    {
+                        rejected.Add(new KeySourceRejection(candidate, why!));
+                    }
 
-            if (!_distinct && candidate is KeySourceKind.Postings or KeySourceKind.Dictionary)
-            {
-                rejected.Add(new KeySourceRejection(
-                    candidate,
-                    "it holds keys without rows, which only a Distinct() cursor takes"));
-                continue;
-            }
+                    continue;
+                }
 
-            if (_excluded is not null && candidate is KeySourceKind.Postings or KeySourceKind.Dictionary)
-            {
-                rejected.Add(new KeySourceRejection(
-                    candidate,
-                    "it holds keys without rows, and the cursor leaves rows out"));
-                continue;
-            }
-
-            if (chosen is not null && candidate == KeySourceKind.Dictionary)
-            {
-                // Opening a dictionary source reads the column's chunks: not to say why it lost.
-                rejected.Add(new KeySourceRejection(candidate, $"{kind} is cheaper and was taken first; the dictionaries were not read"));
-                continue;
-            }
-
-            (KeySource? opened, string? reason) = await OpenAsync(candidate, cancellationToken).ConfigureAwait(false);
-            if (opened is null)
-            {
-                rejected.Add(new KeySourceRejection(candidate, reason!));
-            }
-            else if (chosen is not null)
-            {
-                rejected.Add(new KeySourceRejection(candidate, $"{kind} is cheaper and was taken first"));
-                await opened.DisposeAsync().ConfigureAwait(false);
-            }
-            else
-            {
-                chosen = opened;
-                kind = candidate;
+                (KeySource? opened, string? reason) = await OpenAsync(candidate, cancellationToken).ConfigureAwait(false);
+                if (opened is null)
+                {
+                    rejected.Add(new KeySourceRejection(candidate, reason!));
+                }
+                else if (chosen is not null)
+                {
+                    rejected.Add(new KeySourceRejection(candidate, $"{kind} is cheaper and was taken first"));
+                    await opened.DisposeAsync().ConfigureAwait(false);
+                }
+                else
+                {
+                    chosen = opened;
+                    kind = candidate;
+                }
             }
         }
+        catch
+        {
+            // A source taken first goes back when a later one's open fails: its context and its segments, which nothing
+            // else would release.
+            if (chosen is not null)
+            {
+                await chosen.DisposeAsync().ConfigureAwait(false);
+            }
 
-        return new Choice(chosen, kind, rejected);
+            throw;
+        }
+
+        return new Choice(chosen, kind, rejected, plannedRuns);
+    }
+
+    /// <summary>Why <paramref name="candidate"/> is not opened, by the cursor's shape alone; null when it may be.</summary>
+    private KeySourceRejection? Refusal(KeySourceKind candidate, bool taken, KeySourceKind kind)
+    {
+        if (_forced != KeySourceKind.None && _forced != candidate)
+        {
+            return new KeySourceRejection(candidate, $"the caller forced {_forced}");
+        }
+
+        if (_composite is not null && candidate != KeySourceKind.SortedRuns)
+        {
+            return new KeySourceRejection(candidate, "a composite key is served only by the sorted runs of its row encoding");
+        }
+
+        if (!_distinct && candidate is KeySourceKind.Postings or KeySourceKind.Dictionary)
+        {
+            return new KeySourceRejection(candidate, "it holds keys without rows, which only a Distinct() cursor takes");
+        }
+
+        if (_excluded is not null && candidate is KeySourceKind.Postings or KeySourceKind.Dictionary)
+        {
+            return new KeySourceRejection(candidate, "it holds keys without rows, and the cursor leaves rows out");
+        }
+
+        // Opening a dictionary source reads the column's chunks: not to say why it lost.
+        return taken && candidate == KeySourceKind.Dictionary
+            ? new KeySourceRejection(candidate, $"{kind} is cheaper and was taken first; the dictionaries were not read")
+            : null;
     }
 
     private async ValueTask<(KeySource? Source, string? Reason)> OpenAsync(
@@ -365,7 +402,7 @@ internal sealed class KeyCursorBuilder
         return (runs, why);
     }
 
-    private sealed record Choice(KeySource? Source, KeySourceKind Kind, List<KeySourceRejection> Rejected);
+    private sealed record Choice(KeySource? Source, KeySourceKind Kind, List<KeySourceRejection> Rejected, int PlannedRuns = 0);
 }
 
 /// <summary>The cursor entry point.</summary>

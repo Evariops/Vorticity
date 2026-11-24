@@ -666,7 +666,7 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
         // of them, a part of a parallel merge: their chains alone.
         BytesDistinctSlot source = (BytesDistinctSlot)other;
         ByteKeyTable seen = source._seen;
-        if (from.Length == source._groups)
+        if (from.Length == source._groups && Numbers.AreUpto(from))
         {
             for (int i = 0; i < seen.Count; i++)
             {
@@ -789,81 +789,87 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
         // groups whole and counts them where the slot keeps them: no count of every group a part; unless
         // a group's pairs outweigh the other parts (PairedParts.Lopsided), cut by the pairs' hash then.
         int shift = 64 - BitOperations.Log2((uint)parts);
-        ((int[] Placed, int[] Starts)[] cuts, bool byGroup) = await PairedParts.CutAsync(
+        ((int[] Placed, int[] Starts)[] cuts, bool byGroup, long cut) = await PairedParts.CutAsync(
             Array.ConvertAll(all, static lane => lane._seen.Count),
             (p, group, partOf) => all[p].PartsOf(maps[p], shift, parts, group, partOf),
             groups,
             parts,
             degree,
+            memory,
             cancellationToken).ConfigureAwait(false);
-        long[][] counts = new long[parts][];
-        if (byGroup)
-        {
-            EnsureGroups(groups);
-            _counts.AsSpan(0, groups).Clear();
-        }
 
-        Block<long> owned = _counts;
-        await SideBySide.RunAsync(
-            parts,
-            part =>
+        // The parts' tables, and their counts by group when cut by hash, grow under one account of the query's memory, each
+        // block reserved as it is taken: they were built uncounted and asked of the budget once released, after their peak.
+        TableArrays tables = TableArrays.OfParts(memory);
+        Block<long>[] counts = new Block<long>[parts];
+        try
+        {
+            if (byGroup)
             {
-                ByteKeyTable distinct = new ByteKeyTable();
-                ScratchBlock<byte> key = default;
-                long[]? own = byGroup ? null : new long[groups];
-                Span<long> count = own is not null ? own : owned.AsSpan();
-                for (int p = 0; p < all.Length; p++)
+                EnsureGroups(groups);
+                _counts.AsSpan(0, groups).Clear();
+            }
+
+            Block<long> owned = _counts;
+            await SideBySide.RunAsync(
+                parts,
+                part =>
                 {
-                    (int[] placed, int[] starts) = cuts[p];
-                    int[] map = maps[p];
-                    ByteKeyTable lane = all[p]._seen;
-                    for (int i = starts[part]; i < starts[part + 1]; i++)
+                    ByteKeyTable distinct = new ByteKeyTable(tables);
+                    ScratchBlock<byte> key = default;
+                    try
                     {
-                        ReadOnlySpan<byte> pair = lane.KeyOf(placed[i]);
-                        int group = map[BinaryPrimitives.ReadInt32LittleEndian(pair)];
-                        Scratch.Grow(ref key, pair.Length);
-                        BinaryPrimitives.WriteInt32LittleEndian(key, group);
-                        pair[4..].CopyTo(key.AsSpan(4));
-                        distinct.GetOrAdd(key.AsSpan(0, pair.Length), out bool added);
-                        if (added)
+                        Span<long> count = byGroup ? owned.AsSpan() : (counts[part] = tables.Rent<long>(groups, zeroed: true)).AsSpan();
+                        for (int p = 0; p < all.Length; p++)
                         {
-                            count[group]++;
+                            (int[] placed, int[] starts) = cuts[p];
+                            int[] map = maps[p];
+                            ByteKeyTable lane = all[p]._seen;
+                            for (int i = starts[part]; i < starts[part + 1]; i++)
+                            {
+                                ReadOnlySpan<byte> pair = lane.KeyOf(placed[i]);
+                                int group = map[BinaryPrimitives.ReadInt32LittleEndian(pair)];
+                                Scratch.Grow(ref key, pair.Length);
+                                BinaryPrimitives.WriteInt32LittleEndian(key, group);
+                                pair[4..].CopyTo(key.AsSpan(4));
+                                distinct.GetOrAdd(key.AsSpan(0, pair.Length), out bool added);
+                                if (added)
+                                {
+                                    count[group]++;
+                                }
+                            }
                         }
                     }
-                }
+                    finally
+                    {
+                        Scratch.Return(ref key);
+                        distinct.Release();
+                    }
+                },
+                degree,
+                cancellationToken).ConfigureAwait(false);
 
-                Scratch.Return(ref key);
-
-                // The part's table, held until its pairs are counted.
-                long bytes = distinct.Footprint;
-                distinct.Release();
-                if (memory is not null && !memory.TryGrow(bytes))
-                {
-                    throw memory.Exceeded("merge of a distinct count", groups, bytes);
-                }
-
-                if (own is not null)
-                {
-                    counts[part] = own;
-                }
-
-                memory?.Shrink(bytes);
-                memory?.Discard(bytes);
-            },
-            degree,
-            cancellationToken).ConfigureAwait(false);
-
-        if (!byGroup)
-        {
-            EnsureGroups(groups);
-            _counts.Clear();
-            foreach (long[] count in counts)
+            if (!byGroup)
             {
-                for (int group = 0; group < groups; group++)
+                EnsureGroups(groups);
+                _counts.Clear();
+                foreach (Block<long> count in counts)
                 {
-                    _counts[group] += count[group];
+                    for (int group = 0; group < groups; group++)
+                    {
+                        _counts[group] += count[group];
+                    }
                 }
             }
+        }
+        finally
+        {
+            foreach (Block<long> count in counts)
+            {
+                tables.Return(count);
+            }
+
+            memory?.LetGo(cut);
         }
 
         _seen.Clear();
@@ -905,41 +911,49 @@ internal sealed class BytesDistinctSlot : AggregateSlot<long>, IPairedSlot
     internal override void Keep(ReadOnlySpan<int> groups)
     {
         // The pairs of the groups kept, their chains alone read: the values, each after its length, in
-        // one buffer, then a table emptied of every pair, which takes them back under their new groups.
-        byte[] values = [];
-        int used = 0;
-        for (int i = 0; i < groups.Length; i++)
+        // one buffer, then a table emptied of every pair, which takes them back under their new groups. The buffer grows
+        // under the slot's account and goes back once read: an array grown at every batch a stream closed was the heap's.
+        Block<byte> values = default;
+        try
         {
-            for (int number = _first[groups[i]]; number != 0; number = _next[number - 1])
+            int used = 0;
+            for (int i = 0; i < groups.Length; i++)
             {
-                ReadOnlySpan<byte> value = _seen.KeyOf(number - 1)[4..];
-                if (values.Length < used + 8 + value.Length)
+                for (int number = _first[groups[i]]; number != 0; number = _next[number - 1])
                 {
-                    Array.Resize(ref values, Scratch.Capacity(used + 8 + value.Length, values.Length));
-                }
+                    ReadOnlySpan<byte> value = _seen.KeyOf(number - 1)[4..];
+                    if (values.Length < used + 8 + value.Length)
+                    {
+                        TableArrays.Resize(_account, ref values, Scratch.Capacity(used + 8 + value.Length, values.Length));
+                    }
 
-                BinaryPrimitives.WriteInt32LittleEndian(values.AsSpan(used), i);
-                BinaryPrimitives.WriteInt32LittleEndian(values.AsSpan(used + 4), value.Length);
-                value.CopyTo(values.AsSpan(used + 8));
-                used += 8 + value.Length;
+                    BinaryPrimitives.WriteInt32LittleEndian(values.AsSpan(used), i);
+                    BinaryPrimitives.WriteInt32LittleEndian(values.AsSpan(used + 4), value.Length);
+                    value.CopyTo(values.AsSpan(used + 8));
+                    used += 8 + value.Length;
+                }
+            }
+
+            _seen.Clear();
+            _first.Clear();
+            for (int i = 0; i < groups.Length; i++)
+            {
+                _counts[i] = _counts[groups[i]];
+            }
+
+            _counts.AsSpan(groups.Length, _groups - groups.Length).Clear();
+            _groups = groups.Length;
+            for (int at = 0; at < used;)
+            {
+                int group = BinaryPrimitives.ReadInt32LittleEndian(values.AsSpan(at));
+                int length = BinaryPrimitives.ReadInt32LittleEndian(values.AsSpan(at + 4));
+                Chain(group, values.AsSpan(at + 8, length));
+                at += 8 + length;
             }
         }
-
-        _seen.Clear();
-        _first.Clear();
-        for (int i = 0; i < groups.Length; i++)
+        finally
         {
-            _counts[i] = _counts[groups[i]];
-        }
-
-        _counts.AsSpan(groups.Length, _groups - groups.Length).Clear();
-        _groups = groups.Length;
-        for (int at = 0; at < used;)
-        {
-            int group = BinaryPrimitives.ReadInt32LittleEndian(values.AsSpan(at));
-            int length = BinaryPrimitives.ReadInt32LittleEndian(values.AsSpan(at + 4));
-            Chain(group, values.AsSpan(at + 8, length));
-            at += 8 + length;
+            _account.Return(values);
         }
     }
 

@@ -318,8 +318,15 @@ internal sealed class FencePage
                 throw Malformed($"fence {fence} covers no segment");
             }
 
-            entryStarts[fence + 1] = checked(entryStarts[fence] + (long)entries);
-            segmentStarts[fence + 1] = checked(segmentStarts[fence] + segments);
+            // Counts of the file's, refused as a format error past a long, where a checked sum threw the arithmetic's overflow
+            // past every caller that catches format errors.
+            if (entries > (ulong)(long.MaxValue - entryStarts[fence]) || segments > long.MaxValue - segmentStarts[fence])
+            {
+                throw Malformed($"fence {fence} counts entries or segments past a long");
+            }
+
+            entryStarts[fence + 1] = entryStarts[fence] + (long)entries;
+            segmentStarts[fence + 1] = segmentStarts[fence] + segments;
             fence++;
         }
 
@@ -442,7 +449,13 @@ internal sealed class FenceTable
             long[] starts = new long[segments.Length + 1];
             for (int i = 0; i < segments.Length; i++)
             {
-                starts[i + 1] = checked(starts[i] + (long)segments[i].Entries);
+                // Refused as a format error past a long, as a fence page's sums are.
+                if (segments[i].Entries > (ulong)(long.MaxValue - starts[i]))
+                {
+                    throw FencePage.Malformed($"inline segment {i} counts entries past a long");
+                }
+
+                starts[i + 1] = starts[i] + (long)segments[i].Entries;
             }
 
             return starts;

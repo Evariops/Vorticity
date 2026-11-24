@@ -143,9 +143,6 @@ internal readonly partial struct ZstdPlan
         // compressed ahead.
         private bool _reached;
 
-        // The ticks the items took, every thread's.
-        private long _ticks;
-
         /// <summary>Whether the frames of the chunk are compressed ahead: the trial reads them once every item has run.</summary>
         internal bool Ready { get; private set; }
 
@@ -157,9 +154,6 @@ internal readonly partial struct ZstdPlan
 
         /// <summary>The items the frames are cut into.</summary>
         internal int Items { get; private set; }
-
-        /// <summary>The ticks the items took together, on whichever threads ran them: read once every item has run.</summary>
-        internal long Ticks => _ticks;
 
         /// <summary>
         /// Plans the frames of node <paramref name="node"/> of <paramref name="chunk"/>, a column's chunk about to be
@@ -291,7 +285,6 @@ internal readonly partial struct ZstdPlan
         internal void Run(int item)
         {
             Debug.Assert(Ready && (uint)item < (uint)Items, "An item of frames planned ahead.");
-            long began = Stopwatch.GetTimestamp();
             CanonicalArena arena = _arena!;
             CanonicalNode node = arena.GetNode(_node);
             ValidityReader valid = ValidityReader.Of(arena, node.Validity);
@@ -317,7 +310,6 @@ internal readonly partial struct ZstdPlan
             finally
             {
                 ZstdEncoders.Return(encoder);
-                System.Threading.Interlocked.Add(ref _ticks, Stopwatch.GetTimestamp() - began);
             }
         }
 
@@ -351,7 +343,6 @@ internal readonly partial struct ZstdPlan
             _planned = false;
             _arena = null;
             Items = 0;
-            _ticks = 0;
         }
 
         /// <summary><see cref="Finish"/>, and what the trials priced forgotten too: for the next writer.</summary>

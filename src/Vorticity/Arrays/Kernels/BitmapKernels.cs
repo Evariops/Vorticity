@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -694,6 +695,7 @@ internal static class BitmapKernels
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowShortBitmap(int bytes, int values) =>
         throw new ArgumentException($"A bitmap of {bytes} bytes cannot hold {values} values.");
 

@@ -41,6 +41,7 @@ public sealed class VariantKeySharedChildrenTests
         ];
         await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new DatasetOptions { ContentsObjectBytes = 0, SheetObjectBytes = 0 }, Ct);
         Scan<DatasetVariantGranulesTests.Call> scan = dataset.Scan<DatasetVariantGranulesTests.Call>().With(new ScanOptions { UseSynopses = false });
+        using CanonicalArena.Listening listening = ArrayDecodeContext.CountSharedChildren();
         long before = ArrayDecodeContext.SharedChildrenDecoded;
         List<DatasetVariantGranulesTests.ServiceCount> answers = await scan.Where(c => c.Service == "svc-3" && c.Attributes["code"].AsInt64() >= 500)
             .GroupBy(c => c.Service).Select(g => (g.Key, g.Count())).As<DatasetVariantGranulesTests.ServiceCount>().ToRecordsAsync(Ct).ToListAsync(Ct);

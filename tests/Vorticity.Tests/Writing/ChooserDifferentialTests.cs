@@ -1,6 +1,6 @@
 // The oracle for the chooser by cost formulas: it is built BESIDE the chooser it replaces, and the
 // two are compared plan against plan on every column chunk of every in-scope corpus file, through
-// the probe `ColumnCompressor.Differential`.
+// the probe a writer is handed (`WriteProbes.Differential`).
 //
 // WHY PLANS AND NOT BYTES. `WrittenSizeTests` is byte-exact, but a byte total cannot see two
 // divergences that compensate, and a byte-identical file
@@ -114,17 +114,17 @@ public sealed class ChooserDifferentialTests
                 string id = entry.Id;
                 string destination = Path.Combine(root, id.Replace('/', '_') + ".vortex");
 
-                // Installed inside the loop so that the reported file is the one being written,
-                // and cleared in `finally` so that a failing write cannot leak it into another test
-                // on the same async flow.
-                ColumnCompressor.Differential.Value = new ColumnCompressor.DifferentialProbe(
-                    runEndCompetes,
-                    (node, today, formula) => disagreements.Add(id + " node " + node + ": " + today + " => " + formula));
-                try
+                // Handed to each file's writer, so that the reported file is the one being written.
+                await using (VortexFile source = await VortexFile.OpenAsync(
+                    entry.Path, VortexOpenOptions.Default, CancellationToken.None))
                 {
-                    await using VortexFile source = await VortexFile.OpenAsync(
-                        entry.Path, VortexOpenOptions.Default, CancellationToken.None);
                     await using VortexFileWriter writer = VortexFileWriter.Create(destination, source.DType);
+                    writer.Probes = new WriteProbes
+                    {
+                        Differential = new ColumnCompressor.DifferentialProbe(
+                            runEndCompetes,
+                            (node, today, formula) => disagreements.Add(id + " node " + node + ": " + today + " => " + formula)),
+                    };
                     await foreach (RecordBatch batch in source.ScanBuilder().ExecuteAsync()
                         .WithCancellation(CancellationToken.None))
                     {
@@ -132,10 +132,6 @@ public sealed class ChooserDifferentialTests
                     }
 
                     await writer.CompleteAsync(CancellationToken.None);
-                }
-                finally
-                {
-                    ColumnCompressor.Differential.Value = null;
                 }
 
                 files++;

@@ -1038,7 +1038,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         Read(span, ref at);
         Read(span, ref at);
         Skip(span, ref at, 16);
-        Skip(span, ref at, (long)Read(span, ref at) * PageReference.Bytes);
+        SkipEach(span, ref at, Read(span, ref at), PageReference.Bytes);
         int length = (int)Math.Min(Read(span, ref at), int.MaxValue);
         Skip(span, ref at, length);
         return value.Slice(at - length, length);
@@ -1058,7 +1058,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         Read(span, ref at);
         Read(span, ref at);
         Skip(span, ref at, 16);
-        Skip(span, ref at, (long)Read(span, ref at) * PageReference.Bytes);
+        SkipEach(span, ref at, Read(span, ref at), PageReference.Bytes);
         Skip(span, ref at, (long)Read(span, ref at));
 
         // The tagged fields stand behind a zero, where a count of deleted rows would.
@@ -1166,12 +1166,24 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     /// </summary>
     private static void Skip(ReadOnlySpan<byte> value, ref int at, long bytes)
     {
-        if (bytes < 0 || at + bytes > value.Length)
+        // Against what is left, where a sum past a long wrapped under the length.
+        if (bytes < 0 || bytes > value.Length - at)
         {
             throw new CommitFormatException("An object entry is cut short.");
         }
 
         at += (int)bytes;
+    }
+
+    /// <summary>Skips <paramref name="count"/> elements of <paramref name="width"/> bytes, the count held to what is left before it is multiplied.</summary>
+    private static void SkipEach(ReadOnlySpan<byte> value, ref int at, ulong count, int width)
+    {
+        if (count > (ulong)((value.Length - at) / width))
+        {
+            throw new CommitFormatException("An object entry's fragment list is cut short.");
+        }
+
+        at += (int)count * width;
     }
 
     /// <summary>
@@ -1207,8 +1219,9 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
     private static ObjectEntry Parse(ReadOnlySpan<byte> value, ReadOnlyMemory<byte> memory, bool copy)
     {
         int at = 0;
+        // Each length against what is left, where a sum past an int wrapped under the length and a slice threw.
         int length = Length(Read(value, ref at), "key");
-        if (at + length > value.Length)
+        if (length > value.Length - at)
         {
             throw new CommitFormatException("An object entry's key runs past its bytes.");
         }
@@ -1233,7 +1246,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
         }
 
         int summaries = Length(Read(value, ref at), "summaries");
-        if (at + summaries > value.Length)
+        if (summaries > value.Length - at)
         {
             throw new CommitFormatException("An object entry's summaries run past its bytes.");
         }
@@ -1292,7 +1305,7 @@ internal sealed class ObjectEntry : IEquatable<ObjectEntry>
 
         at++;
         int length = Length(Read(value, ref at), "fields");
-        if (at + length > value.Length)
+        if (length > value.Length - at)
         {
             throw new CommitFormatException("An object entry's tagged fields run past its bytes.");
         }

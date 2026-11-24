@@ -2401,18 +2401,8 @@ internal static class ArrayBlobWriter
         return Node(blob, encodings, "vortex.map"u8, default, children, []);
     }
 
-    /// <summary>
-    /// What a test installs to see every list chunk's elements beside the summary the chooser is
-    /// handed for them: the arena, the elements node, and that summary, which is absent when the
-    /// chooser has to walk the elements itself. It flows with the async write, as
-    /// <c>ColumnCompressor.Differential</c> does, so two tests writing at once never see each
-    /// other's chunks.
-    /// </summary>
-    internal static readonly System.Threading.AsyncLocal<Action<CanonicalArena, int, BlockStats>?> ElementsHanded =
-        new System.Threading.AsyncLocal<Action<CanonicalArena, int, BlockStats>?>();
-
-    /// <summary>The cursor for a list's elements, shown to the audit when one is installed.</summary>
-    private static ChunkStats ElementsOf(CanonicalArena arena, int elements, bool compress, ChunkStats stats)
+    /// <summary>The cursor for a list's elements, shown to the writer's probe when a test set one (<see cref="WriteProbes.ElementsHanded"/>).</summary>
+    private static ChunkStats ElementsOf(Workspace blob, CanonicalArena arena, int elements, bool compress, ChunkStats stats)
     {
         if (!compress)
         {
@@ -2420,7 +2410,7 @@ internal static class ArrayBlobWriter
         }
 
         ChunkStats cursor = stats.Elements(arena.GetNode(elements).Length);
-        ElementsHanded.Value?.Invoke(arena, elements, cursor.Stats);
+        blob.Probes?.ElementsHanded?.Invoke(arena, elements, cursor.Stats);
         return cursor;
     }
 
@@ -2451,7 +2441,7 @@ internal static class ArrayBlobWriter
         Span<int> children = stackalloc int[4];
         children[0] = WriteChild(
             blob, arena, node.ElementsIndex, encodings, compress,
-            ElementsOf(arena, node.ElementsIndex, compress, stats));
+            ElementsOf(blob, arena, node.ElementsIndex, compress, stats));
         children[1] = compress
             ? WriteIndexBuffer(
                 blob, arena, blob.TypesFor(node.DType), node.Offsets, node.OffsetPType, node.Length, encodings)
@@ -2557,7 +2547,7 @@ internal static class ArrayBlobWriter
         Span<int> children = stackalloc int[3];
         children[0] = WriteChild(
             blob, arena, node.ElementsIndex, encodings, compress,
-            ElementsOf(arena, node.ElementsIndex, compress, stats));
+            ElementsOf(blob, arena, node.ElementsIndex, compress, stats));
         children[1] = compress
             ? WriteIndexBuffer(blob, arena, blob.TypesFor(node.DType), offsets, ptype, rows + 1, encodings)
             : WritePrimitiveBuffer(blob, encodings, offsets, ptype);
@@ -2583,7 +2573,7 @@ internal static class ArrayBlobWriter
         Span<int> children = stackalloc int[2];
         children[0] = WriteChild(
             blob, arena, node.ElementsIndex, encodings, compress,
-            ElementsOf(arena, node.ElementsIndex, compress, stats));
+            ElementsOf(blob, arena, node.ElementsIndex, compress, stats));
         int count = 1 + Validity(blob, arena, node, encodings, children[1..]);
         return Node(blob, encodings, "vortex.fixed_size_list"u8, default, children[..count], []);
     }
@@ -2865,7 +2855,6 @@ internal static class ArrayBlobWriter
             VortexTimeUnit.Microseconds => 1_000_000,
             VortexTimeUnit.Milliseconds => 1_000,
             VortexTimeUnit.Seconds => 1,
-            VortexTimeUnit.Days => 0,
             _ => 0,
         };
     }
@@ -3253,6 +3242,12 @@ internal static class ArrayBlobWriter
         internal FlatBufferBuilder Builder { get; } = new FlatBufferBuilder();
 
         /// <summary>
+        /// What a test watches the chooser with, which the writer the workspace serves hands it while it holds it, and takes
+        /// back with it; none in production.
+        /// </summary>
+        internal WriteProbes? Probes { get; set; }
+
+        /// <summary>
         /// Whether the validities written now are a shredded tree's, which the compressor encodes as
         /// any column, runs where its rows hold a path in stretches, rather than a bit a row.
         /// </summary>
@@ -3412,6 +3407,7 @@ internal static class ArrayBlobWriter
                 FrameRows = FrameRows, GranuleRows = GranuleRows, OwnTypes = OwnTypes, ZstdLevel = ZstdLevel, Account = Account,
             };
             _measure.ColumnLevel = ColumnLevel;
+            _measure.Probes = Probes;
             if (_measureEncodings is null || _measureEncodings.Target != target)
             {
                 _measureEncodings = new EncodingDictionary(ComponentKind.Array, target);

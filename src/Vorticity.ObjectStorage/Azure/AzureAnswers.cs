@@ -119,10 +119,9 @@ internal static class AzureAnswers
                         }
                     }
                 }
-                else if (reader.LocalName != "Properties")
-                {
-                    reader.Skip();
-                }
+
+                // An empty Properties is passed by Enter, the reader on the element after it, which the next turn reads: a
+                // branch here that skipped what did not read as Properties skipped that element.
             }
         }
 

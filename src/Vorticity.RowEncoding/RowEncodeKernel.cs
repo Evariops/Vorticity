@@ -510,7 +510,7 @@ internal static class RowEncodeKernel
         ReadOnlySpan<int> offsets, Span<int> cursors, Span<byte> destination)
     {
         // The child's sizes, its rows' starts in the scratch, and their cursors, in one block.
-        Block<int> rowScratch = Blocks.Rent<int>(3 * rows);
+        Block<int> rowScratch = Blocks.Rent<int>(ScratchEntries(3L * rows));
         Block<byte> scratch = default;
         try
         {
@@ -572,7 +572,7 @@ internal static class RowEncodeKernel
         byte childNull = RowSentinels.ChildCanonicalNull(elementType, field);
         int elementCount = checked(rows * listSize);
         // The elements' starts and their cursors, in one block.
-        Block<int> elementScratch = Blocks.Rent<int>(2 * elementCount);
+        Block<int> elementScratch = Blocks.Rent<int>(ScratchEntries(2L * elementCount));
         try
         {
             Span<int> starts = elementScratch.AsSpan(0, elementCount);
@@ -741,6 +741,15 @@ internal static class RowEncodeKernel
                 $"A {destination.Length}-byte value slot took {written} bytes.");
         }
     }
+
+    /// <summary>
+    /// <paramref name="count"/> entries of a scratch, counted in 64 bits: in 32, three a row of 716 million rows wrapped to
+    /// a small block the slices of it ran past.
+    /// </summary>
+    private static int ScratchEntries(long count) =>
+        count <= Array.MaxLength
+            ? (int)count
+            : throw new VortexFormatException($"A row encoding needs {count} entries of scratch, past what an array holds.");
 
     /// <summary>
     /// A child whose length disagrees with its parent's would desynchronize the cursors, so it is

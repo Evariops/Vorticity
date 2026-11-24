@@ -54,7 +54,7 @@ internal static class XxHash3Fixed
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static ulong Hash3(uint trigram)
     {
-        uint combined = ((trigram & 0xFF) << 16) | ((trigram & 0xFF00) << 16) | (trigram >> 16) | (3u << 8);
+        uint combined = ((trigram & 0xFF) << 16) | ((trigram & 0xFF00) << 16) | ((trigram >> 16) & 0xFF) | (3u << 8);
         return Avalanche64(combined ^ (ulong)(Secret0 ^ Secret4));
     }
 
@@ -219,7 +219,7 @@ internal static class XxHash3Fixed
                 return;
             }
 
-            case <= 3:
+            case >= 1 and <= 3:
                 for (int row = start; row < stop; row++)
                 {
                     hashes[row - start] = Hash1To3(values.Slice(row * width, width));
@@ -227,10 +227,20 @@ internal static class XxHash3Fixed
 
                 return;
 
-            default:
+            case >= 9 and <= 16:
                 for (int row = start; row < stop; row++)
                 {
                     hashes[row - start] = Hash9To16(values.Slice(row * width, width));
+                }
+
+                return;
+
+            default:
+                // The widths no short path here serves, five to seven bytes, none, or past sixteen (a decimal of 256
+                // bits): XXH3 itself, so that every width hashes as the reference does, bit for bit.
+                for (int row = start; row < stop; row++)
+                {
+                    hashes[row - start] = System.IO.Hashing.XxHash3.HashToUInt64(values.Slice(row * width, width));
                 }
 
                 return;

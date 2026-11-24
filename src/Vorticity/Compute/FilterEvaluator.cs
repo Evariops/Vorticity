@@ -839,6 +839,9 @@ internal sealed class FilterEvaluator
         return open;
     }
 
+    /// <summary>The columns of a tuple whose scratch <see cref="EvaluateTuples"/> keeps on the stack.</summary>
+    private const int StackArity = 64;
+
     /// <summary>
     /// Answers whether each row's values of <paramref name="tuples"/>' columns are one of its tuples: by the tuples' set,
     /// built once for the kinds of the columns' storage, encoded columns materialized; with no set for a kind, a list, a
@@ -847,10 +850,14 @@ internal sealed class FilterEvaluator
     private static void EvaluateTuples(
         TupleInExpr tuples, CanonicalArena arena, int rootIndex, int rows, ReadOnlySpan<int> selection, Span<byte> destination)
     {
+        // On the stack for a tuple of a few columns, a block of the pool past them: the filter's, of any arity.
         int arity = tuples.Arity;
-        Span<int> nodes = stackalloc int[arity];
-        Span<int> columns = stackalloc int[arity];
-        Span<CandidateKind> kinds = stackalloc CandidateKind[arity];
+        using Scratch<int> nodeScratch = new Scratch<int>(arity, stackalloc int[StackArity]);
+        using Scratch<int> columnScratch = new Scratch<int>(arity, stackalloc int[StackArity]);
+        using Scratch<CandidateKind> kindScratch = new Scratch<CandidateKind>(arity, stackalloc CandidateKind[StackArity]);
+        Span<int> nodes = nodeScratch.Span;
+        Span<int> columns = columnScratch.Span;
+        Span<CandidateKind> kinds = kindScratch.Span;
         for (int column = 0; column < arity; column++)
         {
             nodes[column] = Column(arena, rootIndex, tuples.Fields[column], rows, selection);

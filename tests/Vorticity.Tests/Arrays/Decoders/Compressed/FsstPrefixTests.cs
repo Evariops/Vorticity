@@ -15,7 +15,9 @@ namespace Vorticity.Tests.Arrays.Decoders.Compressed;
 public sealed class FsstPrefixTests
 {
     // 'q' and a lone 'x' have no symbol, so they escape.
-    private static readonly string[] Symbols = ["ab", "a", "b", "c", "d", "e", "abc", "abcdefgh", "bcd", "dea", "xyz", "cab", "ee", "eeeeeeee", "y", "z"];
+    // A table a trainer could make: no two symbols of three bytes or more open alike, which a writer looking them up by their
+    // first three bytes cannot hold, and a table that holds them is declined (FsstCompressInvariantTests).
+    private static readonly string[] Symbols = ["ab", "a", "b", "c", "d", "e", "abc", "cdeabcde", "bcd", "dea", "xyz", "cab", "ee", "eeeeeeee", "y", "z"];
 
     private const string Alphabet = "abcdeqxyz";
 

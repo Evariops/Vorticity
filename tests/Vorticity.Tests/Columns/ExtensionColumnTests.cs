@@ -203,13 +203,14 @@ public sealed class ExtensionColumnTests
     }
 
     [Fact]
-    public void TimestampInDaysHasNoInstant()
+    public void TimestampInDaysIsMalformed()
     {
         using ColumnFixture f = new ColumnFixture();
 
-        // Days passes upstream's dtype validation and fails when a value is unpacked; this is that.
+        // The reference refuses a timestamp in days as it validates the type, since 0.93: its unit is not read, nor its
+        // values unpacked.
         RecordBatch batch = TimestampColumn(f, VortexTimeUnit.Days, null, [1L]);
-        Assert.Equal(VortexTimeUnit.Days, batch.Root.AsExtension().TimeUnit);
+        Assert.Throws<VortexFormatException>(() => batch.Root.AsExtension().TimeUnit);
         Assert.Throws<VortexFormatException>(() => batch.Root.AsExtension().ToUtcDateTime(0));
         Assert.Throws<VortexFormatException>(() =>
             batch.Root.AsExtension().ToDateTimeOffset(0, TimeZoneInfo.Utc));

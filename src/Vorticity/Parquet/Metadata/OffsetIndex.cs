@@ -31,7 +31,8 @@ internal static class OffsetIndex
             }
 
             ThriftCompactReader.Expect(type, ThriftType.List);
-            int count = reader.ReadListHeader(out ThriftType element);
+            // A location's three fields are required: three headers, three varints' first bytes, the stop.
+            int count = reader.ReadListHeader(out ThriftType element, leastBytes: 7);
             ThriftCompactReader.Expect(element, ThriftType.Struct);
             pages = new PageLocation[count];
             for (int i = 0; i < pages.Length; i++)

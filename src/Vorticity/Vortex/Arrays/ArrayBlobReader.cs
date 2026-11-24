@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using Vorticity.Buffers;
 using Vorticity.Serialization.Schemas;
 
@@ -465,6 +466,7 @@ internal static class ArrayBlobReader
 
     [System.Runtime.CompilerServices.MethodImpl(
         System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowWorkBudget(string what) =>
         throw new VortexFormatException(
             $"The array node tree expands to more {what} than its FlatBuffer has room to declare; " +
@@ -483,6 +485,7 @@ internal static class ArrayBlobReader
     /// </remarks>
     [System.Runtime.CompilerServices.MethodImpl(
         System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowBufferCompression(int index, byte compression) =>
         throw new VortexUnsupportedException(
             compression == (byte)BufferCompression.LZ4
