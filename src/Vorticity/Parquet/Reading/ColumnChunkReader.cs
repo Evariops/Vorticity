@@ -1443,7 +1443,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private int ViewsAt(in PageHeader header)
     {
         if (_nested || _form is not (LeafForm.Binary or LeafForm.Utf8) || header.Encoding != ParquetEncoding.Plain
-            || header.ValueCount <= 0 || (long)header.ValueCount * CanonicalSupport.ViewSize > _cap)
+            || header.ValueCount <= 0 || (long)header.ValueCount * CanonicalSupport.ViewSize > Math.Min(_cap, Array.MaxLength))
         {
             return NoViews;
         }
@@ -2040,7 +2040,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     return;
                 }
 
-                BlockOwner slots = Slots(page, rows * _slot);
+                BlockOwner slots = Slots(page, Sized(rows,_slot));
                 Span<byte> into = slots.WritableSpan;
                 ValidRows.SpreadOver(source, into, ValidityMask.Bitmap(page.Validity.Buffer.Span, 0), rows, _width, Encoding);
                 owner?.Dispose();
@@ -2069,11 +2069,11 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
         else if (page.Validity is null)
         {
-            Cut(values.Span, Slots(page, rows * CanonicalSupport.ViewSize).WritableSpan, valid);
+            Cut(values.Span, Slots(page, Sized(rows,CanonicalSupport.ViewSize)).WritableSpan, valid);
         }
         else
         {
-            Span<byte> into = Slots(page, rows * CanonicalSupport.ViewSize).WritableSpan;
+            Span<byte> into = Slots(page, Sized(rows,CanonicalSupport.ViewSize)).WritableSpan;
             BlockOwner dense = cut ?? _account.Rent(Math.Max(valid, 1) * CanonicalSupport.ViewSize, 64);
             try
             {
@@ -2157,10 +2157,10 @@ internal sealed partial class ColumnChunkReader : IDisposable
         if (page.Validity is null)
         {
             spread = null;
-            return Slots(page, page.Rows * _slot).WritableSpan[..(valid * _slot)];
+            return Slots(page, Sized(page.Rows, _slot)).WritableSpan[..(valid * _slot)];
         }
 
-        spread = _account.Rent(Math.Max(valid, 1) * _slot, 64);
+        spread = _account.Rent(Sized(Math.Max(valid, 1),_slot), 64);
         return spread.WritableSpan[..(valid * _slot)];
     }
 
@@ -2280,7 +2280,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private void Place(Page page, ReadOnlySpan<byte> dense)
     {
         int rows = page.Rows;
-        BlockOwner slots = Slots(page, rows * _slot);
+        BlockOwner slots = Slots(page, Sized(rows,_slot));
         Span<byte> into = slots.WritableSpan;
         if (page.Validity is null)
         {
@@ -2439,7 +2439,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         int width = wide ? sizeof(long) : sizeof(int);
         if (page.Validity is null && _form == LeafForm.Fixed && _slot == width)
         {
-            Span<byte> slots = Slots(page, rows * width).WritableSpan;
+            Span<byte> slots = Slots(page, Sized(rows,width)).WritableSpan;
             if (wide)
             {
                 DeltaBinaryPacked.Decode64(source, MemoryMarshal.Cast<byte, long>(slots)[..rows]);
@@ -2452,7 +2452,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             return;
         }
 
-        BlockOwner dense = _account.Rent(Math.Max(valid, 1) * width, 64);
+        BlockOwner dense = _account.Rent(Sized(Math.Max(valid, 1),width), 64);
         try
         {
             Span<byte> values = dense.WritableSpan[..(valid * width)];
@@ -2486,7 +2486,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// </summary>
     private void Lengths(Page page, VortexBuffer values, BlockOwner? owner, int valid)
     {
-        BlockOwner lengths = _account.Rent(Math.Max(valid, 1) * sizeof(int), 64);
+        BlockOwner lengths = _account.Rent(Sized(Math.Max(valid, 1),sizeof(int)), 64);
         try
         {
             Span<int> span = MemoryMarshal.Cast<byte, int>(lengths.WritableSpan)[..valid];
@@ -2513,7 +2513,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     /// <summary>A DELTA_BYTE_ARRAY page rebuilt, each value from the one before it, into a heap the page keeps.</summary>
     private void Prefixed(Page page, ReadOnlySpan<byte> source, int valid)
     {
-        BlockOwner lengths = _account.Rent(Math.Max(valid, 1) * sizeof(int) * 3, 64);
+        BlockOwner lengths = _account.Rent(Sized(Math.Max(valid, 1),sizeof(int) * 3), 64);
         BlockOwner? heap = null;
         try
         {
@@ -2571,11 +2571,11 @@ internal sealed partial class ColumnChunkReader : IDisposable
         bool kept = _form is not (LeafForm.Narrowed or LeafForm.BigEndianDecimal);
         if (page.Validity is null && kept)
         {
-            ByteStreamSplit.Decode(source, _width, Slots(page, rows * _width).WritableSpan);
+            ByteStreamSplit.Decode(source, _width, Slots(page, Sized(rows,_width)).WritableSpan);
             return;
         }
 
-        BlockOwner dense = _account.Rent(Math.Max(valid, 1) * _width, 64);
+        BlockOwner dense = _account.Rent(Sized(Math.Max(valid, 1),_width), 64);
         try
         {
             Span<byte> values = dense.WritableSpan[..(valid * _width)];
@@ -2613,8 +2613,8 @@ internal sealed partial class ColumnChunkReader : IDisposable
         try
         {
             Span<byte> into = page.Validity is null
-                ? Slots(page, rows * width).WritableSpan[..(rows * width)]
-                : (dense = _account.Rent(Math.Max(valid, 1) * width, 64)).WritableSpan[..(valid * width)];
+                ? Slots(page, Sized(rows,width)).WritableSpan[..(rows * width)]
+                : (dense = _account.Rent(Sized(Math.Max(valid, 1),width), 64)).WritableSpan[..(valid * width)];
             if (wide)
             {
                 Encodings.Alp.Decode(source, MemoryMarshal.Cast<byte, double>(into), MemoryMarshal.Cast<byte, ulong>(scratch.WritableSpan));
@@ -2676,7 +2676,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private void CutViews(Page page, ReadOnlySpan<int> lengths, VortexBuffer heap, int valid)
     {
         int rows = page.Rows;
-        BlockOwner views = Slots(page, rows * CanonicalSupport.ViewSize);
+        BlockOwner views = Slots(page, Sized(rows,CanonicalSupport.ViewSize));
         Span<byte> into = views.WritableSpan;
         BlockOwner? dense = page.Validity is null ? null : _account.Rent(Math.Max(valid, 1) * CanonicalSupport.ViewSize, 64);
         try
@@ -2734,6 +2734,12 @@ internal sealed partial class ColumnChunkReader : IDisposable
         {
             owner?.Dispose();
             throw;
+        }
+
+        if ((long)header.ValueCount * PlainBits() > (long)header.UncompressedPageSize * 8)
+        {
+            owner?.Dispose();
+            ParquetThrow.Format($"The dictionary page of '{Name}' declares {header.ValueCount} entries, more than its {header.UncompressedPageSize} bytes hold.");
         }
 
         Page page = Rent(header.ValueCount);
@@ -2833,7 +2839,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         if (valid == 0)
         {
             // Every row is null: zeroed slots, nothing to gather.
-            Slots(page, _slot == 0 ? CanonicalSupport.BitmapByteCount(rows) : rows * _slot).WritableSpan.Clear();
+            Slots(page, _slot == 0 ? CanonicalSupport.BitmapByteCount(rows) : Sized(rows,_slot)).WritableSpan.Clear();
             page.Data = dictionary.Data;
             return;
         }
@@ -2844,7 +2850,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
         }
 
         int width = source[0];
-        BlockOwner codes = _account.Rent(valid * sizeof(uint), 64);
+        BlockOwner codes = _account.Rent(Sized(valid, sizeof(uint)), 64);
         BlockOwner? dense = null;
         try
         {
@@ -2898,7 +2904,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
             }
 
             ReadOnlySpan<byte> codeBytes = MemoryMarshal.AsBytes((ReadOnlySpan<uint>)span);
-            BlockOwner slots = Slots(page, rows * _slot);
+            BlockOwner slots = Slots(page, Sized(rows,_slot));
             Span<byte> target = page.Validity is null ? slots.WritableSpan : (dense = _account.Rent(valid * _slot, 64)).WritableSpan;
             int bad = RowKernels.Gather(codeBytes, PType.U32, dictionary.Values.Span, _slot, dictionary.Rows, target[..(valid * _slot)], valid);
             if (bad >= 0)
@@ -2961,7 +2967,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
         Page dictionary = _dictionary!;
         int rows = page.Rows;
-        Span<byte> into = Slots(page, rows * _slot).WritableSpan[..(rows * _slot)];
+        Span<byte> into = Slots(page, Sized(rows,_slot)).WritableSpan[..(rows * _slot)];
         if (dictionary.Rows == 0)
         {
             // Every row is null, and names no entry.
@@ -2981,13 +2987,45 @@ internal sealed partial class ColumnChunkReader : IDisposable
     private static bool Same(VortexBuffer a, VortexBuffer b) =>
         a.Length == b.Length && Unsafe.AreSame(ref MemoryMarshal.GetReference(a.Span), ref MemoryMarshal.GetReference(b.Span));
 
+    /// <summary>
+    /// Refuses a page whose decode would take more than <paramref name="bytes"/> allows: past the
+    /// reader's cap, or past what one block can hold, so that a size checked here narrows to an
+    /// <see langword="int"/> exactly.
+    /// </summary>
     private void Cap(long bytes)
     {
-        if (bytes > _cap)
+        long most = Math.Min(_cap, Array.MaxLength);
+        if (bytes > most)
         {
-            ParquetThrow.Format($"A page of '{Name}' decodes to {bytes} bytes, past the {_cap} the reader allows.");
+            ParquetThrow.Format($"A page of '{Name}' decodes to {bytes} bytes, past the {most} the reader allows.");
         }
     }
+
+    /// <summary>
+    /// The bytes <paramref name="count"/> values of <paramref name="width"/> bytes each take, computed
+    /// wide and held to <see cref="Cap"/> before it narrows: a count the file declares never wraps
+    /// into a small block that the values then overrun.
+    /// </summary>
+    private int Sized(int count, int width)
+    {
+        long bytes = (long)count * width;
+        Cap(bytes);
+        return (int)bytes;
+    }
+
+    /// <summary>
+    /// The fewest bits one PLAIN value of the column's physical type takes in a page: a boolean's bit,
+    /// a fixed width's bytes, a byte array's four-byte length. A dictionary page's count of entries is
+    /// held to it, since nothing else bounds that count before its slots are allocated.
+    /// </summary>
+    private long PlainBits() => _leaf.Physical switch
+    {
+        PhysicalType.Boolean => 1,
+        PhysicalType.Int32 or PhysicalType.Float or PhysicalType.ByteArray => 32,
+        PhysicalType.Int64 or PhysicalType.Double => 64,
+        PhysicalType.Int96 => 96,
+        _ => 8L * Math.Max(_leaf.TypeLength, 1),
+    };
 
     /// <summary>A page decoded whole, and how many of its rows batches have read.</summary>
     /// <remarks>

@@ -600,6 +600,22 @@ internal static class ViewKernels
         return referenced;
     }
 
+    /// <summary>
+    /// Holds a kernel that writes views by reference to the room its caller gave: one comparison a
+    /// call, so that a count the caller got wrong fails here instead of writing past the span.
+    /// </summary>
+    private static void RequireRoom(Span<byte> views, int count)
+    {
+        if ((long)count * ViewSize > views.Length)
+        {
+            ThrowNoRoom(views.Length, count);
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void ThrowNoRoom(int bytes, int count) =>
+        throw new ArgumentOutOfRangeException(nameof(count), $"{count} views do not fit the {bytes} bytes given for them.");
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static void ThrowRowPastHeap(int row, int offset, int size, int heapLength) =>
         throw new VortexFormatException(
@@ -635,6 +651,7 @@ internal static class ViewKernels
         ReadOnlySpan<TLen> lengths, ReadOnlySpan<byte> heap, Span<byte> views, bool requireUtf8)
         where TLen : unmanaged, INumber<TLen>
     {
+        RequireRoom(views, lengths.Length);
         ref TLen lengthRef = ref MemoryMarshal.GetReference(lengths);
         ref byte heapRef = ref MemoryMarshal.GetReference(heap);
         ref byte viewRef = ref MemoryMarshal.GetReference(views);
@@ -1317,6 +1334,7 @@ internal static class ViewKernels
     [MethodImpl(MethodImplOptions.NoInlining)]
     internal static int BuildFromPrefixed(ReadOnlySpan<byte> heap, Span<byte> views, int count)
     {
+        RequireRoom(views, count);
         ref byte heapRef = ref MemoryMarshal.GetReference(heap);
         ref byte viewRef = ref MemoryMarshal.GetReference(views);
         int heapLength = heap.Length;
