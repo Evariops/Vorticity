@@ -19,8 +19,11 @@ namespace Vorticity;
 /// <param name="WorkingSet">What the container uses, less its inactive file pages.</param>
 internal sealed record ContainerMemory(long Limit, long WorkingSet)
 {
-    private static readonly string[] V2 = ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.stat"];
-    private static readonly string[] V1 = ["/sys/fs/cgroup/memory/memory.limit_in_bytes", "/sys/fs/cgroup/memory/memory.usage_in_bytes", "/sys/fs/cgroup/memory/memory.stat"];
+    /// <summary>The files of a cgroup v2's memory: its limit, its usage, its statistics.</summary>
+    internal static readonly CgroupFiles V2 = new CgroupFiles("/sys/fs/cgroup", "memory.max", "memory.current", "memory.stat", "inactive_file");
+
+    /// <summary>The files of a cgroup v1's memory controller.</summary>
+    internal static readonly CgroupFiles V1 = new CgroupFiles("/sys/fs/cgroup/memory", "memory.limit_in_bytes", "memory.usage_in_bytes", "memory.stat", "total_inactive_file");
 
     /// <summary>The container's memory now; null outside Linux, outside a container, or under no limit.</summary>
     internal static ContainerMemory? Read()
@@ -30,20 +33,46 @@ internal sealed record ContainerMemory(long Limit, long WorkingSet)
             return null;
         }
 
-        return Read(V2, inactiveFile: "inactive_file") ?? Read(V1, inactiveFile: "total_inactive_file");
+        string? cgroups = ReadText("/proc/self/cgroup");
+        return Read(V2, CgroupPath(cgroups, v2: true)) ?? Read(V1, CgroupPath(cgroups, v2: false));
     }
 
-    private static ContainerMemory? Read(string[] paths, string inactiveFile)
+    /// <summary>
+    /// The memory of the process's cgroup at <paramref name="path"/> under <paramref name="files"/>' mount: the least limit of
+    /// its own and of the cgroups above it, which the kernel holds it to as well, and the usage of the cgroup whose limit
+    /// that is. Read at the mount's root alone, a limit set on a parent, a pod's over a container of none, or the process's
+    /// own outside a namespace of cgroups, whose root has no limit, went unseen.
+    /// </summary>
+    internal static ContainerMemory? Read(CgroupFiles files, string path)
     {
         try
         {
-            if (Bytes(System.IO.File.ReadAllText(paths[0])) is not long limit)
+            long? limit = null;
+            string? bound = null;
+            string directory = Path.Join(files.Root, path.TrimStart('/'));
+            while (true)
+            {
+                if (ReadText(Path.Join(directory, files.Limit)) is { } text && Bytes(text) is long found && (limit is null || found < limit))
+                {
+                    limit = found;
+                    bound = directory;
+                }
+
+                if (directory.Length <= files.Root.Length || Path.GetDirectoryName(directory) is not { } parent || parent.Length < files.Root.Length)
+                {
+                    break;
+                }
+
+                directory = parent;
+            }
+
+            if (limit is not long held || bound is null)
             {
                 return null;
             }
 
-            long usage = Bytes(System.IO.File.ReadAllText(paths[1])) ?? 0;
-            return new ContainerMemory(limit, WorkingSetOf(usage, System.IO.File.ReadAllText(paths[2]), inactiveFile));
+            long usage = (ReadText(Path.Join(bound, files.Usage)) is { } used ? Bytes(used) : null) ?? 0;
+            return new ContainerMemory(held, WorkingSetOf(usage, ReadText(Path.Join(bound, files.Stat)) ?? string.Empty, files.InactiveFile));
         }
         catch (IOException)
         {
@@ -54,6 +83,59 @@ internal sealed record ContainerMemory(long Limit, long WorkingSet)
             return null;
         }
     }
+
+    /// <summary>
+    /// The process's cgroup in <paramref name="cgroups"/>, its <c>/proc/self/cgroup</c>: the unified hierarchy's
+    /// (<c>0::/path</c>) for v2, the memory controller's for v1; the root when the file says none, as in a namespace of
+    /// cgroups, whose root is the container's own.
+    /// </summary>
+    internal static string CgroupPath(string? cgroups, bool v2)
+    {
+        foreach (ReadOnlySpan<char> line in (cgroups ?? string.Empty).AsSpan().EnumerateLines())
+        {
+            int first = line.IndexOf(':');
+            int second = first < 0 ? -1 : line[(first + 1)..].IndexOf(':');
+            if (second < 0)
+            {
+                continue;
+            }
+
+            ReadOnlySpan<char> controllers = line.Slice(first + 1, second);
+            ReadOnlySpan<char> path = line[(first + second + 2)..];
+            bool memory = false;
+            foreach (Range controller in controllers.Split(','))
+            {
+                memory |= controllers[controller].SequenceEqual("memory");
+            }
+
+            if (v2 ? line[..first].SequenceEqual("0") && controllers.IsEmpty : memory)
+            {
+                return path.ToString();
+            }
+        }
+
+        return "/";
+    }
+
+    /// <summary>The text of a file of the kernel's; null when it is not there or not readable.</summary>
+    private static string? ReadText(string path)
+    {
+        try
+        {
+            return System.IO.File.ReadAllText(path);
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Where a hierarchy's memory files lie, and their names: its mount, its limit, its usage, its statistics and their inactive file pages.</summary>
+    internal sealed record CgroupFiles(string Root, string Limit, string Usage, string Stat, string InactiveFile);
 
     /// <summary>A count of bytes as a cgroup file gives it; null for <c>max</c>, an unbounded limit, or what does not parse.</summary>
     internal static long? Bytes(string text) =>

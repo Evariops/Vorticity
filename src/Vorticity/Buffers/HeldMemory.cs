@@ -175,12 +175,24 @@ internal static class HeldMemory
     }
 
     /// <summary>The bytes every holder holds now: what the registry knows of the memory kept.</summary>
+    /// <remarks>
+    /// Read by the process's budget on its timer, where no caller hears of a failure and the process ends on it: a holder
+    /// whose reading fails is said, as a failed upkeep is, and counted for nothing.
+    /// </remarks>
     internal static long TotalBytes()
     {
         long bytes = 0;
         foreach (KeyValuePair<IHeldMemory, object?> pair in Holders)
         {
-            bytes += pair.Key.HeldBytes;
+            IHeldMemory holder = pair.Key;
+            try
+            {
+                bytes += holder.HeldBytes;
+            }
+            catch (Exception e) when (e is not OutOfMemoryException)
+            {
+                VortexEventSource.Log.UpkeepFailed(holder.Holder, e.ToString());
+            }
         }
 
         return bytes;

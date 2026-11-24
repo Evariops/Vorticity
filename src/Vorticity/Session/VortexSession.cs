@@ -537,29 +537,14 @@ public sealed class VortexSession : IAsyncDisposable
         await using (reader.ConfigureAwait(false))
         {
             long length = await reader.GetLengthAsync(cancellationToken).ConfigureAwait(false);
-            Block<byte> buffer = Blocks.Rent<byte>((int)Math.Min(Chunk, Math.Max(length, 1)));
-            try
+            for (long at = 0; at < length; at += Chunk)
             {
-                for (long at = 0; at < length; at += Chunk)
-                {
-                    int wanted = (int)Math.Min(Chunk, length - at);
-                    SegmentOwner owner = await reader.ReadRangeAsync(at, wanted, 1, cancellationToken).ConfigureAwait(false);
-                    try
-                    {
-                        owner.Buffer.Span.CopyTo(buffer);
-                    }
-                    finally
-                    {
-                        owner.Release();
-                    }
-
-                    await destination.WriteAsync(buffer.AsMemory(0, wanted), cancellationToken).ConfigureAwait(false);
-                }
-            }
-            finally
-            {
-                System.Security.Cryptography.CryptographicOperations.ZeroMemory(buffer);
-                Blocks.Return(buffer);
+                // Written from the reader's block where it lies. A copy of it, cleared once written, left the block's own
+                // plaintext as it was: the reader's blocks go back to the pool as every read's do.
+                int wanted = (int)Math.Min(Chunk, length - at);
+                SegmentOwner owner = await reader.ReadRangeAsync(at, wanted, 1, cancellationToken).ConfigureAwait(false);
+                using SegmentLease lease = SegmentOwnerMemory.Lease(owner);
+                await destination.WriteAsync(lease.Memory[..wanted], cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -609,9 +594,22 @@ public sealed class VortexSession : IAsyncDisposable
         (IObjectStore store, string key) = Options.ObjectStores.Locate(location);
         Pipe pipe = new Pipe(new PipeOptions(pauseWriterThreshold: 4 << 20, resumeWriterThreshold: 2 << 20, useSynchronizationContext: false));
         VortexFileWriter writer = VortexFileWriter.Create(pipe.Writer, VortexTypes.ToDType(schema, new DTypeArena()), options ?? VortexWriteOptions.Default, this);
-        writer.Declare(schema);
         CancellationTokenSource abandoned = new CancellationTokenSource();
-        writer.UploadTo(store.PutAsync(key, pipe.Reader, -1, PutCondition.None, abandoned.Token).AsTask(), abandoned);
+        Task upload;
+        try
+        {
+            writer.Declare(schema);
+            upload = store.PutAsync(key, pipe.Reader, -1, PutCondition.None, abandoned.Token).AsTask();
+        }
+        catch
+        {
+            // A store that refuses before it hands back its upload: the writer is given up, as a writer no one completes is.
+            abandoned.Dispose();
+            writer.Abandon();
+            throw;
+        }
+
+        writer.UploadTo(upload, abandoned);
         return writer;
     }
 
