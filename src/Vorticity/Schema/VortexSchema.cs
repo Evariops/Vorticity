@@ -107,14 +107,25 @@ public sealed class VortexSchema : IReadOnlyList<VortexField>, IEquatable<Vortex
     /// <returns>The index, or -1 when no field matches or the bytes are not UTF-8.</returns>
     public int IndexOf(ReadOnlySpan<byte> pathUtf8)
     {
-        Span<char> chars = pathUtf8.Length <= 256 ? stackalloc char[256] : new char[pathUtf8.Length];
-        if (Utf8.ToUtf16(pathUtf8, chars, out _, out int written) != System.Buffers.OperationStatus.Done)
+        if (pathUtf8.Length <= 256)
         {
-            return -1;
+            return IndexOfUtf8(pathUtf8, stackalloc char[256]);
         }
 
-        return Find(chars[..written]);
+        // A UTF-8 path takes as many UTF-16 characters as it has bytes at most: a block of the pool past the stack's room.
+        Buffers.Block<char> chars = Buffers.Blocks.Rent<char>(pathUtf8.Length);
+        try
+        {
+            return IndexOfUtf8(pathUtf8, chars.AsSpan());
+        }
+        finally
+        {
+            Buffers.Blocks.Return(chars);
+        }
     }
+
+    private int IndexOfUtf8(ReadOnlySpan<byte> pathUtf8, Span<char> chars) =>
+        Utf8.ToUtf16(pathUtf8, chars, out _, out int written) == System.Buffers.OperationStatus.Done ? Find(chars[..written]) : -1;
 
     /// <summary>The index of the first top-level field named exactly <paramref name="name"/>, or -1.</summary>
     internal int IndexOfName(ReadOnlySpan<char> name) => FieldNames.IndexOf(_fields, ref _names, name);
@@ -224,6 +235,15 @@ public sealed class VortexSchema : IReadOnlyList<VortexField>, IEquatable<Vortex
     }
 
     /// <inheritdoc/>
-    public bool TryFormat(Span<byte> utf8Destination, out int bytesWritten, ReadOnlySpan<char> format, IFormatProvider? provider) =>
-        Utf8.FromUtf16(ToString(), utf8Destination, out _, out bytesWritten) == System.Buffers.OperationStatus.Done;
+    /// <remarks>A destination too short takes nothing: false, and no byte said written, as the base types do.</remarks>
+    public bool TryFormat(Span<byte> utf8Destination, out int bytesWritten, ReadOnlySpan<char> format, IFormatProvider? provider)
+    {
+        if (Utf8.FromUtf16(ToString(), utf8Destination, out _, out bytesWritten) == System.Buffers.OperationStatus.Done)
+        {
+            return true;
+        }
+
+        bytesWritten = 0;
+        return false;
+    }
 }

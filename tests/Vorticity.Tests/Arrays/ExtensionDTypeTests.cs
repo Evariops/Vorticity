@@ -180,17 +180,18 @@ public sealed class ExtensionDTypeTests
     }
 
     [Fact]
-    public void EveryTimestampUnitStoresI64IncludingDays()
+    public void EveryTimestampUnitButDaysStoresI64()
     {
-        // TimeUnit::Days passes DType validation for timestamp upstream and fails only when a
-        // value is unpacked, so accepting it here is the reference behaviour.
-        for (byte unit = 0; unit <= 4; unit++)
+        for (byte unit = 0; unit <= 3; unit++)
         {
             Assert.Equal(
                 (VortexTimeUnit)unit,
                 ExtensionDTypeRegistry.ReadTimestamp([unit, 0, 0], Int64Storage()).Unit);
         }
 
+        // The reference refuses a timestamp in days as it validates the type, since 0.93.
+        Assert.Throws<VortexFormatException>(
+            () => { _ = ExtensionDTypeRegistry.ReadTimestamp([(byte)VortexTimeUnit.Days, 0, 0], Int64Storage()).Unit; });
         Assert.Throws<VortexFormatException>(
             () => { _ = ExtensionDTypeRegistry.ReadTimestamp([2, 0, 0], Int32Storage()).Unit; });
     }

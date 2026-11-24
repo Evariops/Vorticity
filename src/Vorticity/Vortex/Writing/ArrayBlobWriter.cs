@@ -2865,7 +2865,6 @@ internal static class ArrayBlobWriter
             VortexTimeUnit.Microseconds => 1_000_000,
             VortexTimeUnit.Milliseconds => 1_000,
             VortexTimeUnit.Seconds => 1,
-            VortexTimeUnit.Days => 0,
             _ => 0,
         };
     }

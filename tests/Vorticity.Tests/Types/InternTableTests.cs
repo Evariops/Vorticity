@@ -34,4 +34,28 @@ public sealed class InternTableTests
         // What it has is still served.
         Assert.Same(a, table.Intern(new string('a', 1), 4));
     }
+
+    /// <summary>
+    /// A type kept for reuse weighs the bytes it holds on the heap: a fixed-size list of a new size, a unit under a weight
+    /// of one a type, weighs 176 bytes, so that a family of such types fills the budget at megabytes and not at a million
+    /// of them. Every other test interns beside this one, which only adds to what is weighed.
+    /// </summary>
+    [Fact]
+    public void ATypeKeptWeighsTheBytesItHolds()
+    {
+        long before = VortexType.InternedBytes;
+        int kept = 0;
+        for (int size = 7_000_000; size < 7_001_000; size++)
+        {
+            VortexType type = VortexType.FixedSizeList(VortexType.UInt8, size);
+            if (ReferenceEquals(type, VortexType.FixedSizeList(VortexType.UInt8, size)))
+            {
+                kept++;
+            }
+        }
+
+        long weighed = VortexType.InternedBytes - before;
+        Assert.True(weighed >= kept * 176L, $"{kept} types kept weigh {weighed} bytes");
+        Assert.True(kept > 0 || VortexType.InternedBytes > (8L << 20) - 176, $"none of the types was kept under {VortexType.InternedBytes} bytes");
+    }
 }
