@@ -206,12 +206,29 @@ public sealed class BlocksTests
     [Fact]
     public void A_rent_past_the_longest_array_gives_back_what_it_reserved()
     {
+        // Just past the longest array, some 2 GiB: a budget whose ceiling is the machine's grants it where it may refuse
+        // the 16 GiB of int.MaxValue longs, as a runner of 16 GB did.
+        int past = (Array.MaxLength / sizeof(long)) + 1;
         CountedAccount account = new CountedAccount(MemoryAccount.Caller);
-        Assert.Throws<ArgumentOutOfRangeException>(() => Blocks.Rent<long>(account, int.MaxValue));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Blocks.Rent<long>(account, past));
         Assert.Equal(0, account.Held);
 
         using QueryMemory memory = new QueryMemory(new QueryMemoryBudget(1L << 40, process: null));
-        Assert.Throws<ArgumentOutOfRangeException>(() => Blocks.TryRent<long>(memory, int.MaxValue, out _));
+        try
+        {
+            if (!Blocks.TryRent<long>(memory, past, out _))
+            {
+                // Refused before the rent, the bytes were never taken: the case this test is about did not arise.
+                Assert.Equal(0, memory.Held);
+                Assert.Skip("The machine's memory grants no 2 GiB: the budget refused the bytes before the rent.");
+            }
+
+            Assert.Fail("A block past the longest array was handed out.");
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+        }
+
         Assert.Equal(0, memory.Held);
     }
 
