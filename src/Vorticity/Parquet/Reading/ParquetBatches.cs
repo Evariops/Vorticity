@@ -374,7 +374,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         if (_piped >= 0)
         {
             // Decoded ahead, a field at a time: the batch's arena references their nodes where they lie.
-            int slot = await _pipeline!.WaitAsync(_piped++).ConfigureAwait(false);
+            int slot = await _pipeline!.WaitAsync(_piped++, _cancellationToken).ConfigureAwait(false);
             _file.Counters.AddPiped();
             for (int i = 0; i < _nodes.Length; i++)
             {
@@ -456,9 +456,9 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             {
                 await planned.ConfigureAwait(false);
             }
-            catch (Exception)
+            catch (Exception failed) when (failed is not OutOfMemoryException)
             {
-                // A read nobody waits for has no one to report to.
+                // A read nobody waits for has no one to report to; the process running out of memory does.
             }
         }
 
@@ -944,9 +944,9 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
             {
                 await ahead.ConfigureAwait(false);
             }
-            catch (Exception)
+            catch (Exception failed) when (failed is not OutOfMemoryException)
             {
-                // A read nobody waits for has no one to report to.
+                // A read nobody waits for has no one to report to; the process running out of memory does.
             }
         }
 
@@ -1029,9 +1029,9 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
                 {
                     await reading.ConfigureAwait(false);
                 }
-                catch (Exception)
+                catch (Exception failed) when (failed is not OutOfMemoryException)
                 {
-                    // A read nobody waits for has no one to report to.
+                    // A read nobody waits for has no one to report to; the process running out of memory does.
                 }
             }
         }

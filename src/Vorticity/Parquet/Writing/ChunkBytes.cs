@@ -88,12 +88,21 @@ internal sealed class ChunkBytes : IBufferWriter<byte>, IDisposable
         }
     }
 
-    /// <summary>Forgets what was written and keeps the blocks.</summary>
+    /// <summary>
+    /// Forgets what was written and keeps the blocks it filled; those it did not reach go back, so
+    /// that a column keeps what its last chunk took rather than the most any chunk of the file did.
+    /// </summary>
     internal void Clear()
     {
         for (int i = 0; i <= _current; i++)
         {
             _blocks[i].Used = 0;
+        }
+
+        for (int i = _blocks.Count - 1; i > _current; i--)
+        {
+            _blocks[i].Owner.Release();
+            _blocks.RemoveAt(i);
         }
 
         _current = -1;

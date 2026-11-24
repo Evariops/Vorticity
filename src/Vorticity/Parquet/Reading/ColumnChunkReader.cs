@@ -2202,8 +2202,6 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     ? $"A decimal of '{Name}' runs past its page."
                     : $"A page of '{Name}' holds bytes past its {valid} decimals.");
             }
-
-            Wide(_width);
         }
 
         Span<byte> wide = Dense(page, valid, out BlockOwner? spread);
@@ -2230,7 +2228,6 @@ internal sealed partial class ColumnChunkReader : IDisposable
                         ParquetThrow.Format($"A decimal of '{Name}' runs past its page.");
                     }
 
-                    Wide(length);
                     BigEndianDecimals.Widen(source, position, length, wide.Slice(i * _slot, _slot));
                     position += length;
                 }
@@ -2268,7 +2265,6 @@ internal sealed partial class ColumnChunkReader : IDisposable
                     ParquetThrow.Format($"A decimal of '{Name}' takes {length} bytes where its type's length is {_width}.");
                 }
 
-                Wide(length);
                 BigEndianDecimals.Widen(heap, position, length, wide.Slice(i * _slot, _slot));
                 position += length;
             }
@@ -2278,16 +2274,6 @@ internal sealed partial class ColumnChunkReader : IDisposable
         finally
         {
             spread?.Dispose();
-        }
-    }
-
-    /// <summary>One big-endian two's-complement decimal sign-extended into its little-endian slot.</summary>
-    /// <summary>Refuses a decimal of <paramref name="length"/> bytes that its storage does not hold.</summary>
-    private void Wide(int length)
-    {
-        if (length > _slot)
-        {
-            ParquetThrow.Format($"A decimal of '{Name}' is wider than its precision allows.");
         }
     }
 

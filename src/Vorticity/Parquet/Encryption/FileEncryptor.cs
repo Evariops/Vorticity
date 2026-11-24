@@ -187,6 +187,14 @@ internal sealed class ColumnEncryptor : IDisposable
     /// </summary>
     internal int Encrypt(ReadOnlySpan<byte> plaintext, ModuleType type, int rowGroup, int page, IBufferWriter<byte> into)
     {
+        // The AAD holds each ordinal as a 2-byte short: past it, two modules would share an AAD,
+        // which the standard forbids and other readers refuse.
+        if (rowGroup > short.MaxValue || page > short.MaxValue || Ordinal > short.MaxValue)
+        {
+            throw new ParquetUnsupportedException("module ordinal", ParquetComponentKind.Encryption,
+                $"An encrypted file holds at most {short.MaxValue} row groups, columns, and pages a column chunk, as its AAD names each by a 2-byte ordinal; this module is row group {rowGroup}'s, column {Ordinal}'s, page {page}'s.");
+        }
+
         int bytes = plaintext.Length + Overhead(type);
         Span<byte> module = into.GetSpan(bytes)[..bytes];
         if (_file.Ctr && type is ModuleType.DataPage or ModuleType.DictionaryPage)
