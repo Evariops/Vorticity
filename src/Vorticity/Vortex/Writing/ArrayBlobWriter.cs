@@ -2741,26 +2741,30 @@ internal static class ArrayBlobWriter
             : Shredded(blob, arena, arena.GetNode(frame), encodings, compress, children, residualNullable, tree);
 
     /// <summary>
-    /// Whether the compressor writes <paramref name="frame"/> whole, without its children -- one value, nulls only --
-    /// as it would the node that holds them: <paramref name="written"/> its node then. Uncompressed, a node is written
-    /// with its children.
+    /// Whether <see cref="WriteStruct{TChildren}"/> and <see cref="WriteShredded{TChildren}"/> write <paramref name="frame"/>
+    /// whole, as one constant of nulls, and ask for none of its children: compressed, nulls only, of a dtype a reader fills
+    /// with nulls, the plan the compressor gives the node that holds them (<see cref="ColumnCompressor.TakesNulls"/>).
+    /// Uncompressed, a node is written with its children. A caller that lists the children before the blob comes to them
+    /// asks it too, and lists none of a frame written whole (<see cref="VariantShredder.Shredding.PrepareLeaves"/>).
+    /// </summary>
+    internal static bool WritesWhole(CanonicalArena arena, int frame, VortexEdition target, bool compress) =>
+        compress && ColumnCompressor.TakesNulls(arena, arena.GetNode(frame), target);
+
+    /// <summary>
+    /// Writes <paramref name="frame"/> whole when <see cref="WritesWhole(CanonicalArena, int, VortexEdition, bool)"/> says
+    /// so: <paramref name="written"/> its node then.
     /// </summary>
     private static bool WritesWhole(
         Workspace blob, CanonicalArena arena, int frame, EncodingDictionary encodings, bool compress, out int written)
     {
         written = -1;
-        if (!compress)
+        if (!WritesWhole(arena, frame, encodings.Target, compress))
         {
             return false;
         }
 
-        ColumnPlan plan = Plan(blob, arena, ref frame, encodings, default, default);
-        if (plan.Scheme == ColumnScheme.None)
-        {
-            return false;
-        }
-
-        written = WriteChosen(blob, arena, frame, in plan, encodings, default, owner: null, out _);
+        ColumnPlan nulls = ColumnPlan.ForConstant(-1);
+        written = WriteChosen(blob, arena, frame, in nulls, encodings, default, owner: null, out _);
         return true;
     }
 

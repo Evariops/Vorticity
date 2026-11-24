@@ -2455,6 +2455,14 @@ internal static class ColumnCompressor
             : ColumnPlan.Canonical;
     }
 
+    /// <summary>
+    /// Whether <paramref name="node"/>, a chunk the ingest pass did not measure, takes the constant plan of nulls
+    /// (<see cref="ConstantOf"/>): nulls only, of a dtype a reader fills with nulls. Its validity and its dtype answer it,
+    /// so a node that holds no child yet is answered as the node that holds them.
+    /// </summary>
+    internal static bool TakesNulls(CanonicalArena arena, in CanonicalNode node, VortexEdition target) =>
+        ConstantOf(arena, in node, target, default, measured: false).Scheme == ColumnScheme.Constant;
+
     /// <summary>The rows a node's validity says are valid.</summary>
     private static int ValidRows(CanonicalArena arena, in CanonicalNode node)
     {

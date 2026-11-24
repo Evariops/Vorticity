@@ -489,6 +489,98 @@ public sealed partial class ShreddedVariantWriteTests
     }
 
     /// <summary>
+    /// The same for a chunk where an object key holds no object, only text: the struct of its objects is nulls only, which
+    /// the compressed blob writes whole, as one constant, without its fields, and whose leaves are not listed. The key comes
+    /// first among the plan's keys, between two, or last, which the order of their names decides; the struct may be a key's
+    /// of an object that holds some, a key after it. In the control, the key holds an object in the chunk's first row, its
+    /// struct is written a field at a time, and a row in ten is null.
+    /// </summary>
+    [Theory]
+    [InlineData("auth", false, false)]
+    [InlineData("session", false, false)]
+    [InlineData("user", false, false)]
+    [InlineData("auth", true, false)]
+    [InlineData("auth", false, true)]
+    [InlineData("auth", true, true)]
+    public async Task AChunkOfAnObjectKeyHoldingNoObjectWrittenAColumnAtATimeIsTheBlobOfItsShreddingLaidOutWhole(string key, bool nested, bool someObjects)
+    {
+        (VariantShredding plan, Doc[] rows) = ObjectKeyHoldingText(key, nested, someObjects, 2_000);
+        await AssertSameBlobsAsync(rows, plan, plan);
+    }
+
+    /// <summary>
+    /// Chunks where an object key holds no object, emitted apart on four lanes, each one's leaves written apart and grafted
+    /// into its blob, write the file one thread writes, which reads back every row: a maintainer's compaction of attributes
+    /// some sources write as an object and others as text.
+    /// </summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ChunksOfAnObjectKeyHoldingNoObjectGraftedOnFourLanesWriteTheFileOfOneThread(bool nested)
+    {
+        (VariantShredding plan, Doc[] rows) = ObjectKeyHoldingText("auth", nested, someObjects: false, 8_000);
+        Dictionary<string, VariantShredding> shredding = new() { [nameof(Doc.Attributes)] = plan, [nameof(Doc.Extra)] = plan };
+        string onePath = Path.Combine(Path.GetTempPath(), $"vorticity-text-key-{Guid.NewGuid():N}.vortex");
+        string fourPath = Path.Combine(Path.GetTempPath(), $"vorticity-text-key-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            (_, int oneGrafted, _, _, _) = await WriteGatheredAsync(rows, shredding, onePath, degree: 1);
+            (_, int fourGrafted, _, _, _) = await WriteGatheredAsync(rows, shredding, fourPath, degree: 4);
+            Assert.Equal(0, oneGrafted);
+            Assert.True(fourGrafted > 0, "no chunk grafted on four lanes");
+            Assert.Equal(await System.IO.File.ReadAllBytesAsync(onePath, Ct), await System.IO.File.ReadAllBytesAsync(fourPath, Ct));
+            await using VortexFile file = await VortexFile.OpenAsync(fourPath, Ct);
+            List<Doc> read = await file.Scan<Doc>().ToRecordsAsync(Ct).ToListAsync(Ct);
+            Assert.Equal(rows.Length, read.Count);
+            for (int i = 0; i < rows.Length; i++)
+            {
+                Assert.Equal(rows[i].Id, read[i].Id);
+                Assert.True(rows[i].Attributes.Equals(read[i].Attributes), $"row {i}: {rows[i].Attributes.ToJson()} read as {read[i].Attributes.ToJson()}");
+                Assert.True(Equals(rows[i].Extra, read[i].Extra), $"row {i}'s extra");
+            }
+        }
+        finally
+        {
+            System.IO.File.Delete(onePath);
+            System.IO.File.Delete(fourPath);
+        }
+    }
+
+    /// <summary>
+    /// A plan of <c>route</c>, <c>tags</c> and an object key <paramref name="key"/>, and <paramref name="count"/> rows where the
+    /// key holds text: at the root, or when <paramref name="nested"/> in an object <c>meta</c> every row holds, its key
+    /// <c>zone</c> after it. When <paramref name="someObjects"/>, a row in ten is null and the first holds the key's object.
+    /// The second column holds the same, null in a row in three, never the first.
+    /// </summary>
+    private static (VariantShredding Plan, Doc[] Rows) ObjectKeyHoldingText(string key, bool nested, bool someObjects, int count)
+    {
+        VariantShredding objects = VariantShredding.Object(
+            ("id", VariantShredding.Primitive(VariantClass.Integer)),
+            ("labels", VariantShredding.List(VariantClass.String)));
+        VariantShredding plan = nested
+            ? VariantShredding.Object(
+                ("route", VariantShredding.Primitive(VariantClass.String)),
+                ("meta", VariantShredding.Object((key, objects), ("zone", VariantShredding.Primitive(VariantClass.String)))),
+                ("tags", VariantShredding.List(VariantClass.String)))
+            : VariantShredding.Object(
+                ("route", VariantShredding.Primitive(VariantClass.String)),
+                (key, objects),
+                ("tags", VariantShredding.List(VariantClass.String)));
+
+        Doc[] rows = [.. Enumerable.Range(0, count).Select(i =>
+        {
+            Variant held = someObjects && i == 0 ? Variant.Object(("id", 7L)) : Variant.From($"bob-{i % 7}");
+            Variant attributes = someObjects && i % 10 == 9
+                ? Variant.Null
+                : nested
+                    ? Variant.Object(("route", "/r"), ("meta", Variant.Object((key, held), ("zone", "eu"))), ("tags", Variant.Array(Variant.From("a"))))
+                    : Variant.Object(("route", "/r"), (key, held), ("tags", Variant.Array(Variant.From("a"))));
+            return new Doc(i, attributes, i % 3 == 1 ? null : attributes);
+        })];
+        return (plan, rows);
+    }
+
+    /// <summary>
     /// Shredded variant columns that gather to a target of their own, each chunk emitted by a task of its own as it is due,
     /// write the same file on one thread and on four, which reads back every row: a chunk's blob goes out where the column's
     /// chunk after next is due, whatever lane compressed it and whenever it ended, its new encoding ids made the file's then.
@@ -723,7 +815,7 @@ public sealed partial class ShreddedVariantWriteTests
                             using ArrayBlobWriter.Workspace apart = new ArrayBlobWriter.Workspace { FrameRows = frameRows, Account = TestAccount.Shared };
                             VariantShredder.Shredding shredding = grafting.Shredding(plan);
                             shredding.Take(batch.Arena, column, null);
-                            int leaves = shredding.PrepareLeaves(grafting.EncodesValidity, compress);
+                            int leaves = shredding.PrepareLeaves(grafting.EncodesValidity, compress, Vorticity.Editions.EditionRegistry.Newest);
 
                             // What a writer reserves for the leaves it writes at once: the largest of them, each at what it
                             // lays out and the largest first, a shorter list being the head of a longer one.
