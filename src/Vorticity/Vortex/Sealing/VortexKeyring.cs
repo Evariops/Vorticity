@@ -164,6 +164,11 @@ public abstract class VortexKeyring : IDisposable
     /// AES-256-GCM under it, a random nonce per wrap, the key id and the context as associated data.
     /// The others unwrap what they wrapped before, which is how such a keyring rotates.
     /// </summary>
+    /// <remarks>
+    /// The nonce is 96 random bits, which bounds what one key wraps: past 2^32 wraps, two of them risk sharing a nonce
+    /// (NIST SP 800-38D, 8.3), and a wrap is a file sealed or a dataset's data key made. Rotate the current key well before,
+    /// as a key held for years should be.
+    /// </remarks>
     /// <param name="keys">The keys, the current one first; each id once.</param>
     /// <returns>The keyring; disposing it wipes its copies of the keys.</returns>
     /// <exception cref="ArgumentException">No key is given, or two have the same id.</exception>

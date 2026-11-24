@@ -494,6 +494,86 @@ public sealed class SynopsisCacheTests
         }
     }
 
+    /// <summary>
+    /// A cache keeps no more entries than its capacity holds blocks of 4 KiB, whatever few bytes they hold: each costs some
+    /// 400 bytes of memory, and a cache of 10 GiB of regions of a few hundred bytes kept tens of millions of them.
+    /// </summary>
+    [Fact]
+    public async Task ACacheOfSmallRegionsKeepsNoMoreEntriesThanItsCapacityHoldsBlocks()
+    {
+        string directory = CacheDirectory();
+        try
+        {
+            await using SynopsisCache cache = new SynopsisCache(directory, 8 << 20);
+            UInt128 uid = 0x5a;
+            byte[] bytes = new byte[64];
+            List<IndexSegment> regions = [];
+            for (int i = 0; i < 3_000; i++)
+            {
+                bytes[0] = (byte)i;
+                bytes[1] = (byte)(i >> 8);
+                IndexSegment region = IndexSegment.Of(i * 64L, bytes, 0);
+                cache.Admit(uid, region, bytes);
+                regions.Add(region);
+            }
+
+            await cache.FlushAsync();
+            int kept = regions.Count(region => cache.Holds(uid, region));
+            Assert.InRange(kept, 1, (8 << 20) / 4096);
+            Assert.Equal(kept * 64L, cache.HeldBytes);
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
+
+    /// <summary>
+    /// On Unix the cache creates its directories readable by its user alone: a plain object's regions and data lie there as
+    /// their store holds them, and a reader of the directory reads them.
+    /// </summary>
+    [Fact]
+    public async Task ACachesDirectoriesAreItsUsersAloneOnUnix()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Skip("Windows gives a directory its parent's access rules");
+            return;
+        }
+
+        string directory = Path.Combine(CacheDirectory(), "nested");
+        try
+        {
+            await using (SynopsisCache cache = new SynopsisCache(directory, 1 << 20))
+            {
+                byte[] bytes = new byte[100];
+                cache.Admit(0x77, IndexSegment.Of(0, bytes, 0), bytes);
+                await cache.FlushAsync();
+            }
+
+            const UnixFileMode Owner = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute;
+            Assert.Equal(Owner, System.IO.File.GetUnixFileMode(Path.GetDirectoryName(directory)!));
+            Assert.Equal(Owner, System.IO.File.GetUnixFileMode(directory));
+            string[] shards = Directory.GetDirectories(directory, "*", SearchOption.AllDirectories);
+            Assert.NotEmpty(shards);
+            foreach (string shard in shards)
+            {
+                Assert.Equal(Owner, System.IO.File.GetUnixFileMode(shard));
+            }
+        }
+        finally
+        {
+            string parent = Path.GetDirectoryName(directory)!;
+            if (Directory.Exists(parent))
+            {
+                Directory.Delete(parent, recursive: true);
+            }
+        }
+    }
+
     private static string CacheDirectory() => Path.Combine(Path.GetTempPath(), "vorticity-synopsis-cache-" + Guid.NewGuid().ToString("N"));
 
     private static CancellationToken Ct => TestContext.Current.CancellationToken;

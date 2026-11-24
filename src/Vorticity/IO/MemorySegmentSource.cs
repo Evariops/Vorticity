@@ -35,6 +35,12 @@ public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader
 
     /// <summary>A source over <paramref name="bytes"/>.</summary>
     /// <param name="bytes">The whole file.</param>
+    /// <remarks>
+    /// Bytes that do not lie on a 64-byte boundary are copied once into memory the source owns, for its life: the file
+    /// then takes twice its length until the source is disposed. A <c>byte[]</c> lies on one about once in eight, since
+    /// its data start 16 bytes past an address aligned to 8. To spare the copy, hand memory on a 64-byte boundary, such
+    /// as a memory manager over <c>NativeMemory.AlignedAlloc(length, 64)</c>.
+    /// </remarks>
     public unsafe MemorySegmentSource(ReadOnlyMemory<byte> bytes)
     {
         _length = bytes.Length;

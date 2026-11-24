@@ -242,7 +242,12 @@ internal sealed class DistinctTable
             Resize(Sparse(_distinct));
         }
 
-        EnsureCodes(_rows + count);
+        EnsureCodes((long)_rows + count);
+        if (_abandoned)
+        {
+            return;
+        }
+
         ValidityMask mask = ValidityMask.From(arena, node.Validity);
         if (constant)
         {
@@ -980,6 +985,11 @@ internal sealed class DistinctTable
                 }
 
                 int offset = Append(bytes);
+                if (_abandoned)
+                {
+                    return;
+                }
+
                 _slotCode[slot] = code + 1;
                 _slotKey[slot] = hash;
                 offsets[slot] = offset;
@@ -1039,6 +1049,11 @@ internal sealed class DistinctTable
                 }
 
                 int offset = Append(bytes);
+                if (_abandoned)
+                {
+                    return;
+                }
+
                 _slotCode[slot] = code + 1;
                 _slotKey[slot] = hash;
                 offsets[slot] = offset;
@@ -1124,17 +1139,22 @@ internal sealed class DistinctTable
         return code;
     }
 
+    /// <summary>
+    /// The bytes' offset in the heap, the heap doubled as it must; -1, the table abandoned, when it would pass what one
+    /// buffer holds: doubled in an int, a heap of a gigabyte went negative, then to zero, and the doubling never ended.
+    /// </summary>
     private int Append(ReadOnlySpan<byte> bytes)
     {
-        if (_heapUsed + bytes.Length + HeapSlack > _heap.Length)
+        long needed = (long)_heapUsed + bytes.Length + HeapSlack;
+        if (needed > _heap.Length)
         {
-            int grown = _heap.Length * 2;
-            while (grown < _heapUsed + bytes.Length + HeapSlack)
+            if (needed > Array.MaxLength)
             {
-                grown *= 2;
+                _abandoned = true;
+                return -1;
             }
 
-            Blocks.Grow(ref _heap, grown);
+            Blocks.Grow(ref _heap, (int)Math.Min(Math.Max(2L * _heap.Length, needed), Array.MaxLength));
         }
 
         int offset = _heapUsed;
@@ -1143,20 +1163,21 @@ internal sealed class DistinctTable
         return offset;
     }
 
-    private void EnsureCodes(int rows)
+    /// <summary>Room for <paramref name="rows"/> codes, doubled in 64 bits; the table abandoned past what one buffer holds.</summary>
+    private void EnsureCodes(long rows)
     {
         if (rows <= _codes.Length)
         {
             return;
         }
 
-        int grown = _codes.Length * 2;
-        while (grown < rows)
+        if (rows > Array.MaxLength)
         {
-            grown *= 2;
+            _abandoned = true;
+            return;
         }
 
-        Blocks.Grow(ref _codes, grown);
+        Blocks.Grow(ref _codes, (int)Math.Min(Math.Max(2L * _codes.Length, rows), Array.MaxLength));
     }
 
     /// <summary>Doubles the slots once the load passes one half.</summary>

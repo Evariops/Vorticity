@@ -44,6 +44,14 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
     private readonly long[] _starts;
     private readonly bool _states;
 
+    // The places last moved for each member past the first, with the take and the question's memory they were moved for: a
+    // question asks its capabilities one after another (its cost, its parts, its batches) with the same take, and each ask
+    // moved the places again and held them again in the question's memory.
+    private readonly MovedPlaces?[] _moved;
+
+    /// <summary>A member's places, counted from its first row, and the take and the memory they were moved and held for.</summary>
+    private sealed record MovedPlaces(ReadOnlyMemory<long> Take, Aggregating.QueryMemory? Memory, long[] Places);
+
     /// <param name="members">The sources, in the order of their rows: one or more, of one session and one schema, each knowing its rows before a read.</param>
     /// <exception cref="ArgumentException">No source, sources of two sessions or two schemas, or one that does not know its rows.</exception>
     internal UnionScanSource(ReadOnlySpan<ScanSource> members)
@@ -55,6 +63,7 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
 
         _members = members.ToArray();
         _starts = new long[_members.Length + 1];
+        _moved = new MovedPlaces?[_members.Length];
         ScanSource first = _members[0];
         for (int m = 0; m < _members.Length; m++)
         {
@@ -293,18 +302,26 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
             }
 
             // The first member reads its places where they lie; another one a copy counted from its first row, held in the
-            // question's memory until the question ends.
+            // question's memory until the question ends, and made once for the question's asks of the same take.
             ReadOnlyMemory<long> own = take.Slice(first, last - first);
             if (start != 0)
             {
-                spec.Memory?.Hold((long)(last - first) * sizeof(long), "a union member's places");
-                long[] moved = new long[last - first];
-                for (int i = 0; i < moved.Length; i++)
+                if (Volatile.Read(ref _moved[m]) is { } kept && kept.Take.Equals(take) && ReferenceEquals(kept.Memory, spec.Memory))
                 {
-                    moved[i] = places[first + i] - start;
+                    own = kept.Places;
                 }
+                else
+                {
+                    spec.Memory?.Hold((long)(last - first) * sizeof(long), "a union member's places");
+                    long[] moved = new long[last - first];
+                    for (int i = 0; i < moved.Length; i++)
+                    {
+                        moved[i] = places[first + i] - start;
+                    }
 
-                own = moved;
+                    Volatile.Write(ref _moved[m], new MovedPlaces(take, spec.Memory, moved));
+                    own = moved;
+                }
             }
 
             asked = asked with { Take = own };
@@ -424,10 +441,11 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
             spec, (member, asked) => member.Rows.AnswerAsync(asked, form, metrics, cancellationToken), new FormAnswer(0, FilterLiteral.Null)).ConfigureAwait(false);
         if (form is ExtremeShape extreme)
         {
+            bool decimals = Scanning.ExtremeOrder.IsDecimal(Schema, extreme.Path);
             FilterLiteral best = FilterLiteral.Null;
             foreach (FormAnswer answer in answers)
             {
-                if (answer.Value.Kind != FilterLiteralKind.Null && Beats(answer.Value, best, extreme.Min))
+                if (Scanning.ExtremeOrder.Beats(answer.Value, best, extreme.Min, decimals))
                 {
                     best = answer.Value;
                 }
@@ -444,12 +462,6 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
 
         return new FormAnswer(rows, FilterLiteral.Null);
     }
-
-    /// <summary>Whether <paramref name="candidate"/> is a better extreme than <paramref name="best"/>, as a dataset judges its objects'.</summary>
-    private static bool Beats(FilterLiteral candidate, FilterLiteral best, bool wantMin) =>
-        best.Kind == FilterLiteralKind.Null
-        || candidate.Kind != best.Kind
-        || (wantMin ? KeyOrder.Total(candidate, best) < 0 : KeyOrder.Total(candidate, best) > 0);
 
     /// <summary>The paths of each member's variant columns, tallied in the one question, each from its own directories first.</summary>
     public async ValueTask PathsAsync(ScanSpec spec, PathsQuestion question, ScanCounters metrics, CancellationToken cancellationToken)
@@ -641,6 +653,7 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
         min = FilterLiteral.Null;
         max = FilterLiteral.Null;
         bool any = false;
+        bool decimals = Scanning.ExtremeOrder.IsDecimal(Schema, path);
         for (int m = 0; m < _members.Length; m++)
         {
             if (_starts[m + 1] == _starts[m])
@@ -664,8 +677,17 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
                 continue;
             }
 
-            min = KeyOrder.Total(low, min) < 0 ? low : min;
-            max = KeyOrder.Total(high, max) > 0 ? high : max;
+            // A decimal's bounds are numbers, an unscaled value past 64 bits read as its bytes; bounds that do not compare
+            // as numbers bound nothing.
+            if (Scanning.ExtremeOrder.Compare(low, min, decimals) is not { } below || Scanning.ExtremeOrder.Compare(high, max, decimals) is not { } above)
+            {
+                min = FilterLiteral.Null;
+                max = FilterLiteral.Null;
+                return false;
+            }
+
+            min = below < 0 ? low : min;
+            max = above > 0 ? high : max;
         }
 
         return any;

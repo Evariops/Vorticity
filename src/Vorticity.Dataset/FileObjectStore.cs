@@ -74,6 +74,26 @@ public sealed class FileObjectStore : IObjectStore
         : OperatingSystem.IsLinux() ? (delegate* unmanaged<byte*, byte*, int>)FileInode.Export(["libc.so.6", "libc.musl-x86_64.so.1", "libc.musl-aarch64.so.1"], "link")
         : null;
 
+    /// <summary>
+    /// open(2), fsync(2) and close(2): a directory flushed once a durable put names its object in it, which no managed call
+    /// does, a directory being no file .NET opens. Null on Windows, whose file system journals a rename with the file, and
+    /// where a call cannot be found.
+    /// </summary>
+    private static readonly unsafe delegate* unmanaged<byte*, int, int> OpenCall = (delegate* unmanaged<byte*, int, int>)Unix("open");
+
+    /// <inheritdoc cref="OpenCall"/>
+    private static readonly unsafe delegate* unmanaged<int, int> FsyncCall = (delegate* unmanaged<int, int>)Unix("fsync");
+
+    /// <inheritdoc cref="OpenCall"/>
+    private static readonly unsafe delegate* unmanaged<int, int> CloseCall = (delegate* unmanaged<int, int>)Unix("close");
+
+    /// <summary>The C library's <paramref name="name"/> on macOS and Linux, as the calls above are found; zero elsewhere.</summary>
+    private static IntPtr Unix(string name) =>
+        OperatingSystem.IsWindows() || !Environment.Is64BitProcess ? IntPtr.Zero
+        : OperatingSystem.IsMacOS() ? FileInode.Export(["/usr/lib/libSystem.B.dylib"], name)
+        : OperatingSystem.IsLinux() ? FileInode.Export(["libc.so.6", "libc.musl-x86_64.so.1", "libc.musl-aarch64.so.1"], name)
+        : IntPtr.Zero;
+
     /// <summary>How a creation shows its object, chosen at the first creation: an exclusive rename, a link, or a claim of the key.</summary>
     private enum Showing
     {
@@ -169,8 +189,8 @@ public sealed class FileObjectStore : IObjectStore
     public string Root => _root;
 
     /// <summary>
-    /// Whether a created object's bytes are flushed to the device before the put returns. False by
-    /// default; set it when the store is the system of record.
+    /// Whether a created object's bytes, and the directory entry that names it, are flushed to the device before the put
+    /// returns. False by default; set it when the store is the system of record.
     /// </summary>
     public bool Durable { get; init; }
 
@@ -617,6 +637,7 @@ public sealed class FileObjectStore : IObjectStore
 
         if (claims)
         {
+            FlushedName(path);
             return PutOutcome.Created;
         }
 
@@ -624,10 +645,26 @@ public sealed class FileObjectStore : IObjectStore
         {
             // A rename over the object, which a reader sees whole on either side of.
             System.IO.File.Move(target, path, overwrite: true);
+            FlushedName(path);
             return PutOutcome.Created;
         }
 
-        return Publish(key, target, path, ShowingIn(path));
+        PutOutcome outcome = Publish(key, target, path, ShowingIn(path));
+        if (outcome == PutOutcome.Created)
+        {
+            FlushedName(path);
+        }
+
+        return outcome;
+    }
+
+    /// <summary>The name of an object a durable put created flushed with its directory (<see cref="FlushDirectoryOf"/>); nothing otherwise.</summary>
+    private void FlushedName(string path)
+    {
+        if (Durable)
+        {
+            FlushDirectoryOf(path);
+        }
     }
 
     /// <summary>
@@ -870,6 +907,43 @@ public sealed class FileObjectStore : IObjectStore
             return RenameExclusiveMacOS != null
                 ? RenameExclusiveMacOS(bytes, bytes + names.Second, RenameExcl) == 0
                 : RenameExclusiveLinux(CurrentDirectory, bytes, CurrentDirectory, bytes + names.Second, RenameNoReplace) == 0;
+        }
+    }
+
+    /// <summary>
+    /// Flushes the directory that names <paramref name="path"/>, once a durable put named its object there: the file's bytes
+    /// are on the device already, and without its directory, after a power cut on ext4 or XFS, the name could be lost with
+    /// the object the put said it created, a commit another writer then took again. Nothing on Windows, which journals it.
+    /// </summary>
+    /// <exception cref="IOException">The directory could not be opened or flushed.</exception>
+    private static unsafe void FlushDirectoryOf(string path)
+    {
+        if (OpenCall == null || FsyncCall == null || CloseCall == null)
+        {
+            return;
+        }
+
+        string directory = Path.GetDirectoryName(path)!;
+        using CNames names = new CNames(directory, string.Empty);
+        fixed (byte* bytes = names.Bytes)
+        {
+            int descriptor = OpenCall(bytes, 0);
+            if (descriptor < 0)
+            {
+                throw new IOException($"'{directory}' could not be opened to flush the name of a durable object: error {System.Runtime.InteropServices.Marshal.GetLastSystemError()}.");
+            }
+
+            try
+            {
+                if (FsyncCall(descriptor) != 0)
+                {
+                    throw new IOException($"'{directory}' could not be flushed after a durable object was named in it: error {System.Runtime.InteropServices.Marshal.GetLastSystemError()}.");
+                }
+            }
+            finally
+            {
+                _ = CloseCall(descriptor);
+            }
         }
     }
 
@@ -1139,8 +1213,11 @@ public sealed class FileObjectStore : IObjectStore
     /// <summary>The object's path, under the root and never outside it.</summary>
     private string PathOf(string key)
     {
+        // Under the root and past a separator: a sibling whose name starts like the root's, "/data/objects2" under
+        // "/data/objects", is outside it. The keys' own check refuses such a key first; this one holds whatever the key.
         string path = Path.GetFullPath(Path.Combine(_root, key.Replace('/', Path.DirectorySeparatorChar)));
-        if (!path.StartsWith(_root, StringComparison.Ordinal))
+        if (!path.StartsWith(_root, StringComparison.Ordinal)
+            || (path.Length > _root.Length && !Path.EndsInDirectorySeparator(_root) && path[_root.Length] != Path.DirectorySeparatorChar))
         {
             throw new ArgumentException($"'{key}' resolves outside the store's root.", nameof(key));
         }

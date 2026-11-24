@@ -250,7 +250,7 @@ internal sealed class SessionKeys : IDisposable
 #pragma warning restore VSTHRD003
                 arrived.Dispose();
             }
-            catch (Exception)
+            catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "keys.wipe_late"))
             {
                 // A key that never arrived holds nothing to wipe, and its waiter reports the failure.
             }

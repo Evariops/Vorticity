@@ -28,7 +28,7 @@ internal static class RecordAnalysis
         INamedTypeSymbol type = (INamedTypeSymbol)context.TargetSymbol;
         TypeDeclarationSyntax declaration = (TypeDeclarationSyntax)context.TargetNode;
         Compilation compilation = context.SemanticModel.Compilation;
-        KnownSymbols known = new KnownSymbols(compilation);
+        KnownSymbols known = KnownSymbols.Of(compilation);
         LocationModel? typeLocation = LocationModel.From(declaration.Identifier.GetLocation());
         string display = type.ToDisplayString();
 
@@ -142,7 +142,7 @@ internal static class RecordAnalysis
                 continue;
             }
 
-            members.Add(new MemberModel(member.Member.Name, member.ColumnName, fill, member.Value, member.Member.ContainingType.ToDisplayString(TypeFormat)));
+            members.Add(new MemberModel(member.Member.Name, member.ColumnName, fill, member.Value, member.Member.ContainingType.OriginalDefinition.ToDisplayString(TypeFormat)));
         }
 
         if (!setsRequired)
@@ -183,8 +183,11 @@ internal static class RecordAnalysis
         // name one class twice.
         string containerNames = string.Concat(containers.Select(c => c.Name.TrimStart('@') + "_"));
         string? extensions = members.Count == 0 || access == Accessibility.NotApplicable ? null : containerNames + type.Name + "VortexExtensions";
-        string hint = (ns is null ? string.Empty : ns.Replace("@", string.Empty) + ".")
-            + string.Concat(containers.Select(c => c.Name.TrimStart('@') + ".")) + type.Name + ".g.cs";
+        // A generator's file names are told apart whatever their case, as two records' names may not be: Point and point
+        // made one name twice, and the generator failed for every record. The name's own bytes, hashed, tell them apart.
+        string named = (ns is null ? string.Empty : ns.Replace("@", string.Empty) + ".")
+            + string.Concat(containers.Select(c => c.Name.TrimStart('@') + ".")) + type.Name;
+        string hint = named + "." + Fnv(named).ToString("x8", System.Globalization.CultureInfo.InvariantCulture) + ".g.cs";
 
         return new RecordModel(
             ns,
@@ -799,6 +802,18 @@ internal static class RecordAnalysis
         }
 
         return false;
+    }
+
+    /// <summary>FNV-1a of <paramref name="text"/>'s code units: the same on every machine and run, where <see cref="string.GetHashCode()"/> is not.</summary>
+    private static uint Fnv(string text)
+    {
+        uint hash = 2166136261;
+        foreach (char c in text)
+        {
+            hash = (hash ^ c) * 16777619;
+        }
+
+        return hash;
     }
 
     private static string Keyword(INamedTypeSymbol type) => type switch

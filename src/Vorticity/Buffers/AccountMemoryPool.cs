@@ -11,7 +11,7 @@ namespace Vorticity.Buffers;
 /// </summary>
 /// <remarks>
 /// Each block is a managed array the runtime pins for its whole life and aligned to 64 bytes, as every block of the pool is.
-/// Requests round up to a power of two from 4 KiB.
+/// Requests round up to a power of two from 4 KiB, and the memory lent is the whole block, which the account counts whole.
 /// </remarks>
 internal sealed class AccountMemoryPool : MemoryPool<byte>
 {
@@ -24,18 +24,31 @@ internal sealed class AccountMemoryPool : MemoryPool<byte>
     /// <summary>The bytes the pool lent over its life: what a pipe needed of its own beside the bytes it was lent.</summary>
     internal long Rented => Interlocked.Read(ref _rented);
 
-    /// <inheritdoc/>
-    public override int MaxBufferSize => int.MaxValue - VortexLimits.MaxAlignment;
+    /// <summary>The longest block: the longest array, less the bytes it takes to align its start.</summary>
+    public override int MaxBufferSize => Array.MaxLength - (VortexLimits.MaxAlignment - 1);
 
-    /// <summary>Rents a block of at least <paramref name="minBufferSize"/> bytes, aligned to 64 bytes and not zeroed.</summary>
+    /// <summary>
+    /// Rents a block of at least <paramref name="minBufferSize"/> bytes, aligned to 64 bytes and not zeroed: every byte of
+    /// the block the pool rounded the size up to.
+    /// </summary>
     /// <param name="minBufferSize">The size wanted; -1 for 4 KiB.</param>
     /// <returns>The block; disposing it gives it back to the pool and its bytes to the account.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="minBufferSize"/> is below -1 or past <see cref="MaxBufferSize"/>.</exception>
     /// <exception cref="VortexMemoryException">The account refuses the block.</exception>
     public override IMemoryOwner<byte> Rent(int minBufferSize = -1)
     {
-        int length = minBufferSize < 0 ? 4096 : minBufferSize;
-        Interlocked.Add(ref _rented, length);
-        return new Lease(_account.Rent(length, VortexLimits.MaxAlignment), length);
+        if (minBufferSize == -1)
+        {
+            minBufferSize = 4096;
+        }
+        else if ((uint)minBufferSize > (uint)MaxBufferSize)
+        {
+            throw new ArgumentOutOfRangeException(nameof(minBufferSize), minBufferSize, $"A block holds from 0 to {MaxBufferSize} bytes.");
+        }
+
+        BlockOwner block = _account.Rent(minBufferSize, VortexLimits.MaxAlignment);
+        Interlocked.Add(ref _rented, block.Capacity);
+        return new Lease(block, block.Capacity);
     }
 
     /// <summary>Nothing to free: the blocks are the library's pool's.</summary>
@@ -57,7 +70,7 @@ internal sealed class AccountMemoryPool : MemoryPool<byte>
         public override Span<byte> GetSpan()
         {
             BlockOwner block = _block ?? throw new ObjectDisposedException(nameof(AccountMemoryPool), "The block has been returned to its pool.");
-            return block.WritableSpan[.._length];
+            return block.WholeSpan[.._length];
         }
 
         public override MemoryHandle Pin(int elementIndex = 0)

@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
@@ -529,6 +530,7 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
         return (((low & lowMask) | (high & highMask)) & HighBits) == 0;
     }
 
+    [DoesNotReturn]
     private static void ThrowPrefixMismatch(int row) =>
         throw new VortexFormatException(
             $"Row {row}'s view prefix does not match the first four bytes of the value it " +
@@ -537,10 +539,12 @@ internal sealed class VarBinViewDecoder : ArrayDecoder
     private static void ThrowNotUtf8(int row) =>
         throw new VortexFormatException($"Row {row} of a Utf8 array is not valid UTF-8.");
 
+    [DoesNotReturn]
     private static void ThrowBufferIndex(int row, uint bufferIndex, int count) =>
         throw new VortexFormatException(
             $"Row {row} references data buffer {bufferIndex}; the array has {count}.");
 
+    [DoesNotReturn]
     private static void ThrowViewRange(int row, uint offset, uint size, int bufferLength) =>
         throw new VortexFormatException(
             $"Row {row} spans [{offset}, {(ulong)offset + size}) of a data buffer holding " +

@@ -275,7 +275,12 @@ public sealed partial class VariantPathsTests
     /// A directory added to a tally a second time allocates nothing: its entries are walked as they lie and found by their
     /// bytes, none made an object.
     /// </summary>
+    /// <remarks>
+    /// The directory's body is decompressed into a block of the shared pool, which a test beside it may take between the two
+    /// walks: the second then rents a new one, 32 KiB, as a CI run saw. It runs alone.
+    /// </remarks>
     [Fact]
+    [Trait("Category", "RunsAlone")]
     public void ADirectoryMetAgainIsTalliedWithoutAllocating()
     {
         Random random = new Random(17);

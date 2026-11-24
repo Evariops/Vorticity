@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
 namespace Vorticity;
@@ -10,11 +11,13 @@ namespace Vorticity;
 internal static class ThrowHelper
 {
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     internal static void ThrowTruncated(string what, long need, long have) =>
         throw new VortexFormatException(
             $"Truncated {what}: needed {need} bytes, {have} available.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     internal static void ThrowOutOfBounds(string what, long offset, long length, long limit) =>
         throw new VortexFormatException(
             $"{what} range [{offset}, {offset + length}) is outside the available {limit} bytes.");

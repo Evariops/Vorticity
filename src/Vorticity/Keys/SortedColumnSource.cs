@@ -185,6 +185,10 @@ internal sealed class SortedColumnSource : ISortedEntries
 
             zones = new ZoneColumn(field, Math.Max(file.RowCount, 1), file.RowCount, [ZoneBounds.Unknown]);
         }
+        else if (ZoneMapRefusal(zones, file.RowCount, endRow - firstRow, kind) is { } refused)
+        {
+            return (null, refused);
+        }
 
         FieldMaskBuilder builder = new FieldMaskBuilder();
         ScanProjection.IncludePath(schema, path, builder, nameof(path));
@@ -193,6 +197,37 @@ internal sealed class SortedColumnSource : ISortedEntries
         return (
             new SortedColumnSource(file, tree, field, mask, zones, kind, firstRow, endRow) { Metrics = metrics },
             null);
+    }
+
+    /// <summary>
+    /// Why a column's zone map cannot be the separator level of its search, or null when it can. A map of fewer zones than
+    /// its rows need read the rows past it as null keys, and a past key in them out of the array; a map whose zones state
+    /// no maximum of the key's kind left every zone unbounded, a seek decoding the zones one by one from the first. A
+    /// column of nulls alone has no entry, and no zone of it states a maximum: nothing is sought in it, and it is served.
+    /// </summary>
+    private static string? ZoneMapRefusal(ZoneColumn zones, long rowCount, long entries, FilterLiteralKind kind)
+    {
+        long needed = (rowCount / zones.ZoneLength) + (rowCount % zones.ZoneLength == 0 ? 0 : 1);
+        if (zones.ZoneCount < needed)
+        {
+            return $"the zone map holds {zones.ZoneCount} zones where the column's {rowCount} rows need {needed}";
+        }
+
+        if (entries == 0)
+        {
+            return null;
+        }
+
+        for (int zone = 0; zone < zones.ZoneCount; zone++)
+        {
+            ZoneBounds bounds = zones.Bounds(zone);
+            if (bounds.HasMax && bounds.Max.Kind == kind)
+            {
+                return null;
+            }
+        }
+
+        return "no zone of the column's map states a maximum of the key's kind, so a seek would decode the zones one by one";
     }
 
     /// <summary>The scan's sink, to which the zones this source decodes are added; null when nobody asks.</summary>
@@ -446,7 +481,9 @@ internal sealed class SortedColumnSource : ISortedEntries
     /// </summary>
     private long? TypedBound(FilterLiteral key, bool strict, long start, long end)
     {
-        CanonicalNode node = _context!.Canonical.GetNode(_column);
+        // Through an extension to its storage, as the bytes and the zone's past keys are read: a timestamp, the sorted
+        // column of most datasets of logs and metrics, is an extension over i64, and fell to a literal at each step.
+        CanonicalNode node = _context!.Canonical.GetNode(ComparisonKernels.Unwrap(_context.Canonical, _column));
         if (node.Kind != CanonicalKind.Primitive)
         {
             return null;
@@ -582,7 +619,7 @@ internal sealed class SortedColumnSource : ISortedEntries
     /// </summary>
     private int CompareLoaded(long row, FilterLiteral key)
     {
-        CanonicalNode node = _context!.Canonical.GetNode(_column);
+        CanonicalNode node = _context!.Canonical.GetNode(ComparisonKernels.Unwrap(_context.Canonical, _column));
         int at = (int)(row - _loadedStart);
         if (node.Kind == CanonicalKind.VarBinView && key.Kind == FilterLiteralKind.Bytes)
         {
@@ -595,7 +632,7 @@ internal sealed class SortedColumnSource : ISortedEntries
     /// <summary>Orders the loaded zone's row against a byte key.</summary>
     private int CompareLoaded(long row, ReadOnlySpan<byte> key)
     {
-        CanonicalNode node = _context!.Canonical.GetNode(_column);
+        CanonicalNode node = _context!.Canonical.GetNode(ComparisonKernels.Unwrap(_context.Canonical, _column));
         ReadOnlySpan<byte> value = node.Kind == CanonicalKind.VarBinView
             ? LiteralReader.ViewAt(node, (int)(row - _loadedStart))
             : Literal(row).BytesValue;

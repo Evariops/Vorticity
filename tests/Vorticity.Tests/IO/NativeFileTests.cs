@@ -60,18 +60,19 @@ public sealed class NativeFileTests
         using TempFile file = new TempFile(content);
         using SafeFileHandle handle = NativeFile.OpenRead(file.Path_, out _);
         using SafeFileHandle twin = Assert.IsType<SafeFileHandle>(NativeFile.TryOpenOverlapped(handle));
+        using NativeFile.OverlappedSignals signals = new NativeFile.OverlappedSignals();
 
         Assert.True(twin.IsAsync);
         foreach ((int offset, int length) in new[] { (0, 1), (17, 4_096), (FileLength - 1_000, 1_000), (FileLength / 2, 3) })
         {
             byte[] read = new byte[length];
-            Assert.Equal(length, NativeFile.ReadOverlapped(twin, read, offset));
+            Assert.Equal(length, NativeFile.ReadOverlapped(twin, signals, read, offset));
             Assert.True(read.AsSpan().SequenceEqual(content.AsSpan(offset, length)));
         }
 
         byte[] past = new byte[100];
-        Assert.Equal(10, NativeFile.ReadOverlapped(twin, past, FileLength - 10));
-        Assert.Equal(0, NativeFile.ReadOverlapped(twin, past, FileLength));
+        Assert.Equal(10, NativeFile.ReadOverlapped(twin, signals, past, FileLength - 10));
+        Assert.Equal(0, NativeFile.ReadOverlapped(twin, signals, past, FileLength));
     }
 
     [Fact]
@@ -88,6 +89,7 @@ public sealed class NativeFileTests
         using TempFile file = new TempFile(content);
         using SafeFileHandle handle = NativeFile.OpenRead(file.Path_, out _);
         using SafeFileHandle twin = Assert.IsType<SafeFileHandle>(NativeFile.TryOpenOverlapped(handle));
+        using NativeFile.OverlappedSignals signals = new NativeFile.OverlappedSignals();
 
         // Each thread its own stride of the file, the events of the reads in flight taken and given
         // back across threads all the while.
@@ -96,7 +98,7 @@ public sealed class NativeFileTests
             byte[] read = new byte[64 * 1024];
             for (int offset = lane * read.Length; offset < content.Length; offset += 16 * read.Length)
             {
-                Assert.Equal(read.Length, NativeFile.ReadOverlapped(twin, read, offset));
+                Assert.Equal(read.Length, NativeFile.ReadOverlapped(twin, signals, read, offset));
                 Assert.True(read.AsSpan().SequenceEqual(content.AsSpan(offset, read.Length)));
             }
         });

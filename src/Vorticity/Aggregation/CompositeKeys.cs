@@ -87,13 +87,16 @@ internal sealed class CompositeKeys : GroupKeys
 
             Span<int> offsets = _offsets.AsSpan(0, end - first);
             Span<int> cursors = _cursors.AsSpan(0, end - first);
-            int total = 0;
+
+            // Summed in 64 bits: a window of keys past what one buffer holds, an average of half a megabyte a row, wrapped an
+            // int's sum and wrote the keys at offsets gone negative.
+            long total = 0;
             RowCursor placed = new RowCursor(selection, first, end);
             while (placed.Next(out int row))
             {
                 int at = row - first;
-                offsets[at] = total;
-                cursors[at] = total;
+                offsets[at] = (int)Math.Min(total, int.MaxValue);
+                cursors[at] = offsets[at];
                 total += lengths[at];
             }
 
@@ -102,8 +105,14 @@ internal sealed class CompositeKeys : GroupKeys
                 continue;
             }
 
-            Scratch.Grow(ref _key, total);
-            Span<byte> keys = _key.AsSpan(0, total);
+            if (total > Array.MaxLength)
+            {
+                throw new NotSupportedException(
+                    $"The keys of {end - first} rows take {total:N0} bytes together, past what one buffer holds: a key of several columns is grouped a window of rows at a time.");
+            }
+
+            Scratch.Grow(ref _key, (int)total);
+            Span<byte> keys = _key.AsSpan(0, (int)total);
             for (int p = 0; p < _parts.Length; p++)
             {
                 Part part = View(arena, nodes[p], p);

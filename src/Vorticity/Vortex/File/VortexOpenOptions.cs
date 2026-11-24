@@ -33,6 +33,10 @@ public enum VortexTornTailPolicy : byte
 public sealed record VortexOpenOptions
 {
     private readonly int _initialReadSize = DefaultInitialReadBytes;
+    private readonly int _maxFooterBytes = DefaultMaxFooterBytes;
+
+    /// <summary><see cref="MaxFooterBytes"/> unless a caller sets it: <see cref="Parquet.ParquetOpenOptions.MaxFooterBytes"/>'s own.</summary>
+    internal const int DefaultMaxFooterBytes = 256 * 1024 * 1024;
 
     /// <summary>The file length, or -1 for unknown.</summary>
     private readonly long _length = -1;
@@ -64,6 +68,22 @@ public sealed record VortexOpenOptions
         {
             ArgumentOutOfRangeException.ThrowIfNegative(value);
             _initialReadSize = value;
+        }
+    }
+
+    /// <summary>
+    /// The most bytes the open reads and holds of the file's tail, from the first segment its postscript names to the end:
+    /// 256 MiB by default, as <see cref="Parquet.ParquetOpenOptions.MaxFooterBytes"/>. The postscript's offsets are the file's own
+    /// claim, and this keeps a forged one from sizing a read the open then holds for the file's life.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is not positive.</exception>
+    public int MaxFooterBytes
+    {
+        get => _maxFooterBytes;
+        init
+        {
+            ArgumentOutOfRangeException.ThrowIfNegativeOrZero(value);
+            _maxFooterBytes = value;
         }
     }
 

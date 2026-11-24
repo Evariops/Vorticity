@@ -31,6 +31,31 @@ public sealed class S3ReadTests
             Transport = transport ?? new StoreTransportOptions { RetryBaseDelay = TimeSpan.Zero },
         });
 
+    /// <summary>
+    /// A bucket's or an account's name that goes into a request's host is refused when a character of it would change the
+    /// host, a '/', a ':' or an '@'; an old S3 bucket's capitals and underscores are taken.
+    /// </summary>
+    [Theory]
+    [InlineData("lake/evil", false)]
+    [InlineData("lake:443@evil.example", false)]
+    [InlineData("lake evil", false)]
+    [InlineData("Old_Bucket.2017", true)]
+    public async Task ANameThatWouldChangeTheHostIsRefused(string name, bool taken)
+    {
+        if (taken)
+        {
+            await using S3ObjectStore store = new S3ObjectStore(new S3StoreOptions { Bucket = name, Region = "us-east-1", Credentials = StoreCredentials.Anonymous() });
+            return;
+        }
+
+        ArgumentException bucket = Assert.Throws<ArgumentException>(
+            () => new S3ObjectStore(new S3StoreOptions { Bucket = name, Region = "us-east-1", Credentials = StoreCredentials.Anonymous() }));
+        Assert.Contains("host name", bucket.Message, StringComparison.Ordinal);
+        ArgumentException account = Assert.Throws<ArgumentException>(
+            () => new AzureBlobObjectStore(new AzureBlobStoreOptions { Account = name, Container = "c", Credentials = StoreCredentials.SharedKey(name, AzureEmulator.Key) }));
+        Assert.Contains("host name", account.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task AReadAsksForOneRangeAndLandsInTheCallersMemory()
     {

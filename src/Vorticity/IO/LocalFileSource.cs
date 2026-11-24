@@ -66,7 +66,9 @@ internal interface IReadAnticipation
 /// before the call returns, as a read from the mapping is: a page the cache does not hold blocks
 /// either one the same way, and a hop to the thread pool would cost more than the read. What it
 /// serves before a mapping is the tail and the few structures a plan reads before it decides, so
-/// its segments are read one by one, without coalescing.
+/// its segments are read one by one, without coalescing. On a slow device, a volume over the network
+/// or a cold disk, each lane then holds its thread for the device's latency: the reads are the
+/// thread's, as a mapping's faults are.
 /// </para>
 /// <para>
 /// Windows runs the reads of a handle opened for synchronous I/O one at a time, whatever their
@@ -139,9 +141,9 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
     // Null when the open took over a kept mapping without opening the file.
     private readonly SafeFileHandle? _handle;
 
-    // The handle's twin opened for overlapped I/O, null until reads that waited on another passed
-    // TwinAfterBytes, and the reads of the handle, one field: 16 bytes an open.
-    private SafeFileHandle? _twin;
+    // The handle's twin opened for overlapped I/O with the events its reads are signalled with, null until reads that
+    // waited on another passed TwinAfterBytes, and the reads of the handle, one field: 16 bytes an open.
+    private OverlappedTwin? _twin;
     private long _reads;
     private readonly string _path;
     private readonly MappedFileCache? _mappings;
@@ -388,7 +390,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
         if ((Interlocked.Increment(ref _reads) & UnderWay) > 1 && Twin(destination.Length) is { } twin)
         {
             Interlocked.Decrement(ref _reads);
-            int read = NativeFile.ReadOverlapped(twin, destination, offset);
+            int read = NativeFile.ReadOverlapped(twin.Handle, twin.Signals, destination, offset);
             if (read >= 0)
             {
                 return read;
@@ -413,7 +415,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
     /// whose bytes take those that waited past <see cref="TwinAfterBytes"/>; null before, where the
     /// platform has none, and while that read opens it.
     /// </summary>
-    private SafeFileHandle? Twin(int length)
+    private OverlappedTwin? Twin(int length)
     {
         if (Volatile.Read(ref _twin) is { } twin)
         {
@@ -428,7 +430,7 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
             return null;
         }
 
-        SafeFileHandle? opened = NativeFile.TryOpenOverlapped(_handle!);
+        OverlappedTwin? opened = NativeFile.TryOpenOverlapped(_handle!) is { } handle ? new OverlappedTwin(handle) : null;
         Volatile.Write(ref _twin, opened);
         if (Volatile.Read(ref _disposed) != 0 && Interlocked.Exchange(ref _twin, null) is { } late)
         {
@@ -438,6 +440,21 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
         }
 
         return opened;
+    }
+
+    /// <summary>The overlapped twin of the handle and the events its reads are signalled with, which go with it.</summary>
+    private sealed class OverlappedTwin(SafeFileHandle handle) : IDisposable
+    {
+        internal SafeFileHandle Handle { get; } = handle;
+
+        internal NativeFile.OverlappedSignals Signals { get; } = new NativeFile.OverlappedSignals();
+
+        /// <summary>Closes the twin, once the reads under way on it release it, and the events kept; a read under way closes its own.</summary>
+        public void Dispose()
+        {
+            Handle.Dispose();
+            Signals.Dispose();
+        }
     }
 
     /// <summary>
@@ -562,11 +579,21 @@ internal sealed class LocalFileSource : ISegmentReader, IReadAnticipation, IPosi
                 lanes[lane] = Execution.Waits.StartBlockingAsync(
                     () =>
                     {
-                        for (int i = Interlocked.Increment(ref next); i < reads.Count; i = Interlocked.Increment(ref next))
+                        try
                         {
-                            cancellationToken.ThrowIfCancellationRequested();
-                            (_, long offset, int length) = reads[i];
-                            owners[i] = length == 0 ? new EmptySegmentOwner() : ReadPositionally(offset, length, requests.Account);
+                            for (int i = Interlocked.Increment(ref next); i < reads.Count; i = Interlocked.Increment(ref next))
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                                (_, long offset, int length) = reads[i];
+                                owners[i] = length == 0 ? new EmptySegmentOwner() : ReadPositionally(offset, length, requests.Account);
+                            }
+                        }
+                        catch
+                        {
+                            // The batch fails with the first read that does: the other lanes claim no read after it, where
+                            // they read the whole batch before the failure came out.
+                            Volatile.Write(ref next, reads.Count);
+                            throw;
                         }
                     },
                     cancellationToken);

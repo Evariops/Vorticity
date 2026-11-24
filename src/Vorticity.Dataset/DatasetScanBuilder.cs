@@ -19,6 +19,10 @@ namespace Vorticity.Dataset;
 /// What a dataset scan skipped, and how: counters rather than timings, so that a caller can check
 /// how few objects were read instead of believing a speed.
 /// </summary>
+/// <remarks>
+/// Every count is added under a lock of the counters themselves: a scan's walk, its lanes, its parts and its lookups count
+/// at once, some into the same count. Each is an object's or a granule's, never a row's.
+/// </remarks>
 internal sealed class DatasetScanCounters
 {
     /// <summary>Leaf entries the walk reached.</summary>
@@ -898,7 +902,7 @@ internal sealed partial class DatasetScanBuilder
             await (await opening.ConfigureAwait(false)).DisposeAsync().ConfigureAwait(false);
 #pragma warning restore VSTHRD003
         }
-        catch (Exception)
+        catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "dataset.give_back"))
         {
             // An object never reached: its failure, if it is one, is met by whoever reaches it.
         }
@@ -1065,7 +1069,10 @@ internal sealed partial class DatasetScanBuilder
             {
                 if (_considers && _metrics is { } skipped)
                 {
-                    skipped.ObjectsPrunedByKey++;
+                    lock (skipped)
+                    {
+                        skipped.ObjectsPrunedByKey++;
+                    }
                 }
 
                 continue;
@@ -1095,21 +1102,28 @@ internal sealed partial class DatasetScanBuilder
         IAsyncEnumerable<PositionedObject> walk, KeyPruning pruning, [EnumeratorCancellation] CancellationToken cancellationToken)
     {
         // The indexes of the next objects are asked while the walk goes on, their reads in one wave rather than a round trip
-        // each; an index in hand, with nothing asked before it still waiting, answers at once and makes no task.
+        // each; an index in hand, with nothing asked before it still waiting, answers at once and makes no task. Those still
+        // on their way when the walk fails or its caller stops are called off and awaited (ReadsAhead), none reading past it.
         Queue<Ahead>? ahead = null;
+        ReadsAhead reads = new ReadsAhead(KeysAhead + 1, cancellationToken);
+        await using System.Runtime.CompilerServices.ConfiguredAsyncDisposable readsEnd = reads.ConfigureAwait(false);
         await foreach (PositionedObject held in walk.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             if (KeyRefutes(pruning, held, out ReadOnlyMemory<byte> first))
             {
                 if (_considers && _metrics is { } skipped)
                 {
-                    skipped.ObjectsPrunedByKey++;
+                    lock (skipped)
+                    {
+                        skipped.ObjectsPrunedByKey++;
+                    }
                 }
 
                 continue;
             }
 
-            ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> asked = KeptGranulesAsync(held, pruning, first, read: true, cancellationToken);
+            ValueTask<(List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)?> asked =
+                reads.BeginAsync(token => KeptGranulesAsync(held, pruning, first, read: true, token));
             if (asked.IsCompletedSuccessfully && (ahead is null || ahead.Count == 0))
             {
                 (List<(int First, int End)> Ranges, Indexes.GranuleGrid Grid)? kept = await asked.ConfigureAwait(false);
@@ -1171,7 +1185,7 @@ internal sealed partial class DatasetScanBuilder
     }
 
     /// <summary>The objects whose sparse indexes <see cref="KeyPrunedAsync"/> asks for ahead of the one it hands out.</summary>
-    private const int KeysAhead = 16;
+    internal const int KeysAhead = 16;
 
     /// <summary>An object whose index <see cref="KeyPrunedAsync"/> asked for ahead: what it kept, when in hand, or its read.</summary>
     private readonly record struct Ahead(
@@ -1198,8 +1212,11 @@ internal sealed partial class DatasetScanBuilder
 
         if (_considers && _metrics is { } metrics)
         {
-            metrics.GranulesPrunedByKey += keys.Granules - granules;
-            metrics.ObjectsPrunedByKey += ranges.Count == 0 ? 1 : 0;
+            lock (metrics)
+            {
+                metrics.GranulesPrunedByKey += keys.Granules - granules;
+                metrics.ObjectsPrunedByKey += ranges.Count == 0 ? 1 : 0;
+            }
         }
 
         return ranges.Count == 1 && ranges[0] == (0, keys.Granules);
@@ -1289,7 +1306,9 @@ internal sealed partial class DatasetScanBuilder
             }
             catch (VortexFormatException)
             {
-                // A page that does not hold the keys its table names: the object is read as if it kept no index.
+                // A page that does not hold the keys its table names: the object is read as if it kept no index, and the
+                // damage counted, which a read that only slowed would leave nobody to learn.
+                DatasetTelemetry.KeyIndexUnreadable();
                 return null;
             }
         }

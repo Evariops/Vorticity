@@ -5,6 +5,7 @@
 // more than 1.25; the same keys make the same bytes; and what a filter writes reads back as the same filter.
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Vorticity.Indexes;
 using Xunit;
 
@@ -87,6 +88,38 @@ public sealed class BinaryFuse8Tests
         Assert.Throws<VortexFormatException>(() => BinaryFuse8.Read(bytes.AsSpan(0, bytes.Length - 1), out _));
         bytes[8] = 3;
         Assert.Throws<VortexFormatException>(() => BinaryFuse8.Read(bytes, out _));
+
+        // No segment, and the two a filter always adds: a key's third slot would land past them.
+        byte[] none = new byte[20 + 2 * 1_024];
+        BitConverter.TryWriteBytes(none.AsSpan(8), 1_024u);
+        BitConverter.TryWriteBytes(none.AsSpan(12), 0u);
+        BitConverter.TryWriteBytes(none.AsSpan(16), 2 * 1_024u);
+        Assert.Throws<VortexFormatException>(() => BinaryFuse8.Read(none, out _));
+    }
+
+    [Fact]
+    public void ASketchsRanksAndGapsAreHeldToItsRegisters()
+    {
+        const int Registers = 1 << 12;
+        byte[] ranks = new byte[Registers];
+        ranks[5] = 3;
+        byte[] dense = HyperLogLog.Encode(ranks.Select((r, i) => (byte)(i % 7)).ToArray());
+        Assert.Equal(1, dense[0]);
+
+        // A rank of 63 packed in six bits, past the 53 that twelve bits of index leave.
+        dense[1] |= 63;
+        Assert.Throws<VortexFormatException>(() => HyperLogLog.Decode(dense, new byte[Registers]));
+        Assert.Throws<VortexFormatException>(() => HyperLogLog.Raise(dense, new byte[Registers]));
+
+        // Sparse: one register at a gap past 2^63, which once turned the index negative; then a rank past 53.
+        byte[] wrapped = [0, 1, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01, 3];
+        Assert.Throws<VortexFormatException>(() => HyperLogLog.Decode(wrapped, new byte[Registers]));
+        byte[] high = [0, 1, 5, 60];
+        Assert.Throws<VortexFormatException>(() => HyperLogLog.Decode(high, new byte[Registers]));
+        byte[] fine = [0, 1, 5, 53];
+        byte[] decoded = new byte[Registers];
+        HyperLogLog.Decode(fine, decoded);
+        Assert.Equal(53, decoded[5]);
     }
 
     /// <summary><paramref name="size"/> distinct keys drawn from <paramref name="seed"/>.</summary>

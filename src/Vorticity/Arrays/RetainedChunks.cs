@@ -979,24 +979,82 @@ internal sealed class RetainedChunk
 /// every scan of 256 columns build the entries past it anew, 1.8 MB a scan; the bound now lets
 /// scans of a couple of thousand columns keep theirs, a few megabytes for the process.
 /// </remarks>
-internal sealed class RetainedChunkPool
+internal sealed class RetainedChunkPool : IHeldMemory
 {
     private readonly int _maxCapacity;
     private readonly Lock _gate = new Lock();
     private RetainedChunk?[] _entries;
     private int _count;
 
+    // The fewest entries kept since the registry last asked: those at the bottom that no scan took since.
+    private int _fewest;
+
     /// <summary>Creates a pool.</summary>
     /// <param name="initialCapacity">The entries it has room for before it first grows.</param>
     /// <param name="maxCapacity">The most entries it keeps.</param>
-    internal RetainedChunkPool(int initialCapacity, int maxCapacity)
+    /// <param name="held">Whether the registry of kept memory asks its entries back (<see cref="HeldMemory"/>).</param>
+    internal RetainedChunkPool(int initialCapacity, int maxCapacity, bool held = false)
     {
         _entries = new RetainedChunk?[initialCapacity];
         _maxCapacity = maxCapacity;
+        if (held)
+        {
+            HeldMemory.Register(this);
+        }
     }
 
-    /// <summary>The pool the scans of the process share.</summary>
-    internal static RetainedChunkPool Shared { get; } = new RetainedChunkPool(256, 4096);
+    /// <summary>
+    /// The pool the scans of the process share: a holder of the registry of kept memory, whose entries no scan took since
+    /// its last turn go, and all of them when a reservation needs room. Outside it, under a low limit, they never came back.
+    /// </summary>
+    internal static RetainedChunkPool Shared { get; } = new RetainedChunkPool(256, 4096, held: true);
+
+    /// <inheritdoc/>
+    public string Holder => "chunks";
+
+    /// <summary>Nothing counted: an entry's arena gave its blocks back with its reset, and its tables are a few kilobytes, which the rest reads.</summary>
+    public long HeldBytes => 0;
+
+    /// <summary>Lets go of every entry when a reservation needs room: they rebuild without a request, as blocks do.</summary>
+    public long GiveBack(KeptKind kind, long bytes)
+    {
+        if (kind == KeptKind.Blocks)
+        {
+            LetGo(int.MaxValue);
+        }
+
+        return 0;
+    }
+
+    /// <summary>Lets go of the entries no scan took since the registry last asked.</summary>
+    public long LetGoUnused(bool collection)
+    {
+        int unused;
+        lock (_gate)
+        {
+            unused = _fewest;
+        }
+
+        LetGo(unused);
+        return 0;
+    }
+
+    /// <summary>Lets go of up to <paramref name="most"/> entries from the bottom, the longest kept, and starts a new watch.</summary>
+    private void LetGo(int most)
+    {
+        lock (_gate)
+        {
+            int gone = Math.Min(most, _count);
+            if (gone > 0)
+            {
+                Array.Copy(_entries, gone, _entries, 0, _count - gone);
+                Array.Clear(_entries, _count - gone, gone);
+                _count -= gone;
+            }
+
+            _fewest = _count;
+        }
+    }
 
     /// <summary>The entries it keeps now.</summary>
     internal int Count
@@ -1019,6 +1077,11 @@ internal sealed class RetainedChunkPool
             {
                 RetainedChunk entry = _entries[--_count]!;
                 _entries[_count] = null;
+                if (_count < _fewest)
+                {
+                    _fewest = _count;
+                }
+
                 return entry;
             }
         }

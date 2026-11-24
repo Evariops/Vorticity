@@ -60,6 +60,10 @@ public static partial class RowEncoder
     /// <param name="fields">One sort field per member, one for every member, or none for ascending with nulls first.</param>
     /// <returns>The key's bytes.</returns>
     /// <exception cref="VortexUnsupportedException">A member's type has no order the format defines.</exception>
+    /// <remarks>
+    /// The key is written through a store and an arena of its own, on the process's account and the default session's
+    /// extensions: a seek's cost, made once for a lookup, not one to pay a row at a time.
+    /// </remarks>
     public static byte[] EncodeKey<TKey>(in TKey key, params ReadOnlySpan<RowSortField> fields)
         where TKey : IVortexRecord<TKey>
     {
@@ -125,6 +129,12 @@ public static partial class RowEncoder
     /// The row encoding of one tuple at the key columns' own dtypes, whose width and nullability
     /// shape the bytes.
     /// </summary>
+    /// <remarks>
+    /// A float of an <c>F16</c> or <c>F32</c> column is rounded to the column's nearest value, the one a row written from it
+    /// holds: a seek finds that row, and a value between two of the column's is no bound of it. No pruning encodes a
+    /// filter's float this way (<c>KeyIntervals</c> takes no float key), and an integer for a float column is refused, an
+    /// <see cref="ArgumentException"/> the bounds of an object's summaries read as no bound.
+    /// </remarks>
     internal static byte[] EncodeKey(
         ReadOnlySpan<FilterLiteral> values, ReadOnlySpan<DType> dtypes, ReadOnlySpan<RowSortField> fields)
     {
@@ -299,16 +309,17 @@ public static partial class RowEncoder
     /// a fixed one, its sentinel and blocks for a variable one, the last block's marker the first that is no continuation.
     /// Two keys hold the same first value when these bytes of theirs are the same.
     /// </summary>
+    /// <exception cref="VortexFormatException">The key ends within its first value.</exception>
     internal static int FirstValueLength(ReadOnlySpan<byte> key, DType dtype)
     {
         dtype = Storage(dtype);
         switch (dtype.Kind)
         {
             case DTypeKind.Bool:
-                return 2;
+                return Held(key, 2);
 
             case DTypeKind.Primitive:
-                return dtype.PType.ByteWidth() + 1;
+                return Held(key, dtype.PType.ByteWidth() + 1);
 
             case DTypeKind.Utf8 or DTypeKind.Binary:
                 return VariableLength(key);
@@ -347,19 +358,54 @@ public static partial class RowEncoder
     /// </summary>
     private static int VariableLength(ReadOnlySpan<byte> key)
     {
-        if (key[0] != RowSentinels.VarNonEmpty(RowSortField.Ascending))
+        if (Lead(key) != RowSentinels.VarNonEmpty(RowSortField.Ascending))
         {
             return 1;
         }
 
-        const byte Continuation = 0xFF;
         int length = 1;
-        while (key[length + RowWidths.VarBlockData] == Continuation)
+        while (BlockBytes(key, length, out bool more) > 0 && more)
         {
             length += RowWidths.VarBlockTotal;
         }
 
         return length + RowWidths.VarBlockTotal;
+    }
+
+    /// <summary><paramref name="length"/>, the bytes a key's first value takes, when the key holds them.</summary>
+    /// <exception cref="VortexFormatException">The key ends within its first value.</exception>
+    private static int Held(ReadOnlySpan<byte> key, int length) =>
+        key.Length < length ? throw new VortexFormatException($"A key of {key.Length} bytes ends within its first value of {length}.") : length;
+
+    /// <summary>A key's first byte, its first value's sentinel.</summary>
+    /// <exception cref="VortexFormatException">The key is empty.</exception>
+    private static byte Lead(ReadOnlySpan<byte> key) =>
+        key.IsEmpty ? throw new VortexFormatException("A key holds no byte where a value starts.") : key[0];
+
+    /// <summary>
+    /// The bytes of a text's or a binary's value the block at <paramref name="at"/> of a key holds: 32 when another block
+    /// follows (<paramref name="more"/>), else its marker, 1 to 32. The one reader of a value's blocks, those of a key read
+    /// from a file among them, which <see cref="UnpaddedKeys"/> reads by too.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The key ends within the block, or the block's marker is past what a block holds.</exception>
+    internal static int BlockBytes(ReadOnlySpan<byte> key, int at, out bool more)
+    {
+        const byte Continuation = 0xFF;
+        if ((uint)at >= (uint)key.Length || key.Length - at <= RowWidths.VarBlockData)
+        {
+            throw new VortexFormatException("A key ends within a text's blocks.");
+        }
+
+        byte marker = key[at + RowWidths.VarBlockData];
+        more = marker == Continuation;
+        if (more)
+        {
+            return RowWidths.VarBlockData;
+        }
+
+        return marker is 0 or > RowWidths.VarBlockData
+            ? throw new VortexFormatException($"A text's last block is marked {marker}, past the 1 to 32 bytes a block holds.")
+            : marker;
     }
 
     /// <summary>
@@ -397,9 +443,16 @@ public static partial class RowEncoder
             throw Unkeyed(dtype);
         }
 
-        if (key[0] != RowSentinels.FixedNonNull)
+        if (Lead(key) != RowSentinels.FixedNonNull)
         {
             return FilterLiteral.Null;
+        }
+
+        PType ptype = dtype.Kind == DTypeKind.Bool ? PType.U8 : dtype.PType;
+        int width = ptype.ByteWidth();
+        if (key.Length <= width)
+        {
+            throw new VortexFormatException($"A key ends within its first value, {width} bytes past its sentinel.");
         }
 
         if (dtype.Kind == DTypeKind.Bool)
@@ -407,8 +460,6 @@ public static partial class RowEncoder
             return FilterLiteral.From(key[1] == 0x02);
         }
 
-        PType ptype = dtype.PType;
-        int width = ptype.ByteWidth();
         ulong ordered = 0;
         for (int i = 0; i < width; i++)
         {
@@ -445,12 +496,13 @@ public static partial class RowEncoder
     /// </summary>
     private static FilterLiteral ReadFirstBytes(ReadOnlySpan<byte> key)
     {
-        if (key[0] == RowSentinels.VarEmpty(RowSortField.Ascending))
+        byte lead = Lead(key);
+        if (lead == RowSentinels.VarEmpty(RowSortField.Ascending))
         {
             return FilterLiteral.From(ReadOnlySpan<byte>.Empty);
         }
 
-        if (key[0] != RowSentinels.VarNonEmpty(RowSortField.Ascending))
+        if (lead != RowSentinels.VarNonEmpty(RowSortField.Ascending))
         {
             return FilterLiteral.Null;
         }
@@ -472,12 +524,13 @@ public static partial class RowEncoder
     /// </summary>
     internal static int ReadFirstBytes(ReadOnlySpan<byte> key, ref byte[] into)
     {
-        if (key[0] == RowSentinels.VarEmpty(RowSortField.Ascending))
+        byte lead = Lead(key);
+        if (lead == RowSentinels.VarEmpty(RowSortField.Ascending))
         {
             return 0;
         }
 
-        if (key[0] != RowSentinels.VarNonEmpty(RowSortField.Ascending))
+        if (lead != RowSentinels.VarNonEmpty(RowSortField.Ascending))
         {
             return -1;
         }
@@ -493,17 +546,21 @@ public static partial class RowEncoder
     }
 
     /// <summary>The length of a key's first value, a text's or a binary's, not empty: its <paramref name="full"/> blocks, and the <paramref name="last"/> bytes of the last.</summary>
+    /// <exception cref="VortexFormatException">The key ends within the value's blocks, or its last block's marker is past what a block holds.</exception>
     private static int FirstBytesLength(ReadOnlySpan<byte> key, out int full, out int last)
     {
-        const byte Continuation = 0xFF;
         full = 0;
-        while (key[1 + (full * RowWidths.VarBlockTotal) + RowWidths.VarBlockData] == Continuation)
+        while (true)
         {
+            int bytes = BlockBytes(key, 1 + (full * RowWidths.VarBlockTotal), out bool more);
+            if (!more)
+            {
+                last = bytes;
+                return (full * RowWidths.VarBlockData) + last;
+            }
+
             full++;
         }
-
-        last = key[1 + (full * RowWidths.VarBlockTotal) + RowWidths.VarBlockData];
-        return (full * RowWidths.VarBlockData) + last;
     }
 
     /// <summary>Copies a key's first value, of <paramref name="full"/> blocks and <paramref name="last"/> bytes, out of its blocks into <paramref name="into"/>.</summary>

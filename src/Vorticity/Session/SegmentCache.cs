@@ -313,13 +313,18 @@ public sealed class SegmentCache : IHeldMemory
     long IHeldMemory.GiveBack(KeptKind kind, long bytes) =>
         kind == KeptKind.Segments && bytes > 0 ? LetGo(bytes, stale: false) : 0;
 
-    /// <summary>At a turn of the registry's slow timer, lets go of the segments no scan read since the turn before, above the floor.</summary>
-    void IHeldMemory.LetGoUnused(bool collection)
+    /// <summary>
+    /// At a turn of the registry's slow timer, lets go of the segments no scan read since the turn before, above the floor:
+    /// none of their bytes leaves the heap, their blocks going back to the pool, which tells what it lets go itself.
+    /// </summary>
+    long IHeldMemory.LetGoUnused(bool collection)
     {
         if (!collection)
         {
             LetGo(long.MaxValue, stale: true);
         }
+
+        return 0;
     }
 
     /// <summary>

@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -140,14 +141,22 @@ internal readonly ref struct FsstSymbolTable
     /// <param name="value">The bytes to compress.</param>
     /// <param name="destination">At least <see cref="MaxCompressedLength"/> bytes.</param>
     /// <param name="written">How many code bytes were produced.</param>
-    /// <returns><see langword="false"/> when <paramref name="destination"/> is too short.</returns>
+    /// <returns>
+    /// <see langword="false"/> when <paramref name="destination"/> is too short, or when the table leaves the writer a choice
+    /// at a position of <paramref name="value"/>.
+    /// </returns>
     /// <remarks>
     /// <para>
     /// The same rule the writer applies -- take the longest symbol that matches at this position,
-    /// and escape the byte when none does -- and therefore the same output, because that rule does
-    /// not depend on the order symbols are examined in: two symbols of equal width that both match
-    /// the same bytes are the same symbol. Equal values compress to equal code sequences, which is
-    /// what lets an equality be answered on the codes.
+    /// and escape the byte when none does -- and therefore the same output, as long as the table
+    /// leaves no choice: the writer looks a symbol of three bytes or more up by its first three, so
+    /// at most one of them opens with any three bytes, and finds one or two bytes in tables that
+    /// hold one code each. A table built that way has neither two symbols of three bytes or more
+    /// opening alike nor two symbols of the same bytes. A table of another making could, and its
+    /// writer's choice is then unknown: where the value meets such a choice, the compression is
+    /// refused and the column is decoded, rather than answered on codes that may not be the
+    /// rows'. Equal values compress to equal code sequences, which is what lets an equality be
+    /// answered on the codes.
     /// </para>
     /// <para>
     /// A linear scan over at most 255 symbols, where the writer instead builds a hash of prefixes
@@ -168,19 +177,39 @@ internal readonly ref struct FsstSymbolTable
             ReadOnlySpan<byte> rest = value[read..];
             int best = -1;
             int bestLength = 0;
+
+            // The choices the table leaves here: symbols of three bytes or more opening with the next three, and a twin
+            // of the symbol taken.
+            int opening = 0;
+            bool twin = false;
             for (int code = 0; code < count; code++)
             {
                 int width = _lengths[code];
-                if (width > rest.Length || width <= bestLength)
+                ReadOnlySpan<byte> symbol = _symbols.Slice(code * SymbolSize, width);
+                if (width >= 3 && rest.Length >= 3 && rest[..3].SequenceEqual(symbol[..3]))
+                {
+                    opening++;
+                }
+
+                if (width > rest.Length || width < bestLength)
                 {
                     continue;
                 }
 
-                if (rest[..width].SequenceEqual(_symbols.Slice(code * SymbolSize, width)))
+                if (rest[..width].SequenceEqual(symbol))
                 {
-                    best = code;
-                    bestLength = width;
+                    twin = width == bestLength;
+                    if (!twin)
+                    {
+                        best = code;
+                        bestLength = width;
+                    }
                 }
+            }
+
+            if (opening > 1 || twin)
+            {
+                return false;
             }
 
             if (best >= 0)
@@ -526,6 +555,7 @@ internal readonly ref struct FsstDecodeTable
             $"{encodingId}: the code stream names a symbol the {_count}-entry table does not hold.");
     }
 
+    [DoesNotReturn]
     private static int ThrowOverrun(string encodingId, int capacity) =>
         CompressedThrow.Format<int>(
             $"{encodingId}: the code stream decodes to more than the {capacity} bytes its " +

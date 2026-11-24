@@ -95,15 +95,9 @@ internal sealed class LaneBudget
     /// <summary>Gives back the lane taken at <paramref name="entered"/>, and starts a pump on it when work waits for one.</summary>
     internal void Exit(long entered)
     {
-        ExitQuietly(entered);
-        Core?.LaneFreed();
-    }
-
-    /// <summary>Gives back the lane taken at <paramref name="entered"/>, for the core that took it and found nothing to run.</summary>
-    internal void ExitQuietly(long entered)
-    {
         Interlocked.Add(ref _held, Stopwatch.GetTimestamp() - entered);
         _free.Release();
+        Core?.LaneFreed();
     }
 
     /// <summary>Takes a lane free now, without waiting: false when none is.</summary>

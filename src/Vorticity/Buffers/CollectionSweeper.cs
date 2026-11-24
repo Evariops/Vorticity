@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.InteropServices;
+using Vorticity.Diagnostics;
 
 namespace Vorticity.Buffers;
 
@@ -30,15 +31,23 @@ internal sealed class CollectionSweeper<T>
 
     ~CollectionSweeper()
     {
-        if (_target.TryGetTarget(out T? target))
-        {
-            target.Sweep();
-            GC.ReRegisterForFinalize(this);
-        }
-        else
+        if (!_target.TryGetTarget(out T? target))
         {
             _target.Dispose();
+            return;
         }
+
+        try
+        {
+            target.Sweep();
+        }
+        catch (Exception e) when (e is not OutOfMemoryException)
+        {
+            // On the finalizer thread, where a failure ends the process: said, and the next collection sweeps again.
+            VortexEventSource.Log.UpkeepFailed(typeof(T).Name, e.ToString());
+        }
+
+        GC.ReRegisterForFinalize(this);
     }
 
     /// <summary>Sweeps <paramref name="target"/> after collections, for as long as it lives.</summary>

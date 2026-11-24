@@ -128,11 +128,19 @@ internal sealed class SortKey
 
     /// <summary>The keys of every row of <paramref name="batch"/>, row-encoded; the caller disposes them.</summary>
     /// <exception cref="ArgumentException">A source names no column of the batch.</exception>
-    internal RowKeys Encode(RecordBatch batch)
+    internal RowKeys Encode(RecordBatch batch) => Encode(batch, account: (Vorticity.Buffers.MemoryAccount?)null);
+
+    /// <summary>
+    /// The keys of every row of <paramref name="batch"/>, row-encoded, their blocks and those of their sorts counted in
+    /// <paramref name="account"/>, the work's: as much as the rows they order. The caller disposes them.
+    /// </summary>
+    /// <exception cref="ArgumentException">A source names no column of the batch.</exception>
+    /// <exception cref="VortexMemoryException">The account refuses a block.</exception>
+    internal RowKeys Encode(RecordBatch batch, Vorticity.Buffers.MemoryAccount? account)
     {
         Span<int> nodes = _sources.Length <= 32 ? stackalloc int[_sources.Length] : new int[_sources.Length];
         Components(batch, nodes);
-        return RowEncoder.Encode(batch.Arena, nodes, _fields);
+        return RowEncoder.Encode(batch.Arena, nodes, _fields, account);
     }
 
     /// <summary>

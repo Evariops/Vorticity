@@ -66,13 +66,16 @@ internal sealed class RecordBinding
     internal VortexType TypeOf(int member) => FileFields[FileIndex[member]].Type;
 
     /// <summary>
-    /// The binding of <typeparamref name="TRecord"/> to <paramref name="file"/>, built once per schema; again when it is
-    /// asked under another registry of extensions than the one it was built with, which the binding holds.
+    /// The binding of <typeparamref name="TRecord"/> to <paramref name="file"/>, built once per root type and registry of
+    /// extensions: kept by the schema's root, which equal schemas share as types are kept for reuse, where kept by the
+    /// schema each file opened bound the record again.
     /// </summary>
     internal static RecordBinding For<TRecord>(VortexSchema file, VortexExtensionRegistry? extensions)
         where TRecord : IVortexRecord<TRecord>
     {
-        if (Cache<TRecord>.Bindings.TryGetValue(file, out RecordBinding? binding) && ReferenceEquals(binding.Extensions, extensions))
+        ConditionalWeakTable<VortexType, RecordBinding> bindings = Cache<TRecord>.Of(extensions);
+        VortexType root = file.Root;
+        if (bindings.TryGetValue(root, out RecordBinding? binding))
         {
             return binding;
         }
@@ -84,25 +87,26 @@ internal sealed class RecordBinding
         }
 
         binding = Bind(typeof(TRecord), TRecord.Schema, file.FieldArray, [], [], extensions);
-        Cache<TRecord>.Bindings.AddOrUpdate(file, binding);
+        bindings.AddOrUpdate(root, binding);
         return binding;
     }
 
     /// <summary>
     /// <see cref="For{TRecord}(VortexSchema, VortexExtensionRegistry?)"/> over the fields of <paramref name="type"/>, a struct
     /// a result's batches share: kept by the type, where a schema made of it for each batch missed the cache every time and
-    /// bound the record again. Under another registry of extensions than the one it was built with, bound again.
+    /// bound the record again.
     /// </summary>
     internal static RecordBinding ForType<TRecord>(VortexType type, VortexExtensionRegistry? extensions)
         where TRecord : IVortexRecord<TRecord>
     {
-        if (Cache<TRecord>.ByType.TryGetValue(type, out RecordBinding? binding) && ReferenceEquals(binding.Extensions, extensions))
+        ConditionalWeakTable<VortexType, RecordBinding> bindings = Cache<TRecord>.Of(extensions);
+        if (bindings.TryGetValue(type, out RecordBinding? binding))
         {
             return binding;
         }
 
         binding = For<TRecord>(VortexSchema.Create(type.FieldArray), extensions);
-        Cache<TRecord>.ByType.AddOrUpdate(type, binding);
+        bindings.AddOrUpdate(type, binding);
         return binding;
     }
 
@@ -307,6 +311,22 @@ internal sealed class RecordBinding
             throw new VortexSchemaException(
                 $"Member '{member.Name}' of {recordType.Name} is {member.Type.NonNullable} and its column '{column.Name}' is {column.Type}.");
         }
+
+        // A list's elements as its column's: a null among elements that are not nullable reads as the value its slot holds,
+        // a list(i64?) of 1, null, 3 read as 1, 0, 3.
+        VortexType memberElements = member.Type;
+        VortexType columnElements = column.Type;
+        while (memberElements.Kind is VortexTypeKind.List or VortexTypeKind.FixedSizeList
+            && columnElements.Kind is VortexTypeKind.List or VortexTypeKind.FixedSizeList)
+        {
+            memberElements = memberElements.ElementType!;
+            columnElements = columnElements.ElementType!;
+            if (!memberElements.IsNullable && columnElements.IsNullable)
+            {
+                throw new VortexSchemaException(
+                    $"Member '{member.Name}' of {recordType.Name} holds elements that are not nullable and its column '{column.Name}' holds nullable ones ({column.Type}); declare the elements nullable.");
+            }
+        }
     }
 
     /// <summary>Whether a record type and a file type are the same kind of column; the exact .NET fit is checked on first access.</summary>
@@ -344,10 +364,19 @@ internal sealed class RecordBinding
         }
     }
 
+    /// <summary>
+    /// The bindings of <typeparamref name="TRecord"/>, by registry of extensions and then by type: a registry that goes
+    /// takes its bindings with it, and two sessions of different registries that read the same files keep one binding
+    /// each, where one entry a type was replaced at every turn between them.
+    /// </summary>
     private static class Cache<TRecord>
     {
-        internal static readonly ConditionalWeakTable<VortexSchema, RecordBinding> Bindings = [];
+        private static readonly ConditionalWeakTable<VortexType, RecordBinding> Plain = [];
 
-        internal static readonly ConditionalWeakTable<VortexType, RecordBinding> ByType = [];
+        private static readonly ConditionalWeakTable<VortexExtensionRegistry, ConditionalWeakTable<VortexType, RecordBinding>> ByRegistry = [];
+
+        /// <summary>The bindings made under <paramref name="extensions"/>.</summary>
+        internal static ConditionalWeakTable<VortexType, RecordBinding> Of(VortexExtensionRegistry? extensions) =>
+            extensions is null ? Plain : ByRegistry.GetValue(extensions, static _ => []);
     }
 }

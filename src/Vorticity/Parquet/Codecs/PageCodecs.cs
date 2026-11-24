@@ -112,8 +112,9 @@ internal static class PageCodecs
         CompressionCodec.Brotli => BrotliEncoder.GetMaxCompressedLength(length),
 
         // Deflate stores incompressible input in blocks of at most 65 535 bytes, five bytes of
-        // header each, and GZIP adds 18 bytes of its own.
-        CompressionCodec.Gzip => length + 5 * (length / 16_383 + 1) + 64,
+        // header each, and GZIP adds 18 bytes of its own. At level 1 zlib-ng writes static Huffman
+        // blocks without that check, a literal past 143 taking 9 bits: an eighth more at most.
+        CompressionCodec.Gzip => length + (length >> 3) + 5 * (length / 16_383 + 1) + 64,
         _ => throw new ArgumentOutOfRangeException(nameof(codec), codec, "No codec this library writes."),
     };
 
@@ -156,12 +157,9 @@ internal static class PageCodecs
 
     private static unsafe int CompressGzip(int level, ReadOnlySpan<byte> source, Span<byte> destination)
     {
-        CompressionLevel compression = level switch
-        {
-            <= 0 => CompressionLevel.Fastest,
-            >= 9 => CompressionLevel.SmallestSize,
-            _ => CompressionLevel.Optimal,
-        };
+        // zlib's own level, 1 to 9, which the options hold the caller to: the three named levels
+        // would give 1 to 8 the same output.
+        ZLibCompressionOptions compression = new() { CompressionLevel = Math.Clamp(level, 1, 9) };
         fixed (byte* output = destination)
         {
             using UnmanagedMemoryStream stream = new(output, 0, destination.Length, FileAccess.Write);

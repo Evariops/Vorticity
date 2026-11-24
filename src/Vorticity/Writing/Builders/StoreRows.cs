@@ -100,6 +100,12 @@ internal static class StoreRows
     }
 
     /// <summary>
+    /// The elements a list's gathering takes at a time: their indices a quarter of a megabyte, a block of the pool's, however
+    /// many the views name.
+    /// </summary>
+    private const int GatherWindow = 1 << 16;
+
+    /// <summary>
     /// Appends the lists of the list view <paramref name="node"/> to <paramref name="list"/>: the elements of its valid rows,
     /// in their order, gathered from wherever the view names them into one node and appended whole, then each row closed
     /// over its count of them; a null row holds none.
@@ -120,25 +126,56 @@ internal static class StoreRows
             Span<long> sizes = words.AsSpan(rows, rows);
             CanonicalSupport.ReadIntegers(view.Offsets.Span, view.OffsetPType, 0, offsets);
             CanonicalSupport.ReadIntegers(view.Sizes.Span, view.SizePType, 0, sizes);
-            int total = 0;
-            for (int row = 0; row < rows; row++)
+            long total = 0;
+            for (int r = 0; r < rows; r++)
             {
-                counts[row] = IsValid(valid, row) ? checked((int)sizes[row]) : 0;
-                total = checked(total + counts[row]);
+                counts[r] = IsValid(valid, r) ? checked((int)sizes[r]) : 0;
+                total += counts[r];
             }
 
-            indices = Blocks.Rent<int>(Math.Max(1, total));
-            int at = 0;
-            for (int row = 0; row < rows; row++)
+            // A store's lists close at int offsets: views that overlap may name more elements than that, which no store holds.
+            if (total > Array.MaxLength)
             {
-                int offset = counts[row] == 0 ? 0 : checked((int)offsets[row]);
-                for (int e = 0; e < counts[row]; e++)
+                throw new NotSupportedException($"The lists of {rows} rows name {total:N0} elements together, past what one store holds.");
+            }
+
+            // The elements gathered a window of them at a time, in their order: views that overlap name elements many times
+            // over, and an index for each of them at once was gigabytes rented before a single element was read.
+            indices = Blocks.Rent<int>((int)Math.Clamp(total, 1, GatherWindow));
+            int row = 0;
+            int next = 0;
+            while (row < rows)
+            {
+                // The window filled from row `row`'s element `next` on: a row of more elements than a window goes on in the next.
+                int at = 0;
+                while (row < rows && at < indices.Length)
                 {
-                    indices[at++] = offset + e;
+                    int count = counts[row];
+                    if (next < count)
+                    {
+                        int from = checked((int)offsets[row] + next);
+                        int take = Math.Min(count - next, indices.Length - at);
+                        for (int k = 0; k < take; k++)
+                        {
+                            indices[at++] = from + k;
+                        }
+
+                        next += take;
+                    }
+
+                    if (next == count)
+                    {
+                        row++;
+                        next = 0;
+                    }
+                }
+
+                if (at > 0)
+                {
+                    Append(list.Elements, arena, CanonicalFilter.Apply(arena, elements, indices.AsSpan(0, at)), validated);
                 }
             }
 
-            Append(list.Elements, arena, CanonicalFilter.Apply(arena, elements, indices.AsSpan(0, total)), validated);
             list.AppendLists(counts.AsSpan(0, rows), valid);
         }
         finally

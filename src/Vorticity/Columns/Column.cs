@@ -137,8 +137,25 @@ public readonly ref struct Columns<TRecord>
     private readonly ReadOnlySpan<ulong> _selection;
     private readonly int _selected;
     private readonly bool _projected;
+    private readonly RecordScratch? _scratch;
+    private readonly int _depth;
 
-    internal Columns(RecordBatch batch, CanonicalArena arena, int node, RecordBinding binding, long startRow, ReadOnlySpan<ulong> selection, int selected, bool projected)
+    /// <param name="batch">The batch the rows are of.</param>
+    /// <param name="arena">The arena its nodes lie in.</param>
+    /// <param name="node">The struct node the record's members are fields of.</param>
+    /// <param name="binding">The record's members bound to the struct's fields.</param>
+    /// <param name="startRow">The file row of the batch's first row.</param>
+    /// <param name="selection">The rows the filter kept as words; empty when every row is.</param>
+    /// <param name="selected">The rows the filter kept.</param>
+    /// <param name="projected">Whether the struct holds the record's fields only, in its order.</param>
+    /// <param name="scratch">
+    /// What holds the arrays generated code fills before it builds the records (<see cref="Scratch{TMember}"/>), from one
+    /// batch to the next: a typed scan's enumeration; null where nothing reads more than one batch, which then allocates.
+    /// </param>
+    /// <param name="depth">How deep the record lies in the one read: 0 for the batch's, one more for each record within.</param>
+    internal Columns(
+        RecordBatch batch, CanonicalArena arena, int node, RecordBinding binding, long startRow, ReadOnlySpan<ulong> selection, int selected, bool projected,
+        RecordScratch? scratch = null, int depth = 0)
     {
         Batch = batch;
         Arena = arena;
@@ -148,7 +165,29 @@ public readonly ref struct Columns<TRecord>
         _selection = selection;
         _selected = selected;
         _projected = projected;
+        _scratch = scratch;
+        _depth = depth;
     }
+
+    /// <summary>
+    /// Room for <paramref name="count"/> values of a member, which the code the generator emits fills before it builds the
+    /// records: an array held by what reads the records, from one batch to the next, and the same for the same
+    /// <paramref name="slot"/> at the same depth. The values are the caller's to clear once read, when they hold references.
+    /// </summary>
+    /// <typeparam name="TMember">The member's type.</typeparam>
+    /// <param name="slot">Which of the record's uses: four a member, the generated code's own numbering.</param>
+    /// <param name="count">The values the room holds.</param>
+    /// <returns>The room, valid until the next batch is read.</returns>
+    /// <remarks>A view no enumeration made, one a caller took of a batch, holds no room from one batch to the next: its room is made for the call.</remarks>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Span<TMember> Scratch<TMember>(int slot, int count) =>
+        _scratch is { } scratch ? scratch.Take<TMember>(_depth, slot, count).AsSpan(0, count) : new TMember[count];
+
+    /// <summary>The scratch the records within share, a level deeper.</summary>
+    internal RecordScratch? NestedScratch => _scratch;
+
+    /// <summary>The depth of the records within.</summary>
+    internal int NestedDepth => _depth + 1;
 
     internal RecordBatch Batch { get; }
 
@@ -210,7 +249,7 @@ public readonly ref struct Columns<TRecord>
     {
         RecordBinding nested = Binding.NestedFor<TNested>(index);
         int child = Arena.GetNode(StructNode()).GetFieldIndex(Slot(index));
-        return new Columns<TNested>(Batch, Arena, child, nested, StartRow, _selection, _selected, _projected);
+        return new Columns<TNested>(Batch, Arena, child, nested, StartRow, _selection, _selected, _projected, NestedScratch, NestedDepth);
     }
 
     /// <summary>The lists of records held by member <paramref name="index"/>.</summary>
@@ -222,7 +261,7 @@ public readonly ref struct Columns<TRecord>
         where TNested : IVortexRecord<TNested>
     {
         RecordBinding elements = Binding.ElementsFor<TNested>(index);
-        return new ListColumns<TNested>(Batch, Arena, Arena.GetNode(StructNode()).GetFieldIndex(Slot(index)), elements);
+        return new ListColumns<TNested>(Batch, Arena, Arena.GetNode(StructNode()).GetFieldIndex(Slot(index)), elements, NestedScratch, NestedDepth);
     }
 
     /// <summary>The maps held by member <paramref name="index"/>.</summary>

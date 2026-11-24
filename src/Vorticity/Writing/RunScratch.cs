@@ -361,6 +361,13 @@ internal sealed class RunScratch : IDisposable
         {
             if (!ReferenceEquals(page, _tail))
             {
+                // A sealed store's pages hold plaintext, wiped before they go back, as Dispose wipes them: returned as they
+                // were, the next rent of the pool read them.
+                if (_sealFile)
+                {
+                    System.Security.Cryptography.CryptographicOperations.ZeroMemory(page);
+                }
+
                 Blocks.ReturnBytes(page);
             }
         }

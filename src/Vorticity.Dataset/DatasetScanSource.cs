@@ -457,6 +457,12 @@ internal sealed partial class DatasetScanSource
         Dictionary<long, long>? granular = null;
         HashSet<long>? undecided = null;
         List<(PositionedObject Held, RowRange Rows, List<RowRange>? Kept, Task<List<RowRange>?>? Reading)> walked = [];
+
+        // The key indexes asked as the walk goes, KeysAhead at once as the units' walk asks them, and called off and awaited
+        // when the walk fails: begun all at once, they were a task and a request an object of the version, none awaited past
+        // a failure.
+        ReadsAhead ahead = new ReadsAhead(DatasetScanBuilder.KeysAhead, cancellationToken);
+        await using System.Runtime.CompilerServices.ConfiguredAsyncDisposable aheadEnds = ahead.ConfigureAwait(false);
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
             long start = System.Math.Max(from, held.FirstRow);
@@ -496,7 +502,8 @@ internal sealed partial class DatasetScanSource
             // the walk finds their objects and read side by side, a wave of requests, where one awaited at a time cost a
             // round trip each: fourteen for a time window over seven objects. An object kept whole is marked so, no list
             // made for it.
-            ValueTask<List<RowRange>?> keeping = KeptAsync(held, pruning, planner, new RowRange(start, end), cancellationToken);
+            RowRange range = new RowRange(start, end);
+            ValueTask<List<RowRange>?> keeping = ahead.BeginAsync(token => KeptAsync(held, pruning, planner, range, token));
             walked.Add(keeping.IsCompletedSuccessfully
                 ? (held, new RowRange(start, end), await keeping.ConfigureAwait(false) ?? AllKept, null)
                 : (held, new RowRange(start, end), null, keeping.AsTask()));
@@ -647,7 +654,7 @@ internal sealed partial class DatasetScanSource
         long to = pass.Rows?.End ?? long.MaxValue;
         KeyPruning? pruning = pass.Options.UseStatistics && pass.Options.UseIndexes ? KeyPruningOf(pass.Filter) : null;
         DatasetScanBuilder planner = Builder(pass, null);
-        List<Task<RowRange[]>> objects = [];
+        List<(PositionedObject Held, RowRange Rows)> asked = [];
         await foreach (PositionedObject held in _version.WalkAsync(pruner, from, to, null, cancellationToken).ConfigureAwait(false))
         {
             long start = System.Math.Max(from, held.FirstRow);
@@ -656,17 +663,25 @@ internal sealed partial class DatasetScanSource
             // An object reads the granules the key's pruning keeps alone, by its sparse index.
             if (await KeptAsync(held, pruning, planner, new RowRange(start, end), cancellationToken).ConfigureAwait(false) is not { } ranges)
             {
-                objects.Add(ClustersAsync(held, new RowRange(start, end), pass.Projection, rangeBytes, cancellationToken));
+                asked.Add((held, new RowRange(start, end)));
                 continue;
             }
 
             foreach (RowRange kept in ranges)
             {
-                objects.Add(ClustersAsync(held, kept, pass.Projection, rangeBytes, cancellationToken));
+                asked.Add((held, kept));
             }
         }
 
-        return await Task.WhenAll(objects).ConfigureAwait(false);
+        // The ranges' cuts, each an open and a lease of its object, as many at once as the session reads, and called off and
+        // awaited when one fails: begun all at once, they were a task, an open and a lease an object of the version.
+        RowRange[][] strata = new RowRange[asked.Count][];
+        await Execution.Waits.ForAsync(
+            asked.Count,
+            _dataset.Session.Options.MaxConcurrentReads,
+            async (i, token) => strata[i] = await ClustersAsync(asked[i].Held, asked[i].Rows, pass.Projection, rangeBytes, token).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+        return strata;
     }
 
     /// <summary>The ranges of an object that keeps none of the rows asked: one list for every such object, never added to.</summary>

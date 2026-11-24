@@ -135,6 +135,11 @@ internal static class ParquetVerifier
         }
 
         long rows = footer.RowGroups[group].RowCount;
+        foreach ((SortingColumn _, ChunkValues read, bool _) in keys)
+        {
+            rows = Math.Min(rows, read.Rows);
+        }
+
         for (int row = 1; row < rows; row++)
         {
             foreach ((SortingColumn key, ChunkValues values, bool decimals) in keys)
@@ -268,21 +273,44 @@ internal static class ParquetVerifier
     }
 
     /// <summary>A flat column's values in one row group, row by row: each a literal, or null, or none this build compares.</summary>
-    private sealed class ChunkValues(long rows)
+    /// <remarks>
+    /// The arrays grow with the rows the scan decodes, not with the rows the group declares: a file
+    /// that declares 2^40 rows and holds a page of ten is described by a finding, not an array of 2^40.
+    /// </remarks>
+    private sealed class ChunkValues
     {
-        internal FilterLiteral[] Values { get; } = new FilterLiteral[rows];
+        private FilterLiteral[] _values = [];
+        private bool[] _valid = [];
 
-        internal bool[] Valid { get; } = new bool[rows];
+        internal FilterLiteral[] Values => _values;
+
+        internal bool[] Valid => _valid;
+
+        /// <summary>The rows read.</summary>
+        internal int Rows { get; private set; }
 
         /// <summary>Whether a valid value had no literal: a type no bound of this build covers.</summary>
         internal bool Unbounded { get; set; }
+
+        /// <summary>Makes room for the rows up to <paramref name="end"/>, which a batch read.</summary>
+        internal void Hold(int end)
+        {
+            if (end > _values.Length)
+            {
+                int length = (int)Math.Min(Array.MaxLength, Math.Max(end, 2L * _values.Length));
+                Array.Resize(ref _values, length);
+                Array.Resize(ref _valid, length);
+            }
+
+            Rows = Math.Max(Rows, end);
+        }
     }
 
     private static async ValueTask<ChunkValues> ValuesAsync(ParquetFile file, int group, ParquetColumn column, CancellationToken cancellationToken)
     {
         ParquetFooter footer = file.Footer;
         RowGroupEntry entry = footer.RowGroups[group];
-        ChunkValues values = new ChunkValues(entry.RowCount);
+        ChunkValues values = new ChunkValues();
         int field = TopField(file.Compiled, column);
         bool[] groups = new bool[footer.RowGroups.Length];
         groups[group] = true;
@@ -343,6 +371,7 @@ internal static class ParquetVerifier
         CanonicalArena arena = batch.Arena;
         int node = Node(arena, batch.RootIndex, top, column);
         ValidityMask mask = ValidityMask.From(arena, arena.GetNode(node).Validity);
+        values.Hold(offset + batch.RowCount);
         for (int row = 0; row < batch.RowCount; row++)
         {
             bool valid = mask.IsValid(row);
@@ -428,7 +457,7 @@ internal static class ParquetVerifier
     {
         ZoneBounds bounds = ColumnBounds.Of(column, chunk.Statistics, chunk.Source.Span);
         bool decimals = ColumnBounds.IsDecimal(column);
-        (FilterLiteral min, FilterLiteral max, bool bounded, long nulls, long nans) = Summarize(values, 0, values.Valid.Length, decimals);
+        (FilterLiteral min, FilterLiteral max, bool bounded, long nulls, long nans) = Summarize(values, 0, values.Rows, decimals);
         if (bounds.HasNullCount && bounds.NullCount != nulls)
         {
             findings.Add(Finding(group, column, "null_count", $"{bounds.NullCount} where the rows hold {nulls}"));
@@ -485,7 +514,7 @@ internal static class ParquetVerifier
             found.Gap(declared.XMax + slack, declared.XMin - slack);
         }
 
-        for (int row = 0; row < values.Valid.Length; row++)
+        for (int row = 0; row < values.Rows; row++)
         {
             if (values.Valid[row])
             {
@@ -560,7 +589,7 @@ internal static class ParquetVerifier
             return;
         }
 
-        long rows = values.Valid.Length;
+        long rows = values.Rows;
         using SegmentRequestSet requests = new();
         int columnSlot = requests.Add(new SegmentSpec((ulong)chunk.ColumnIndexOffset, (uint)chunk.ColumnIndexLength, 0, 0, 0));
         int offsetSlot = requests.Add(new SegmentSpec((ulong)chunk.OffsetIndexOffset, (uint)chunk.OffsetIndexLength, 0, 0, 0));
@@ -625,7 +654,7 @@ internal static class ParquetVerifier
         }
 
         Span<byte> plain = stackalloc byte[32];
-        for (long row = 0; row < values.Valid.Length; row++)
+        for (long row = 0; row < values.Rows; row++)
         {
             if (!values.Valid[row])
             {

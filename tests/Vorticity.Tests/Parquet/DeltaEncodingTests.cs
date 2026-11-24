@@ -208,6 +208,9 @@ public sealed class DeltaEncodingTests
         Assert.Throws<ParquetFormatException>(() => Decode32([0x80, 0x01, 0x04, 0x02, 0x00, 0x00, 33, 0, 0, 0], 2));
         Assert.Throws<ParquetFormatException>(() => Decode32(encoded, 299));
         Assert.Throws<ParquetFormatException>(() => Decode32(Reference.Encode(Enumerable.Range(0, 300).Select(i => (long)i * i).ToArray(), 32)[..20], 300));
+
+        // Blocks of 2^31 values in 2^15 miniblocks: the shape's every rule holds but the block's size fits no int.
+        Assert.Throws<ParquetFormatException>(() => Decode32([0x80, 0x80, 0x80, 0x80, 0x08, 0x80, 0x80, 0x02, 0x01, 0x00], 1));
     }
 
     [Theory]

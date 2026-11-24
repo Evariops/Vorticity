@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using Vorticity.Diagnostics;
 
 namespace Vorticity.Buffers;
 
@@ -49,9 +50,9 @@ internal interface IHeldMemory
     /// <summary>
     /// Lets go of what nothing took since it was last asked, above its floors: after a collection of the oldest generation
     /// (<paramref name="collection"/>) for what rebuilds without a request, at each turn of the registry's slow timer for
-    /// everything.
+    /// everything. The bytes that leave the heap, which the process's budget read as live and the next collection takes.
     /// </summary>
-    void LetGoUnused(bool collection);
+    long LetGoUnused(bool collection);
 }
 
 /// <summary>
@@ -133,12 +134,30 @@ internal static class HeldMemory
     }
 
     /// <summary>Has every holder let go of what nothing took since it was last asked (<see cref="IHeldMemory.LetGoUnused"/>).</summary>
+    /// <remarks>
+    /// What they let go was live at the last full collection, so the process's budget still reads it so: it is told, as it
+    /// is of what <see cref="GiveBack"/> lets go, or it would refuse a reservation over bytes that only a collection it
+    /// does not ask for would take back.
+    /// </remarks>
     internal static void LetGoUnused(bool collection)
     {
+        long let = 0;
         foreach (KeyValuePair<IHeldMemory, object?> pair in Holders)
         {
-            pair.Key.LetGoUnused(collection);
+            IHeldMemory holder = pair.Key;
+            try
+            {
+                let += holder.LetGoUnused(collection);
+            }
+            catch (Exception e) when (e is not OutOfMemoryException)
+            {
+                // Asked from the slow timer or after a collection, where no caller hears of a failure and the process ends
+                // on it: said, and the other holders are asked still.
+                VortexEventSource.Log.UpkeepFailed(holder.Holder, e.ToString());
+            }
         }
+
+        QueryMemoryBudget.Process.LetGoKept(let);
     }
 
     /// <summary>The bytes each kind of holder holds now, and how many holders of each kind there are.</summary>
@@ -156,12 +175,24 @@ internal static class HeldMemory
     }
 
     /// <summary>The bytes every holder holds now: what the registry knows of the memory kept.</summary>
+    /// <remarks>
+    /// Read by the process's budget on its timer, where no caller hears of a failure and the process ends on it: a holder
+    /// whose reading fails is said, as a failed upkeep is, and counted for nothing.
+    /// </remarks>
     internal static long TotalBytes()
     {
         long bytes = 0;
         foreach (KeyValuePair<IHeldMemory, object?> pair in Holders)
         {
-            bytes += pair.Key.HeldBytes;
+            IHeldMemory holder = pair.Key;
+            try
+            {
+                bytes += holder.HeldBytes;
+            }
+            catch (Exception e) when (e is not OutOfMemoryException)
+            {
+                VortexEventSource.Log.UpkeepFailed(holder.Holder, e.ToString());
+            }
         }
 
         return bytes;
@@ -204,6 +235,12 @@ internal static class HeldMemory
                 try
                 {
                     GiveBack(long.MaxValue);
+                }
+                catch (Exception e) when (e is not OutOfMemoryException)
+                {
+                    // On a thread of the pool, where no caller hears of a failure and the process ends on it: said, and
+                    // the next high load asks again.
+                    VortexEventSource.Log.UpkeepFailed("kept memory", e.ToString());
                 }
                 finally
                 {

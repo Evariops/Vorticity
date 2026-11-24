@@ -564,13 +564,23 @@ internal abstract class StreamScanSource : ScanSource, IRowsCapability, IStatist
             }
 
             CanonicalNode node = arena.GetNode(root);
-            Span<int> children = _fields.Length <= 64 ? stackalloc int[_fields.Length] : new int[_fields.Length];
-            for (int i = 0; i < children.Length; i++)
-            {
-                children[i] = node.GetFieldIndex(_fields[i]);
-            }
 
-            return arena.AddStruct(_projected, node.Length, node.Validity, children);
+            // Past 64 fields a block of the pool, where an array was allocated at every batch.
+            Block<int> rented = _fields.Length <= 64 ? default : Blocks.Rent<int>(_fields.Length);
+            try
+            {
+                Span<int> children = rented.IsDefault ? stackalloc int[_fields.Length] : rented.AsSpan();
+                for (int i = 0; i < children.Length; i++)
+                {
+                    children[i] = node.GetFieldIndex(_fields[i]);
+                }
+
+                return arena.AddStruct(_projected, node.Length, node.Validity, children);
+            }
+            finally
+            {
+                Blocks.Return(rented);
+            }
         }
     }
 }

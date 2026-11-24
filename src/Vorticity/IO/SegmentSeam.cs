@@ -30,7 +30,10 @@ public interface ISegmentSource : IAsyncDisposable
     /// <param name="ranges">The ranges, in any order.</param>
     /// <param name="leases">One lease per range, written at the range's index; the caller disposes every one.</param>
     /// <param name="cancellationToken">Cancels the reads.</param>
-    /// <returns>A task that completes when every lease is written; on failure no lease is left to dispose.</returns>
+    /// <returns>
+    /// A task that completes when every lease is written. On failure no lease is left to dispose: the source disposes the
+    /// leases it wrote, in their slots, and leaves every slot <see langword="default"/>, which a caller may dispose again.
+    /// </returns>
     ValueTask ReadAsync(ReadOnlyMemory<SegmentRange> ranges, Memory<SegmentLease> leases, CancellationToken cancellationToken);
 }
 

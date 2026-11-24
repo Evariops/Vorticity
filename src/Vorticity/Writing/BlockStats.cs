@@ -24,7 +24,13 @@ internal enum BoundDomain : byte
 /// A mutable struct held by reference through <c>ref</c>: it is an accumulator, and copying it per
 /// batch would be the allocation this design exists to not make. Nothing stores one by value except
 /// the closed-block list, which is where its life ends.
+/// <para>
+/// Laid out by the runtime, which packs its flags together: in the order they are written, each flag
+/// before a word took a word, 112 bytes a summary where packed it takes 96, kept for every block of a
+/// file's every column.
+/// </para>
 /// </remarks>
+[System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Auto)]
 internal struct BlockStats
 {
     // One pair of words, not three. The three domains are mutually exclusive -- `Domain` says which

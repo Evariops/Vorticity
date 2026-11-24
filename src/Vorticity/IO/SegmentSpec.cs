@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -74,6 +75,7 @@ internal readonly struct SegmentSpec
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowEndOverflow(ulong offset, uint length) =>
         throw new VortexFormatException(
             $"Segment at offset {offset} with length {length} ends past ulong.MaxValue.");

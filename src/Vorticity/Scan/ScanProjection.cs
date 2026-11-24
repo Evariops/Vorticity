@@ -280,3 +280,28 @@ internal readonly struct ScanProjection
         return arena.Struct(new ReadOnlySpan<int>(names), new ReadOnlySpan<DType>(fields), dtype.Nullability);
     }
 }
+
+/// <summary>
+/// The projected schema of the batches of one stream, composed once while they share their schema, for the stream's own
+/// reader: each batch composed it again in an arena made for it. The schema it came from is imported into an arena of its
+/// own, which nothing changes after, so that a batch's arena reset since takes nothing with it. Not thread-safe.
+/// </summary>
+internal sealed class ProjectedSchemas
+{
+    private DType _source;
+    private DType _target;
+
+    /// <summary>What <paramref name="projection"/> makes of <paramref name="schema"/>, composed again only when the schema changes.</summary>
+    internal DType Of(ScanProjection projection, DType schema)
+    {
+        if (!_source.IsDefault && _source.Equals(schema))
+        {
+            return _target;
+        }
+
+        DTypeArena arena = new DTypeArena();
+        _source = DTypeImport.Into(arena, schema);
+        _target = projection.ProjectedSchema(_source, arena);
+        return _target;
+    }
+}

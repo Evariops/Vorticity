@@ -89,6 +89,22 @@ internal sealed class HttpTransport : IDisposable
     /// </summary>
     internal CancellationTokenSource Outliving() => new CancellationTokenSource(Timeout.InfiniteTimeSpan, _options.TimeProvider);
 
+    /// <summary>
+    /// A deadline <paramref name="after"/> from now on the options' clock, as every other wait of the transport, cancelled
+    /// too by <paramref name="cancellationToken"/> through <paramref name="joined"/>, which the caller disposes before it:
+    /// a linked source keeps the system's clock, which a test's cannot move.
+    /// </summary>
+    private CancellationTokenSource Deadline(TimeSpan after, CancellationToken cancellationToken, out CancellationTokenRegistration joined)
+    {
+        CancellationTokenSource deadline = new CancellationTokenSource(after, _options.TimeProvider);
+        joined = cancellationToken.UnsafeRegister(static source => ((CancellationTokenSource)source!).Cancel(), deadline);
+        return deadline;
+    }
+
+    /// <summary>The stall deadline of a body's read, as <see cref="Deadline"/> makes one.</summary>
+    private CancellationTokenSource Stall(CancellationToken cancellationToken, out CancellationTokenRegistration joined) =>
+        Deadline(_options.StallTimeout, cancellationToken, out joined);
+
     /// <summary>Gives a token of <see cref="Outliving"/> the abort's deadline from now, its caller having given up.</summary>
     internal void Outlive(CancellationTokenSource outliving) => outliving.CancelAfter(_options.AbortTimeout);
 
@@ -234,8 +250,9 @@ internal sealed class HttpTransport : IDisposable
     {
         HttpRequestMessage request = await build(state, cancellationToken).ConfigureAwait(false);
         SequenceContent? body = request.Content as SequenceContent;
-        using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        deadline.CancelAfter(_options.FirstByteTimeout);
+
+        using CancellationTokenSource deadline = Deadline(_options.FirstByteTimeout, cancellationToken, out CancellationTokenRegistration joined);
+        using CancellationTokenRegistration held = joined;
         body?.Watch(deadline, _options.StallTimeout, _options.FirstByteTimeout);
         try
         {
@@ -324,8 +341,8 @@ internal sealed class HttpTransport : IDisposable
         try
         {
             Stream body = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            using CancellationTokenSource stall = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            stall.CancelAfter(_options.StallTimeout);
+            using CancellationTokenSource stall = Stall(cancellationToken, out CancellationTokenRegistration joined);
+            using CancellationTokenRegistration held = joined;
             while (total < destination.Length)
             {
                 int read = await body.ReadAsync(destination[total..], stall.Token).ConfigureAwait(false);
@@ -366,8 +383,8 @@ internal sealed class HttpTransport : IDisposable
         try
         {
             Stream body = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            using CancellationTokenSource stall = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            stall.CancelAfter(_options.StallTimeout);
+            using CancellationTokenSource stall = Stall(cancellationToken, out CancellationTokenRegistration joined);
+            using CancellationTokenRegistration held = joined;
             while (copied < length)
             {
                 int read = await body.ReadAsync(block.AsMemory(0, (int)Math.Min(block.Length, length - copied)), stall.Token).ConfigureAwait(false);

@@ -176,6 +176,9 @@ internal static class DatasetIndexing
                 IndexFragment? fragment = await FragmentAsync(dataset, held, wanted, build, cancellationToken).ConfigureAwait(false);
                 if (fragment is null)
                 {
+                    // Holding every index the policy names already, or nothing to index: a later walk passes it over, where
+                    // it opened it again, so that the walk that ends the run lists the objects and opens none.
+                    done.Add(held.Entry.Key);
                     continue;
                 }
 

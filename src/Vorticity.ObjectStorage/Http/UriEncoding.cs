@@ -14,6 +14,24 @@ internal static class UriEncoding
     private static readonly SearchValues<byte> Unreserved =
         SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"u8);
 
+    // What a name that goes into a URI's host may hold: letters, digits, '.', '-' and '_', those of a bucket an old S3
+    // region took among them.
+    private static readonly SearchValues<char> HostName =
+        SearchValues.Create("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._");
+
+    /// <summary>
+    /// Refuses a bucket's or an account's <paramref name="name"/> that would change the host a request goes to, with a
+    /// '/', a ':', an '@' or any character a host name does not take.
+    /// </summary>
+    /// <exception cref="ArgumentException">The name holds such a character.</exception>
+    internal static void RequireHostName(string name, string what, string parameter)
+    {
+        if (name.AsSpan().IndexOfAnyExcept(HostName) is int at and >= 0)
+        {
+            throw new ArgumentException($"{what} '{name}' holds '{name[at]}', which a host name does not take: it would send the requests elsewhere.", parameter);
+        }
+    }
+
     /// <summary>A key or a path encoded for a URI's path: <c>/</c> kept.</summary>
     internal static string Path(string value) => Encode(value, keepSlash: true);
 

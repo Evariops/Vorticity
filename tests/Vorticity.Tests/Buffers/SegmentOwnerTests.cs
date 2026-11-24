@@ -97,6 +97,48 @@ public sealed class SegmentOwnerTests
         Assert.Equal(1, owner.Frees);
     }
 
+    /// <summary>
+    /// A retain of a freed owner never moves its count, even for a moment: a stray release on another thread at that
+    /// moment would see one reference go and free the memory a second time.
+    /// </summary>
+    [Fact]
+    public void A_retain_of_a_freed_owner_never_lends_a_stray_release_a_reference()
+    {
+        CountingOwner owner = new CountingOwner();
+        owner.Release();
+        long until = Environment.TickCount64 + 200;
+        Parallel.Invoke(
+            () =>
+            {
+                while (Environment.TickCount64 < until)
+                {
+                    try
+                    {
+                        owner.Retain();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+                }
+            },
+            () =>
+            {
+                while (Environment.TickCount64 < until)
+                {
+                    try
+                    {
+                        owner.Release();
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+                }
+            });
+
+        Assert.Equal(1, owner.Frees);
+        Assert.Equal(0, owner.RefCount);
+    }
+
     [Fact]
     public void Dispose_is_idempotent()
     {

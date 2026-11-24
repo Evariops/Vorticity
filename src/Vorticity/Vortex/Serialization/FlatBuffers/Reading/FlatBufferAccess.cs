@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -112,11 +113,13 @@ internal static class FlatBufferAccess
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowRead(int pos, int width, int length) =>
         throw new VortexFormatException(
             $"FlatBuffers: a {width}-byte read at offset {pos} escapes the {length}-byte buffer.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowOutOfBounds(string what, long pos, long length, long limit) =>
         ThrowHelper.ThrowOutOfBounds("FlatBuffers " + what, pos, length, limit);
 }

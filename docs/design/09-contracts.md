@@ -166,7 +166,9 @@ vacuum, never per batch of rows, and when nothing listens the dataset's telemetr
 The second is an event source, `Vorticity`, whose polling counters say whether an index earns its
 bytes: `segments-requested`, `bytes-requested`, `zones-pruned`, `zones-total`, `index-runs-read`,
 `cursor-seeks`, `cursor-steps`, `count-blocks-proven`, `count-blocks-decoded`, `key-order-windows`
-and `key-order-window-splits`.
+and `key-order-window-splits`. Its `segments-requested` and `bytes-requested` count the same requests
+as the meter's `vortex.scan.requests` and `vortex.scan.bytes_requested`, from the one hook a scan
+calls as it asks.
 
 The third works per query: a scan's `ExplainAsync` is its plan before it runs, and its `Metrics`
 the same quantities measured afterwards ([observability.md](../guide/observability.md)).

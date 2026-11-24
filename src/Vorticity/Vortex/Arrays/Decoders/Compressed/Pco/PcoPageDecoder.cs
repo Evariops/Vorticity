@@ -832,6 +832,15 @@ internal sealed class PcoLatentState
     private int _windowLength;
     private int _windowPosition;
 
+    // The account the window was rented under, given back to at the page's end.
+    private MemoryAccount? _windowAccount;
+
+    /// <summary>
+    /// The account a page's window is rented under, the decode's, set while a decode holds the state and cleared when it gives
+    /// it back: a window of 2^24 values, five bits of a file's metadata away, was 256 MiB a page and a lane past the governor.
+    /// </summary>
+    internal MemoryAccount? Account { get; set; }
+
     /// <summary>Creates an empty slot; a page fills it with <see cref="Reset"/>.</summary>
     internal PcoLatentState()
     {
@@ -897,8 +906,17 @@ internal sealed class PcoLatentState
     /// <summary>Gives back what the page rented; the slot is then empty until the next <see cref="Reset"/>.</summary>
     internal void EndPage()
     {
-        Blocks.Return(_window);
+        if (_windowAccount is { } account)
+        {
+            Blocks.Return(account, _window);
+        }
+        else
+        {
+            Blocks.Return(_window);
+        }
+
         _window = default;
+        _windowAccount = null;
     }
 
     /// <summary>
@@ -1422,7 +1440,8 @@ internal sealed class PcoLatentState
         // Upstream's buffer: twice the window or twice a batch, whichever is longer, so that a
         // batch always fits past the window before it has to be moved back.
         int length = Math.Max(windowLength, PcoPageDecoder.BatchSize) * 2;
-        _window = Blocks.Rent<ulong>(length);
+        _windowAccount = Account;
+        _window = Account is { } account ? Blocks.Rent<ulong>(account, length) : Blocks.Rent<ulong>(length);
         Span<ulong> window = _window;
 
         // All of it, not only what comes before the state: a lookback that points before the page

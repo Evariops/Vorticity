@@ -58,7 +58,8 @@ internal static class FragmentBundle
             ReadOnlySpan<byte> row = bytes.Slice((int)tableStart + (i * RowBytes), RowBytes);
             ulong offset = BinaryPrimitives.ReadUInt64LittleEndian(row);
             ulong length = BinaryPrimitives.ReadUInt64LittleEndian(row[sizeof(ulong)..]);
-            if (offset < (ulong)Magic.Length || offset + length > (ulong)tableStart || length == 0)
+            // Compared without the sum, which an offset near 2^64 wrapped under the table.
+            if (offset < (ulong)Magic.Length || offset > (ulong)tableStart || length > (ulong)tableStart - offset || length == 0)
             {
                 throw new CommitFormatException(
                     $"Part {i} of a fragment bundle lies at {offset}+{length}, outside the {tableStart} bytes before its table.");

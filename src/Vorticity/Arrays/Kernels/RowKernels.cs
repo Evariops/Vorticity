@@ -1397,7 +1397,12 @@ internal static class RowKernels
             return 0;
         }
 
+        // The blocks store by reference: the destination holds every row's value, one comparison a call.
         int count = codes.Length;
+        if ((long)count * width > destination.Length)
+        {
+            throw new ArgumentOutOfRangeException(nameof(destination), $"{count} values of {width} bytes do not fit the {destination.Length} bytes given for them.");
+        }
         Span<byte> table = stackalloc byte[128];
         table.Clear();
         values[..(valuesLength * width)].CopyTo(table);

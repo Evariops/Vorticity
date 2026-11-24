@@ -925,6 +925,13 @@ internal sealed partial class SortedRunsSource : KeySource
         Invalidate();
         foreach (Run run in _runs)
         {
+            // A dictionary's segment is its run's alone, where an index's is the file's run cache's: the one goes back to
+            // the pool here, once, the other stays with the file.
+            if (_source == KeySourceKind.Dictionary)
+            {
+                run.Probe?.Release();
+            }
+
             run.Current = null;
             run.Probe = null;
         }
@@ -1127,8 +1134,12 @@ internal sealed partial class SortedRunsSource : KeySource
 
         // The first segment whose last key does not come before the key: a binary search over the
         // bounds in memory, or a descent through the fence pages when they are paged out.
+        // For the place past every entry of the key, the first segment whose last key comes after it: a segment the key
+        // fills, its last key the key, holds nothing past it, and was loaded and searched to learn what its bounds say.
         ISegmentReader source = _file.IndexSourceOf(run.Meta);
-        long low = await table.LowerBoundAsync(source, new MaxProbe<TKey>(key), cancellationToken).ConfigureAwait(false);
+        long low = row == long.MaxValue
+            ? await table.LowerBoundAsync(source, new PastProbe<TKey>(key), cancellationToken).ConfigureAwait(false)
+            : await table.LowerBoundAsync(source, new MaxProbe<TKey>(key), cancellationToken).ConfigureAwait(false);
         for (long s = low; s < table.SegmentCount; s++)
         {
             Fence fence = await table.GetAsync(source, s, cancellationToken).ConfigureAwait(false);
@@ -1269,90 +1280,109 @@ internal sealed partial class SortedRunsSource : KeySource
                 : types.Binary(Nullability.NonNullable);
         DType u32 = types.Primitive(PType.U32, Nullability.NonNullable);
 
-        CanonicalNode keyNode = context.Canonical.GetNode(DecodeRoot(context, keyBlob, keyType, entries));
-        Block<byte> keys;
+        // The blocks rented go back when the segment is refused: a malformed one kept them from the pool.
+        Block<byte> keys = default;
         Block<int> offsets = default;
-        if (_layout.Shape == KeyShape.Bytes)
+        Block<ulong> wide = default;
+        Block<uint> rows = default;
+        try
         {
-            if (keyNode.Kind != CanonicalKind.VarBinView || keyNode.Length != entries)
+            CanonicalNode keyNode = context.Canonical.GetNode(DecodeRoot(context, keyBlob, keyType, entries));
+            if (_layout.Shape == KeyShape.Bytes)
             {
-                throw Malformed("its keys do not decode to one string per entry");
+                if (keyNode.Kind != CanonicalKind.VarBinView || keyNode.Length != entries)
+                {
+                    throw Malformed("its keys do not decode to one string per entry");
+                }
+
+                offsets = Blocks.Rent<int>(entries + 1);
+                Span<int> starts = offsets.AsSpan();
+                starts[0] = 0;
+                long total = 0;
+                for (int i = 0; i < entries; i++)
+                {
+                    total += LiteralReader.ViewAt(keyNode, i).Length;
+                    if (total > Array.MaxLength)
+                    {
+                        throw Malformed($"its keys hold more than the {Array.MaxLength} bytes one buffer holds");
+                    }
+
+                    starts[i + 1] = (int)total;
+                }
+
+                keys = Blocks.Rent<byte>((int)total);
+                for (int i = 0; i < entries; i++)
+                {
+                    LiteralReader.ViewAt(keyNode, i).CopyTo(keys.AsSpan(starts[i]));
+                }
+            }
+            else
+            {
+                if (keyNode.Kind != CanonicalKind.Primitive || keyNode.PType != _layout.PType || keyNode.Length != entries)
+                {
+                    throw Malformed("its keys do not decode to one value of the column's type per entry");
+                }
+
+                ReadOnlySpan<byte> values = keyNode.Values.Span[..(entries * _layout.Width)];
+                keys = Blocks.Rent<byte>(values.Length);
+                values.CopyTo(keys.AsSpan());
             }
 
-            offsets = Blocks.Rent<int>(entries + 1);
-            Span<int> starts = offsets.AsSpan();
-            starts[0] = 0;
-            long total = 0;
-            for (int i = 0; i < entries; i++)
+            if (!HasRows)
             {
-                total += LiteralReader.ViewAt(keyNode, i).Length;
-                starts[i + 1] = checked((int)total);
+                return new RunSegment(keys, offsets, default, entries);
             }
 
-            keys = Blocks.Rent<byte>(checked((int)total));
-            for (int i = 0; i < entries; i++)
+            context.ResetBatch();
+            if (wideRows)
             {
-                LiteralReader.ViewAt(keyNode, i).CopyTo(keys.AsSpan(starts[i]));
-            }
-        }
-        else
-        {
-            if (keyNode.Kind != CanonicalKind.Primitive || keyNode.PType != _layout.PType || keyNode.Length != entries)
-            {
-                throw Malformed("its keys do not decode to one value of the column's type per entry");
-            }
+                // A run spanning more rows than a u32 can name writes its rows at 64 bits.
+                DType u64 = types.Primitive(PType.U64, Nullability.NonNullable);
+                CanonicalNode wideNode = context.Canonical.GetNode(DecodeRoot(context, rowBlob, u64, entries));
+                if (wideNode.Kind != CanonicalKind.Primitive || wideNode.PType != PType.U64 || wideNode.Length != entries)
+                {
+                    throw Malformed("its rows do not decode to one u64 per entry");
+                }
 
-            ReadOnlySpan<byte> values = keyNode.Values.Span[..(entries * _layout.Width)];
-            keys = Blocks.Rent<byte>(values.Length);
-            values.CopyTo(keys.AsSpan());
-        }
+                wide = Blocks.Rent<ulong>(entries);
+                wideNode.Values.Cast<ulong>()[..entries].CopyTo(wide.AsSpan());
+                foreach (ulong row in wide.AsSpan())
+                {
+                    if (row >= (ulong)rowLimit)
+                    {
+                        throw Malformed($"it names row {row} of a run of {rowLimit}");
+                    }
+                }
 
-        if (!HasRows)
-        {
-            return new RunSegment(keys, offsets, default, entries);
-        }
-
-        context.ResetBatch();
-        if (wideRows)
-        {
-            // A run spanning more rows than a u32 can name writes its rows at 64 bits.
-            DType u64 = types.Primitive(PType.U64, Nullability.NonNullable);
-            CanonicalNode wideNode = context.Canonical.GetNode(DecodeRoot(context, rowBlob, u64, entries));
-            if (wideNode.Kind != CanonicalKind.Primitive || wideNode.PType != PType.U64 || wideNode.Length != entries)
-            {
-                throw Malformed("its rows do not decode to one u64 per entry");
+                return new RunSegment(keys, offsets, default, entries, wide);
             }
 
-            Block<ulong> wide = Blocks.Rent<ulong>(entries);
-            wideNode.Values.Cast<ulong>()[..entries].CopyTo(wide.AsSpan());
-            foreach (ulong row in wide.AsSpan())
+            CanonicalNode rowNode = context.Canonical.GetNode(DecodeRoot(context, rowBlob, u32, entries));
+            if (rowNode.Kind != CanonicalKind.Primitive || rowNode.PType != PType.U32 || rowNode.Length != entries)
             {
-                if (row >= (ulong)rowLimit)
+                throw Malformed("its rows do not decode to one u32 per entry");
+            }
+
+            rows = Blocks.Rent<uint>(entries);
+            rowNode.Values.Cast<uint>()[..entries].CopyTo(rows.AsSpan());
+            foreach (uint row in rows.AsSpan())
+            {
+                if (row >= rowLimit)
                 {
                     throw Malformed($"it names row {row} of a run of {rowLimit}");
                 }
             }
 
-            return new RunSegment(keys, offsets, default, entries, wide);
+            return new RunSegment(keys, offsets, rows, entries);
         }
-
-        CanonicalNode rowNode = context.Canonical.GetNode(DecodeRoot(context, rowBlob, u32, entries));
-        if (rowNode.Kind != CanonicalKind.Primitive || rowNode.PType != PType.U32 || rowNode.Length != entries)
+        catch
         {
-            throw Malformed("its rows do not decode to one u32 per entry");
+            Blocks.Return(keys);
+            Blocks.Return(offsets);
+            Blocks.Return(wide);
+            Blocks.Return(rows);
+            throw;
         }
-
-        Block<uint> rows = Blocks.Rent<uint>(entries);
-        rowNode.Values.Cast<uint>()[..entries].CopyTo(rows.AsSpan());
-        foreach (uint row in rows.AsSpan())
-        {
-            if (row >= rowLimit)
-            {
-                throw Malformed($"it names row {row} of a run of {rowLimit}");
-            }
-        }
-
-        return new RunSegment(keys, offsets, rows, entries);
     }
 
     /// <summary>
@@ -1490,6 +1520,13 @@ internal sealed partial class SortedRunsSource : KeySource
         where TKey : struct, IKeyOrder
     {
         public bool Below(ReadOnlySpan<byte> max) => key.Order(max) < 0;
+    }
+
+    /// <summary>A descent's comparison for the place past every entry of a key: a fence whose last key is not after it.</summary>
+    private readonly struct PastProbe<TKey>(TKey key) : IFenceProbe
+        where TKey : struct, IKeyOrder
+    {
+        public bool Below(ReadOnlySpan<byte> max) => key.Order(max) <= 0;
     }
 
     /// <summary>A key sought, ordered against the keys of a run.</summary>

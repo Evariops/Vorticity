@@ -71,14 +71,11 @@ internal abstract class SegmentOwner : IDisposable
     /// <exception cref="ObjectDisposedException">The owner has already been freed.</exception>
     public SegmentOwner Retain()
     {
-        int updated = Interlocked.Increment(ref _refCount);
-
-        // updated <= 1 means the previous value was <= 0: the memory is gone (or being freed) and
-        // this call is a use-after-free. Put the counter back before throwing so a concurrent
-        // Release still sees a coherent value.
-        if (updated <= 1)
+        // A count at zero means the memory is gone or being freed, and this call is a use-after-free. Compared before it
+        // is changed: an increment taken back after would let a stray release on another thread see the count go from one
+        // to zero, and free the memory a second time.
+        if (!TryRetain())
         {
-            Interlocked.Decrement(ref _refCount);
             ThrowDisposed();
         }
 
@@ -88,7 +85,8 @@ internal abstract class SegmentOwner : IDisposable
     /// <summary>
     /// Adds one reference while the owner holds one at least: false, nothing changed, once its count reached zero. For an
     /// owner another thread may let go of meanwhile, a cache's, which a reader then takes no reference of rather than
-    /// failing; never for a pooled owner, which a rental may count again from one.
+    /// failing; never so for a pooled owner, which a rental may count again from one. <see cref="Retain"/> is the same
+    /// step for a caller that must hold a reference, and throws where this says false.
     /// </summary>
     /// <returns>Whether the reference was added.</returns>
     internal bool TryRetain()

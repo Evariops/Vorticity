@@ -86,7 +86,9 @@ internal static class ZstdRegion
 
             ulong declared = header.ReadVarint();
             ReadOnlySpan<byte> frame = bytes[(bytes.Length - header.Remaining)..];
-            if (declared > (ulong)frame.Length * ZstdDecoders.MostExpansion || declared > int.MaxValue)
+            // The body is rented before a byte is decoded: held to what a decode is allowed, as well as to what the frame
+            // can expand to, which lets 64 KiB claim 2 GiB.
+            if (declared > (ulong)frame.Length * ZstdDecoders.MostExpansion || declared > VortexLimits.DefaultMaxDecompressedBytes)
             {
                 return null;
             }
@@ -94,20 +96,23 @@ internal static class ZstdRegion
             int size = (int)declared;
             Block<byte> body = Blocks.Rent<byte>(size);
             ZstdDecompressor decoder = ZstdDecoders.Rent();
+            bool decoded = false;
             try
             {
-                if (decoder.Decompress(frame, body, out _, out int produced) != OperationStatus.Done || produced != size)
-                {
-                    Blocks.Return(body);
-                    return null;
-                }
+                decoded = decoder.Decompress(frame, body, out _, out int produced) == OperationStatus.Done && produced == size;
             }
             finally
             {
                 ZstdDecoders.Return(decoder);
+
+                // A frame refused, or one the decoder threw on, gives its body back either way.
+                if (!decoded)
+                {
+                    Blocks.Return(body);
+                }
             }
 
-            return body;
+            return decoded ? body : null;
         }
         catch (VortexFormatException)
         {

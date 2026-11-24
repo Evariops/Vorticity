@@ -295,7 +295,7 @@ public sealed partial class VortexFile : IAsyncDisposable
                 {
                     await source.DisposeAsync().ConfigureAwait(false);
                 }
-                catch (Exception)
+                catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "file.close_failed_open"))
                 {
                     // Ignored: the open is already failing, and its diagnosis is worth more.
                 }
@@ -412,6 +412,13 @@ public sealed partial class VortexFile : IAsyncDisposable
             // the extension stays because "one suffices" is a claim about that arithmetic and not
             // about the file, and a file may say anything.
             long required = RequiredOffset(in postscript, tailOffset) & startMask;
+            if (fileLength - required > options.MaxFooterBytes)
+            {
+                // The postscript's claim, held to the open's bound before it sizes a read the file keeps for its life.
+                throw new VortexFormatException(
+                    $"The footer segments take the file's last {fileLength - required} bytes, past the {options.MaxFooterBytes} bytes the open allows (VortexOpenOptions.MaxFooterBytes).");
+            }
+
             if (required < tailOffset)
             {
                 long gap = tailOffset - required;
@@ -486,7 +493,7 @@ public sealed partial class VortexFile : IAsyncDisposable
             {
                 tail?.Release();
             }
-            catch (Exception)
+            catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "file.close_failed_open"))
             {
                 // Ignored: the open is already failing.
             }

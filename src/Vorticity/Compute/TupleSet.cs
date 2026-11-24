@@ -71,7 +71,9 @@ internal sealed class TupleSet
         int arity = kinds.Length;
         List<ulong> keys = new List<ulong>(tuples.Values.Length);
         List<byte[]?> bytes = new List<byte[]?>(tuples.Values.Length);
-        Span<ulong> row = stackalloc ulong[arity];
+        // On the stack for a tuple of a few columns, a block of the pool past them.
+        using Scratch<ulong> rowScratch = new Scratch<ulong>(arity, stackalloc ulong[64]);
+        Span<ulong> row = rowScratch.Span;
         int count = 0;
         for (int t = 0; t < tuples.Count; t++)
         {

@@ -74,6 +74,14 @@ namespace Vorticity;
 /// it, and reads from the others' what they keep before it asks the store, keeping none of it again.
 /// </para>
 /// <para>
+/// The cache trusts its disk. What it keeps of a plain object is checked at each read against a checksum, which catches
+/// a file torn or flipped, not one written in its place: whoever can write its directory can make a question read the
+/// bytes they choose, and whoever can read it reads the regions and the data kept there, as their store holds them. The
+/// processes whose caches share a root trust each other the same way. On Unix the cache creates its directories readable
+/// and writable by its user alone; a directory that exists keeps its mode, and on Windows a directory takes its parent's
+/// access rules. A sealed object is apart: its frames are authenticated at each read, and no plaintext of it is kept.
+/// </para>
+/// <para>
 /// Past its capacity, the cache drops entries as S3-FIFO does, by their bytes: a new entry waits in a small
 /// queue, a tenth of the capacity, and only one read again there moves on to the main queue, so a sweep of a
 /// long window passes through without pushing
@@ -209,7 +217,7 @@ public sealed class SynopsisCache : IAsyncDisposable
         CapacityBytes = capacityBytes;
         _regions = new Tier(capacityBytes);
         _data = new Tier(dataCapacityBytes);
-        System.IO.Directory.CreateDirectory(Directory);
+        CreateOwnedDirectory(Directory);
         try
         {
             _lock = new FileStream(Path.Combine(Directory, LockName), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
@@ -240,7 +248,9 @@ public sealed class SynopsisCache : IAsyncDisposable
     /// <remarks>
     /// The directory a cache took outlives it, as a cache's of its own does: the next cache of the root to take it finds
     /// what it kept, and until then the others read it. The caches of a root each keep their own share of the disk, and
-    /// a region two of them read from the store before either kept it lies in both directories.
+    /// a region two of them read from the store before either kept it lies in both directories. The processes that share
+    /// a root trust each other: each reads what the others keep, checked against checksums that a writer of their
+    /// directories could forge.
     /// </remarks>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="capacityBytes"/> is not positive.</exception>
     /// <exception cref="InvalidOperationException">A cache of its own owns the root, or 64 caches share it already.</exception>
@@ -263,7 +273,7 @@ public sealed class SynopsisCache : IAsyncDisposable
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacityBytes);
         ArgumentOutOfRangeException.ThrowIfNegative(dataCapacityBytes);
         string full = Path.GetFullPath(root);
-        System.IO.Directory.CreateDirectory(full);
+        CreateOwnedDirectory(full);
 
         // Held shared by every cache of the root, which a cache of its own, holding it alone, refuses, and is refused.
         FileStream rootLock;
@@ -295,7 +305,43 @@ public sealed class SynopsisCache : IAsyncDisposable
     /// <summary>The directory the cache keeps its entries in.</summary>
     public string Directory { get; }
 
+    /// <summary>
+    /// Creates <paramref name="path"/> and the directories above it that are missing: on Unix, readable, writable and
+    /// searchable by the process's user alone, since a plain object's regions and data lie there as their store holds
+    /// them. A directory that exists keeps its mode.
+    /// </summary>
+    private static void CreateOwnedDirectory(string path)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            System.IO.Directory.CreateDirectory(path);
+            return;
+        }
+
+        if (System.IO.Directory.Exists(path))
+        {
+            return;
+        }
+
+        // The runtime gives the mode to the last directory of a path alone, and the default to those it creates above it:
+        // each missing one is made on its own, from the top down.
+        if (Path.GetDirectoryName(path) is { Length: > 0 } parent)
+        {
+            CreateOwnedDirectory(parent);
+        }
+
+        System.IO.Directory.CreateDirectory(path, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+    }
+
     /// <summary>The bytes of regions the cache keeps at most.</summary>
+    /// <remarks>
+    /// The cache keeps in memory an index of what it holds on the disk: some 400 bytes an entry, and some 250 for each name
+    /// it remembers of an entry it let go. It keeps no more entries, and remembers no more names, than its capacities hold
+    /// blocks of 4 KiB, a file taking one at least on the disk, or 1 024 for a capacity under 4 MiB: past that, its index
+    /// takes at most some 16 % of
+    /// <see cref="CapacityBytes"/> and <see cref="DataCapacityBytes"/>, 1.6 GiB of memory for 10 GiB of disk, less when
+    /// the regions are larger. That memory is the process's, outside any budget of the library's.
+    /// </remarks>
     public long CapacityBytes { get; }
 
     /// <summary>The bytes of data the cache keeps at most, beside its regions, plain objects' segments and sealed ones' frames; 0 when it keeps none.</summary>
@@ -1781,7 +1827,7 @@ public sealed class SynopsisCache : IAsyncDisposable
         string temporary = path + "." + Guid.NewGuid().ToString("N") + TemporaryExtension;
         try
         {
-            System.IO.Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            CreateOwnedDirectory(Path.GetDirectoryName(path)!);
             using (SafeFileHandle file = System.IO.File.OpenHandle(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
             {
                 RandomAccess.Write(file, bytes, 0);
@@ -2163,7 +2209,7 @@ public sealed class SynopsisCache : IAsyncDisposable
     private void Evict(Tier tier, List<Entry> evicted)
     {
         long smallCapacity = Math.Max(1, tier.Capacity / 10);
-        while (tier.Held > tier.Capacity && (tier.Small.Count > 0 || tier.Main.Count > 0))
+        while ((tier.Held > tier.Capacity || tier.Small.Count + tier.Main.Count > tier.MostEntries) && (tier.Small.Count > 0 || tier.Main.Count > 0))
         {
             if (tier.Small.Count > 0 && (tier.SmallHeld >= smallCapacity || tier.Main.Count == 0))
             {
@@ -2179,7 +2225,7 @@ public sealed class SynopsisCache : IAsyncDisposable
                 Evicted(oldest, evicted);
                 tier.Ghosts[oldest.Name] = tier.Ghost.AddFirst((oldest.Name, oldest.Bytes));
                 tier.GhostHeld += oldest.Bytes;
-                while (tier.GhostHeld > tier.Capacity - smallCapacity && tier.Ghost.Last is { } forgotten)
+                while ((tier.GhostHeld > tier.Capacity - smallCapacity || tier.Ghost.Count > tier.MostEntries) && tier.Ghost.Last is { } forgotten)
                 {
                     tier.Ghost.RemoveLast();
                     tier.Ghosts.Remove(forgotten.Value.Name);
@@ -2437,8 +2483,24 @@ public sealed class SynopsisCache : IAsyncDisposable
     /// </summary>
     private sealed class Tier(long capacity)
     {
+        /// <summary>
+        /// A block of the disk, which a file takes one of at least: the capacity holds no more files than it holds blocks,
+        /// and the entries and the ghosts of a tier are as many at most.
+        /// </summary>
+        internal const int EntryFloorBytes = 4096;
+
         /// <summary>The bytes its entries hold at most.</summary>
         internal long Capacity { get; } = capacity;
+
+        /// <summary>The entries a tier keeps whatever its capacity: an index of some 650 KiB, which a small cache keeps by its bytes alone.</summary>
+        internal const int LeastEntries = 1_024;
+
+        /// <summary>
+        /// The entries it keeps at most, and the ghosts: as many as its capacity holds blocks of the disk, and
+        /// <see cref="LeastEntries"/> at the fewest. Bounded by bytes alone, ten gibibytes of regions of a few hundred bytes
+        /// kept tens of millions of entries in memory, each some 400 bytes and each ghost some 250 (measured 2026-11-24).
+        /// </summary>
+        internal long MostEntries { get; } = Math.Max(LeastEntries, capacity / EntryFloorBytes);
 
         internal LinkedList<Entry> Small { get; } = new LinkedList<Entry>();
 

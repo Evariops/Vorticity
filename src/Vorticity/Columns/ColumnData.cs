@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -64,6 +65,7 @@ internal static class ColumnData
         }
     }
 
+    [DoesNotReturn]
     internal static void ThrowRow(int index, int length) =>
         throw new ArgumentOutOfRangeException(nameof(index), index, $"The column has {length} rows.");
 
@@ -90,19 +92,41 @@ internal static class ColumnData
     internal static string? String(CanonicalArena arena, int node, int index) =>
         ArenaWords.IsValid(arena, node, index) ? Encoding.UTF8.GetString(Bytes(arena, node, index)) : null;
 
-    /// <summary>The elements of row <paramref name="index"/> of a list node, as a range of its elements child.</summary>
+    /// <summary>
+    /// The elements of row <paramref name="index"/> of a list node, as a range of its elements child: none for a null row,
+    /// whose offset and size the format leaves undefined.
+    /// </summary>
+    /// <exception cref="VortexFormatException">The row's range does not lie within the elements.</exception>
     internal static Range ListRange(CanonicalArena arena, int node, int index)
     {
         CanonicalNode list = arena.GetNode(node);
         CheckRow(index, list.Length);
-        if (list.Kind == CanonicalKind.FixedSizeList)
+        if (!ArenaWords.IsValid(arena, node, index))
         {
-            int size = (int)list.FixedSize;
-            return new Range(index * size, (index + 1) * size);
+            return default;
         }
 
-        long offset = Integer(list.Offsets.Span, list.OffsetPType, index);
-        long length = Integer(list.Sizes.Span, list.SizePType, index);
+        // Held to the elements in 64 bits: cut to 32 first, an offset past 2^31 named other elements, and nothing compared
+        // the range with the elements there are.
+        long elements = arena.GetNode(list.ElementsIndex).Length;
+        long offset;
+        long length;
+        if (list.Kind == CanonicalKind.FixedSizeList)
+        {
+            length = list.FixedSize;
+            offset = index * length;
+        }
+        else
+        {
+            offset = Integer(list.Offsets.Span, list.OffsetPType, index);
+            length = Integer(list.Sizes.Span, list.SizePType, index);
+        }
+
+        if (offset < 0 || length < 0 || offset > elements - length)
+        {
+            Columns.ColumnsThrow.Format($"List row {index} spans [{offset}, {offset + length}) of its {elements} elements.");
+        }
+
         return new Range((int)offset, (int)(offset + length));
     }
 

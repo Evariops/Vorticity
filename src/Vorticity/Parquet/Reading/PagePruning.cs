@@ -144,7 +144,41 @@ internal static class PagePruning
 
         ScanCounters.Note(metrics, 2 * indexed, bytes);
         await file.Reader.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
-        int batches = (int)((rows + batchRows - 1) / batchRows);
+
+        // A zone a batch a column, sized by the rows the group declares before any page is read:
+        // counted by the scan's account while the pruner reads them.
+        long declared = (rows + batchRows - 1) / batchRows;
+        if (declared > Array.MaxLength)
+        {
+            ParquetThrow.Format($"Row group {group} declares {rows} rows, more batches of {batchRows} than a read holds.");
+        }
+
+        int batches = (int)declared;
+        long held = (long)batches * columns * System.Runtime.CompilerServices.Unsafe.SizeOf<ZoneBounds>();
+        Buffers.MemoryAccount account = requests.Account;
+        if (!account.TryTake(held))
+        {
+            throw account.Refused(held);
+        }
+
+        try
+        {
+            return Prune(filter, group, rows, batchRows, requests, locations, columnSlots, offsetSlots, batches);
+        }
+        finally
+        {
+            account.Give(held);
+        }
+    }
+
+    /// <summary>The live batches of the group from the indexes <see cref="LiveAsync"/> read, at their slots of <paramref name="requests"/>.</summary>
+    private static BlockMask Prune(
+        FilterColumns filter, int group, long rows, int batchRows, SegmentRequestSet requests, PageLocation[]?[]? locations,
+        int[] columnSlots, int[] offsetSlots, int batches)
+    {
+        ParquetFile file = filter.File;
+        ParquetFooter footer = file.Footer;
+        int columns = filter.Columns.Length;
         ZoneColumn[] zones = new ZoneColumn[columns];
         for (int i = 0; i < columns; i++)
         {

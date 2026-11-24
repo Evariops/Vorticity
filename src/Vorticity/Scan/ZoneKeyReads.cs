@@ -433,10 +433,7 @@ internal sealed class ZoneKeyReads
                 ZoneBounds bounds = map.Bounds(zone);
                 if (!bounds.HasNullCount || bounds.NullCount != 0 || !bounds.IsExact || !bounds.HasMin || !bounds.HasMax
                     || (storage.PType.IsFloat() && (!bounds.HasNanCount || bounds.NanCount != 0))
-                    || !Array.TrueForAll(functions, function =>
-                        ZoneSettling.TryMap(function, bounds.Min, out FilterLiteral low)
-                        && ZoneSettling.TryMap(function, bounds.Max, out FilterLiteral high)
-                        && ZoneSettling.Same(low, high)))
+                    || !OneImage(functions, in bounds))
                 {
                     continue;
                 }
@@ -459,6 +456,25 @@ internal sealed class ZoneKeyReads
             }
 
             return Array.Exists(settled, word => word != 0) ? column : null;
+        }
+
+        /// <summary>
+        /// Whether every function gives the zone's two bounds one image: a loop, where a lambda over the bounds made a closure
+        /// and a delegate a zone.
+        /// </summary>
+        private static bool OneImage(FieldExpr[] functions, in ZoneBounds bounds)
+        {
+            foreach (FieldExpr function in functions)
+            {
+                if (!ZoneSettling.TryMap(function, bounds.Min, out FilterLiteral low)
+                    || !ZoneSettling.TryMap(function, bounds.Max, out FilterLiteral high)
+                    || !ZoneSettling.Same(low, high))
+                {
+                    return false;
+                }
+            }
+
+            return true;
         }
 
         /// <summary>The zones <paramref name="rows"/> holds a row of, given no value.</summary>

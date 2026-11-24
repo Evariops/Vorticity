@@ -25,12 +25,16 @@ internal sealed class FileEncryptor : IDisposable
     private readonly ModuleCipher _footer;
     private readonly Dictionary<string, ColumnEncryptor> _columns = new(StringComparer.Ordinal);
 
+    /// <summary>The footer's AAD: on the heap, since its length is the caller's prefix's.</summary>
+    private readonly byte[] _footerAad;
+
     internal FileEncryptor(ParquetEncryption options)
     {
         _options = options;
         _footer = new ModuleCipher(options.FooterKey.Span);
         Unique = RandomNumberGenerator.GetBytes(UniqueBytes);
         FileAad = [.. options.AadPrefix.Span, .. Unique];
+        _footerAad = new byte[FileAad.Length + ModuleAad.SuffixBytes];
     }
 
     /// <summary>Whether the footer is in plaintext, signed.</summary>
@@ -54,8 +58,11 @@ internal sealed class FileEncryptor : IDisposable
 
         if (!_columns.TryGetValue(path, out ColumnEncryptor? column))
         {
+            // A cipher of its own even under the footer's key: a writer of many lanes closes its
+            // columns' pages side by side, and a cipher's state (GCM's context, CTR's counters and
+            // keystream) is one operation's at a time.
             bool footer = key.Key.IsEmpty;
-            column = new ColumnEncryptor(this, footer ? _footer : new ModuleCipher(key.Key.Span), footer, key.KeyMetadata.ToArray(), names, ordinal);
+            column = new ColumnEncryptor(this, new ModuleCipher(footer ? _options.FooterKey.Span : key.Key.Span), footer, key.KeyMetadata.ToArray(), names, ordinal);
             _columns[path] = column;
         }
 
@@ -108,21 +115,19 @@ internal sealed class FileEncryptor : IDisposable
 
         writer.EndStruct(saved);
         writer.Flush();
-        Span<byte> aad = stackalloc byte[FileAad.Length + ModuleAad.SuffixBytes];
-        int length = ModuleAad.Write(aad, FileAad, ModuleType.Footer, -1, -1, -1);
+        int length = ModuleAad.Write(_footerAad, FileAad, ModuleType.Footer, -1, -1, -1);
         Span<byte> module = into.GetSpan(footer.Length + ModuleCipher.GcmOverhead)[..(footer.Length + ModuleCipher.GcmOverhead)];
-        _footer.Encrypt(footer, aad[..length], module);
+        _footer.Encrypt(footer, _footerAad.AsSpan(0, length), module);
         into.Advance(module.Length);
     }
 
     /// <summary>The 28 bytes that sign a plaintext <paramref name="footer"/>: a fresh nonce, and the tag GCM gives the footer under it.</summary>
     internal void Sign(ReadOnlySpan<byte> footer, Span<byte> signature)
     {
-        Span<byte> aad = stackalloc byte[FileAad.Length + ModuleAad.SuffixBytes];
-        int length = ModuleAad.Write(aad, FileAad, ModuleType.Footer, -1, -1, -1);
+        int length = ModuleAad.Write(_footerAad, FileAad, ModuleType.Footer, -1, -1, -1);
         Span<byte> nonce = signature[..ModuleCipher.NonceLength];
         RandomNumberGenerator.Fill(nonce);
-        _footer.Sign(footer, nonce, aad[..length], signature.Slice(ModuleCipher.NonceLength, ModuleCipher.TagLength));
+        _footer.Sign(footer, nonce, _footerAad.AsSpan(0, length), signature.Slice(ModuleCipher.NonceLength, ModuleCipher.TagLength));
     }
 
     public void Dispose()
@@ -182,6 +187,14 @@ internal sealed class ColumnEncryptor : IDisposable
     /// </summary>
     internal int Encrypt(ReadOnlySpan<byte> plaintext, ModuleType type, int rowGroup, int page, IBufferWriter<byte> into)
     {
+        // The AAD holds each ordinal as a 2-byte short: past it, two modules would share an AAD,
+        // which the standard forbids and other readers refuse.
+        if (rowGroup > short.MaxValue || page > short.MaxValue || Ordinal > short.MaxValue)
+        {
+            throw new ParquetUnsupportedException("module ordinal", ParquetComponentKind.Encryption,
+                $"An encrypted file holds at most {short.MaxValue} row groups, columns, and pages a column chunk, as its AAD names each by a 2-byte ordinal; this module is row group {rowGroup}'s, column {Ordinal}'s, page {page}'s.");
+        }
+
         int bytes = plaintext.Length + Overhead(type);
         Span<byte> module = into.GetSpan(bytes)[..bytes];
         if (_file.Ctr && type is ModuleType.DataPage or ModuleType.DictionaryPage)
@@ -227,11 +240,5 @@ internal sealed class ColumnEncryptor : IDisposable
         writer.EndStruct(union);
     }
 
-    public void Dispose()
-    {
-        if (!FooterKey)
-        {
-            _cipher.Dispose();
-        }
-    }
+    public void Dispose() => _cipher.Dispose();
 }

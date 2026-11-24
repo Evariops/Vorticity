@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -168,6 +169,7 @@ internal static class Varint
     internal static int ZigZagDecode32(uint value) => unchecked((int)(value >> 1) ^ -(int)(value & 1));
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowTooShort() =>
         throw new ArgumentException("The destination is shorter than the varint.", "destination");
 }

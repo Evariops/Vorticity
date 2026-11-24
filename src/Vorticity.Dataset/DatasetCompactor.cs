@@ -498,7 +498,8 @@ internal static partial class DatasetCompactor
         // no postings of their identifiers.
         using PartitionPostings? postings = merge && indexed && job.Trigger == CompactionTrigger.Consolidation
             ? new PartitionPostings(
-                schema.Identifiers, dataset.UnitBlocksOf(schema.DType, schema.Identifiers), ColumnNames(schema), dataset.Store is SealedObjectStore { Seals: true })
+                schema.Identifiers, dataset.UnitBlocksOf(schema.DType, schema.Identifiers), ColumnNames(schema), dataset.Store is SealedObjectStore { Seals: true },
+                QueryMemoryBudget.JobsOf(dataset.Session))
             : null;
 
         // Each object it streams is announced to the store as at most what the job reads, times what a job
@@ -1190,17 +1191,30 @@ internal static partial class DatasetCompactor
         VortexDataset dataset, DatasetSchema schema, CompactionJob job, JobMemory memory, CancellationToken cancellationToken)
     {
         int fields = schema.DType.FieldCount;
-        List<ObjectDictionary>?[] held = new List<ObjectDictionary>?[fields];
-        long[] rowBytes = new long[fields];
-        bool first = true;
         foreach (CompactionInput input in job.Inputs)
         {
             if (input.Entry.Contents is not { Dictionaries.Count: > 0 } contents || contents.Dictionaries.Count != fields)
             {
                 return [];
             }
+        }
 
-            ObjectDictionary?[] dictionaries = await dataset.DictionariesAsync(input.Entry, contents, cancellationToken).ConfigureAwait(false);
+        // Every input's dictionaries read side by side, as many at once as the session reads: one request each, whose
+        // latencies added up when they were read one after the other.
+        ObjectDictionary?[][] read = new ObjectDictionary?[job.Inputs.Count][];
+        await Execution.Waits.ForAsync(
+            read.Length,
+            dataset.Session.Options.MaxConcurrentReads,
+            async (i, token) => read[i] = await dataset.DictionariesAsync(job.Inputs[i].Entry, job.Inputs[i].Entry.Contents!, token).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+
+        List<ObjectDictionary>?[] held = new List<ObjectDictionary>?[fields];
+        long[] rowBytes = new long[fields];
+        bool first = true;
+        for (int i = 0; i < read.Length; i++)
+        {
+            CompactionInput input = job.Inputs[i];
+            ObjectDictionary?[] dictionaries = read[i];
             for (int field = 0; field < fields; field++)
             {
                 if (dictionaries[field] is not { } dictionary)
@@ -2591,8 +2605,11 @@ internal static partial class DatasetCompactor
     private static class Censuses
     {
         private const int Most = 32;
-        private static readonly Lock Gate = new Lock();
-        private static readonly Stack<PathCensus> Kept = new Stack<PathCensus>();
+
+        // Kept as memory the registry of kept memory asks back, their blocks given back to the pool as they go: those no job
+        // took since its last turn, and all of them when a reservation needs the room.
+        private static readonly Vorticity.Buffers.KeptObjects<PathCensus> Kept =
+            new Vorticity.Buffers.KeptObjects<PathCensus>("censuses", Most, bytesEach: 0, static census => census.Release());
 
         /// <summary>A census of each of <paramref name="columns"/> variant columns, text bounds cut to <paramref name="textBound"/> bytes, counting nothing.</summary>
         internal static PathCensus[] Rent(int columns, int textBound)
@@ -2600,13 +2617,16 @@ internal static partial class DatasetCompactor
             PathCensus[] censuses = new PathCensus[columns];
             for (int c = 0; c < columns; c++)
             {
-                PathCensus? kept = null;
-                lock (Gate)
+                // The last given back, when it cuts texts at the same bound; kept for another bound otherwise.
+                PathCensus? kept = Kept.Take();
+                if (kept is not null && kept.StringBoundBytes != textBound)
                 {
-                    if (Kept.Count > 0 && Kept.Peek().StringBoundBytes == textBound)
+                    if (!Kept.Give(kept))
                     {
-                        kept = Kept.Pop();
+                        kept.Release();
                     }
+
+                    kept = null;
                 }
 
                 censuses[c] = kept ?? new PathCensus(textBound);
@@ -2615,23 +2635,21 @@ internal static partial class DatasetCompactor
             return censuses;
         }
 
-        /// <summary>Takes <paramref name="censuses"/> back, cleared, those the pool has room for.</summary>
+        /// <summary>Takes <paramref name="censuses"/> back, cleared, those the pool has room for; the others give their blocks back.</summary>
         internal static void Return(PathCensus[] censuses)
         {
             foreach (PathCensus census in censuses)
             {
                 if (census.HeldKeys > 2 * PathCensus.MaxKeys)
                 {
+                    census.Release();
                     continue;
                 }
 
                 census.Clear();
-                lock (Gate)
+                if (!Kept.Give(census))
                 {
-                    if (Kept.Count < Most)
-                    {
-                        Kept.Push(census);
-                    }
+                    census.Release();
                 }
             }
         }
@@ -2788,33 +2806,58 @@ internal static partial class DatasetCompactor
 
         IO.ISegmentReader file = lease.File;
 
+        // Each column's region, the first the table names for it, read in one request set: one after the other, their
+        // round trips added up.
+        IndexSegment?[] wanted = new IndexSegment?[variants.Length];
+        int asked = 0;
+        for (int v = 0; v < variants.Length; v++)
+        {
+            foreach ((int column, IndexSegment region) in regions)
+            {
+                if (column == variants[v])
+                {
+                    wanted[v] = region;
+                    asked++;
+                    break;
+                }
+            }
+        }
+
+        if (asked == 0)
+        {
+            return directories;
+        }
+
         try
         {
+            using IO.SegmentRequestSet requests = new IO.SegmentRequestSet(asked);
+            int[] slots = new int[variants.Length];
             for (int v = 0; v < variants.Length; v++)
             {
-                foreach ((int column, IndexSegment region) in regions)
+                slots[v] = wanted[v] is { } region
+                    ? requests.Add(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0))
+                    : -1;
+            }
+
+            await file.ReadManyAsync(requests, cancellationToken).ConfigureAwait(false);
+            for (int v = 0; v < variants.Length; v++)
+            {
+                if (slots[v] < 0)
                 {
-                    if (column != variants[v])
-                    {
-                        continue;
-                    }
+                    continue;
+                }
 
-                    using Buffers.SegmentOwner bytes = await file
-                        .ReadAsync(new Serialization.Schemas.SegmentSpec(region.Offset, region.Length, region.AlignmentExponent, 0, 0), cancellationToken)
-                        .ConfigureAwait(false);
-                    if (region.Holds(bytes.Buffer.Span) && VariantDirectory.Open(bytes.Buffer.Span) is { } body)
+                ReadOnlySpan<byte> bytes = requests.GetBuffer(slots[v]).Span;
+                if (wanted[v]!.Value.Holds(bytes) && VariantDirectory.Open(bytes) is { } body)
+                {
+                    if (PathCensus.Tells(body))
                     {
-                        if (PathCensus.Tells(body))
-                        {
-                            directories[v] = body;
-                        }
-                        else
-                        {
-                            body.Dispose();
-                        }
+                        directories[v] = body;
                     }
-
-                    break;
+                    else
+                    {
+                        body.Dispose();
+                    }
                 }
             }
         }

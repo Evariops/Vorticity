@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
@@ -68,6 +69,31 @@ internal static class VortexTelemetry
     private static readonly Counter<long> SynopsisCorrupt = Meter.CreateCounter<long>("vortex.synopsis_cache.corrupt", "{region}", "Regions whose file on the disk failed its checksum, dropped and read again.");
     private static readonly UpDownCounter<long> SynopsisHeld = Meter.CreateUpDownCounter<long>("vortex.synopsis_cache.held", "By", "Bytes the synopsis caches hold on the local disk.");
 
+    private static readonly Counter<long> Swallowed = Meter.CreateCounter<long>(
+        "vortex.failures.swallowed", "{failure}",
+        "Failures a path of comfort let go, a read ahead, a cache, a give-back, a periodic vacuum, by where: one that repeats shows here, where it slowed the work and stopped nothing.");
+
+    /// <summary>
+    /// Whether a path of comfort lets <paramref name="failure"/> go, where nobody waits for it and the work goes on without:
+    /// any failure but an out-of-memory, which goes on to what the process does with it, kept quiet nowhere. One let go is
+    /// counted by <paramref name="site"/> where something listens, so that a failure that repeats is seen.
+    /// </summary>
+    /// <remarks>An exception filter: <c>catch (Exception e) when (VortexTelemetry.LetsGo(e, "…"))</c>, which leaves the rest uncaught.</remarks>
+    internal static bool LetsGo(Exception failure, string site)
+    {
+        if (failure is OutOfMemoryException)
+        {
+            return false;
+        }
+
+        if (Swallowed.Enabled)
+        {
+            Swallowed.Add(1, new KeyValuePair<string, object?>("vortex.site", site));
+        }
+
+        return true;
+    }
+
     // The memory the library holds, by sort, read when a listener collects: the same numbers as MemoryReport.
     private static readonly ObservableGauge<long> MemoryLimit = Meter.CreateObservableGauge(
         "vortex.memory.limit", static () => QueryMemoryBudget.ProcessLimit(), "By", "The limit the process is held to.");
@@ -127,10 +153,9 @@ internal static class VortexTelemetry
     internal static void ScanEnded(ScanCounters metrics, Activity? activity)
     {
         // Each instrument on its own: a listener may enable some and not others, and an Add to an
-        // instrument nobody listens to returns at once.
+        // instrument nobody listens to returns at once. The requests were counted as they were made
+        // (Requested).
         Rows.Add(metrics.Rows);
-        Requests.Add(metrics.SegmentRequests);
-        BytesRequested.Add(metrics.BytesRequested);
         BlocksDecoded.Add(metrics.BlocksDecoded);
         BlocksPruned.Add(metrics.BlocksPruned);
 
@@ -144,6 +169,19 @@ internal static class VortexTelemetry
             activity.SetTag("vortex.blocks_pruned", metrics.BlocksPruned);
             activity.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Segments a scan asked its source for, and their bytes, as it asks: the meter's <c>vortex.scan.requests</c> and
+    /// <c>vortex.scan.bytes_requested</c>, and the event source's <c>segments-requested</c> and <c>bytes-requested</c>.
+    /// One hook for both channels, so that they count the same requests: the meter counted them at a scan's end, from
+    /// the scans that end through a sink alone, and the event source as each split asked.
+    /// </summary>
+    internal static void Requested(long segments, long bytes)
+    {
+        Requests.Add(segments);
+        BytesRequested.Add(bytes);
+        Diagnostics.VortexEventSource.Requested(segments, bytes);
     }
 
     internal static void CacheHit(int count) => CacheHits.Add(count);

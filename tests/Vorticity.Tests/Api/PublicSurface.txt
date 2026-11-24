@@ -729,6 +729,7 @@ Vorticity:     method Columns<TNested> Struct<TNested>(int)
 Vorticity:     method ListColumns<TNested> ListOf<TNested>(int)
 Vorticity:     method MapColumns<TKey, TValue> MapOf<TKey, TValue>(int)
 Vorticity:     method RecordBatch ToOwned()
+Vorticity:     method Span<TMember> Scratch<TMember>(int, int)
 Vorticity:     method bool IsValid(int)
 Vorticity:     property ReadOnlySpan<ulong> ValidityWords { get; }
 Vorticity:     property Selection Selection { get; }
@@ -747,6 +748,7 @@ Vorticity:     property int RowCount { get; }
 Vorticity: sealed class Vorticity.ColumnsBuilder<TRecord> : ColumnsBuilder
 Vorticity:     method ColumnsBuilder<TNested> Struct<TNested>(int)
 Vorticity:     method ListColumnsBuilder<TNested> ListOf<TNested>(int)
+Vorticity:     method Span<TMember> Scratch<TMember>(int, int)
 Vorticity: enum Vorticity.ComponentKind
 Vorticity:     const ComponentKind Aggregate = 3
 Vorticity:     const ComponentKind Array = 0
@@ -2834,6 +2836,7 @@ Vorticity:     property VortexTornTailPolicy TornTail { get; init; }
 Vorticity:     property bool IndexFragmentsNeedIdentity { get; init; }
 Vorticity:     property bool VerifyStatistics { get; init; }
 Vorticity:     property int InitialReadBytes { get; init; }
+Vorticity:     property int MaxFooterBytes { get; init; }
 Vorticity:     property long MaxDecompressedBytes { get; init; }
 Vorticity: sealed class Vorticity.VortexRecordAttribute : Attribute
 Vorticity:     ctor VortexRecordAttribute()

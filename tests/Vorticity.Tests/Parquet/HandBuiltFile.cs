@@ -368,6 +368,57 @@ internal sealed class HandBuiltFile
             return Add(page.WrittenSpan.ToArray(), definition.Length);
         }
 
+        /// <summary>
+        /// Adds a dictionary page, PLAIN, that declares <paramref name="entries"/> entries whatever its
+        /// <paramref name="values"/> hold: a hostile file's, to hold the reader to the count it trusts.
+        /// </summary>
+        internal Column Dictionary(int entries, byte[] values)
+        {
+            Encodings.Add(ParquetEncoding.RleDictionary);
+            ArrayBufferWriter<byte> page = new();
+            ThriftCompactWriter writer = new(page);
+            short header = writer.BeginStruct();
+            writer.WriteI32Field(1, (int)PageType.DictionaryPage);
+            writer.WriteI32Field(2, values.Length);
+            writer.WriteI32Field(3, values.Length);
+            short dictionary = writer.BeginStructField(7);
+            writer.WriteI32Field(1, entries);
+            writer.WriteI32Field(2, (int)ParquetEncoding.Plain);
+            writer.EndStruct(dictionary);
+            writer.EndStruct(header);
+            writer.Flush();
+            page.Write(values);
+            return Add(page.WrittenSpan.ToArray(), 0);
+        }
+
+        /// <summary>
+        /// Adds a v2 page of a required flat column that declares <paramref name="rows"/> rows whatever
+        /// its <paramref name="values"/>, of <paramref name="encoding"/>, hold.
+        /// </summary>
+        internal Column Declared(int rows, byte[] values, ParquetEncoding encoding)
+        {
+            Encodings.Add(encoding);
+            ArrayBufferWriter<byte> page = new();
+            ThriftCompactWriter writer = new(page);
+            short header = writer.BeginStruct();
+            writer.WriteI32Field(1, (int)PageType.DataPageV2);
+            writer.WriteI32Field(2, values.Length);
+            writer.WriteI32Field(3, values.Length);
+            short data = writer.BeginStructField(8);
+            writer.WriteI32Field(1, rows);
+            writer.WriteI32Field(2, 0);
+            writer.WriteI32Field(3, rows);
+            writer.WriteI32Field(4, (int)encoding);
+            writer.WriteI32Field(5, 0);
+            writer.WriteI32Field(6, 0);
+            writer.WriteBooleanField(7, false);
+            writer.EndStruct(data);
+            writer.EndStruct(header);
+            writer.Flush();
+            page.Write(values);
+            return Add(page.WrittenSpan.ToArray(), rows);
+        }
+
         private Column Add(byte[] page, int values)
         {
             Pages.Add(page);

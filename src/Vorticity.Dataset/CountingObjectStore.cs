@@ -14,6 +14,10 @@ namespace Vorticity.Dataset;
 /// Wraps a store and records what passes through it, including a lower bound on how many round
 /// trips the caller waited for one after another: the number a read budget is held to.
 /// </summary>
+/// <remarks>
+/// Public on purpose: it wraps any store, a production one included, to measure what an
+/// application's reads and writes cost in requests and bytes. It counts under a lock of its own.
+/// </remarks>
 public sealed class CountingObjectStore : IObjectStore
 {
     private readonly IObjectStore _inner;

@@ -126,6 +126,7 @@ internal static class HyperLogLog
         if (bytes.Length == 1 + (ranks.Length * 3 / 4) && bytes[0] == 1)
         {
             Unpack(bytes[1..], ranks);
+            RequireRanks(ranks, ranks.Length);
             return;
         }
 
@@ -145,13 +146,38 @@ internal static class HyperLogLog
         {
             Block<byte> rented = ranks.Length > 4_096 ? Blocks.Rent<byte>(ranks.Length) : default;
             Span<byte> other = rented.IsEmpty ? stackalloc byte[ranks.Length] : rented;
-            Unpack(bytes[1..], other);
-            Highest(other, ranks);
-            Blocks.Return(rented);
+            try
+            {
+                other = other[..ranks.Length];
+                Unpack(bytes[1..], other);
+                RequireRanks(other, ranks.Length);
+                Highest(other, ranks);
+            }
+            finally
+            {
+                Blocks.Return(rented);
+            }
+
             return;
         }
 
         RaiseSparse(bytes, ranks);
+    }
+
+    /// <summary>
+    /// The highest rank a register of a sketch of <paramref name="registers"/> registers can hold: the 64 bits of a hash
+    /// past its index's, plus one. A count by rank has a slot up to it, and no further.
+    /// </summary>
+    private static int MostRank(int registers) => 65 - BitOperations.Log2((uint)registers);
+
+    /// <summary>Refuses registers read from bytes that hold a rank past what a sketch of <paramref name="registers"/> registers can.</summary>
+    /// <exception cref="VortexFormatException">A rank passes it.</exception>
+    internal static void RequireRanks(ReadOnlySpan<byte> ranks, int registers)
+    {
+        if (ranks.IndexOfAnyInRange((byte)(MostRank(registers) + 1), byte.MaxValue) >= 0)
+        {
+            throw new VortexFormatException($"Registers of a sketch hold a rank past the {MostRank(registers)} its {registers} registers allow.");
+        }
     }
 
     /// <summary>Raises each of <paramref name="ranks"/> to <paramref name="other"/>'s register where that one is higher.</summary>
@@ -179,16 +205,25 @@ internal static class HyperLogLog
         ulong set = bytes.Length > 0 && bytes[0] == 0
             ? Serialization.Varint.Read64<Errors>(bytes, ref at)
             : throw new VortexFormatException("Registers of a sketch are in no form this library reads.");
+        int most = MostRank(ranks.Length);
         long register = 0;
         for (ulong i = 0; i < set; i++)
         {
-            register += (long)Serialization.Varint.Read64<Errors>(bytes, ref at);
-            if (register >= ranks.Length || at >= bytes.Length)
+            // The gap is compared before it is added: a gap past 2^63 would turn the register negative.
+            ulong gap = Serialization.Varint.Read64<Errors>(bytes, ref at);
+            if (gap >= (ulong)(ranks.Length - register) || at >= bytes.Length)
             {
                 throw new VortexFormatException("Registers of a sketch name one past their count.");
             }
 
-            ranks[(int)register] = Math.Max(ranks[(int)register], bytes[at++]);
+            register += (long)gap;
+            byte rank = bytes[at++];
+            if (rank > most)
+            {
+                throw new VortexFormatException($"Registers of a sketch hold a rank of {rank}, past the {most} its {ranks.Length} registers allow.");
+            }
+
+            ranks[(int)register] = Math.Max(ranks[(int)register], rank);
         }
     }
 

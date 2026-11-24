@@ -345,7 +345,8 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
 
         if (_tail is null || _tailUsed + data.Length > _tail.Length)
         {
-            byte[] grown = Blocks.Rent<byte>(Math.Max(_tailUsed + data.Length, Math.Max((_tail?.Length ?? 0) * 2, 64 << 10))).Array();
+            // Up to MostTailBytes an object written, counted in the sink's account.
+            byte[] grown = Blocks.Rent<byte>(_account, Math.Max(_tailUsed + data.Length, Math.Max((_tail?.Length ?? 0) * 2, 64 << 10))).Array();
             _tail?.AsSpan(0, _tailUsed).CopyTo(grown);
             ReleaseTail();
             _tail = grown;
@@ -359,7 +360,7 @@ internal sealed class ObjectSegmentSink : ISegmentSink, IAsyncDisposable
     {
         if (_tail is not null)
         {
-            Blocks.ReturnBytes(_tail);
+            Blocks.Return(_account, new Block<byte>(_tail, _tail.Length));
             _tail = null;
         }
     }

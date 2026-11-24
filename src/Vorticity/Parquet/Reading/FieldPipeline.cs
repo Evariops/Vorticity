@@ -172,7 +172,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IValueTaskSource<int>
     /// Completes once every field of batch <paramref name="batch"/> is decoded, with the slot its nodes lie in; rethrows
     /// the first error a field met.
     /// </summary>
-    internal ValueTask<int> WaitAsync(int batch)
+    internal ValueTask<int> WaitAsync(int batch, CancellationToken cancellationToken)
     {
         int slot = batch % Slots;
         lock (_gate)
@@ -183,7 +183,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IValueTaskSource<int>
                 // for one, holding none, and starts a runner on it.
                 if (_runners == 0 && _runnable.Count > 0)
                 {
-                    return RunnerThenWaitAsync(batch);
+                    return RunnerThenWaitAsync(batch, cancellationToken);
                 }
 
                 _ready.Reset();
@@ -201,10 +201,13 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IValueTaskSource<int>
         }
     }
 
-    /// <summary>Waits for a lane of the session's, starts a runner on it unless one started meanwhile, then waits for <paramref name="batch"/>.</summary>
-    private async ValueTask<int> RunnerThenWaitAsync(int batch)
+    /// <summary>
+    /// Waits for a lane of the session's, starts a runner on it unless one started meanwhile, then waits for
+    /// <paramref name="batch"/>; a scan cancelled while every lane is held stops waiting for one.
+    /// </summary>
+    private async ValueTask<int> RunnerThenWaitAsync(int batch, CancellationToken cancellationToken)
     {
-        long entered = await _session.EnterAsync(CancellationToken.None).ConfigureAwait(false);
+        long entered = await _session.EnterAsync(cancellationToken).ConfigureAwait(false);
         bool start;
         lock (_gate)
         {
@@ -226,7 +229,7 @@ internal sealed class FieldPipeline : IThreadPoolWorkItem, IValueTaskSource<int>
             _session.Exit(entered);
         }
 
-        return await WaitAsync(batch).ConfigureAwait(false);
+        return await WaitAsync(batch, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Field <paramref name="field"/>'s node in slot <paramref name="slot"/>, and the context whose arena holds it.</summary>

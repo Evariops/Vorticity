@@ -213,8 +213,8 @@ internal static class ExtensionDTypeRegistry
     /// <returns>The parsed options; <see cref="TimestampOptions.TimeZoneUtf8"/> points into
     /// <paramref name="metadata"/>.</returns>
     /// <exception cref="VortexFormatException">
-    /// The metadata is shorter than 3 bytes, the unit is undefined, the timezone length overruns,
-    /// the timezone is not valid UTF-8, or the storage dtype is not <c>i64</c>.
+    /// The metadata is shorter than 3 bytes, the unit is undefined or <c>Days</c>, the timezone
+    /// length overruns, the timezone is not valid UTF-8, or the storage dtype is not <c>i64</c>.
     /// </exception>
     public static TimestampOptions ReadTimestamp(ReadOnlySpan<byte> metadata, DType storage)
     {
@@ -241,8 +241,13 @@ internal static class ExtensionDTypeRegistry
             ArraysThrow.Format("vortex.timestamp's timezone is not valid UTF-8.");
         }
 
-        // Every unit stores i64, TimeUnit::Days included: Days passes DType validation upstream and
-        // fails only when a value is unpacked.
+        // Days has no instant: the reference refuses it as it validates the type, since 0.93, where
+        // 0.90 failed only when a value was unpacked.
+        if (unit == VortexTimeUnit.Days)
+        {
+            ThrowUnit<PType>("vortex.timestamp", unit, "s, ms, µs or ns");
+        }
+
         RequirePrimitiveStorage(storage, PType.I64, "vortex.timestamp", unit);
         return new TimestampOptions(unit, tzLength != 0, zone);
     }

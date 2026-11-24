@@ -58,11 +58,25 @@ public sealed class CredentialChainTests
         Assert.Equal(("arn:aws:iam::123:role/reader", "jwt-1"), (host.Requests[0].Form["RoleArn"], host.Requests[0].Form["WebIdentityToken"]));
         Assert.Same(first, await chain.GetAsync(ct));
 
-        // Within five minutes of the expiry, the keys are renewed, the rotated file read again.
+        // Within five minutes of the expiry, the keys still valid serve while they are renewed behind, the rotated file read
+        // again.
         host.Files["/var/run/token"] = "jwt-2";
         host.Clock.Advance(TimeSpan.FromMinutes(56));
-        Assert.Equal("ASIA2", (await chain.GetAsync(ct))!.AccessKeyId);
+        Assert.Equal("ASIA2", await RenewedAsync(async () => (await chain.GetAsync(ct))!.AccessKeyId, "ASIA2"));
         Assert.Equal("jwt-2", host.Requests[1].Form["WebIdentityToken"]);
+    }
+
+    /// <summary>What <paramref name="read"/> gives once it gives <paramref name="renewed"/>, a renewal behind the requests ended.</summary>
+    private static async Task<string> RenewedAsync(Func<Task<string>> read, string renewed)
+    {
+        string value = await read();
+        for (int i = 0; i < 3_000 && value != renewed; i++)
+        {
+            await Task.Delay(10, TestContext.Current.CancellationToken);
+            value = await read();
+        }
+
+        return value;
     }
 
     [Fact]
@@ -121,6 +135,31 @@ public sealed class CredentialChainTests
             : null;
         AwsChain chain = new AwsChain(host.Build());
         Assert.Equal("ASIAPOD", (await chain.GetAsync(TestContext.Current.CancellationToken))!.AccessKeyId);
+    }
+
+    /// <summary>
+    /// An answer whose expiry is no date, null or past the calendar, is a malformed answer: an <see cref="ObjectStoreException"/>,
+    /// where the parser's argument errors escaped the readers' filters.
+    /// </summary>
+    [Theory]
+    [InlineData("{\"AccessKeyId\":\"ASIA\",\"SecretAccessKey\":\"s\",\"Token\":\"t\",\"Expiration\":null}")]
+    [InlineData("{\"access_token\":\"x\",\"expires_in\":1e30}")]
+    [InlineData("{\"access_token\":\"x\",\"expires_on\":99999999999999999}")]
+    public async Task AnAnswerWhoseExpiryIsNoDateIsMalformed(string answer)
+    {
+        FakeHost host = new FakeHost();
+        host.Env["AWS_CONTAINER_CREDENTIALS_FULL_URI"] = "http://169.254.170.23/v1/credentials";
+        host.Env["AWS_CONTAINER_AUTHORIZATION_TOKEN"] = "container-token";
+        host.Answer = _ => Ok(answer);
+        if (answer.Contains("AccessKeyId", StringComparison.Ordinal))
+        {
+            AwsChain chain = new AwsChain(host.Build());
+            await Assert.ThrowsAsync<ObjectStoreException>(async () => await chain.GetAsync(TestContext.Current.CancellationToken));
+        }
+        else
+        {
+            Assert.Throws<ObjectStoreException>(() => host.Build().ParseToken(Encoding.UTF8.GetBytes(answer), "The token endpoint"));
+        }
     }
 
     [Theory]
@@ -240,9 +279,10 @@ public sealed class CredentialChainTests
         Assert.Equal("t-federated-1", (await chain.GetAsync(ct)).Bearer);
         Assert.Equal("urn:ietf:params:oauth:client-assertion-type:jwt-bearer", host.Requests[0].Form["client_assertion_type"]);
 
+        // In the margin, the token still valid serves while the next is exchanged behind, the file read again.
         host.Files["/var/run/azure-token"] = "federated-2";
         host.Clock.Advance(TimeSpan.FromMinutes(56));
-        Assert.Equal("t-federated-2", (await chain.GetAsync(ct)).Bearer);
+        Assert.Equal("t-federated-2", await RenewedAsync(async () => (await chain.GetAsync(ct)).Bearer!, "t-federated-2"));
     }
 
     [Theory]
@@ -371,6 +411,30 @@ public sealed class CredentialChainTests
         GoogleChain chain = new GoogleChain(host.Build());
         Assert.Equal("impersonated", await chain.GetAsync(TestContext.Current.CancellationToken));
         Assert.Equal(2, host.Requests.Count);
+    }
+
+    /// <summary>
+    /// An external account whose token service or impersonation is off its universe, or not HTTPS, is refused before any
+    /// token is sent: a credentials file from another hand would send the federated token where it likes.
+    /// </summary>
+    [Theory]
+    [InlineData("\"token_url\":\"https://sts.attacker.example/v1/token\"")]
+    [InlineData("\"token_url\":\"http://sts.googleapis.com/v1/token\"")]
+    [InlineData("\"service_account_impersonation_url\":\"https://googleapis.com.attacker.example/generate\"")]
+    [InlineData("\"universe_domain\":\"sovereign.example\"")]
+    public async Task AnExternalAccountSendsItsTokenWithinItsUniverseAlone(string named)
+    {
+        FakeHost host = new FakeHost();
+        host.Env["GOOGLE_APPLICATION_CREDENTIALS"] = "/secrets/wif.json";
+        host.Files["/var/run/oidc"] = "{\"id_token\":\"oidc-subject\"}";
+        host.Files["/secrets/wif.json"] =
+            "{\"type\":\"external_account\",\"audience\":\"//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/k\"," +
+            "\"subject_token_type\":\"urn:ietf:params:oauth:token-type:jwt\"," + named + "," +
+            "\"credential_source\":{\"file\":\"/var/run/oidc\",\"format\":{\"type\":\"json\",\"subject_token_field_name\":\"id_token\"}}}";
+        host.Answer = _ => Ok("{\"access_token\":\"federated\",\"expires_in\":3600}");
+        GoogleChain chain = new GoogleChain(host.Build());
+        await Assert.ThrowsAsync<ObjectStoreException>(async () => await chain.GetAsync(TestContext.Current.CancellationToken));
+        Assert.Empty(host.Requests);
     }
 
     private static HttpResponseMessage Ok(string body) => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8) };

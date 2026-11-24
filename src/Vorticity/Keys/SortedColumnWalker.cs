@@ -29,6 +29,8 @@ internal sealed class SortedColumnWalker : KeySource
 
     internal override int Runs => 1;
 
+    internal override int CompareKeys(FilterLiteral left, FilterLiteral right) => _source.Compare(left, right);
+
     internal override bool IsValid => _entry >= 0;
 
     internal override FilterLiteral Key => _source.LoadedKey(_entry);

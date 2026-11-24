@@ -14,13 +14,17 @@ public readonly ref struct ListColumns<TRecord>
 {
     private readonly RecordBatch _batch;
     private readonly RecordBinding _elements;
+    private readonly RecordScratch? _scratch;
+    private readonly int _depth;
 
-    internal ListColumns(RecordBatch batch, CanonicalArena arena, int node, RecordBinding elements)
+    internal ListColumns(RecordBatch batch, CanonicalArena arena, int node, RecordBinding elements, RecordScratch? scratch = null, int depth = 1)
     {
         _batch = batch;
         Arena = arena;
         Node = EncodedForms.Canonical(arena, node);
         _elements = elements;
+        _scratch = scratch;
+        _depth = depth;
     }
 
     internal CanonicalArena Arena { get; }
@@ -48,5 +52,5 @@ public readonly ref struct ListColumns<TRecord>
 
     /// <summary>Every row's elements, contiguous, in row order, as the columns of <typeparamref name="TRecord"/>.</summary>
     public Columns<TRecord> Elements =>
-        new Columns<TRecord>(_batch, Arena, ColumnData.Elements(Arena, Node), _elements, startRow: 0, selection: default, selected: 0, projected: false);
+        new Columns<TRecord>(_batch, Arena, ColumnData.Elements(Arena, Node), _elements, startRow: 0, selection: default, selected: 0, projected: false, _scratch, _depth);
 }

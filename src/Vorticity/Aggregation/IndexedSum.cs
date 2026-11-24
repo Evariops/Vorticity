@@ -89,6 +89,25 @@ internal struct IndexedSum : IFloatSumState<IndexedSum>
     /// <summary>The meta word of the parts <see cref="PartsOf"/> gives.</summary>
     internal static long MetaOf(long count, int top, int infinities) => count | ((long)top << TopShift) | ((long)infinities << 56);
 
+    /// <summary>
+    /// <paramref name="meta"/>, a sum's word of count, top and infinities read from bytes, held to what a sum writes: a
+    /// top among the bins the extractors' tables hold, a count within <see cref="Endurance"/>, no bit past the flags.
+    /// A state a file or a partial gives is adopted whole by a merge, and rows folded in after read the tables at its top,
+    /// by reference: a top past them read past the tables.
+    /// </summary>
+    /// <exception cref="Vorticity.VortexFormatException">The word is not one a sum writes.</exception>
+    internal static long CheckedMeta(long meta)
+    {
+        long top = (meta & TopMask) >>> TopShift;
+        long count = meta & CountMask;
+        if (top > MaxTop || count > Endurance || (meta & ~(CountMask | TopMask | PositiveInfinity | NegativeInfinity)) != 0)
+        {
+            throw new Vorticity.VortexFormatException($"A float sum's state names bin {top} and {count} values, past the {MaxTop} bins and {Endurance} values a sum holds.");
+        }
+
+        return meta;
+    }
+
     /// <summary>The bin the largest value called for, the highest of the three; 0 before the first finite value.</summary>
     internal readonly int Top => (int)((Meta & TopMask) >>> TopShift);
 

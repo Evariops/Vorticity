@@ -617,6 +617,36 @@ public sealed class SortedRunsCursorTests
     }
 
     /// <summary>
+    /// A plan the dictionaries serve is drawn from the index directory and the file's tree: no chunk is read to say which
+    /// source would serve, where opening the source to plan read every chunk the probe claims and dropped them.
+    /// </summary>
+    [Fact]
+    public async Task ADictionaryPlanReadsNoChunk()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        ReadsCounted? counted = null;
+        await using Written written = await Written.CreateAsync(IndexSpec.Auto, source => counted = new ReadsCounted(source));
+        int served = 0;
+        foreach (string column in (string[])[.. Names, "label"])
+        {
+            // The directory once read, the plan itself reads nothing.
+            await written.File.Keys(column).Distinct().WithSource(KeySourceKind.Dictionary).ExplainAsync(ct);
+            long before = counted!.Sets;
+            KeyPlan plan = await written.File.Keys(column).Distinct().WithSource(KeySourceKind.Dictionary).ExplainAsync(ct);
+            if (plan.Source != KeySourceKind.Dictionary)
+            {
+                continue;
+            }
+
+            Assert.Equal(before, counted.Sets);
+            served++;
+        }
+
+        Assert.True(served >= 2, $"{served} columns served by their dictionaries");
+    }
+
+    /// <summary>
     /// A distinct walk the dictionaries serve opens with its column's chunks read a batch at a time: the twelve chunks in a
     /// read or two, where a read awaited for each chunk was twelve round trips, one after another.
     /// </summary>

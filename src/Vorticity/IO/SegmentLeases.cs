@@ -33,6 +33,7 @@ internal static class SegmentLeases
         }
 
         SegmentRequestSet set = new SegmentRequestSet(Math.Max(ranges.Length, 1));
+        int written = 0;
         try
         {
             int[] slots = new int[ranges.Length];
@@ -42,11 +43,22 @@ internal static class SegmentLeases
             }
 
             await reader.ReadManyAsync(set, cancellationToken).ConfigureAwait(false);
-            for (int i = 0; i < slots.Length; i++)
+            for (; written < slots.Length; written++)
             {
-                SegmentOwner owner = set.GetOwner(slots[i]).Retain();
-                leases.Span[i] = SegmentOwnerMemory.Lease(owner, set.GetBuffer(slots[i]));
+                SegmentOwner owner = set.GetOwner(slots[written]).Retain();
+                leases.Span[written] = SegmentOwnerMemory.Lease(owner, set.GetBuffer(slots[written]));
             }
+        }
+        catch
+        {
+            // As the contract says: on failure no lease is left, those written disposed in their slots and the slots default.
+            for (int i = 0; i < written; i++)
+            {
+                leases.Span[i].Dispose();
+                leases.Span[i] = default;
+            }
+
+            throw;
         }
         finally
         {

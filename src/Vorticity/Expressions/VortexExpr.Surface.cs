@@ -24,8 +24,8 @@ public abstract class VortexExpr
     /// <summary>
     /// Parses the filter grammar: comparisons (<c>=</c>, <c>!=</c>, <c>&lt;</c>, <c>&lt;=</c>,
     /// <c>&gt;</c>, <c>&gt;=</c>) of a column with a literal or another column, <c>and</c>, <c>or</c>,
-    /// <c>not</c>, parentheses, <c>in (…)</c>, <c>is [not] null</c>, <c>like</c>, <c>starts with</c>
-    /// and <c>contains</c>.
+    /// <c>not</c>, parentheses, <c>in (…)</c>, <c>is [not] null</c>, <c>like</c>, <c>starts with</c>,
+    /// <c>has token</c> and <c>contains</c>.
     /// </summary>
     /// <param name="text">The filter, e.g. <c>day &gt;= 900 and city = 'Paris'</c>.</param>
     /// <returns>The filter.</returns>
@@ -64,6 +64,10 @@ public abstract class VortexExpr
 
     /// <summary>The filter in the grammar <see cref="Parse"/> reads.</summary>
     /// <returns>The text.</returns>
+    /// <remarks>
+    /// A membership built over typed values the grammar has no literal for, dates, instants, ids or decimals, prints them
+    /// as quoted text: the text reads as the filter, but parses back as a membership of text.
+    /// </remarks>
     public override string ToString() => ExprText.Format(this);
 
     /// <summary>What this node is, so a consumer can switch without a type test.</summary>

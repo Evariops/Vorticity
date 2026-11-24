@@ -53,8 +53,11 @@ public sealed class StoreTransportOptions
     /// whole.
     /// </summary>
     /// <remarks>
-    /// A put of bytes already in memory is never spooled. Each put takes a file of its own, deleted when
-    /// the put ends, and its upload starts once its content has ended.
+    /// A put of bytes already in memory is never spooled. Each put takes a file of its own, named
+    /// <c>vorticity-put-*.spool</c>, deleted when the put and the last request sending it end, and its upload
+    /// starts once its content has ended. A process that dies meanwhile leaves its files: nothing sweeps
+    /// them, since another process may share the directory, and a file older than the process's start
+    /// can be deleted.
     /// </remarks>
     public string? SpoolDirectory { get; init; }
 

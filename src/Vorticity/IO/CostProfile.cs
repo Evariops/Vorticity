@@ -8,13 +8,36 @@ namespace Vorticity.IO;
 /// Where some bytes lie and what reaching them costs: a round trip's latency, the requests in flight, the bytes a second.
 /// A request is worth the bytes the link carries during its share of the latency, <c>L × D / Q</c>.
 /// </summary>
-/// <param name="Latency">A request's round trip.</param>
+/// <param name="Latency">A request's round trip, zero or more.</param>
 /// <param name="InFlight">The requests in flight at once, one at least.</param>
-/// <param name="BytesPerSecond">The bytes a second the tier delivers.</param>
+/// <param name="BytesPerSecond">The bytes a second the tier delivers, finite and above zero.</param>
+/// <exception cref="ArgumentOutOfRangeException">A value is outside its range: a rate of zero divided a prediction by zero.</exception>
 public sealed record CostTier(TimeSpan Latency, int InFlight, double BytesPerSecond)
 {
+    private readonly TimeSpan _latency = CheckLatency(Latency);
+    private readonly int _inFlight = CheckInFlight(InFlight);
+    private readonly double _bytesPerSecond = CheckRate(BytesPerSecond);
+
+    /// <summary>A request's round trip, zero or more.</summary>
+    public TimeSpan Latency { get => _latency; init => _latency = CheckLatency(value); }
+
+    /// <summary>The requests in flight at once, one at least.</summary>
+    public int InFlight { get => _inFlight; init => _inFlight = CheckInFlight(value); }
+
+    /// <summary>The bytes a second the tier delivers, finite and above zero.</summary>
+    public double BytesPerSecond { get => _bytesPerSecond; init => _bytesPerSecond = CheckRate(value); }
+
     /// <summary>The bytes a request's round trip is worth: what the link carries during its share of the latency.</summary>
-    public long RequestBytes => (long)Math.Round(Latency.TotalSeconds * BytesPerSecond / Math.Max(InFlight, 1));
+    public long RequestBytes => (long)Math.Round(Latency.TotalSeconds * BytesPerSecond / InFlight);
+
+    private static TimeSpan CheckLatency(TimeSpan value) =>
+        value >= TimeSpan.Zero ? value : throw new ArgumentOutOfRangeException(nameof(Latency), value, "A round trip takes no time or some.");
+
+    private static int CheckInFlight(int value) =>
+        value >= 1 ? value : throw new ArgumentOutOfRangeException(nameof(InFlight), value, "One request at least is in flight.");
+
+    private static double CheckRate(double value) =>
+        double.IsFinite(value) && value > 0 ? value : throw new ArgumentOutOfRangeException(nameof(BytesPerSecond), value, "A tier delivers some bytes a second.");
 }
 
 /// <summary>How a value is encoded, by what reading it costs the processor (spec B, 2.1).</summary>
@@ -94,26 +117,57 @@ public sealed record CostProfile
     /// <summary>A store in memory's profile.</summary>
     public static CostProfile Memory { get; } = new CostProfile { Store = MemoryTier };
 
+    private readonly CostTier _store = RemoteTier;
+    private readonly CostTier _diskCache = LocalTier;
+    private readonly CostTier _memoryCache = MemoryTier;
+    private readonly int _maxRequestBytes = 8 << 20;
+    private readonly double _foldValuesPerSecond = 5e9;
+    private readonly int _cores = Environment.ProcessorCount;
+    private readonly IReadOnlyList<ProcessorPrice> _prices = DefaultPrices;
+
     /// <summary>Where the objects lie.</summary>
-    public CostTier Store { get; init; } = RemoteTier;
+    public CostTier Store { get => _store; init => _store = value ?? throw new ArgumentNullException(nameof(Store)); }
 
     /// <summary>Where a cache on disk holds its regions: the local tier by default.</summary>
-    public CostTier DiskCache { get; init; } = LocalTier;
+    public CostTier DiskCache { get => _diskCache; init => _diskCache = value ?? throw new ArgumentNullException(nameof(DiskCache)); }
 
     /// <summary>Where a cache in memory holds its regions.</summary>
-    public CostTier MemoryCache { get; init; } = MemoryTier;
+    public CostTier MemoryCache { get => _memoryCache; init => _memoryCache = value ?? throw new ArgumentNullException(nameof(MemoryCache)); }
 
-    /// <summary>The most bytes a request carries, ranges joined: 8 MiB by default.</summary>
-    public int MaxRequestBytes { get; init; } = 8 << 20;
+    /// <summary>The most bytes a request carries, ranges joined: 8 MiB by default, one at least.</summary>
+    public int MaxRequestBytes
+    {
+        get => _maxRequestBytes;
+        init => _maxRequestBytes = value >= 1 ? value : throw new ArgumentOutOfRangeException(nameof(MaxRequestBytes), value, "A request carries one byte at least.");
+    }
 
     /// <summary>The values a node folds a second, aggregating or grouping, a run and a dictionary's code counting for one: 5·10⁹.</summary>
-    public double FoldValuesPerSecond { get; init; } = 5e9;
+    public double FoldValuesPerSecond
+    {
+        get => _foldValuesPerSecond;
+        init => _foldValuesPerSecond = double.IsFinite(value) && value > 0
+            ? value
+            : throw new ArgumentOutOfRangeException(nameof(FoldValuesPerSecond), value, "A node folds some values a second.");
+    }
 
-    /// <summary>The cores of a node, which the processor's prices are shared over: the machine's by default.</summary>
-    public int Cores { get; init; } = Environment.ProcessorCount;
+    /// <summary>The cores of a node, which the processor's prices are shared over: the machine's by default, one at least.</summary>
+    public int Cores
+    {
+        get => _cores;
+        init => _cores = value >= 1 ? value : throw new ArgumentOutOfRangeException(nameof(Cores), value, "A node has one core at least.");
+    }
 
-    /// <summary>The processor's price a value of each encoding class, by <see cref="EncodingClass"/>.</summary>
-    public IReadOnlyList<ProcessorPrice> Prices { get; init; } = DefaultPrices;
+    /// <summary>
+    /// The processor's price a value of each encoding class, by <see cref="EncodingClass"/>: one at least, the last
+    /// standing for the classes past the list.
+    /// </summary>
+    public IReadOnlyList<ProcessorPrice> Prices
+    {
+        get => _prices;
+        init => _prices = value is { Count: > 0 }
+            ? value
+            : throw new ArgumentException("The prices hold one at least, the last standing for the classes past them.", nameof(Prices));
+    }
 
     /// <summary>The bytes a request to the store is worth.</summary>
     public long RequestBytes => Store.RequestBytes;

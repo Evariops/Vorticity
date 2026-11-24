@@ -100,6 +100,7 @@ public sealed partial class JobInputChunkTests
         BatchHandover handover = new BatchHandover { Reserve = reserve };
         using WorkAccount work = new WorkAccount(budget, "the scan of one input");
         CountedAccount account = new CountedAccount(work, reserve);
+        using CanonicalArena.Listening listening = ArrayDecodeContext.CountSharedChildren();
         long before = Interlocked.Read(ref ArrayDecodeContext.SharedChildrenDecoded);
         long rows = 0;
         try

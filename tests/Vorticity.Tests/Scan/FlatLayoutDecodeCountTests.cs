@@ -120,6 +120,7 @@ public sealed class FlatLayoutDecodeCountTests
         string path = WriteOneListChunk(Rows);
         try
         {
+            using CanonicalArena.Listening listening = CanonicalArena.CountMaterialized();
             long before = CanonicalArena.BytesMaterialized;
             long batches = 0;
             long rows = 0;

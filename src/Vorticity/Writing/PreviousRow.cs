@@ -12,8 +12,12 @@ internal sealed class PreviousRow
     /// <summary>Fixed-width values up to a 256-bit decimal fit without ever growing.</summary>
     private const int Inline = 32;
 
-    /// <summary>Allocated on the first value: interior schema nodes never hold one.</summary>
-    private byte[]? _bytes;
+    /// <summary>
+    /// Rented on the first value, a block of the pool's: interior schema nodes never hold one. An array of the column's
+    /// widest value, a text of megabytes, stayed in the heap the writer's life; the block goes back as it grows and once
+    /// the file is done (<see cref="Release"/>).
+    /// </summary>
+    private Buffers.Block<byte> _bytes;
     private int _length;
 
     /// <summary>Whether a row has been seen at all; false before the file's first row.</summary>
@@ -23,7 +27,7 @@ internal sealed class PreviousRow
     internal bool IsNull { get; private set; }
 
     /// <summary>The row's bytes, empty when it was null.</summary>
-    internal ReadOnlySpan<byte> Bytes => _bytes is null ? default : _bytes.AsSpan(0, _length);
+    internal ReadOnlySpan<byte> Bytes => _bytes.IsDefault ? default : _bytes.AsSpan(0, _length);
 
     /// <summary>Records a null row.</summary>
     internal void SetNull()
@@ -36,16 +40,34 @@ internal sealed class PreviousRow
     /// <summary>Records a valid row by copying its bytes; the span is never retained.</summary>
     internal void Set(ReadOnlySpan<byte> value)
     {
-        if (_bytes is null || value.Length > _bytes.Length)
+        if (_bytes.IsDefault || value.Length > _bytes.Length)
         {
             // Grown to the value, not doubled: the buffer settles on the column's widest value.
-            _bytes = new byte[Math.Max(value.Length, Inline)];
+            Grow(value.Length);
         }
 
-        value.CopyTo(_bytes);
+        value.CopyTo(_bytes.AsSpan());
         _length = value.Length;
         HasValue = true;
         IsNull = false;
+    }
+
+    /// <summary>Gives the block back once the file is done: the column holds no row after it.</summary>
+    internal void Release()
+    {
+        Buffers.Blocks.Return(_bytes);
+        _bytes = default;
+        _length = 0;
+        HasValue = false;
+        IsNull = false;
+    }
+
+    /// <summary>A block of <paramref name="length"/> bytes at least, the one before given back; nothing it held is kept.</summary>
+    private void Grow(int length)
+    {
+        Buffers.Blocks.Return(_bytes);
+        _bytes = default;
+        _bytes = Buffers.Blocks.Rent<byte>(Math.Max(length, Inline));
     }
 
     // A list column has no row equality, so its node never calls Set and reuses the same buffer to
@@ -59,8 +81,8 @@ internal sealed class PreviousRow
     internal bool ListContinues(long row, out long end)
     {
         end = -1;
-        if (_bytes is null || _length != 2 * sizeof(long)
-            || BinaryPrimitives.ReadInt64LittleEndian(_bytes) != row)
+        if (_bytes.IsDefault || _length != 2 * sizeof(long)
+            || BinaryPrimitives.ReadInt64LittleEndian(_bytes.AsSpan()) != row)
         {
             return false;
         }
@@ -72,8 +94,12 @@ internal sealed class PreviousRow
     /// <summary>Records the row after a list range and where its named elements ended.</summary>
     internal void SetListEnd(long row, long end)
     {
-        _bytes ??= new byte[Inline];
-        BinaryPrimitives.WriteInt64LittleEndian(_bytes, row);
+        if (_bytes.IsDefault)
+        {
+            Grow(Inline);
+        }
+
+        BinaryPrimitives.WriteInt64LittleEndian(_bytes.AsSpan(), row);
         BinaryPrimitives.WriteInt64LittleEndian(_bytes.AsSpan(sizeof(long)), end);
         _length = 2 * sizeof(long);
     }

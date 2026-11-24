@@ -172,7 +172,7 @@ internal sealed class ScanCounters
     internal static void Note(ScanCounters? metrics, long segments, long bytes)
     {
         metrics?.AddRequests(segments, bytes);
-        Diagnostics.VortexEventSource.Requested(segments, bytes);
+        VortexTelemetry.Requested(segments, bytes);
     }
 
     /// <summary>

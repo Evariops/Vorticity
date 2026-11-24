@@ -102,7 +102,24 @@ internal sealed class PartitionLookup
     /// </summary>
     internal async ValueTask<(uint[] Blocks, int BlockRows)?> BlocksAsync(PositionedObject held, CancellationToken cancellationToken)
     {
-        Partition? known = await LoadingAsync(held, cancellationToken).ConfigureAwait(false);
+        Partition? known;
+        while (true)
+        {
+            Task<Partition?> load = LoadingAsync(held, cancellationToken);
+
+            // A load begun on another caller's token, which that caller cancelled, is not this one's failure, and is begun
+            // again, as the locates' are: the lookup an answer keeps serves whoever asks it.
+            try
+            {
+                known = await load.WaitAsync(cancellationToken).ConfigureAwait(false);
+                break;
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                Forget(held, load);
+            }
+        }
+
         if (known is null || known.RankOf(held.Entry.Uid) is not (>= 0 and int rank)
             || !known.Postings.Covers(rank) || known.Index.Objects[rank].Rows != held.Entry.PhysicalRows)
         {
@@ -118,6 +135,20 @@ internal sealed class PartitionLookup
     /// in turn cost two round trips, its directory then its page.
     /// </summary>
     internal void Ahead(PositionedObject held, CancellationToken cancellationToken) => _ = LoadingAsync(held, cancellationToken);
+
+    /// <summary>Drops <paramref name="load"/>, a cancelled read, when it is still the partition's, for the next ask to begin again.</summary>
+    private void Forget(in PositionedObject held, Task<Partition?> load)
+    {
+        ReadOnlySpan<byte> partition = PartitionSpan(_version, held);
+        lock (_partitions)
+        {
+            Dictionary<byte[], Task<Partition?>>.AlternateLookup<ReadOnlySpan<byte>> named = _partitions.GetAlternateLookup<ReadOnlySpan<byte>>();
+            if (named.TryGetValue(partition, out Task<Partition?>? failed) && ReferenceEquals(failed, load))
+            {
+                named.Remove(partition);
+            }
+        }
+    }
 
     /// <summary>The read of the index of the partition of <paramref name="held"/>, begun once.</summary>
     private Task<Partition?> LoadingAsync(PositionedObject held, CancellationToken cancellationToken)

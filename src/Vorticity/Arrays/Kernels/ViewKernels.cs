@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -600,10 +601,28 @@ internal static class ViewKernels
         return referenced;
     }
 
+    /// <summary>
+    /// Holds a kernel that writes views by reference to the room its caller gave: one comparison a
+    /// call, so that a count the caller got wrong fails here instead of writing past the span.
+    /// </summary>
+    private static void RequireRoom(Span<byte> views, int count)
+    {
+        if ((long)count * ViewSize > views.Length)
+        {
+            ThrowNoRoom(views.Length, count);
+        }
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void ThrowRowPastHeap(int row, int offset, int size, int heapLength) =>
+    [DoesNotReturn]
+    private static void ThrowNoRoom(int bytes, int count) =>
+        throw new ArgumentOutOfRangeException(nameof(count), $"{count} views do not fit the {bytes} bytes given for them.");
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
+    private static void ThrowRowPastHeap(int row, long offset, long size, int heapLength) =>
         throw new VortexFormatException(
-            $"Row {row} spans [{offset}, {(long)offset + size}) of a {heapLength}-byte decoded " +
+            $"Row {row} spans [{offset}, {offset + size}) of a {heapLength}-byte decoded " +
             "heap; the row lengths and the heap disagree.");
 
     /// <summary>
@@ -635,6 +654,7 @@ internal static class ViewKernels
         ReadOnlySpan<TLen> lengths, ReadOnlySpan<byte> heap, Span<byte> views, bool requireUtf8)
         where TLen : unmanaged, INumber<TLen>
     {
+        RequireRoom(views, lengths.Length);
         ref TLen lengthRef = ref MemoryMarshal.GetReference(lengths);
         ref byte heapRef = ref MemoryMarshal.GetReference(heap);
         ref byte viewRef = ref MemoryMarshal.GetReference(views);
@@ -777,6 +797,7 @@ internal static class ViewKernels
     /// whatever it likes.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowFirstBadLengthRow<TLen>(ReadOnlySpan<TLen> lengths, ReadOnlySpan<byte> heap, bool requireUtf8)
         where TLen : unmanaged
     {
@@ -828,6 +849,7 @@ internal static class ViewKernels
         out int first, out int end)
         where TOff : unmanaged, INumber<TOff>
     {
+        RequireRoom(views, count);
         ref TOff offsetRef = ref MemoryMarshal.GetReference(offsets);
         ref byte heapRef = ref MemoryMarshal.GetReference(heap);
         ref byte viewRef = ref MemoryMarshal.GetReference(views);
@@ -1317,6 +1339,7 @@ internal static class ViewKernels
     [MethodImpl(MethodImplOptions.NoInlining)]
     internal static int BuildFromPrefixed(ReadOnlySpan<byte> heap, Span<byte> views, int count)
     {
+        RequireRoom(views, count);
         ref byte heapRef = ref MemoryMarshal.GetReference(heap);
         ref byte viewRef = ref MemoryMarshal.GetReference(views);
         int heapLength = heap.Length;
@@ -1364,6 +1387,16 @@ internal static class ViewKernels
     [MethodImpl(MethodImplOptions.NoInlining)]
     internal static bool BuildFromPrefixedRuns(ReadOnlySpan<byte> heap, Span<byte> views, ReadOnlySpan<PrefixedRun> runs)
     {
+        // Each run's rows within the room given, one comparison a run: the runs write their views by reference.
+        long room = views.Length / ViewSize;
+        foreach (PrefixedRun run in runs)
+        {
+            if (run.FirstRow < 0 || run.Rows < 0 || (long)run.FirstRow + run.Rows > room)
+            {
+                ThrowNoRoom(views.Length, run.FirstRow + run.Rows);
+            }
+        }
+
         ref byte heapRef = ref MemoryMarshal.GetReference(heap);
         ref byte viewRef = ref MemoryMarshal.GetReference(views);
         int heapLength = heap.Length;
@@ -1824,6 +1857,7 @@ internal static class ViewKernels
     {
         ReadOnlySpan<TOff> typed = MemoryMarshal.Cast<byte, TOff>(offsets);
         bool allValid = mask.AllValid;
+        RequireRoom(views, wanted.Length);
 
         ref byte heapRef = ref MemoryMarshal.GetReference(heap);
         ref byte viewRef = ref MemoryMarshal.GetReference(views);
@@ -1842,15 +1876,18 @@ internal static class ViewKernels
             }
 
             // The pair is read fresh for every row: `start` cannot be carried across the gaps a
-            // selection leaves, which is the one structural difference from `FromOffsets`.
+            // selection leaves, which is the one structural difference from `FromOffsets`. Compared
+            // in 64 bits, as the dense arm compares them.
             int row = wanted[i];
-            int start = (int)Widen(typed[row]);
-            int size = (int)Widen(typed[row + 1]) - start;
-            if ((uint)start > (uint)heapLength || (uint)size > (uint)(heapLength - start))
+            ulong from = Widen(typed[row]);
+            ulong to = Widen(typed[row + 1]);
+            if (to < from || to > (ulong)heapLength)
             {
-                ThrowRowPastHeap(row, start, size, heapLength);
+                ThrowRowPastHeap(row, unchecked((long)from), unchecked((long)to - (long)from), heapLength);
             }
 
+            int start = (int)from;
+            int size = (int)(to - from);
             ref byte value = ref Unsafe.Add(ref heapRef, start);
             if (requireUtf8 && !IsUtf8(ref value, size))
             {
@@ -1891,6 +1928,7 @@ internal static class ViewKernels
     {
         ReadOnlySpan<TOff> typed = MemoryMarshal.Cast<byte, TOff>(offsets);
         bool allValid = mask.AllValid;
+        RequireRoom(views, pairs.Length);
         ref byte heapRef = ref MemoryMarshal.GetReference(heap);
         ref byte viewRef = ref MemoryMarshal.GetReference(views);
         int heapLength = heap.Length;
@@ -1939,7 +1977,8 @@ internal static class ViewKernels
         // immediately. `offsets` is sliced once to the count + 1 entries the caller promised, and
         // the heap range is checked per row because the offsets come from the file.
         ReadOnlySpan<TOff> typed = MemoryMarshal.Cast<byte, TOff>(offsets)[..(count + 1)];
-        int start = (int)Widen(typed[0]);
+        ulong start = Widen(typed[0]);
+        RequireRoom(views, count);
 
         ref byte heapRef = ref MemoryMarshal.GetReference(heap);
         ref byte viewRef = ref MemoryMarshal.GetReference(views);
@@ -1947,7 +1986,9 @@ internal static class ViewKernels
 
         for (int i = 0; i < count; i++)
         {
-            int end = (int)Widen(typed[i + 1]);
+            // Compared in 64 bits, as the dense arm compares them: cut to 32 first, an offset past 2^32 was read by its low
+            // half and accepted where it lands in the heap.
+            ulong end = Widen(typed[i + 1]);
             ref byte view = ref Unsafe.Add(ref viewRef, i * ViewSize);
 
             if (!mask.IsValid(i))
@@ -1959,19 +2000,20 @@ internal static class ViewKernels
                 continue;
             }
 
-            int size = end - start;
-            if ((uint)start > (uint)heapLength || (uint)size > (uint)(heapLength - start))
+            if (end < start || end > (ulong)heapLength)
             {
-                ThrowRowPastHeap(i, start, size, heapLength);
+                ThrowRowPastHeap(i, unchecked((long)start), unchecked((long)end - (long)start), heapLength);
             }
 
-            ref byte value = ref Unsafe.Add(ref heapRef, start);
+            int at = (int)start;
+            int size = (int)(end - start);
+            ref byte value = ref Unsafe.Add(ref heapRef, at);
             if (requireUtf8 && !IsUtf8(ref value, size))
             {
                 ThrowInvalidRow(i);
             }
 
-            Place(ref view, ref heapRef, start, size, heapLength, requireUtf8: false);
+            Place(ref view, ref heapRef, at, size, heapLength, requireUtf8: false);
             start = end;
         }
     }
@@ -2031,6 +2073,7 @@ internal static class ViewKernels
     /// The heap failed as a whole, so at least one row fails; finds which by the loop the fast
     /// path replaced. An error path may cost whatever it likes.
     /// </summary>
+    [DoesNotReturn]
     private static void ThrowFirstInvalidRow(
         ReadOnlySpan<byte> lengths, PType ptype, ReadOnlySpan<int> wanted, ReadOnlySpan<byte> heap,
         int count)
@@ -2059,6 +2102,7 @@ internal static class ViewKernels
     /// The bytes a column's rows tile failed as a whole, every row valid and every offset checked,
     /// so at least one row fails; finds which, one row at a time.
     /// </summary>
+    [DoesNotReturn]
     private static void ThrowFirstInvalidOffsetRow(
         ReadOnlySpan<byte> offsets, PType ptype, ReadOnlySpan<byte> heap, int count)
     {
@@ -2084,6 +2128,7 @@ internal static class ViewKernels
     /// likes.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowFirstBadOffsetRow(
         ReadOnlySpan<byte> offsets, PType ptype, ReadOnlySpan<byte> heap, int count, bool requireUtf8,
         string encodingId)
@@ -2137,6 +2182,7 @@ internal static class ViewKernels
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowInvalidRow(int row) =>
         throw new VortexFormatException($"Row {row} of a Utf8 array is not valid UTF-8.");
 }

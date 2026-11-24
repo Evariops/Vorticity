@@ -106,18 +106,6 @@ internal static unsafe class NativeFile
     private const int StatusEndOfFile = unchecked((int)0xC0000011);
     private const uint Infinite = uint.MaxValue;
 
-    /// <summary>The events kept for overlapped reads, one slot a cache line apart for each of so many processors.</summary>
-    private const int SignalSlots = 64;
-
-    private const int SlotStride = 8;
-
-    /// <summary>
-    /// The events overlapped reads are signalled with, each taken by one read and given back as it
-    /// ends: a read starts at the slot of the processor it runs on, so that lanes on different
-    /// processors touch different cache lines.
-    /// </summary>
-    private static readonly IntPtr[] Signals = new IntPtr[SignalSlots * SlotStride];
-
     /// <summary>Whether <see cref="ReadOverlapped"/> has the calls it makes: on 64-bit Windows.</summary>
     private static bool Overlapped => NtReadFile != null && WaitForSingleObject != null && CreateEvent != null && CloseHandle != null;
 
@@ -238,11 +226,12 @@ internal static unsafe class NativeFile
     /// </summary>
     /// <remarks>
     /// No completion context is passed, so a port the framework binds the handle to for a read of
-    /// its own queues no packet for this one; the status and the event say when it is done.
+    /// its own queues no packet for this one; the status and the event say when it is done. The event
+    /// is one of <paramref name="signals"/>, which the reader that owns the handle keeps.
     /// </remarks>
-    internal static int ReadOverlapped(SafeFileHandle handle, Span<byte> destination, long offset)
+    internal static int ReadOverlapped(SafeFileHandle handle, OverlappedSignals signals, Span<byte> destination, long offset)
     {
-        IntPtr signal = Overlapped ? TakeSignal() : IntPtr.Zero;
+        IntPtr signal = Overlapped ? signals.Take() : IntPtr.Zero;
         if (signal == IntPtr.Zero)
         {
             return -1;
@@ -277,41 +266,78 @@ internal static unsafe class NativeFile
                 handle.DangerousRelease();
             }
 
-            GiveSignal(signal);
+            signals.Give(signal);
         }
     }
 
-    /// <summary>An event a read gave back, or a new one; zero when the system makes none.</summary>
-    private static IntPtr TakeSignal()
+    /// <summary>
+    /// The events the overlapped reads of one handle are signalled with, kept by the reader that owns the handle: each taken
+    /// by one read and given back as it ends, closed with the reader. They were a static of the process, a slot a processor,
+    /// which the rule of the library's memory leaves to no one: what holds a resource is the work's owner.
+    /// </summary>
+    internal sealed class OverlappedSignals : IDisposable
     {
-        int start = Thread.GetCurrentProcessorId();
-        for (int i = 0; i < SignalSlots; i++)
+        // As many as reads can run at once on one handle: no more than the threads that run them.
+        private readonly IntPtr[] _kept = new IntPtr[Environment.ProcessorCount];
+        private int _disposed;
+
+        /// <summary>An event a read gave back, or a new one; zero when the system makes none.</summary>
+        internal IntPtr Take()
         {
-            ref IntPtr slot = ref Signals[((start + i) & (SignalSlots - 1)) * SlotStride];
-            if (Volatile.Read(ref slot) != IntPtr.Zero && Interlocked.Exchange(ref slot, IntPtr.Zero) is var kept && kept != IntPtr.Zero)
+            for (int i = 0; i < _kept.Length; i++)
             {
-                return kept;
+                ref IntPtr slot = ref _kept[i];
+                if (Volatile.Read(ref slot) != IntPtr.Zero && Interlocked.Exchange(ref slot, IntPtr.Zero) is var kept && kept != IntPtr.Zero)
+                {
+                    return kept;
+                }
             }
+
+            // Manual reset, which a read's start does for it.
+            return CreateEvent(IntPtr.Zero, 1, 0, IntPtr.Zero);
         }
 
-        // Manual reset, which a read's start does for it.
-        return CreateEvent(IntPtr.Zero, 1, 0, IntPtr.Zero);
-    }
-
-    /// <summary>Keeps an event for the next read, or closes it when every slot holds one.</summary>
-    private static void GiveSignal(IntPtr signal)
-    {
-        int start = Thread.GetCurrentProcessorId();
-        for (int i = 0; i < SignalSlots; i++)
+        /// <summary>Keeps an event for the next read, or closes it when every slot holds one or the reader is gone.</summary>
+        internal void Give(IntPtr signal)
         {
-            ref IntPtr slot = ref Signals[((start + i) & (SignalSlots - 1)) * SlotStride];
-            if (Volatile.Read(ref slot) == IntPtr.Zero && Interlocked.CompareExchange(ref slot, signal, IntPtr.Zero) == IntPtr.Zero)
+            if (Volatile.Read(ref _disposed) == 0)
+            {
+                for (int i = 0; i < _kept.Length; i++)
+                {
+                    ref IntPtr slot = ref _kept[i];
+                    if (Volatile.Read(ref slot) == IntPtr.Zero && Interlocked.CompareExchange(ref slot, signal, IntPtr.Zero) == IntPtr.Zero)
+                    {
+                        // A dispose that ran meanwhile closes what it finds; one that found this slot empty leaves it to
+                        // this read, and whichever empties the slot first closes the event, once.
+                        if (Volatile.Read(ref _disposed) != 0 && Interlocked.Exchange(ref slot, IntPtr.Zero) is var late && late != IntPtr.Zero)
+                        {
+                            _ = CloseHandle(late);
+                        }
+
+                        return;
+                    }
+                }
+            }
+
+            _ = CloseHandle(signal);
+        }
+
+        /// <summary>Closes the events kept; a read under way closes its own as it gives it back.</summary>
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
             {
                 return;
             }
-        }
 
-        _ = CloseHandle(signal);
+            for (int i = 0; i < _kept.Length; i++)
+            {
+                if (Interlocked.Exchange(ref _kept[i], IntPtr.Zero) is var kept && kept != IntPtr.Zero)
+                {
+                    _ = CloseHandle(kept);
+                }
+            }
+        }
     }
 
     /// <summary>IO_STATUS_BLOCK: a status in a pointer-sized union, then the bytes transferred.</summary>

@@ -170,6 +170,47 @@ public sealed class PartsContractTests
         }
     }
 
+    /// <summary>
+    /// A part given up at the queue's head drains nothing itself: the next part created takes the place it held, and the
+    /// parts written after it go in when the file completes, which awaits their writes. Two places at one lane: giving the
+    /// first up, then creating a third, waited for a place nobody gave back once the drain was the creator's to make.
+    /// </summary>
+    [Fact]
+    public async Task APartGivenUpAtTheHeadLeavesItsPlaceAndItsFollowersToTheNextWrite()
+    {
+        Reading[] rows = Rows(20_000);
+        string path = Path.Combine(Path.GetTempPath(), $"vorticity-parts-{Guid.NewGuid():N}.vortex");
+        try
+        {
+            await using (VortexSession session = VortexSession.Create(options => options.MaxDegreeOfParallelism = 1))
+            await using (VortexFileWriter writer = session.CreateWriter<Reading>(path))
+            {
+                WritePart<Reading> given = await writer.CreatePartAsync<Reading>(Ct);
+                WritePart<Reading> first = await writer.CreatePartAsync<Reading>(Ct);
+                given.Dispose();
+                WritePart<Reading> second = await writer.CreatePartAsync<Reading>(Ct).AsTask().WaitAsync(TimeSpan.FromSeconds(30), Ct);
+                Reading.WriteRows(second.Builder, rows.AsSpan(10_000, 10_000));
+                await second.WriteAsync(Ct);
+                Reading.WriteRows(first.Builder, rows.AsSpan(0, 10_000));
+                await first.WriteAsync(Ct);
+                await writer.CompleteAsync(Ct);
+            }
+
+            await using VortexFile file = await VortexFile.OpenAsync(path, Ct);
+            List<int> days = [];
+            await foreach (Columns<Reading> batch in file.Scan<Reading>().WithCancellation(Ct))
+            {
+                days.AddRange(batch.Column<int>(0).Values.ToArray());
+            }
+
+            Assert.Equal(rows.Select(static row => row.Day), days);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
     /// <summary>A file is not completed while a part is neither written nor disposed.</summary>
     [Fact]
     public async Task AFileWithAPartPendingIsNotCompleted()

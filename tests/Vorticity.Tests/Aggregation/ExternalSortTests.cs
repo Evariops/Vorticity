@@ -59,6 +59,56 @@ public sealed partial class ExternalSortTests
         }
     }
 
+    /// <summary>
+    /// Under a budget two hundred times smaller than the result, the runs number in the hundreds and their cursors' blocks
+    /// pass the budget together: they are merged in passes, as many at a time as the budget holds blocks of, the runs of a
+    /// pass deleted once merged, and the result ends exact within the budget, every file gone.
+    /// </summary>
+    [Fact]
+    public async Task AResultTwoHundredTimesItsBudgetMergesItsRunsInPasses()
+    {
+        Row[] rows = Rows_();
+        string path = await WriteAsync(rows);
+        string scratch = TestScratch.Create("vorticity-sort-");
+        try
+        {
+            long whole = await PeakAsync(path, descending: false, new QueryMemoryBudget(1L << 30), scratch);
+            QueryMemoryBudget budget = new QueryMemoryBudget(whole / 200);
+            await using VortexSession session = VortexSession.Create(options =>
+            {
+                options.MaxDegreeOfParallelism = 1;
+                options.MemoryBudget = budget;
+                options.ScratchDirectory = scratch;
+            });
+
+            await using VortexFile file = await session.OpenAsync(path, cancellationToken: Ct);
+            List<NameValue> sorted = [];
+            int runs = 0;
+            await foreach (NameValue row in Sorted(file, descending: false).ToRecordsAsync(Ct))
+            {
+                if (sorted.Count == 0)
+                {
+                    runs = Directory.EnumerateFileSystemEntries(scratch, "*", SearchOption.AllDirectories).Count();
+                }
+
+                sorted.Add(row);
+            }
+
+            // The sort writes seventeen runs here, and the budget holds the blocks of two: one merge read all seventeen, each
+            // its block and its open file; the levels leave the last merge two to read.
+            Assert.InRange(runs, 1, 4);
+            Assert.Equal(Expected(rows, descending: false), sorted);
+            Assert.True(budget.PeakBytes <= budget.CeilingBytes, $"{budget.PeakBytes:N0} bytes at most under {budget.CeilingBytes:N0}");
+            Assert.Equal(0, budget.ReservedBytes);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(scratch));
+        }
+        finally
+        {
+            Directory.Delete(scratch, recursive: true);
+            System.IO.File.Delete(path);
+        }
+    }
+
     [Fact]
     public async Task AConsumerThatStopsLeavesNoRunBehind()
     {

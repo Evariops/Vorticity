@@ -105,6 +105,45 @@ public sealed class RowKeyScalarTests
         Assert.False(RowEncoder.KeysBytes(types.Primitive(PType.I64, Nullability.Nullable)));
     }
 
+    /// <summary>
+    /// A key read from a file that holds no byte, ends within its first value, or marks a text's last block past the 32
+    /// bytes a block holds, is malformed: a format error each, where an index or a slice past the key escaped, and where a
+    /// block marked 200 of a key long enough copied the key's next values into the value without a word.
+    /// </summary>
+    [Fact]
+    public void AKeyThatEndsWithinItsFirstValueOrMarksABlockPastItIsMalformed()
+    {
+        DTypeArena types = new DTypeArena();
+        DType text = types.Utf8(Nullability.Nullable);
+        DType number = types.Primitive(PType.I64, Nullability.Nullable);
+        RowSortField ascending = new RowSortField(descending: false, nullsFirst: true);
+        byte[] into = [];
+
+        // Forty bytes: a full block, then one of eight marked 8, then the key's next values.
+        FilterLiteral value = FilterLiteral.From(new byte[40].AsSpan());
+        byte[] key = new byte[RowEncoder.ValueLength(value, text) + 300];
+        int written = RowEncoder.WriteValue(value, text, ascending, key);
+        Assert.Equal(8, key[written - 1]);
+        byte[] marked = (byte[])key.Clone();
+        marked[written - 1] = 200;
+
+        foreach (byte[] malformed in (byte[][])[[], key[..(written - 1)], marked])
+        {
+            Assert.Throws<VortexFormatException>(() => RowEncoder.ReadFirstValue(malformed, text));
+            Assert.Throws<VortexFormatException>(() => RowEncoder.ReadFirstBytes(malformed, ref into));
+            Assert.Throws<VortexFormatException>(() => RowEncoder.FirstValueLength(malformed, text));
+        }
+
+        byte[] whole = new byte[RowEncoder.ValueLength(FilterLiteral.From(-5L), number)];
+        RowEncoder.WriteValue(FilterLiteral.From(-5L), number, ascending, whole);
+        Assert.Equal(-5L, RowEncoder.ReadFirstValue(whole, number).SignedValue);
+        foreach (byte[] malformed in (byte[][])[[], whole[..5]])
+        {
+            Assert.Throws<VortexFormatException>(() => RowEncoder.ReadFirstValue(malformed, number));
+            Assert.Throws<VortexFormatException>(() => RowEncoder.FirstValueLength(malformed, number));
+        }
+    }
+
     [Fact]
     public void AKeyOfATupleIsItsRowAcrossTheColumns()
     {

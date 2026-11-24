@@ -164,32 +164,102 @@ internal static class SheetPruning
         Func<PositionedObject, bool> consulted, CancellationToken cancellationToken, Action<PositionedObject, ulong[]>? narrowed = null,
         PartitionLocates? partitions = null, List<(int Field, string Key, PathClass Class)>? paths = null)
     {
-        Task<ColumnSheet?[]>?[] reads = new Task<ColumnSheet?[]>?[batch.Count];
-        Task<IValueGranules?[]>?[]? located = null;
-        Task<ColumnLocate?[]>?[]? pathsLie = null;
-        for (int i = 0; i < batch.Count; i++)
+        // A window of objects at a time, their reads side by side: a batch of every object of a version, as a scan's pieces
+        // hand it, began a task and a request an object at once.
+        List<PositionedObject> kept = new List<PositionedObject>(batch.Count);
+        for (int from = 0; from < batch.Count; from += Window)
         {
-            if (consulted(batch[i]))
-            {
-                if (Locates(batch[i].Entry, columns))
-                {
-                    (located ??= new Task<IValueGranules?[]>?[batch.Count])[i] = LocatesAsync(dataset, partitions, batch[i], columns, cancellationToken);
-                }
-                else if (columns.Count > 0)
-                {
-                    reads[i] = dataset.ReadSheetsAsync(batch[i].Entry, columns, cancellationToken).AsTask();
-                }
-
-                if (paths is { Count: > 0 } && LocatesPaths(batch[i].Entry, paths))
-                {
-                    (pathsLie ??= new Task<ColumnLocate?[]>?[batch.Count])[i] = dataset.ReadPathLocatesAsync(batch[i].Entry, paths, cancellationToken).AsTask();
-                }
-            }
+            await KeptWindowAsync(
+                dataset, schema, batch, from, Math.Min(batch.Count, from + Window), kept, filter, columns, metrics, consulted, narrowed, partitions, paths, cancellationToken)
+                .ConfigureAwait(false);
         }
 
-        List<PositionedObject> kept = new List<PositionedObject>(batch.Count);
-        for (int i = 0; i < batch.Count; i++)
+        return kept;
+    }
+
+    /// <summary>The objects whose sheets <see cref="KeptAsync"/> reads at once: the window <c>SheetsKeptAsync</c> reads by.</summary>
+    private const int Window = 16;
+
+    /// <summary>
+    /// <see cref="KeptAsync"/> over objects <c>[from, to)</c> of <paramref name="batch"/>, those kept added to
+    /// <paramref name="kept"/>: their reads begun side by side on a token of their own, called off and awaited, each, when
+    /// one fails, none left reading past the scan.
+    /// </summary>
+    private static async Task KeptWindowAsync(
+        VortexDataset dataset, DatasetSchema schema, List<PositionedObject> batch, int from, int to, List<PositionedObject> kept, VortexExpr filter,
+        List<int> columns, DatasetScanCounters? metrics, Func<PositionedObject, bool> consulted, Action<PositionedObject, ulong[]>? narrowed,
+        PartitionLocates? partitions, List<(int Field, string Key, PathClass Class)>? paths, CancellationToken cancellationToken)
+    {
+        int count = to - from;
+        using CancellationTokenSource stop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        Task<ColumnSheet?[]>?[] reads = new Task<ColumnSheet?[]>?[count];
+        Task<IValueGranules?[]>?[]? located = null;
+        Task<ColumnLocate?[]>?[]? pathsLie = null;
+        try
         {
+            for (int i = 0; i < count; i++)
+            {
+                PositionedObject held = batch[from + i];
+                if (consulted(held))
+                {
+                    if (Locates(held.Entry, columns))
+                    {
+                        (located ??= new Task<IValueGranules?[]>?[count])[i] = LocatesAsync(dataset, partitions, held, columns, stop.Token);
+                    }
+                    else if (columns.Count > 0)
+                    {
+                        reads[i] = dataset.ReadSheetsAsync(held.Entry, columns, stop.Token).AsTask();
+                    }
+
+                    if (paths is { Count: > 0 } && LocatesPaths(held.Entry, paths))
+                    {
+                        (pathsLie ??= new Task<ColumnLocate?[]>?[count])[i] = dataset.ReadPathLocatesAsync(held.Entry, paths, stop.Token).AsTask();
+                    }
+                }
+            }
+
+            await JudgedAsync(schema, batch, from, kept, filter, columns, metrics, narrowed, paths, reads, located, pathsLie).ConfigureAwait(false);
+        }
+        catch
+        {
+            await stop.CancelAsync().ConfigureAwait(false);
+            await SettledAsync(reads).ConfigureAwait(false);
+            await SettledAsync(located).ConfigureAwait(false);
+            await SettledAsync(pathsLie).ConfigureAwait(false);
+            throw;
+        }
+    }
+
+    /// <summary>Awaits each of <paramref name="reads"/> begun, whatever it found: a window that failed lets them go.</summary>
+    private static async Task SettledAsync<T>(Task<T>?[]? reads)
+    {
+        foreach (Task<T>? read in reads ?? [])
+        {
+            if (read is null)
+            {
+                continue;
+            }
+
+            try
+            {
+                await read.ConfigureAwait(false);
+            }
+            catch (Exception) when (read.IsFaulted || read.IsCanceled)
+            {
+                // The window's failure is the one thrown; this read's follows from it or adds nothing.
+            }
+        }
+    }
+
+    /// <summary>The objects of the window <see cref="KeptWindowAsync"/> read, judged in their order by what their reads found.</summary>
+    private static async Task JudgedAsync(
+        DatasetSchema schema, List<PositionedObject> batch, int from, List<PositionedObject> kept, VortexExpr filter, List<int> columns,
+        DatasetScanCounters? metrics, Action<PositionedObject, ulong[]>? narrowed, List<(int Field, string Key, PathClass Class)>? paths,
+        Task<ColumnSheet?[]>?[] reads, Task<IValueGranules?[]>?[]? located, Task<ColumnLocate?[]>?[]? pathsLie)
+    {
+        for (int i = 0; i < reads.Length; i++)
+        {
+            PositionedObject held = batch[from + i];
             if (reads[i] is { } read)
             {
                 ColumnSheet?[] sheets = await read.ConfigureAwait(false);
@@ -204,7 +274,6 @@ internal static class SheetPruning
             {
                 IValueGranules?[] locates = located?[i] is { } lying ? await lying.ConfigureAwait(false) : [];
                 ColumnLocate?[] pathLocates = pathsLie?[i] is { } pathLying ? await pathLying.ConfigureAwait(false) : [];
-                ObjectEntry entry = batch[i].Entry;
                 int granules = GranulesOf(locates, pathLocates);
                 ulong[]? may = granules == 0 ? null : GranuleAlgebra.May(
                     filter, schema.DType, field => columns.IndexOf(field) is int at and >= 0 && at < locates.Length ? locates[at] : null, granules,
@@ -217,14 +286,12 @@ internal static class SheetPruning
 
                 if (may is not null && GranuleAlgebra.Count(may) < granules)
                 {
-                    narrowed?.Invoke(batch[i], may);
+                    narrowed?.Invoke(held, may);
                 }
             }
 
-            kept.Add(batch[i]);
+            kept.Add(held);
         }
-
-        return kept;
     }
 
     /// <summary>The granules of the object the first index of <paramref name="locates"/> or <paramref name="paths"/> describes; 0 for none.</summary>
@@ -268,7 +335,10 @@ internal static class SheetPruning
     {
         if (metrics is not null)
         {
-            metrics.ObjectsRefutedBySheets++;
+            lock (metrics)
+            {
+                metrics.ObjectsRefutedBySheets++;
+            }
         }
     }
 

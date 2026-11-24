@@ -148,7 +148,7 @@ public sealed class CoreBatchTests
         Assert.False(budget.TryEnter(out _), "a lane was given back twice");
         for (int i = 0; i < taken; i++)
         {
-            budget.ExitQuietly(Stopwatch.GetTimestamp());
+            budget.Exit(Stopwatch.GetTimestamp());
         }
     }
 
@@ -158,6 +158,36 @@ public sealed class CoreBatchTests
         internal static readonly Counting Instance = new Counting();
 
         public void Run(CoreBatch batch, int item) => Interlocked.Increment(ref ((int[])batch.State!)[batch.Value + item]);
+    }
+
+    /// <summary>
+    /// A piece whose first item throws on one lane, the caller's, leaves the items not claimed yet: it fails with the
+    /// first error, and runs none of the rest for a result nobody takes.
+    /// </summary>
+    [Fact]
+    public async Task APieceStopsClaimingItemsAtItsFirstError()
+    {
+        LaneBudget budget = new LaneBudget(1);
+        FlowCore core = new FlowCore(budget);
+        CoreBatch batch = CoreBatch.Rent(core, 1);
+        int[] runs = new int[100];
+        await Assert.ThrowsAsync<InvalidOperationException>(async () => await batch.RunAsync(FirstThrows.Instance, runs.Length, runs));
+        Assert.Equal(1, runs.Sum());
+        await AssertEveryLaneBackAsync(budget);
+    }
+
+    private sealed class FirstThrows : IBatchWork
+    {
+        internal static readonly FirstThrows Instance = new FirstThrows();
+
+        public void Run(CoreBatch batch, int item)
+        {
+            Interlocked.Increment(ref ((int[])batch.State!)[item]);
+            if (item == 0)
+            {
+                throw new InvalidOperationException("the first item");
+            }
+        }
     }
 
     /// <summary>A unit that counts its runs and the units running beside it.</summary>

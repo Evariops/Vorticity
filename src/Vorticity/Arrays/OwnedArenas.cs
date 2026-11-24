@@ -12,21 +12,12 @@ namespace Vorticity.Arrays;
 /// </summary>
 internal static class OwnedArenas
 {
-    private static readonly CanonicalArena?[] Kept = new CanonicalArena?[Math.Max(16, 4 * Environment.ProcessorCount)];
-    private static readonly Lock Gate = new Lock();
-    private static int _count;
+    // Kept as memory the registry asks back: those no batch took since its last turn go, and all of them when a reservation
+    // needs room. Their bytes are the arrays each grew, which no reading tells: counted for nothing, seen in the rest.
+    private static readonly KeptObjects<CanonicalArena> Kept = new KeptObjects<CanonicalArena>("arenas", Math.Max(16, 4 * Environment.ProcessorCount), bytesEach: 0);
 
     /// <summary>The arenas kept, for tests.</summary>
-    internal static int Count
-    {
-        get
-        {
-            lock (Gate)
-            {
-                return _count;
-            }
-        }
-    }
+    internal static int Count => Kept.Count;
 
     /// <summary>
     /// An arena a batch gave back, or a new one of <paramref name="capacity"/> records, its blocks counted for
@@ -34,29 +25,15 @@ internal static class OwnedArenas
     /// </summary>
     internal static CanonicalArena Rent(int capacity, MemoryAccount account)
     {
-        lock (Gate)
+        if (Kept.Take() is { } kept)
         {
-            if (_count > 0)
-            {
-                CanonicalArena kept = Kept[--_count]!;
-                Kept[_count] = null;
-                kept.Account = account;
-                return kept;
-            }
+            kept.Account = account;
+            return kept;
         }
 
         return new CanonicalArena(capacity, account);
     }
 
     /// <summary>Keeps <paramref name="arena"/>, reset, for the next batch a caller owns, or leaves it past the bound.</summary>
-    internal static void Return(CanonicalArena arena)
-    {
-        lock (Gate)
-        {
-            if (_count < Kept.Length)
-            {
-                Kept[_count++] = arena;
-            }
-        }
-    }
+    internal static void Return(CanonicalArena arena) => Kept.Give(arena);
 }
