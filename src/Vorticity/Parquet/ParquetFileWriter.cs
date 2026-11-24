@@ -657,6 +657,8 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         /// <summary>Per column, the ticks its item took the last time it ran.</summary>
         private readonly long[] _took = new long[writer._columns.Length];
 
+        private readonly Execution.LongestFirst _order = new(writer._columns.Length);
+
         /// <summary>The batch's first row the block takes.</summary>
         internal int Start { get; set; }
 
@@ -667,20 +669,7 @@ public sealed class ParquetFileWriter : IAsyncDisposable
         internal bool Closes { get; set; }
 
         /// <summary>Lays the columns out in <paramref name="order"/>, longest first.</summary>
-        internal void Order(Span<int> order)
-        {
-            for (int c = 0; c < order.Length; c++)
-            {
-                int at = c;
-                while (at > 0 && _took[order[at - 1]] < _took[c])
-                {
-                    order[at] = order[at - 1];
-                    at--;
-                }
-
-                order[at] = c;
-            }
-        }
+        internal void Order(Span<int> order) => _order.Order(_took, order);
 
         public void Run(CoreBatch fan, int item)
         {

@@ -637,21 +637,10 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         /// <summary>Per field, the ticks its item took the last time it ran.</summary>
         private readonly long[] _took = new long[batches._nodes.Length];
 
-        /// <summary>Lays the fields out in <paramref name="order"/>, longest first.</summary>
-        internal void Order(Span<int> order)
-        {
-            for (int f = 0; f < order.Length; f++)
-            {
-                int at = f;
-                while (at > 0 && _took[order[at - 1]] < _took[f])
-                {
-                    order[at] = order[at - 1];
-                    at--;
-                }
+        private readonly Execution.LongestFirst _order = new(batches._nodes.Length);
 
-                order[at] = f;
-            }
-        }
+        /// <summary>Lays the fields out in <paramref name="order"/>, longest first.</summary>
+        internal void Order(Span<int> order) => _order.Order(_took, order);
 
         public void Run(CoreBatch fan, int item)
         {
