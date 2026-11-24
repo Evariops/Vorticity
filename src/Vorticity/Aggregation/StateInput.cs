@@ -88,7 +88,7 @@ internal readonly ref struct StateInput
         sum.Sum.M0 = Sum0[row];
         sum.Sum.M1 = Sum1[row];
         sum.Sum.M2 = Sum2[row];
-        sum.Sum.Meta = Sum3[row];
+        sum.Sum.Meta = IndexedSum.CheckedMeta(Sum3[row]);
         sum.High = Sum4[row];
         return sum;
     }

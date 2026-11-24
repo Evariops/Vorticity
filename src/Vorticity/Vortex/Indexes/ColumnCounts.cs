@@ -652,7 +652,9 @@ internal sealed class ColumnCounts
                         throw new VortexFormatException($"A column's counts hold a float sum they cannot read at {at}.");
                     }
 
-                    state[sum + 3] = IndexedSum.MetaOf(values - (long)skipped, (int)(top & 0x7F), (int)(top >> 7));
+                    // Held to the bins a sum holds: a merge adopts the state whole, and rows folded in after read the
+                    // extractors' tables at its top.
+                    state[sum + 3] = IndexedSum.CheckedMeta(IndexedSum.MetaOf(values - (long)skipped, (int)(top & 0x7F), (int)(top >> 7)));
                     state[sum + 4] = Varint.ZigZagDecode64(Varint.Read64<Errors>(bytes, ref at));
                     state[m + MeasureLayout.FloatLeast] = Long(bytes, ref at);
                     state[m + MeasureLayout.FloatGreatest] = Long(bytes, ref at);
