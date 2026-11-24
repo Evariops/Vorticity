@@ -130,6 +130,10 @@ public sealed class RowKeys : IEncodedKeys
     // The rows of a run sorted by comparison rather than by another radix pass.
     private const int ComparedRows = 48;
 
+    // The bytes of the keys the radix passes go down, a frame each eight: 64 frames, some ten kilobytes of stack. A bound on
+    // the stack, not a cut-off of speed: past it the keys share 512 bytes, which a comparison reads at the speed of a copy.
+    private const int RadixBytes = 512;
+
     /// <summary>The rows of <paramref name="indices"/> sorted by their bytes from <paramref name="at"/> on, then by their places.</summary>
     private void Radix(Span<int> indices, Span<ulong> prefixes, Span<ulong> spare, Span<int> places, Block<byte> elements, int at)
     {
@@ -162,8 +166,10 @@ public sealed class RowKeys : IEncodedKeys
                 longer += sizes[indices[i]] > at + sizeof(ulong) ? 1 : 0;
             }
 
+            // A level a frame, down to RadixBytes: past them, a run sorted by comparison, whose depth Span.Sort bounds.
+            // Without a floor, a run of keys sharing a text of 64 KiB went 8 400 frames down, past a thread's stack.
             Span<int> run = indices[start..end];
-            if (longer == run.Length && run.Length > ComparedRows)
+            if (longer == run.Length && run.Length > ComparedRows && at + sizeof(ulong) < RadixBytes)
             {
                 Radix(run, prefixes[start..end], spare[start..end], places[start..end], elements, at + sizeof(ulong));
             }

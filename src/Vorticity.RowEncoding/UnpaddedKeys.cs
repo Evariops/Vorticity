@@ -260,7 +260,7 @@ internal static class UnpaddedKeys
     internal static FilterLiteral ReadFirstValue(ReadOnlySpan<byte> key, DType dtype)
     {
         DType storage = dtype.Kind == DTypeKind.Extension ? dtype.StorageType : dtype;
-        if (storage.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary) || key[0] != NonEmpty)
+        if (storage.Kind is not (DTypeKind.Utf8 or DTypeKind.Binary) || key.IsEmpty || key[0] != NonEmpty)
         {
             return RowEncoder.ReadFirstValue(key, dtype);
         }
@@ -277,7 +277,8 @@ internal static class UnpaddedKeys
 
     /// <summary>
     /// The bytes the data of the block of the row encoding at <paramref name="at"/> holds: 32 when another follows, else its
-    /// marker, 1 to 32.
+    /// marker, 1 to 32. Read by the narrowing alone, whose key the row encoding made in this process: a key read from a file
+    /// is read by <see cref="RowEncoder.BlockBytes"/>, which refuses it as malformed.
     /// </summary>
     private static int Block(ReadOnlySpan<byte> key, int at)
     {
