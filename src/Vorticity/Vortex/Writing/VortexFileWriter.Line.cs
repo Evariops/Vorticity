@@ -126,8 +126,15 @@ public sealed partial class VortexFileWriter
     /// </remarks>
     private bool UsesLine =>
         FlightDepth > 1 && _lanes > 1 && _rowBlock > 0 && _stagedRows == _rowBlock && _blockRows == _rowBlock && _automaticChunks && _isTabular
-        && _fieldCount > 1 && _rowBlock < 2 * CensusSliceRows && (_line is not null || !_blocksExactly || _flown >= FlightsAhead)
+        && _fieldCount > 1 && _fieldCount <= MostLineFields && _rowBlock < 2 * CensusSliceRows && (_line is not null || !_blocksExactly || _flown >= FlightsAhead)
         && ColumnCompressor.Differential.Value is null && ArrayBlobWriter.ElementsHanded.Value is null;
+
+    /// <summary>
+    /// The most columns a flight on the line takes: an item names its field in twenty bits and its place in a flight in
+    /// twenty, the last two of which name the prologue and the epilogue, and a flight lays twelve items a column and a
+    /// keys group's each. A wider schema's blocks are written off the line.
+    /// </summary>
+    private const int MostLineFields = 65_536;
 
     /// <summary>The line, made with the writer's first flight.</summary>
     private FlightLine Line => _line ??= new FlightLine(this, _core);
@@ -619,7 +626,12 @@ public sealed partial class VortexFileWriter
             return own;
         }
 
-        if ((entry & ReadItem) != 0)
+        // A keys item first: its group lies over the bits of the other kinds (KeysItem).
+        if ((entry & KeysItem) != 0)
+        {
+            own = [StateGroup(entry & 0xF_FFFF, ((entry >> 20) & 0x3FF) - 1)];
+        }
+        else if ((entry & ReadItem) != 0)
         {
             own = [];
         }
@@ -630,10 +642,6 @@ public sealed partial class VortexFileWriter
         else if ((entry & CensusItem) != 0)
         {
             own = [StateCensus(entry & 0xF_FFFF)];
-        }
-        else if ((entry & KeysItem) != 0)
-        {
-            own = [StateGroup(entry & 0xF_FFFF, ((entry >> 20) & 0x3FF) - 1)];
         }
         else if ((entry & GatherItem) != 0)
         {
@@ -728,6 +736,13 @@ public sealed partial class VortexFileWriter
         StateCount();
         IndexWriter? indexes = _indexes is { AsksNothing: false, Streams: true } streaming ? streaming : null;
         int groups = indexes is null ? 0 : KeysApart(indexes);
+        if ((_fieldCount * 12L) + groups + 4 >= 0xF_FFFE)
+        {
+            throw new VortexUnsupportedException(
+                "flight items", ComponentKind.Feature,
+                $"A flight of {_fieldCount} columns and {groups} groups of keys lays more items than one names in twenty bits.");
+        }
+
         flight.Size((_fieldCount * 12) + groups + 4);
         flight.KeysApart = groups > 0;
         bool attaches = flight.AttachFrom is not null;
@@ -1021,6 +1036,16 @@ public sealed partial class VortexFileWriter
     private void RunLineItem(Flight flight, int entry)
     {
         int rows = flight.Rows;
+
+        // A keys item first: its group lies over the bits of the other kinds (KeysItem).
+        if ((entry & KeysItem) != 0)
+        {
+            int field = entry & 0xF_FFFF;
+            int group = ((entry >> 20) & 0x3FF) - 1;
+            _indexes!.FeedGroup(field, group, flight.Keys[field]!, rows, 0, _blockRows);
+            return;
+        }
+
         if ((entry & ReadItem) != 0)
         {
             int field = entry & 0xF_FFFF;
@@ -1054,14 +1079,6 @@ public sealed partial class VortexFileWriter
                 }
             }
 
-            return;
-        }
-
-        if ((entry & KeysItem) != 0)
-        {
-            int field = entry & 0xF_FFFF;
-            int group = ((entry >> 20) & 0x3FF) - 1;
-            _indexes!.FeedGroup(field, group, flight.Keys[field]!, rows, 0, _blockRows);
             return;
         }
 
