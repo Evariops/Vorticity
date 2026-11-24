@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using Vorticity.Types;
 
 namespace Vorticity;
@@ -282,13 +283,14 @@ internal static class ClrFit
             case ClrKind.TimeOnly:
                 return Expect(target.ExtensionId == ExtensionIds.Time, "a TimeOnly reads a vortex.time column.", out reason);
             case ClrKind.DateTime:
-                return Expect(target.ExtensionId == ExtensionIds.Timestamp && (target.TimeZone is null || TimeZones.IsUtc(target.TimeZone)),
+                // The zone read once by the type: a check asked at every batch decoded it as a string each time.
+                return Expect(target.ExtensionId == ExtensionIds.Timestamp && target.Zone is ZoneState.Naive or ZoneState.Utc,
                     "a DateTime reads a naive or UTC vortex.timestamp column; read a zoned one as DateTimeOffset.", out reason);
             case ClrKind.DateTimeOffset:
                 return written
-                    ? Expect(target.ExtensionId == ExtensionIds.Timestamp && target.TimeZone is not null,
+                    ? Expect(target.ExtensionId == ExtensionIds.Timestamp && target.IsZoned,
                         "a DateTimeOffset writes a zoned vortex.timestamp column; write a naive or UTC one as DateTime.", out reason)
-                    : Expect(target.ExtensionId == ExtensionIds.Timestamp && target.TimeZone is { } zone && TimeZones.TryResolve(zone, out _),
+                    : Expect(target.ExtensionId == ExtensionIds.Timestamp && target.Zone is ZoneState.Utc or ZoneState.Resolved,
                         "a DateTimeOffset reads a vortex.timestamp column whose zone this host resolves; read another as long.", out reason);
             case ClrKind.Guid:
                 return Expect(target.ExtensionId == ExtensionIds.Uuid, "a Guid reads a vortex.uuid column.", out reason);
@@ -326,20 +328,45 @@ internal static class ClrFit
     }
 }
 
-/// <summary>Time zones, resolved once per id.</summary>
+/// <summary>Time zones, resolved once per id while the ids kept weigh no more than their budget.</summary>
 internal static class TimeZones
 {
+    /// <summary>
+    /// What the ids kept with their answers take of the heap at most, 256 KiB. The ids come from the files, up to 65 535
+    /// bytes each, and every one was kept, those the host does not know included. The 419 zones of a macOS host, ids of
+    /// 6 472 characters in all, take 43 KiB (2026-11-24): the budget holds them six times over. Past it, an id is resolved
+    /// at each asking, which a type does once (<see cref="VortexType.ZoneInfo"/>).
+    /// </summary>
+    private const long MaxKeptBytes = 256 * 1024;
+
+    /// <summary>What keeping an id takes beside its characters: its node in the table, and its string's header.</summary>
+    private const int KeptEntryBytes = 48 + 24;
+
     private static readonly ConcurrentDictionary<string, TimeZoneInfo?> Resolved = new(StringComparer.Ordinal);
+
+    private static long s_keptBytes;
 
     internal static bool IsUtc(string zone) =>
         zone is "UTC" or "Etc/UTC" or "Z" or "+00:00" or "Etc/GMT" or "GMT";
 
     internal static bool TryResolve(string zone, out TimeZoneInfo info)
     {
-        TimeZoneInfo? found = Resolved.GetOrAdd(zone, Find);
+        if (!Resolved.TryGetValue(zone, out TimeZoneInfo? found))
+        {
+            found = Find(zone);
+            long bytes = KeptEntryBytes + (2L * zone.Length);
+            if (Interlocked.Read(ref s_keptBytes) + bytes <= MaxKeptBytes && Resolved.TryAdd(zone, found))
+            {
+                Interlocked.Add(ref s_keptBytes, bytes);
+            }
+        }
+
         info = found!;
         return found is not null;
     }
+
+    /// <summary>What the ids kept take, as <see cref="MaxKeptBytes"/> counts them: for the tests.</summary>
+    internal static long KeptBytes => Interlocked.Read(ref s_keptBytes);
 
     private static TimeZoneInfo? Find(string zone)
     {

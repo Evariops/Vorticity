@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
+using System.Threading;
 using Vorticity.Types;
 
 namespace Vorticity;
@@ -382,18 +383,59 @@ public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8
     {
         get
         {
-            TimeZoneInfo? zone = _zone;
-            if (zone is null)
+            if (Volatile.Read(ref _zoneState) == 0)
             {
-                zone = TimeZone is { } id && TimeZones.TryResolve(id, out TimeZoneInfo found) ? found : TimeZoneInfo.Utc;
-                _zone = zone;
+                ReadZone();
             }
 
-            return zone;
+            return _zone!;
         }
     }
 
+    /// <summary>
+    /// What a timestamp's zone is on this host, read once: <see cref="ZoneState.Naive"/> for a naive timestamp and any
+    /// other type. What a check of a column asks at every batch, where the zone decoded was a string a batch.
+    /// </summary>
+    internal ZoneState Zone
+    {
+        get
+        {
+            byte state = Volatile.Read(ref _zoneState);
+            if (state == 0)
+            {
+                ReadZone();
+                state = _zoneState;
+            }
+
+            return (ZoneState)state;
+        }
+    }
+
+    /// <summary>Reads the zone and what it is once; two threads that read it at once read the same.</summary>
+    private void ReadZone()
+    {
+        TimeZoneInfo zone = TimeZoneInfo.Utc;
+        ZoneState state = ZoneState.Naive;
+        if (TimeZone is { } id)
+        {
+            if (TimeZones.TryResolve(id, out TimeZoneInfo found))
+            {
+                zone = found;
+                state = TimeZones.IsUtc(id) ? ZoneState.Utc : ZoneState.Resolved;
+            }
+            else
+            {
+                state = ZoneState.Unresolved;
+            }
+        }
+
+        // The zone before its state: a reader that sees the state finds the zone.
+        _zone = zone;
+        Volatile.Write(ref _zoneState, (byte)state);
+    }
+
     private TimeZoneInfo? _zone;
+    private byte _zoneState;
 
     /// <summary>The zone of a timestamp, or null for a naive one and any other type.</summary>
     /// <remarks>Decoded at each call: a test of whether there is one is <see cref="IsZoned"/>.</remarks>
@@ -594,6 +636,22 @@ public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8
         bytesWritten = 0;
         return false;
     }
+}
+
+/// <summary>What a timestamp's zone is on this host (<see cref="VortexType.Zone"/>).</summary>
+internal enum ZoneState : byte
+{
+    /// <summary>No zone: a naive timestamp, or a type that is no timestamp.</summary>
+    Naive = 1,
+
+    /// <summary>A zone named as UTC.</summary>
+    Utc,
+
+    /// <summary>A zone this host resolves, named otherwise.</summary>
+    Resolved,
+
+    /// <summary>A zone this host does not know.</summary>
+    Unresolved,
 }
 
 /// <summary>The extension ids the core knows by name.</summary>
