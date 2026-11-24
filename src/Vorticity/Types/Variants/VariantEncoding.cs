@@ -684,16 +684,40 @@ internal static class VariantEncoding
                 json.WriteBase64StringValue(scalar.Bytes);
                 return;
             case VariantKind.Date:
-                json.WriteStringValue(DateOnly.FromDayNumber(EpochDay + (int)scalar.Integer).ToString("O", CultureInfo.InvariantCulture));
+                // A date past the years ISO text writes is written as its count of days, as it is stored.
+                if (TryDate(scalar.Integer, out DateOnly date))
+                {
+                    json.WriteStringValue(date.ToString("O", CultureInfo.InvariantCulture));
+                }
+                else
+                {
+                    json.WriteNumberValue((long)scalar.Integer);
+                }
+
                 return;
             case VariantKind.Time:
-                json.WriteStringValue(TimeOnly.FromTimeSpan(TimeSpan.FromMicroseconds((long)scalar.Integer)).ToString("O", CultureInfo.InvariantCulture));
+                if (TryTime(scalar.Integer, out TimeOnly time))
+                {
+                    json.WriteStringValue(time.ToString("O", CultureInfo.InvariantCulture));
+                }
+                else
+                {
+                    json.WriteNumberValue((long)scalar.Integer);
+                }
+
                 return;
             case VariantKind.Timestamp:
-                json.WriteStringValue(TimestampText(scalar, utc: true));
-                return;
             case VariantKind.LocalTimestamp:
-                json.WriteStringValue(TimestampText(scalar, utc: false));
+                // An instant past the years ISO text writes is written as its count of units since 1970, as it is stored.
+                if (TimestampText(scalar, utc: scalar.Kind == VariantKind.Timestamp) is { } text)
+                {
+                    json.WriteStringValue(text);
+                }
+                else
+                {
+                    json.WriteNumberValue((long)scalar.Integer);
+                }
+
                 return;
             case VariantKind.Uuid:
                 json.WriteStringValue(new Guid(scalar.Bytes, bigEndian: true).ToString("D", CultureInfo.InvariantCulture));
@@ -731,10 +755,30 @@ internal static class VariantEncoding
     /// <summary>The day number of 1970-01-01, which a variant's dates count from.</summary>
     internal const int EpochDay = 719_162;
 
+    /// <summary>The magnitude of <paramref name="value"/>, -2^127's included, which <see cref="Int128.Abs"/> refuses.</summary>
+    internal static UInt128 Magnitude(Int128 value) => value < 0 ? (UInt128)(-(value + 1)) + 1 : (UInt128)value;
+
+    /// <summary>The date <paramref name="days"/> from 1970-01-01 name: false past the years 1 to 9999 <see cref="DateOnly"/> holds.</summary>
+    internal static bool TryDate(Int128 days, out DateOnly date)
+    {
+        Int128 number = days + EpochDay;
+        bool held = number >= DateOnly.MinValue.DayNumber && number <= DateOnly.MaxValue.DayNumber;
+        date = held ? DateOnly.FromDayNumber((int)number) : default;
+        return held;
+    }
+
+    /// <summary>The time of day <paramref name="microseconds"/> past midnight name: false outside a day.</summary>
+    internal static bool TryTime(Int128 microseconds, out TimeOnly time)
+    {
+        bool held = microseconds >= 0 && microseconds < TimeSpan.TicksPerDay / TimeSpan.TicksPerMicrosecond;
+        time = held ? new TimeOnly((long)microseconds * TimeSpan.TicksPerMicrosecond) : default;
+        return held;
+    }
+
     /// <summary>A decimal's text: its unscaled digits with the point <paramref name="scale"/> digits from the right.</summary>
     internal static string DecimalText(Int128 unscaled, int scale)
     {
-        string digits = Int128.Abs(unscaled).ToString(CultureInfo.InvariantCulture);
+        string digits = Magnitude(unscaled).ToString(CultureInfo.InvariantCulture);
         if (scale > 0)
         {
             digits = digits.PadLeft(scale + 1, '0');
@@ -744,10 +788,17 @@ internal static class VariantEncoding
         return unscaled < 0 ? "-" + digits : digits;
     }
 
-    private static string TimestampText(VariantScalar scalar, bool utc)
+    /// <summary>A timestamp's ISO text; null for an instant past the years 1 to 9999 that <see cref="DateTime"/> holds.</summary>
+    private static string? TimestampText(VariantScalar scalar, bool utc)
     {
         long micros = scalar.Microseconds;
-        DateTime time = DateTime.UnixEpoch.AddTicks(checked(micros * 10));
+        Int128 ticks = (Int128)micros * TimeSpan.TicksPerMicrosecond + DateTime.UnixEpoch.Ticks;
+        if (ticks < DateTime.MinValue.Ticks || ticks > DateTime.MaxValue.Ticks)
+        {
+            return null;
+        }
+
+        DateTime time = new((long)ticks, DateTimeKind.Unspecified);
         string text = time.ToString("yyyy-MM-ddTHH:mm:ss.ffffff", CultureInfo.InvariantCulture);
         if (scalar.Nanoseconds)
         {
@@ -1137,7 +1188,7 @@ internal static class VariantEncoding
             ReadOnlySpan<byte> text = reader.ValueSpan;
             if (text.IndexOfAny(".eE"u8) < 0 && text.Length <= 39
                 && Int128.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out Int128 wide)
-                && Int128.Abs(wide) < DecimalLimit)
+                && Magnitude(wide) < (UInt128)DecimalLimit)
             {
                 _length += PutDecimal(into, wide, 0);
                 return;

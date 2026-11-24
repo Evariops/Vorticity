@@ -201,17 +201,17 @@ public readonly struct Variant : IEquatable<Variant>
         return Value[5..];
     }
 
-    /// <summary>The value as a date, when it is one.</summary>
-    public DateOnly? AsDate() => Read(out VariantScalar s) && s.Kind == VariantKind.Date ? DateOnly.FromDayNumber(VariantEncoding.EpochDay + (int)s.Integer) : null;
+    /// <summary>The value as a date, when it is one that <see cref="DateOnly"/> holds, years 1 to 9999.</summary>
+    public DateOnly? AsDate() => Read(out VariantScalar s) && s.Kind == VariantKind.Date && VariantEncoding.TryDate(s.Integer, out DateOnly date) ? date : null;
 
-    /// <summary>The value as an instant, when it is a timestamp in UTC; nanoseconds are cut to the 100 ns of a tick.</summary>
-    public DateTimeOffset? AsTimestamp() => Read(out VariantScalar s) && s.Kind == VariantKind.Timestamp ? new DateTimeOffset(Ticks(s), TimeSpan.Zero) : null;
+    /// <summary>The value as an instant, when it is a timestamp in UTC of years 1 to 9999; nanoseconds are cut to the 100 ns of a tick.</summary>
+    public DateTimeOffset? AsTimestamp() => Read(out VariantScalar s) && s.Kind == VariantKind.Timestamp && TryTicks(s, out long ticks) ? new DateTimeOffset(ticks, TimeSpan.Zero) : null;
 
-    /// <summary>The value as a wall-clock time, when it is a timestamp of no zone; nanoseconds are cut to the 100 ns of a tick.</summary>
-    public DateTime? AsLocalTimestamp() => Read(out VariantScalar s) && s.Kind == VariantKind.LocalTimestamp ? new DateTime(Ticks(s), DateTimeKind.Unspecified) : null;
+    /// <summary>The value as a wall-clock time, when it is a timestamp of no zone of years 1 to 9999; nanoseconds are cut to the 100 ns of a tick.</summary>
+    public DateTime? AsLocalTimestamp() => Read(out VariantScalar s) && s.Kind == VariantKind.LocalTimestamp && TryTicks(s, out long ticks) ? new DateTime(ticks, DateTimeKind.Unspecified) : null;
 
-    /// <summary>The value as a time of day, when it is one.</summary>
-    public TimeOnly? AsTime() => Read(out VariantScalar s) && s.Kind == VariantKind.Time ? TimeOnly.FromTimeSpan(TimeSpan.FromMicroseconds((long)s.Integer)) : null;
+    /// <summary>The value as a time of day, when it is one inside a day.</summary>
+    public TimeOnly? AsTime() => Read(out VariantScalar s) && s.Kind == VariantKind.Time && VariantEncoding.TryTime(s.Integer, out TimeOnly time) ? time : null;
 
     /// <summary>The value as a UUID, when it is one.</summary>
     public Guid? AsUuid() => Read(out VariantScalar s) && s.Kind == VariantKind.Uuid ? new Guid(s.Bytes, bigEndian: true) : null;
@@ -660,25 +660,48 @@ public readonly struct Variant : IEquatable<Variant>
         return true;
     }
 
-    /// <summary>A timestamp's count of ticks since year 1, its unit's finer digits cut.</summary>
-    private static long Ticks(VariantScalar s)
+    /// <summary>
+    /// A timestamp's count of ticks since year 1, its unit's finer digits cut: false for an instant past the years
+    /// <see cref="DateTime"/> holds, which the encoding's 64 bits of microseconds reach.
+    /// </summary>
+    private static bool TryTicks(VariantScalar s, out long ticks)
     {
-        Int128 ticks = s.Nanoseconds ? s.Integer / 100 : s.Integer * 10;
-        return checked((long)(ticks + DateTime.UnixEpoch.Ticks));
+        Int128 since = (s.Nanoseconds ? s.Integer / 100 : s.Integer * 10) + DateTime.UnixEpoch.Ticks;
+        ticks = since >= DateTime.MinValue.Ticks && since <= DateTime.MaxValue.Ticks ? (long)since : 0;
+        return since >= DateTime.MinValue.Ticks && since <= DateTime.MaxValue.Ticks;
     }
 
-    private static long Micros(long ticks) => (ticks - DateTime.UnixEpoch.Ticks) / TimeSpan.TicksPerMicrosecond;
+    /// <summary>
+    /// Microseconds since 1970 at <paramref name="ticks"/>, rounded down as the temporal columns round: an instant before
+    /// 1970 with a fraction of a microsecond goes to the microsecond before it, not the one after.
+    /// </summary>
+    private static long Micros(long ticks)
+    {
+        long micros = Math.DivRem(ticks - DateTime.UnixEpoch.Ticks, TimeSpan.TicksPerMicrosecond, out long rest);
+        return rest < 0 ? micros - 1 : micros;
+    }
 
+    /// <summary>
+    /// The decimal of <paramref name="unscaled"/> at <paramref name="scale"/>, exactly: false when <see cref="decimal"/>
+    /// cannot hold it, past 96 bits of digits or 28 of scale once the trailing zeros are dropped, rather than a value rounded.
+    /// </summary>
     private static bool ToDecimal(Int128 unscaled, byte scale, out decimal value)
     {
         value = default;
-        if (scale > 28 || Int128.Abs(unscaled) > (Int128)ulong.MaxValue * uint.MaxValue)
+        int digits = scale;
+        while (digits > 28 && unscaled % 10 == 0)
         {
-            return decimal.TryParse(VariantEncoding.DecimalText(unscaled, scale), NumberStyles.Number, CultureInfo.InvariantCulture, out value);
+            unscaled /= 10;
+            digits--;
         }
 
-        UInt128 magnitude = (UInt128)Int128.Abs(unscaled);
-        value = new decimal((int)(uint)magnitude, (int)(uint)(magnitude >> 32), (int)(uint)(magnitude >> 64), unscaled < 0, scale);
+        UInt128 magnitude = VariantEncoding.Magnitude(unscaled);
+        if (digits > 28 || (magnitude >> 96) != 0)
+        {
+            return false;
+        }
+
+        value = new decimal((int)(uint)magnitude, (int)(uint)(magnitude >> 32), (int)(uint)(magnitude >> 64), unscaled < 0, (byte)digits);
         return true;
     }
 

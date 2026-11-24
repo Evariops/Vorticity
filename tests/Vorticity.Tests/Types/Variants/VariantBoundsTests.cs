@@ -57,6 +57,42 @@ public sealed class VariantBoundsTests
         Assert.Equal(VariantKind.Object, Variant.FromBytes(FourKeys, Apart(depth: 3)).Kind);
     }
 
+    /// <summary>
+    /// Values of the right type past what .NET's types hold read as null, as <c>As…</c> promises for a value it cannot give,
+    /// and print as JSON in the form they are stored; a decimal is given exactly or not at all.
+    /// </summary>
+    [Fact]
+    public void ALegalValuePastDotNetsTypesReadsAsNullAndPrints()
+    {
+        byte[] none = VariantEncoding.Metadata([]);
+        Variant late = Variant.FromBytes(none, VariantEncoding.Timestamp(long.MaxValue, utc: true));
+        Assert.Null(late.AsTimestamp());
+        Assert.Equal(long.MaxValue.ToString(System.Globalization.CultureInfo.InvariantCulture), late.ToJson());
+        Assert.Null(Variant.FromBytes(none, VariantEncoding.Timestamp(long.MinValue, utc: false)).AsLocalTimestamp());
+
+        Variant far = Variant.FromBytes(none, VariantEncoding.Date(int.MaxValue));
+        Assert.Null(far.AsDate());
+        Assert.Equal(int.MaxValue.ToString(System.Globalization.CultureInfo.InvariantCulture), far.ToJson());
+        Assert.Null(Variant.FromBytes(none, VariantEncoding.Time(-1)).AsTime());
+
+        Variant least = Variant.FromBytes(none, VariantEncoding.Decimal(Int128.MinValue, 0));
+        Assert.Null(least.AsDecimal());
+        Assert.Equal("-170141183460469231731687303715884105728", least.ToJson());
+
+        // A scale past 28 that trailing zeros make up is exact at 28; one that holds a digit there is not, and is no rounded value.
+        Assert.Equal(1.5m, Variant.FromBytes(none, VariantEncoding.Decimal(15 * Int128.Parse("100000000000000000000000000000", System.Globalization.CultureInfo.InvariantCulture), 30)).AsDecimal());
+        Assert.Null(Variant.FromBytes(none, VariantEncoding.Decimal(1, 30)).AsDecimal());
+    }
+
+    [Fact]
+    public void AnInstantBefore1970RoundsDownToItsMicrosecond()
+    {
+        // Half a microsecond past 23:59:59 on the last day of 1969: down to 23:59:59.000000, as the temporal columns round.
+        DateTime instant = new DateTime(1969, 12, 31, 23, 59, 59, DateTimeKind.Utc).AddTicks(5);
+        Assert.Equal(new DateTime(1969, 12, 31, 23, 59, 59, DateTimeKind.Utc), Variant.From(instant).AsTimestamp()!.Value.UtcDateTime);
+        Assert.Equal(new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddTicks(10), Variant.From(new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddTicks(15)).AsTimestamp()!.Value.UtcDateTime);
+    }
+
     /// <summary>Objects <paramref name="depth"/> deep, each of four fields at offset 0, all of them its child.</summary>
     private static byte[] Overlapping(int depth)
     {
