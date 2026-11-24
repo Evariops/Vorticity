@@ -85,6 +85,25 @@ public sealed class VariantBoundsTests
     }
 
     [Fact]
+    public void ACensusSpansAreCountedByItsAccountUntilReleased()
+    {
+        // A key every other row, each row a span of its own past a gap of one row: the spans grow with the rows.
+        TestAccount account = new();
+        PathCensus census = new(stringBoundBytes: 0, groupRows: 1) { Account = account };
+        byte[] metadata = VariantEncoding.Metadata([[(byte)'a'], [(byte)'b']]);
+        byte[] a = VariantEncoding.Object([(0, VariantEncoding.Integer(1))]);
+        byte[] b = VariantEncoding.Object([(1, VariantEncoding.Integer(2))]);
+        for (int row = 0; row < 20_000; row++)
+        {
+            census.Add(metadata, row % 2 == 0 ? a : b);
+        }
+
+        Assert.True(account.Held >= 10_000 * 2 * sizeof(long), $"The census's account holds {account.Held} bytes for 10 000 spans.");
+        census.Release();
+        Assert.Equal(0, account.Held);
+    }
+
+    [Fact]
     public void AnInstantBefore1970RoundsDownToItsMicrosecond()
     {
         // Half a microsecond past 23:59:59 on the last day of 1969: down to 23:59:59.000000, as the temporal columns round.

@@ -1210,7 +1210,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
             {
                 if (schema.GetField(field).Kind == DTypeKind.Variant && writer._directories?[field] is null)
                 {
-                    (writer._census ??= new PathCensus?[writer._fieldCount])[field] = new PathCensus(options.StringBoundBytes, writer.CensusGroupRows);
+                    (writer._census ??= new PathCensus?[writer._fieldCount])[field] = new PathCensus(options.StringBoundBytes, writer.CensusGroupRows) { Account = writer.Account };
                 }
             }
         }
@@ -1644,7 +1644,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
 
                 for (int slice = 1; slice < slices; slice++)
                 {
-                    kept[slice] ??= new PathCensus(census[field]!.StringBoundBytes, CensusGroupRows);
+                    kept[slice] ??= new PathCensus(census[field]!.StringBoundBytes, CensusGroupRows) { Account = Account };
                 }
             }
         }
