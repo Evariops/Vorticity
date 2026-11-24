@@ -10,7 +10,8 @@
 //
 // The session's synopsis cache keeps the pages on the disk, by their hash, for the handles opened later: a
 // restart walks the tree with no request, a page the disk holds torn is read again from the store, and a
-// sealed dataset's pages stay off the disk.
+// sealed dataset's pages are kept as the store holds them, the frames that hold each and the header of its
+// commit object, which a restart decrypts.
 using System;
 using System.Collections.Generic;
 using System.IO.Hashing;
@@ -549,10 +550,11 @@ public sealed class DatasetPageCacheTests
     }
 
     [Fact]
-    public async Task ASealedDatasetLeavesNoPageOfItsTreeOnTheDisk()
+    public async Task AHandleOfASessionOpenedLaterReadsASealedTreeFromTheDiskWhichHoldsOnlyTheStoresBytes()
     {
-        // Its pages are plaintext of its commit objects: a walk that reads them from the store keeps them in its
-        // handle alone.
+        // A sealed dataset's pages are plaintext of its commit objects: the disk keeps, for each, the header of its commit
+        // object and the frames that hold it, as the store holds them. A handle of a session opened after a restart walks the
+        // tree with no request, decrypting each page as a read from the store does.
         CancellationToken ct = TestContext.Current.CancellationToken;
         string directory = CacheDirectory();
         try
@@ -560,30 +562,130 @@ public sealed class DatasetPageCacheTests
             using VortexKeyring keyring = Sealing.SealedObjects.Keyring();
             await using MemoryObjectStore inner = new MemoryObjectStore();
             await using CountingObjectStore store = new CountingObjectStore(inner);
-            await using VortexSession session = VortexSession.Create(options =>
+            DatasetOptions options = await CreateSealedAsync(store, keyring, directory, ct);
+            await using (VortexSession session = SealedCached(keyring, directory))
+            await using (VortexDataset reader = await VortexDataset.OpenAsync(store, options with { Session = session }, ct))
             {
-                options.Keyring = keyring;
-                options.SynopsisCache = new SynopsisCache(directory, 64 << 20);
-            });
-            Decoders.EnsureRegistered();
-            DatasetOptions options = new DatasetOptions { Session = session, Seed = Seed, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] }, Encrypted = true };
-            await using (VortexDataset created = await VortexDataset.CreateAsync(store, Schema(), options, ct))
-            {
-                Assert.True(created.IsEncrypted);
-                await created.CommitAsync([.. Enumerable.Range(0, Objects).Select(i => Add(2L * i))], ct);
+                store.Reset();
+                Assert.Equal(Objects, await CountAsync(reader, ct));
+                Assert.True(store.Requests > 10, $"the walk asked for {store.Requests} pages: the tree should outgrow its header");
             }
 
-            await using VortexDataset reader = await VortexDataset.OpenAsync(store, options, ct);
-            store.Reset();
-            Assert.Equal(Objects, await CountAsync(reader, ct));
-            Assert.True(store.Requests > 10, $"the walk asked for {store.Requests} pages: the tree should outgrow its header");
-            await session.Options.SynopsisCache!.FlushAsync();
-            Assert.Empty(PagesIn(directory));
+            // No plaintext page: each file is a sealed commit object's header and frames, as the store holds them.
+            Assert.DoesNotContain(PagesIn(directory), static file => !file.EndsWith("-sealed-page", StringComparison.Ordinal));
+            string[] kept = SealedPagesIn(directory);
+            Assert.NotEmpty(kept);
+            List<byte[]> commits = await CommitObjectsAsync(inner, ct);
+            Assert.All(kept, file =>
+            {
+                byte[] bytes = System.IO.File.ReadAllBytes(file);
+                int header = BitConverter.ToInt32(bytes, 0);
+                byte[] head = bytes.AsSpan(28, header).ToArray();
+                byte[] frames = bytes.AsSpan(28 + header).ToArray();
+                Assert.Contains(commits, commit => commit.AsSpan().StartsWith(head) && commit.AsSpan().IndexOf(frames) >= header);
+            });
+
+            await using (VortexSession session = SealedCached(keyring, directory))
+            await using (VortexDataset reopened = await VortexDataset.OpenAsync(store, options with { Session = session }, ct))
+            {
+                store.Reset();
+                Assert.Equal(Objects, await CountAsync(reopened, ct));
+                Assert.Equal(0, store.Requests);
+            }
         }
         finally
         {
             System.IO.Directory.Delete(directory, recursive: true);
         }
+    }
+
+    [Fact]
+    public async Task ASealedPageWhoseFrameIsFlippedOnTheDiskIsDroppedAndReadFromTheStore()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        string directory = CacheDirectory();
+        try
+        {
+            using VortexKeyring keyring = Sealing.SealedObjects.Keyring();
+            await using MemoryObjectStore inner = new MemoryObjectStore();
+            await using CountingObjectStore store = new CountingObjectStore(inner);
+            DatasetOptions options = await CreateSealedAsync(store, keyring, directory, ct);
+            await using (VortexSession session = SealedCached(keyring, directory))
+            await using (VortexDataset reader = await VortexDataset.OpenAsync(store, options with { Session = session }, ct))
+            {
+                Assert.Equal(Objects, await CountAsync(reader, ct));
+            }
+
+            // A byte of its last frame flipped: the frame's tag fails.
+            string file = SealedPagesIn(directory)[0];
+            byte[] bytes = System.IO.File.ReadAllBytes(file);
+            bytes[^1] ^= 0xFF;
+            System.IO.File.WriteAllBytes(file, bytes);
+
+            await using (VortexSession session = SealedCached(keyring, directory))
+            await using (VortexDataset reopened = await VortexDataset.OpenAsync(store, options with { Session = session }, ct))
+            {
+                store.Reset();
+                Assert.Equal(Objects, await CountAsync(reopened, ct));
+                Assert.InRange(store.Requests, 1, 3);
+                Assert.True(session.Options.SynopsisCache!.Corrupt > 0);
+            }
+
+            // Kept again from the store's read: the next restart reads nothing.
+            await using (VortexSession session = SealedCached(keyring, directory))
+            await using (VortexDataset again = await VortexDataset.OpenAsync(store, options with { Session = session }, ct))
+            {
+                store.Reset();
+                Assert.Equal(Objects, await CountAsync(again, ct));
+                Assert.Equal(0, store.Requests);
+            }
+        }
+        finally
+        {
+            System.IO.Directory.Delete(directory, recursive: true);
+        }
+    }
+
+    /// <summary>A sealed clustered dataset whose level 1 holds <see cref="Objects"/> entries; the options a handle opens it with.</summary>
+    private static async Task<DatasetOptions> CreateSealedAsync(IObjectStore store, VortexKeyring keyring, string directory, CancellationToken ct)
+    {
+        Decoders.EnsureRegistered();
+        await using VortexSession session = SealedCached(keyring, directory);
+        DatasetOptions options = new DatasetOptions { Session = session, Seed = Seed, Layout = new DatasetLayout { SortKey = [LayoutValue.Column("key")] }, Encrypted = true };
+        await using (VortexDataset created = await VortexDataset.CreateAsync(store, Schema(), options, ct))
+        {
+            Assert.True(created.IsEncrypted);
+            await created.CommitAsync([.. Enumerable.Range(0, Objects).Select(i => Add(2L * i))], ct);
+        }
+
+        return options;
+    }
+
+    /// <summary>A session that unwraps keys through <paramref name="keyring"/>, with a synopsis cache in <paramref name="directory"/>.</summary>
+    private static VortexSession SealedCached(VortexKeyring keyring, string directory) =>
+        VortexSession.Create(options =>
+        {
+            options.Keyring = keyring;
+            options.SynopsisCache = new SynopsisCache(directory, 64 << 20);
+        });
+
+    /// <summary>The files of the sealed tree pages the cache in <paramref name="directory"/> keeps.</summary>
+    private static string[] SealedPagesIn(string directory) =>
+        System.IO.Directory.GetFiles(directory, "*-sealed-page", System.IO.SearchOption.AllDirectories);
+
+    /// <summary>The bytes of every commit object <paramref name="store"/> holds, as it holds them.</summary>
+    private static async Task<List<byte[]>> CommitObjectsAsync(IObjectStore store, CancellationToken ct)
+    {
+        List<byte[]> objects = [];
+        await foreach (ObjectListing listing in store.ListAsync(CommitKey.Prefix, null, ct))
+        {
+            byte[] bytes = new byte[listing.Head.Length];
+            ObjectRead read = await store.ReadAsync(listing.Key, 0, bytes, null, ct);
+            Assert.Equal(bytes.Length, read.BytesRead);
+            objects.Add(bytes);
+        }
+
+        return objects;
     }
 
     [Fact]

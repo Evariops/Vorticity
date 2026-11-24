@@ -39,7 +39,8 @@ internal sealed class CommitPageSource : IPageSource
     private long _builtStart;
 
     // The session's synopsis cache, which keeps the pages read on the disk, by their hash: what a handle opened later, whose
-    // own cache starts empty, finds there. Null for none, and for a sealed dataset, which leaves no plaintext on the disk.
+    // own cache starts empty, finds there. Null for none, and for a sealed dataset, which leaves no plaintext on the disk and
+    // keeps its pages as the store holds them instead (SealedDisk).
     private readonly SynopsisCache? _disk;
 
     /// <summary>
@@ -78,6 +79,12 @@ internal sealed class CommitPageSource : IPageSource
     /// it reads for none.
     /// </summary>
     public ulong Reading { get; init; }
+
+    /// <summary>
+    /// A sealed dataset's pages on the session's disk, each as the frames that hold it and the header of its commit object,
+    /// as the store holds them: what a handle opened later reads its tree from. Null for a plain dataset, and without a cache.
+    /// </summary>
+    public SealedPageDisk? SealedDisk { get; init; }
 
     /// <summary>How many pages and regions of open reads this source holds now.</summary>
     public int InHand => _known.Count + _held.Count;
@@ -252,10 +259,17 @@ internal sealed class CommitPageSource : IPageSource
             _disk.DropPage(reference.Hash, reference.Length);
         }
 
+        // A sealed dataset's, decrypted and checked against its hash: what fails is dropped and read from the store.
+        if (SealedDisk is { } sealedDisk && await sealedDisk.TryReadAsync(reference, cancellationToken).ConfigureAwait(false) is { } opened)
+        {
+            Hold(reference, opened);
+            return opened;
+        }
+
         byte[] page;
         try
         {
-            page = await ReadStoredAsync(reference, cancellationToken).ConfigureAwait(false);
+            page = await ReadStoredAsync(reference, cancellationToken, SealedDisk).ConfigureAwait(false);
         }
         catch (CommitFormatException torn)
         {
@@ -293,11 +307,11 @@ internal sealed class CommitPageSource : IPageSource
         await ReadStoredAsync(reference, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
-    /// A page or a fragment read out of the commit object its reference names. A missing object —
-    /// one vacuum has taken — is reported against the version being read rather than answered from
-    /// what is left.
+    /// A page or a fragment read out of the commit object its reference names, and a sealed dataset's page kept on
+    /// <paramref name="disk"/> when given. A missing object — one vacuum has taken — is reported against the version being
+    /// read rather than answered from what is left.
     /// </summary>
-    private async ValueTask<byte[]> ReadStoredAsync(PageReference reference, CancellationToken cancellationToken)
+    private async ValueTask<byte[]> ReadStoredAsync(PageReference reference, CancellationToken cancellationToken, SealedPageDisk? disk = null)
     {
         string key = CommitKey.For(reference.Version);
         try
@@ -307,14 +321,14 @@ internal sealed class CommitPageSource : IPageSource
                 start = await ReadStartAsync(reference.Version, key, cancellationToken).ConfigureAwait(false);
                 Interlocked.Increment(ref _reads);
                 return await CommitObject
-                    .ReadPageAsync(_store, key, reference, start, cancellationToken).ConfigureAwait(false);
+                    .ReadPageAsync(_store, key, reference, start, cancellationToken, disk).ConfigureAwait(false);
             }
 
             Interlocked.Increment(ref _reads);
             try
             {
                 return await CommitObject
-                    .ReadPageAsync(_store, key, reference, start, cancellationToken).ConfigureAwait(false);
+                    .ReadPageAsync(_store, key, reference, start, cancellationToken, disk).ConfigureAwait(false);
             }
             catch (CommitFormatException)
             {
@@ -330,7 +344,7 @@ internal sealed class CommitPageSource : IPageSource
 
                 Interlocked.Increment(ref _reads);
                 return await CommitObject
-                    .ReadPageAsync(_store, key, reference, now, cancellationToken).ConfigureAwait(false);
+                    .ReadPageAsync(_store, key, reference, now, cancellationToken, disk).ConfigureAwait(false);
             }
         }
         catch (ObjectNotFoundException missing) when (Reading != 0 && !DatasetVacuum.IsLost(missing))

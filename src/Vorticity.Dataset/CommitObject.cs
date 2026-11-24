@@ -294,7 +294,8 @@ internal sealed class CommitObject
         string key,
         PageReference reference,
         long pagesStart,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        SealedPageDisk? disk = null)
     {
         ArgumentNullException.ThrowIfNull(store);
         if (!reference.Exists)
@@ -302,21 +303,41 @@ internal sealed class CommitObject
             throw new CommitFormatException("The reference names no page.");
         }
 
-        using ObjectRange range = await store
-            .GetRangeAsync(key, pagesStart + reference.Offset, reference.Length, cancellationToken)
-            .ConfigureAwait(false);
-        if (range.Length != reference.Length)
+        // A sealed dataset's page read for the disk: the frames that hold it come back with it, kept once it hashes.
+        byte[]? kept = null;
+        ObjectRange range;
+        if (disk is null)
         {
-            throw new CommitFormatException(
-                $"The page at {reference.Offset} is {reference.Length} bytes and {range.Length} were read.");
+            range = await store.GetRangeAsync(key, pagesStart + reference.Offset, reference.Length, cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            (range, kept) = await disk.Store
+                .ReadCommitKeptAsync(key, reference.Version, pagesStart + reference.Offset, reference.Length, cancellationToken).ConfigureAwait(false);
         }
 
-        byte[] page = range.Bytes.ToArray();
+        byte[] page;
+        using (range)
+        {
+            if (range.Length != reference.Length)
+            {
+                throw new CommitFormatException(
+                    $"The page at {reference.Offset} is {reference.Length} bytes and {range.Length} were read.");
+            }
+
+            page = range.Bytes.ToArray();
+        }
+
         UInt128 hash = XxHash128.HashToUInt128(page);
         if (hash != reference.Hash)
         {
             throw new CommitFormatException(
                 $"The page at {reference.Offset} hashes to {hash:x32} and its reference says {reference.Hash:x32}.");
+        }
+
+        if (kept is not null)
+        {
+            disk!.Admit(reference, kept);
         }
 
         return page;
