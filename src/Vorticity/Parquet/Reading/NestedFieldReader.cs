@@ -273,7 +273,7 @@ internal sealed class NestedFieldReader
 
             default:
             {
-                int offsetBytes = checked(length * sizeof(int));
+                int offsetBytes = ParquetThrow.Size((long)length * sizeof(int), "A batch's list offsets");
                 VortexBuffer offsets = CanonicalSupport.AllocateUninitialized(context.Decode, Math.Max(offsetBytes, 1), 64, out Span<byte> offsetSpan).Slice(0, offsetBytes);
                 VortexBuffer sizes = CanonicalSupport.AllocateUninitialized(context.Decode, Math.Max(offsetBytes, 1), 64, out Span<byte> sizeSpan).Slice(0, offsetBytes);
                 VortexBuffer present = default;
@@ -354,7 +354,7 @@ internal sealed class NestedFieldReader
         Span<byte> present, Span<int> offsets, Span<int> sizes, int length, out int valid, ColumnChunkReader levels)
     {
         // The kernel's scratch, two ints per entry, is the batch's: it goes when the batch does.
-        int bytes = checked(2 * def.Length * sizeof(int));
+        int bytes = ParquetThrow.Size(2L * def.Length * sizeof(int), "A batch's scratch of levels");
         context.Canonical.AllocateUninitialized(Math.Max(bytes, 1), 64, out Span<byte> scratch);
         int slots = LevelKernels.Lists(
             rep, def, repetition, definition, field.DefinedAt, field.RepeatedAt, field.ElementsAt, present, offsets, sizes,

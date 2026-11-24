@@ -186,9 +186,9 @@ internal sealed class ParquetFooter
         long rows = 0;
         for (int i = 0; i < rowGroups.Length; i++)
         {
-            if (rowGroups[i].RowCount < 0)
+            if (rowGroups[i].RowCount < 0 || rowGroups[i].RowCount > long.MaxValue - rows)
             {
-                ParquetThrow.Format($"Row group {i} declares {rowGroups[i].RowCount} rows.");
+                ParquetThrow.Format($"Row group {i} declares {rowGroups[i].RowCount} rows, after {rows} in the groups before it.");
             }
 
             rowGroups[i].FirstRow = rows;

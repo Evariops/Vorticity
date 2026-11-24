@@ -345,6 +345,12 @@ internal sealed class ParquetSchema
             ParquetThrow.Format("The schema's root is not a group.");
         }
 
+        // A root without a field would be taken for a leaf of its own, a column the file never wrote.
+        if (root.ChildCount == 0)
+        {
+            ParquetThrow.Unsupported(root.Name, ParquetComponentKind.Feature, "The schema has no field: a file of rows without columns has no column to carry them.");
+        }
+
         Span<(int Node, int Remaining)> stack = stackalloc (int, int)[MaxDepth + 1];
         int top = 0;
         stack[0] = (0, root.ChildCount);

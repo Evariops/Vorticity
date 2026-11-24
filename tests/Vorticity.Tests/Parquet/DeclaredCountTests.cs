@@ -91,6 +91,35 @@ public sealed class DeclaredCountTests : IDisposable
         Assert.Contains("aad_file_unique is 2097152 bytes", refused.Message, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public async Task RefusesARowGroupOfFewerChunksThanTheSchemaHasLeaves()
+    {
+        HandBuiltFile built = new(2);
+        built.Leaf("a", FieldRepetition.Required, PhysicalType.Int64).Leaf("b", FieldRepetition.Required, PhysicalType.Int64);
+        built.Rows = 1;
+        built.Chunk(PhysicalType.Int64, "a").V2(null, 0, [0], 0, 1, HandBuiltFile.Longs(7));
+        await System.IO.File.WriteAllBytesAsync(_path, built.ToBytes(), Ct);
+
+        ParquetFormatException refused = await Assert.ThrowsAsync<ParquetFormatException>(async () =>
+        {
+            await using ParquetFile opened = await ParquetFile.OpenAsync(_path, Ct);
+        });
+        Assert.Contains("holds 1 column chunks where the schema has 2 leaves", refused.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RefusesASchemaWithoutAFieldRatherThanReadItsRootAsALeaf()
+    {
+        HandBuiltFile built = new(0);
+        built.Rows = 3;
+        await System.IO.File.WriteAllBytesAsync(_path, built.ToBytes(), Ct);
+
+        await Assert.ThrowsAsync<ParquetUnsupportedException>(async () =>
+        {
+            await using ParquetFile opened = await ParquetFile.OpenAsync(_path, Ct);
+        });
+    }
+
     private async Task<ParquetFormatException> ScanAsync()
     {
         await using ParquetFile file = await ParquetFile.OpenAsync(_path, Ct);

@@ -885,7 +885,7 @@ internal sealed partial class ColumnChunkReader : IDisposable
 
         // Every slot is written by the pages it is copied from; a bitmap's bits past the rows are
         // left zero.
-        int bytes = _slot == 0 ? CanonicalSupport.BitmapByteCount(rows) : checked(rows * _slot);
+        int bytes = _slot == 0 ? CanonicalSupport.BitmapByteCount(rows) : Sized(rows, _slot);
         Span<byte> into;
         VortexBuffer values = _slot == 0
             ? CanonicalSupport.Allocate(decode, bytes, 64, out into)

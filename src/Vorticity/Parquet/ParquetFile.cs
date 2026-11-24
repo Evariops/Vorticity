@@ -282,6 +282,17 @@ public sealed class ParquetFile : IAsyncDisposable
     private static ParquetSchema Compile(ParquetFooter metadata)
     {
         ParquetSchema schema = ParquetSchema.Compile(metadata.Schema, metadata.ColumnOrders, metadata.Value).Restored(metadata.Value(ParquetSchema.VortexSchemaKey));
+
+        // A chunk is found by its leaf's ordinal in its row group's list: a group of another count
+        // would be indexed past its list, or read a chunk as another leaf's.
+        for (int g = 0; g < metadata.RowGroups.Length; g++)
+        {
+            if (metadata.RowGroups[g].ColumnCount != schema.Columns.Length)
+            {
+                ParquetThrow.Format($"Row group {g} holds {metadata.RowGroups[g].ColumnCount} column chunks where the schema has {schema.Columns.Length} leaves.");
+            }
+        }
+
         if (metadata.Decryptor is not null || metadata.IsEncrypted)
         {
             string[] paths = new string[schema.Columns.Length];
@@ -410,7 +421,7 @@ public sealed class ParquetFile : IAsyncDisposable
             ? chunk.DictionaryPageOffset
             : chunk.DataPageOffset;
         long size = chunk.TotalCompressedSize;
-        if (start < 4 || size <= 0 || size > int.MaxValue || start + size > Length - 8 - 4)
+        if (start < 4 || size <= 0 || size > int.MaxValue || start > Length - 8 - 4 - size)
         {
             ParquetThrow.Format($"A column chunk declares {size} bytes at {start}, outside the {Length} bytes of the file's pages.");
         }

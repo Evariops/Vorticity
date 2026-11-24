@@ -58,7 +58,7 @@ internal static class DeltaBinaryPacked
         uint miniblocks = Varint.Read32<Errors>(data, ref position);
         uint count = Varint.Read32<Errors>(data, ref position);
         long first = Varint.ZigZagDecode64(Varint.Read64<Errors>(data, ref position));
-        if (block == 0 || block % 128 != 0 || miniblocks == 0 || block % miniblocks != 0
+        if (block == 0 || block > int.MaxValue || block % 128 != 0 || miniblocks == 0 || block % miniblocks != 0
             || (block / miniblocks) % 32 != 0 || block / miniblocks > MaxMiniblockValues)
         {
             ParquetThrow.Format($"A DELTA_BINARY_PACKED header declares blocks of {block} values in {miniblocks} miniblocks, which the standard does not allow.");

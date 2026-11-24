@@ -282,6 +282,23 @@ public sealed class RleHybridTests
     }
 
     [Fact]
+    public void AZeroWidthRunOfMoreGroupsThanAPageHoldsIsRefused()
+    {
+        // 2^28 groups of eight at a width of zero, which take no byte: eight of them a group wrap an int.
+        byte[] data = [0x81, 0x80, 0x80, 0x80, 0x02];
+        RleHybridDecoder decoder = new(0);
+        uint[] values = new uint[8];
+        try
+        {
+            decoder.Read(data, values);
+            Assert.Fail("A run of 2^31 values decoded.");
+        }
+        catch (ParquetFormatException)
+        {
+        }
+    }
+
+    [Fact]
     public void DataEndingBeforeItsValuesIsRefused()
     {
         uint[] values = new uint[16];
