@@ -409,13 +409,15 @@ internal static class TemporalUnits
     internal const long MillisecondsPerDay = 86_400_000;
 
     /// <summary>Ticks (100 ns) in one <paramref name="unit"/>, or 0 for nanoseconds, which are finer than a tick.</summary>
+    /// <exception cref="VortexFormatException">The unit is none of the five defined: a divisor of zero, or ticks of zero.</exception>
     internal static long TicksPer(TimeUnit unit) => unit switch
     {
+        TimeUnit.Nanoseconds => 0,
         TimeUnit.Microseconds => TimeSpan.TicksPerMicrosecond,
         TimeUnit.Milliseconds => TimeSpan.TicksPerMillisecond,
         TimeUnit.Seconds => TimeSpan.TicksPerSecond,
         TimeUnit.Days => TimeSpan.TicksPerDay,
-        _ => 0,
+        _ => throw new VortexFormatException($"The time unit {(byte)unit} is none of the five defined."),
     };
 
     /// <summary>Floor division: <c>/</c> truncates toward zero, which moves an instant before the epoch toward the future.</summary>

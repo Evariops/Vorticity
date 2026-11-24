@@ -373,10 +373,19 @@ public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8
         nullable ? type.Nullable : type.NonNullable;
 
     /// <summary>The unit of a time, a timestamp or a date; null for any other type.</summary>
+    /// <exception cref="VortexFormatException">
+    /// The metadata names no unit: a type read from a file is validated only when the field that carries it is read, and
+    /// an unknown unit taken as is read as zero ticks a unit, or as seconds.
+    /// </exception>
     internal TimeUnit? Unit =>
         ExtensionId is ExtensionIds.Date or ExtensionIds.Time or ExtensionIds.Timestamp && _metadata is { Length: > 0 } m
-            ? (TimeUnit)m[0]
+            ? Defined(m[0])
             : null;
+
+    /// <summary><paramref name="raw"/> as a unit, when it names one.</summary>
+    private TimeUnit Defined(byte raw) => raw <= (byte)TimeUnit.Days
+        ? (TimeUnit)raw
+        : throw new VortexFormatException($"The type {ExtensionId} declares the time unit {raw}; 0 to 4 are defined.");
 
     /// <summary>The zone of a timestamp, resolved once on this host; UTC for a naive one.</summary>
     internal TimeZoneInfo ZoneInfo

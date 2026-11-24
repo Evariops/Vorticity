@@ -322,6 +322,25 @@ public sealed class ExtensionDTypeTests
 
     private DType Int32Storage() => _types.Primitive(PType.I32, Nullability.NonNullable);
 
+    /// <summary>
+    /// A temporal type whose metadata names no unit, as a file's type may (it is validated only when the field is read),
+    /// or as the generic constructor builds it, refuses to say its unit: taken as is, it was read as zero ticks a unit by
+    /// the conversions to .NET values, a divisor of zero, and as seconds by the calendar functions.
+    /// </summary>
+    [Fact]
+    public void ATemporalTypeOfAnUnknownUnitRefusesToSayIt()
+    {
+        foreach (string id in new[] { "vortex.timestamp", "vortex.time", "vortex.date" })
+        {
+            VortexType type = VortexType.Extension(id, VortexType.Int64, new byte[] { 9, 0, 0 });
+            Assert.Throws<VortexFormatException>(() => type.Unit);
+            Assert.Equal(TimeUnit.Milliseconds, VortexType.Extension(id, VortexType.Int64, new byte[] { 2, 0, 0 }).Unit);
+        }
+
+        Assert.Throws<VortexFormatException>(() => TemporalUnits.TicksPer((TimeUnit)9));
+        Assert.Equal(0, TemporalUnits.TicksPer(TimeUnit.Nanoseconds));
+    }
+
     private DType Int64Storage() => _types.Primitive(PType.I64, Nullability.NonNullable);
 
     private DType UuidStorage(Nullability outer) =>
