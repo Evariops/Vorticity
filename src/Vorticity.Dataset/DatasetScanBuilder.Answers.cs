@@ -208,12 +208,16 @@ internal sealed partial class DatasetScanBuilder
         Lock gate = new Lock();
         FilterLiteral best = FilterLiteral.Null;
 
+        // A decimal's extremes are numbers, an unscaled value past 64 bits read as its bytes: ordered as numbers between
+        // objects, between batches and against a summary, never byte by byte nor by which came last.
+        bool decimals = TerminalScan.IsDecimal(_version.Schema.DType, path);
+
         // Whether the object is answered without being opened: its summary loses to the best so far, or gives its extreme.
         bool Settles(PositionedObject held)
         {
             lock (gate)
             {
-                if (_summaries && Loses(held.Entry.Summaries, path, best, wantMin))
+                if (_summaries && Loses(held.Entry.Summaries, path, best, wantMin, decimals))
                 {
                     RecordSkipped();
                     return true;
@@ -221,7 +225,7 @@ internal sealed partial class DatasetScanBuilder
 
                 if (_summaries && _filter is null && Whole(held) && Exact(held.Entry.Summaries, path, wantMin, out FilterLiteral bound))
                 {
-                    if (Beats(bound, best, wantMin))
+                    if (ExtremeOrder.Beats(bound, best, wantMin, decimals))
                     {
                         best = bound;
                     }
@@ -250,7 +254,7 @@ internal sealed partial class DatasetScanBuilder
                     .ConfigureAwait(false);
                 lock (gate)
                 {
-                    if (candidate.Kind != FilterLiteralKind.Null && Beats(candidate, best, wantMin))
+                    if (ExtremeOrder.Beats(candidate, best, wantMin, decimals))
                     {
                         best = candidate;
                     }
@@ -506,20 +510,27 @@ internal sealed partial class DatasetScanBuilder
         }
     }
 
-    /// <summary>Whether an object's summary proves it cannot hold a better value than the best.</summary>
-    private static bool Loses(ObjectSummaries summaries, string path, FilterLiteral best, bool wantMin)
+    /// <summary>
+    /// Whether an object's summary proves it cannot hold a better value than the best: a decimal's bound and best compared
+    /// as numbers, whatever their forms; any other's when they are of one kind.
+    /// </summary>
+    private static bool Loses(ObjectSummaries summaries, string path, FilterLiteral best, bool wantMin, bool decimals)
     {
         if (best.Kind == FilterLiteralKind.Null || !summaries.TryGet(path, out ColumnSummary column))
         {
             return false;
         }
 
-        if (wantMin)
+        if (!(wantMin ? column.HasMin : column.HasMax))
         {
-            return column.HasMin && Comparable(column.Min, best) && KeyCursor.Compare(column.Min, best) >= 0;
+            return false;
         }
 
-        return column.HasMax && Comparable(column.Max, best) && KeyCursor.Compare(column.Max, best) <= 0;
+        FilterLiteral bound = wantMin ? column.Min : column.Max;
+        int? order = decimals
+            ? ExtremeOrder.Compare(bound, best, decimals: true)
+            : Comparable(bound, best) ? KeyCursor.Compare(bound, best) : null;
+        return order is { } known && (wantMin ? known >= 0 : known <= 0);
     }
 
     /// <summary>The true extreme an object's summary records, when it records one.</summary>
@@ -534,11 +545,6 @@ internal sealed partial class DatasetScanBuilder
         bound = wantMin ? column.Min : column.Max;
         return (wantMin ? column.HasMin : column.HasMax) && bound.Kind != FilterLiteralKind.Null;
     }
-
-    private static bool Beats(FilterLiteral candidate, FilterLiteral best, bool wantMin) =>
-        best.Kind == FilterLiteralKind.Null
-        || !Comparable(candidate, best)
-        || (wantMin ? KeyCursor.Compare(candidate, best) < 0 : KeyCursor.Compare(candidate, best) > 0);
 
     /// <summary>Whether two literals are of one comparison kind, so that an order holds between them.</summary>
     private static bool Comparable(FilterLiteral left, FilterLiteral right) =>
@@ -722,7 +728,7 @@ internal sealed partial class DatasetScanBuilder
             bool read = numeric
                 ? LiteralReader.TryReadDecimal(batch.Arena, node, row, out FilterLiteral value)
                 : LiteralReader.TryRead(batch.Arena, node, row, out value);
-            if (read && Beats(value, best, wantMin))
+            if (read && ExtremeOrder.Beats(value, best, wantMin, numeric))
             {
                 best = value;
             }

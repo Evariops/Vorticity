@@ -1302,19 +1302,14 @@ internal sealed class TerminalScan
         }
 
         if (best.Kind == FilterLiteralKind.Null
-            || (numeric ? BeatsAsDecimal(candidate, best, wantMin) : Beats(candidate, best, wantMin)))
+            || (numeric ? ExtremeOrder.Beats(candidate, best, wantMin, decimals: true) : Beats(candidate, best, wantMin)))
         {
             best = candidate;
         }
     }
 
-    /// <summary>Whether one unscaled decimal is strictly better than another, compared as the numbers they are.</summary>
-    private static bool BeatsAsDecimal(FilterLiteral candidate, FilterLiteral best, bool wantMin) =>
-        ComparisonKernels.TryDecimal(candidate, out Int256 value) && ComparisonKernels.TryDecimal(best, out Int256 current)
-        && (wantMin ? value.CompareTo(current) < 0 : value.CompareTo(current) > 0);
-
     /// <summary>Whether <paramref name="path"/> names a decimal column, an extension over one included.</summary>
-    private static bool IsDecimal(DType schema, string path)
+    internal static bool IsDecimal(DType schema, string path)
     {
         if (schema.IsDefault)
         {

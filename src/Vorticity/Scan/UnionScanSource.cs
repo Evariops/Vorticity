@@ -424,10 +424,11 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
             spec, (member, asked) => member.Rows.AnswerAsync(asked, form, metrics, cancellationToken), new FormAnswer(0, FilterLiteral.Null)).ConfigureAwait(false);
         if (form is ExtremeShape extreme)
         {
+            bool decimals = Scanning.ExtremeOrder.IsDecimal(Schema, extreme.Path);
             FilterLiteral best = FilterLiteral.Null;
             foreach (FormAnswer answer in answers)
             {
-                if (answer.Value.Kind != FilterLiteralKind.Null && Beats(answer.Value, best, extreme.Min))
+                if (Scanning.ExtremeOrder.Beats(answer.Value, best, extreme.Min, decimals))
                 {
                     best = answer.Value;
                 }
@@ -444,12 +445,6 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
 
         return new FormAnswer(rows, FilterLiteral.Null);
     }
-
-    /// <summary>Whether <paramref name="candidate"/> is a better extreme than <paramref name="best"/>, as a dataset judges its objects'.</summary>
-    private static bool Beats(FilterLiteral candidate, FilterLiteral best, bool wantMin) =>
-        best.Kind == FilterLiteralKind.Null
-        || candidate.Kind != best.Kind
-        || (wantMin ? KeyOrder.Total(candidate, best) < 0 : KeyOrder.Total(candidate, best) > 0);
 
     /// <summary>The paths of each member's variant columns, tallied in the one question, each from its own directories first.</summary>
     public async ValueTask PathsAsync(ScanSpec spec, PathsQuestion question, ScanCounters metrics, CancellationToken cancellationToken)
@@ -641,6 +636,7 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
         min = FilterLiteral.Null;
         max = FilterLiteral.Null;
         bool any = false;
+        bool decimals = Scanning.ExtremeOrder.IsDecimal(Schema, path);
         for (int m = 0; m < _members.Length; m++)
         {
             if (_starts[m + 1] == _starts[m])
@@ -664,8 +660,17 @@ internal sealed class UnionScanSource : ScanSource, IRowsCapability, IStatistics
                 continue;
             }
 
-            min = KeyOrder.Total(low, min) < 0 ? low : min;
-            max = KeyOrder.Total(high, max) > 0 ? high : max;
+            // A decimal's bounds are numbers, an unscaled value past 64 bits read as its bytes; bounds that do not compare
+            // as numbers bound nothing.
+            if (Scanning.ExtremeOrder.Compare(low, min, decimals) is not { } below || Scanning.ExtremeOrder.Compare(high, max, decimals) is not { } above)
+            {
+                min = FilterLiteral.Null;
+                max = FilterLiteral.Null;
+                return false;
+            }
+
+            min = below < 0 ? low : min;
+            max = above > 0 ? high : max;
         }
 
         return any;
