@@ -5,6 +5,13 @@ namespace Vorticity.Generators;
 /// <summary>The types of the core and of the base library the package recognises, resolved once per compilation.</summary>
 internal sealed class KnownSymbols
 {
+    // Kept with the compilation they are of, and gone with it: the generator analyses each record of a compilation in
+    // turn, and resolved the same 43 types for each.
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Compilation, KnownSymbols> Resolved = new();
+
+    /// <summary>The types of <paramref name="compilation"/>, resolved the first time it is asked.</summary>
+    public static KnownSymbols Of(Compilation compilation) => Resolved.GetValue(compilation, static c => new KnownSymbols(c));
+
     public KnownSymbols(Compilation compilation)
     {
         RecordAttribute = compilation.GetTypeByMetadataName("Vorticity.VortexRecordAttribute");

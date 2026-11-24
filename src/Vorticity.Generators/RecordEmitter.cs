@@ -1015,5 +1015,10 @@ internal static class RecordEmitter
         }
     }
 
-    private static string Cref(MemberModel member) => member.DeclaringType + "." + RecordAnalysis.Escape(member.Name);
+    /// <summary>
+    /// The member as a <c>cref</c> names it, by the type that declares it: a member taken from a closed generic base,
+    /// <c>Base&lt;int&gt;</c>, by the base's definition and its type parameters in braces, <c>Base{T}</c>, the one form a
+    /// <c>cref</c> accepts, angle brackets leaving the comment's XML malformed.
+    /// </summary>
+    private static string Cref(MemberModel member) => member.DeclaringType.Replace('<', '{').Replace('>', '}') + "." + RecordAnalysis.Escape(member.Name);
 }
