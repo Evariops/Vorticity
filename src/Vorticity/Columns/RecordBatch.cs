@@ -748,7 +748,6 @@ public sealed class RecordBatch : IDisposable
             return _arena;
         }
     }
-
     /// <summary>The root node's index in <see cref="Arena"/>.</summary>
     internal int RootIndex
     {
