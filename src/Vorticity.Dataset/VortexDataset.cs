@@ -92,8 +92,12 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         _ => 0,
     };
 
-    /// <summary>At a turn of the registry's slow timer, lets go of what no question used since the turn before, above the floors.</summary>
-    void Buffers.IHeldMemory.LetGoUnused(bool collection)
+    /// <summary>
+    /// At a turn of the registry's slow timer, lets go of what no question used since the turn before, above the floors:
+    /// none told as leaving the heap, its pages' and objects' blocks going back to the pool, which tells what it lets go
+    /// itself, where counting them here too would count them twice.
+    /// </summary>
+    long Buffers.IHeldMemory.LetGoUnused(bool collection)
     {
         if (!collection)
         {
@@ -101,6 +105,8 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             _pageCache.LetGo(long.MaxValue, stale: true);
             LetGoMemos(long.MaxValue, stale: true);
         }
+
+        return 0;
     }
 
     /// <summary>

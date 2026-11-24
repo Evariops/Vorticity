@@ -681,9 +681,17 @@ public sealed class QueryMemoryBudget
         long over = soft.ReservedBytes + pool.ParkedBytes - soft.CeilingBytes - PoolSlackBytes;
         if (over > 0)
         {
-            pool.GiveBack(KeptKind.Blocks, over);
+            Process.LetGoKept(pool.GiveBack(KeptKind.Blocks, over));
         }
     }
+
+    /// <summary>
+    /// Tells the process's budget of <paramref name="bytes"/> the memory kept let go of outside its own asking: a sweep of the
+    /// registry of kept memory, the pool trimmed under a hard budget, an outsized block replaced. They were live at the last
+    /// full collection, so the rest still reads them so until it is told, and would refuse a reservation over bytes that
+    /// only a collection it then does not ask for takes back.
+    /// </summary>
+    internal void LetGoKept(long bytes) => LetGo(bytes);
 
     /// <summary>Notes a reservation refused, once: a job reads it to tell its own failure from another's.</summary>
     private void Refuse()

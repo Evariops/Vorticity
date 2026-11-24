@@ -49,9 +49,9 @@ internal interface IHeldMemory
     /// <summary>
     /// Lets go of what nothing took since it was last asked, above its floors: after a collection of the oldest generation
     /// (<paramref name="collection"/>) for what rebuilds without a request, at each turn of the registry's slow timer for
-    /// everything.
+    /// everything. The bytes that leave the heap, which the process's budget read as live and the next collection takes.
     /// </summary>
-    void LetGoUnused(bool collection);
+    long LetGoUnused(bool collection);
 }
 
 /// <summary>
@@ -133,12 +133,20 @@ internal static class HeldMemory
     }
 
     /// <summary>Has every holder let go of what nothing took since it was last asked (<see cref="IHeldMemory.LetGoUnused"/>).</summary>
+    /// <remarks>
+    /// What they let go was live at the last full collection, so the process's budget still reads it so: it is told, as it
+    /// is of what <see cref="GiveBack"/> lets go, or it would refuse a reservation over bytes that only a collection it
+    /// does not ask for would take back.
+    /// </remarks>
     internal static void LetGoUnused(bool collection)
     {
+        long let = 0;
         foreach (KeyValuePair<IHeldMemory, object?> pair in Holders)
         {
-            pair.Key.LetGoUnused(collection);
+            let += pair.Key.LetGoUnused(collection);
         }
+
+        QueryMemoryBudget.Process.LetGoKept(let);
     }
 
     /// <summary>The bytes each kind of holder holds now, and how many holders of each kind there are.</summary>

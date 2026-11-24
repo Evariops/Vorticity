@@ -389,13 +389,17 @@ internal static class Blocks
         return given;
     }
 
-    /// <summary>Lets go, in each class, of the blocks that sat kept since the last time, above the floors.</summary>
-    internal static void LetGoUnused()
+    /// <summary>Lets go, in each class, of the blocks that sat kept since the last time, above the floors: the bytes let go.</summary>
+    internal static long LetGoUnused()
     {
-        foreach (Stack stack in s_classes)
+        long let = 0;
+        for (int i = 0; i < s_classes.Length; i++)
         {
-            stack.LetGo(stack.Unused(), aboveFloor: true);
+            Stack stack = s_classes[i];
+            let += stack.LetGo(stack.Unused(), aboveFloor: true) * SizeOf(i);
         }
+
+        return let;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -555,6 +559,6 @@ internal static class Blocks
 
         public long GiveBack(KeptKind kind, long bytes) => kind == KeptKind.Blocks && bytes > 0 ? Blocks.GiveBack(bytes) : 0;
 
-        public void LetGoUnused(bool collection) => Blocks.LetGoUnused();
+        public long LetGoUnused(bool collection) => Blocks.LetGoUnused();
     }
 }

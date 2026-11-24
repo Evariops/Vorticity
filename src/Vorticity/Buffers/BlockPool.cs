@@ -323,7 +323,8 @@ internal sealed class BlockPool : IHeldMemory
                         return kept;
                     }
 
-                    kept.FreeParked();
+                    // Too short, and let go of: up to 256 MiB the process's budget read as live, which it is told of.
+                    QueryMemoryBudget.Process.LetGoKept(kept.FreeParked());
                 }
 
                 return BlockOwner.AllocatePooled(this, OutsizedBucket, capacity: length, length: length, out reused);
@@ -457,8 +458,9 @@ internal sealed class BlockPool : IHeldMemory
     /// The process's pool lets go, in each class, of the blocks of the slabs it would give back first: those the fewest
     /// rented blocks hold, which come back empty once the blocks it keeps there go (<see cref="Arrange"/>).
     /// </remarks>
-    public void LetGoUnused(bool collection)
+    public long LetGoUnused(bool collection)
     {
+        long let = 0;
         if (_keepsOutsized)
         {
             lock (s_census)
@@ -466,7 +468,7 @@ internal sealed class BlockPool : IHeldMemory
                 Arrange();
                 for (int i = 0; i < _buckets.Length; i++)
                 {
-                    LetGo(i, _buckets[i].TakeFirst(_buckets[i].Unused(), s_letting));
+                    let += LetGo(i, _buckets[i].TakeFirst(_buckets[i].Unused(), s_letting));
                 }
 
                 s_slabs.Clear();
@@ -476,16 +478,17 @@ internal sealed class BlockPool : IHeldMemory
         {
             for (int i = 0; i < _buckets.Length; i++)
             {
-                Free(i, _buckets[i].Unused(), aboveFloor: true);
+                let += Free(i, _buckets[i].Unused(), aboveFloor: true);
             }
         }
 
         if (!Volatile.Read(ref _outsizedAsked))
         {
-            FreeOutsized();
+            let += FreeOutsized();
         }
 
         Volatile.Write(ref _outsizedAsked, false);
+        return let;
     }
 
     /// <summary>
@@ -643,8 +646,8 @@ internal sealed class BlockPool : IHeldMemory
         return _buckets[BucketIndexOf(RoundedSize(length))].Count;
     }
 
-    /// <summary>Frees the block the outsized slot keeps, if any.</summary>
-    private void FreeOutsized() => Interlocked.Exchange(ref _outsized, null)?.FreeParked();
+    /// <summary>Frees the block the outsized slot keeps, if any: the bytes that leave the heap.</summary>
+    private long FreeOutsized() => Interlocked.Exchange(ref _outsized, null)?.FreeParked() ?? 0;
 
     /// <summary>Whether the outsized slot keeps a block: for tests, as <see cref="ParkedCount"/> is.</summary>
     internal bool KeepsOutsized => Volatile.Read(ref _outsized) is not null;

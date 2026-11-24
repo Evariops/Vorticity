@@ -475,6 +475,34 @@ public sealed class BlockPoolTests
     /// last asked, the fewest it held in between: a block taken and given back between two askings stays. A class keeps
     /// its floor, 256 KiB of blocks, however long they sat.
     /// </summary>
+    /// <summary>
+    /// What a sweep lets go leaves the heap, and the sweep says how many bytes, for the process's budget to stop reading
+    /// them as live: the outsized block a pool that keeps all parks, once no rent asked for it. Larger than a slab, it is
+    /// an array of its own, whose bytes all leave, where a piece of a slab leaves nothing until its slab empties.
+    /// </summary>
+    [Fact]
+    public void Letting_go_of_what_was_unused_says_the_bytes_that_leave_the_heap()
+    {
+        const int megabyte = 1024 * 1024;
+        BlockPool pool = BlockPool.KeepingAll(megabyte);
+        HeldMemory.Unregister(pool);
+        try
+        {
+            pool.Return(pool.Rent(TestAccount.Shared, 40 * megabyte, 64));
+            Assert.True(pool.KeepsOutsized);
+
+            // Asked for since the sweep before: kept; then sat unasked through one: let go, its bytes said.
+            Assert.Equal(0, pool.LetGoUnused(collection: true));
+            long let = pool.LetGoUnused(collection: true);
+            Assert.False(pool.KeepsOutsized);
+            Assert.True(let >= 40L * megabyte, $"A sweep that let go of the outsized block of 40 MiB said {let} bytes.");
+        }
+        finally
+        {
+            pool.Trim();
+        }
+    }
+
     [Fact]
     public void Letting_go_of_what_was_unused_frees_the_blocks_parked_since_the_time_before_above_the_floor()
     {
@@ -949,8 +977,6 @@ public sealed class SharedPoolTests
             return given;
         }
 
-        public void LetGoUnused(bool collection)
-        {
-        }
+        public long LetGoUnused(bool collection) => 0;
     }
 }
