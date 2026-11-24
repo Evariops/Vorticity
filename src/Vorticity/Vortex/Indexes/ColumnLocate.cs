@@ -232,11 +232,16 @@ internal sealed class ColumnLocate : IValueGranules
             int[] counts = new int[count];
             int[] offsets = new int[count];
             byte[] previous = [];
+            long rebuilt = 0;
             for (int v = 0; v < count; v++)
             {
                 int shared = checked((int)Varint(span, ref at));
                 int length = checked((int)Varint(span, ref at));
-                if (shared > previous.Length || length > span.Length - at)
+
+                // Each value shares a prefix of the one before, which front coding lets repeat for a few bytes into a
+                // total that grows as the square of the region: held to what a decode is allowed.
+                rebuilt += (long)shared + length;
+                if (shared > previous.Length || length > span.Length - at || rebuilt > VortexLimits.DefaultMaxDecompressedBytes)
                 {
                     return null;
                 }

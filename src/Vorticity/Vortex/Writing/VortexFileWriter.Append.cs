@@ -608,7 +608,7 @@ public sealed partial class VortexFileWriter
             IndexDirectory? directory = file.HasIndexDirectory
                 ? await file.ReadIndexDirectoryAsync(cancellationToken).ConfigureAwait(false)
                 : null;
-            HashSet<int>[] dictBlocks = DictBlocks(directory, schema);
+            HashSet<int>[] dictBlocks = DictBlocks(directory, schema, boundary);
             OldColumn[] columns = new OldColumn[fields];
             ZonePruner? zones = null;
             if (boundary > 0 && zoneLength > 0)
@@ -821,8 +821,11 @@ public sealed partial class VortexFileWriter
             return Expr.And(NoneNull(schema, first, middle), NoneNull(schema, middle, end));
         }
 
-        /// <summary>Per column, the blocks a dictionary probe claimed.</summary>
-        private static HashSet<int>[] DictBlocks(IndexDirectory? directory, DType schema)
+        /// <summary>
+        /// Per column, the blocks a dictionary probe claimed among the <paramref name="kept"/> the append keeps: a run's end
+        /// is the file's to say, and a run past the blocks kept would have every block to 2^31 set.
+        /// </summary>
+        private static HashSet<int>[] DictBlocks(IndexDirectory? directory, DType schema, int kept)
         {
             HashSet<int>[] blocks = new HashSet<int>[schema.FieldCount];
             for (int i = 0; i < blocks.Length; i++)
@@ -839,7 +842,7 @@ public sealed partial class VortexFileWriter
 
                 foreach (IndexRun run in entry.Runs)
                 {
-                    for (ulong b = run.FirstBlock; b < run.EndBlock && b < int.MaxValue; b++)
+                    for (ulong b = run.FirstBlock; b < run.EndBlock && b < (ulong)kept; b++)
                     {
                         blocks[entry.ColumnPath[0]].Add((int)b);
                     }

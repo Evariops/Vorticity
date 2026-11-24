@@ -301,6 +301,11 @@ internal sealed class GranuleKeys : IDisposable
                     throw Corrupt(page);
                 }
 
+                if ((long)_wholeUsed + length > VortexLimits.DefaultMaxDecompressedBytes)
+                {
+                    throw Corrupt(page);
+                }
+
                 if (_whole is null || _whole.Length - _wholeUsed < length)
                 {
                     GrowWhole(length);
@@ -651,7 +656,7 @@ internal sealed class GranuleKeys : IDisposable
                 return null;
             }
 
-            int runsAPage = (pageEntries + RestartEvery - 1) / RestartEvery;
+            int runsAPage = (int)(((long)pageEntries + RestartEvery - 1) / RestartEvery);
             int lastPage = (int)Math.Min((ulong)pageEntries, granules - ((ulong)(pages - 1) * (ulong)pageEntries));
             long runs = ((long)(pages - 1) * runsAPage) + ((lastPage + RestartEvery - 1) / RestartEvery);
             if ((2 * (long)pages) + (3 * runs) > int.MaxValue)
@@ -666,7 +671,10 @@ internal sealed class GranuleKeys : IDisposable
             int before = 0;
             for (int page = 0; page < pages; page++)
             {
-                if (!Varint(bytes, ref at, out int shared) || shared > end - before || !Varint(bytes, ref at, out int rest) || rest > bytes.Length - at)
+                // A key shares a prefix of the one before, which front coding lets a few bytes repeat page after page into
+                // a total that grows as the square of the table: held to what a decode is allowed.
+                if (!Varint(bytes, ref at, out int shared) || shared > end - before || !Varint(bytes, ref at, out int rest) || rest > bytes.Length - at
+                    || (long)end + shared + rest > VortexLimits.DefaultMaxDecompressedBytes)
                 {
                     return null;
                 }

@@ -171,7 +171,10 @@ internal sealed class GranuleKeyRuns
                 ulong shared = reader.ReadVarint();
                 ReadOnlySpan<byte> rest = reader.ReadLengthDelimited();
                 int before = previous < 0 ? 0 : keys.WrittenCount - previous;
-                if (shared > (ulong)before)
+
+                // Front coding lets a key repeat the one before whole for a few bytes, so the keys rebuilt grow as the
+                // square of the region: held to what a decode is allowed.
+                if (shared > (ulong)before || (long)keys.WrittenCount + (long)shared + rest.Length > VortexLimits.DefaultMaxDecompressedBytes)
                 {
                     return null;
                 }

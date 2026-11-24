@@ -86,7 +86,9 @@ internal static class ZstdRegion
 
             ulong declared = header.ReadVarint();
             ReadOnlySpan<byte> frame = bytes[(bytes.Length - header.Remaining)..];
-            if (declared > (ulong)frame.Length * ZstdDecoders.MostExpansion || declared > int.MaxValue)
+            // The body is rented before a byte is decoded: held to what a decode is allowed, as well as to what the frame
+            // can expand to, which lets 64 KiB claim 2 GiB.
+            if (declared > (ulong)frame.Length * ZstdDecoders.MostExpansion || declared > VortexLimits.DefaultMaxDecompressedBytes)
             {
                 return null;
             }
