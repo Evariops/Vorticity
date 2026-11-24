@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -613,10 +614,12 @@ internal static class ViewKernels
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowNoRoom(int bytes, int count) =>
         throw new ArgumentOutOfRangeException(nameof(count), $"{count} views do not fit the {bytes} bytes given for them.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowRowPastHeap(int row, int offset, int size, int heapLength) =>
         throw new VortexFormatException(
             $"Row {row} spans [{offset}, {(long)offset + size}) of a {heapLength}-byte decoded " +
@@ -794,6 +797,7 @@ internal static class ViewKernels
     /// whatever it likes.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowFirstBadLengthRow<TLen>(ReadOnlySpan<TLen> lengths, ReadOnlySpan<byte> heap, bool requireUtf8)
         where TLen : unmanaged
     {
@@ -2049,6 +2053,7 @@ internal static class ViewKernels
     /// The heap failed as a whole, so at least one row fails; finds which by the loop the fast
     /// path replaced. An error path may cost whatever it likes.
     /// </summary>
+    [DoesNotReturn]
     private static void ThrowFirstInvalidRow(
         ReadOnlySpan<byte> lengths, PType ptype, ReadOnlySpan<int> wanted, ReadOnlySpan<byte> heap,
         int count)
@@ -2077,6 +2082,7 @@ internal static class ViewKernels
     /// The bytes a column's rows tile failed as a whole, every row valid and every offset checked,
     /// so at least one row fails; finds which, one row at a time.
     /// </summary>
+    [DoesNotReturn]
     private static void ThrowFirstInvalidOffsetRow(
         ReadOnlySpan<byte> offsets, PType ptype, ReadOnlySpan<byte> heap, int count)
     {
@@ -2102,6 +2108,7 @@ internal static class ViewKernels
     /// likes.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowFirstBadOffsetRow(
         ReadOnlySpan<byte> offsets, PType ptype, ReadOnlySpan<byte> heap, int count, bool requireUtf8,
         string encodingId)
@@ -2155,6 +2162,7 @@ internal static class ViewKernels
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowInvalidRow(int row) =>
         throw new VortexFormatException($"Row {row} of a Utf8 array is not valid UTF-8.");
 }

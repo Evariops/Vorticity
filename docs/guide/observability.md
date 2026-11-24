@@ -53,19 +53,21 @@ instrument vortex.write.bytes (By): Bytes written by writers.
 ```
 
 These are eight `long` counters with no tags, adding up every scan and every write in the process. A
-scan adds its figures when its sink ends, and a writer adds its bytes as they reach the sink, at each
-flush and at completion. After the sample's two filtered scans, a count on the tool path and a small
+scan adds its requests and their bytes as it makes them, through the same hook as the event counters
+`segments-requested` and `bytes-requested`, so that the two channels count the same requests. It adds
+its other figures when its sink ends. A writer adds its bytes as they reach the sink, at each flush
+and at completion. After the sample's two filtered scans, a count on the tool path and a small
 write:
 
 ```
 total vortex.cache.hits = 8
 total vortex.cache.misses = 19
-total vortex.scan.blocks_decoded = 151
+total vortex.scan.blocks_decoded = 28
 total vortex.scan.blocks_pruned = 218
-total vortex.scan.bytes_requested = 690916
+total vortex.scan.bytes_requested = 718372
 total vortex.scan.requests = 27
 total vortex.scan.rows = 200000
-total vortex.write.bytes = 3020
+total vortex.write.bytes = 3148
 ```
 
 `vortex.scan.rows` counts rows delivered, so a count, which delivers none, adds requests and bytes
@@ -110,8 +112,8 @@ vacuum:
 ```
 total vortex.dataset.commit_attempts = 5
 total vortex.dataset.commits = 5
-total vortex.dataset.compaction.bytes_read = 10725
-total vortex.dataset.compaction.bytes_written = 2956
+total vortex.dataset.compaction.bytes_read = 6801
+total vortex.dataset.compaction.bytes_written = 1676
 total vortex.dataset.compactions = 1
 ```
 
@@ -149,9 +151,9 @@ and each write gets one named `vortex.write`. Each carries what the operation di
 ends:
 
 ```
-activity vortex.scan.typed [Unset]: vortex.rows=100000, vortex.batches=5, vortex.requests=6, vortex.bytes_requested=180368, vortex.blocks_decoded=14, vortex.blocks_pruned=109
-activity vortex.scan.tool [Unset]: vortex.rows=0, vortex.batches=0, vortex.requests=15, vortex.bytes_requested=330180, vortex.blocks_decoded=123, vortex.blocks_pruned=0
-activity vortex.write [Unset]: vortex.rows=2, vortex.bytes=3020, vortex.completed=True
+activity vortex.scan.typed [Unset]: vortex.rows=100000, vortex.batches=5, vortex.requests=6, vortex.bytes_requested=194096, vortex.blocks_decoded=14, vortex.blocks_pruned=109
+activity vortex.scan.tool [Unset]: vortex.rows=0, vortex.batches=0, vortex.requests=15, vortex.bytes_requested=330180, vortex.blocks_decoded=0, vortex.blocks_pruned=0
+activity vortex.write [Unset]: vortex.rows=2, vortex.bytes=3148, vortex.completed=True
 activity vortex.write [Error]: vortex.rows=1, vortex.bytes=0, vortex.completed=False
 ```
 
@@ -164,18 +166,22 @@ scans it ran. `ExplainAsync(analyze: true)` reads statistics and zone maps witho
 A dataset's commit, compaction and vacuum get one activity each, `vortex.dataset.commit` over all of
 a commit's attempts, `vortex.dataset.compaction`, whose passes and commit are its children, and
 `vortex.dataset.vacuum`. A compaction's passes are `vortex.dataset.compaction.write`, which reads the
-inputs' rows and writes the outputs, and before it, for a job over a variant column,
-`vortex.dataset.compaction.plan`, which counts each partition value's paths. A handle opened
-at a location tags the others with it:
+inputs' rows and writes the outputs. Before it come `vortex.dataset.compaction.plan`, for a job over a
+variant column, which counts each partition value's paths, and `vortex.dataset.compaction.unions`, for
+a merge, which unites the dictionaries the inputs write a column against. Within it,
+`vortex.dataset.compaction.slices` cuts a merge into key ranges, and after it
+`vortex.dataset.compaction.index` writes a partition index. A handle opened at a location tags the
+others with it:
 
 ```
 activity vortex.dataset.commit [Unset]: vortex.operation=create, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=1
 activity vortex.dataset.commit [Unset]: vortex.operation=append, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=2
 activity vortex.dataset.commit [Unset]: vortex.operation=append, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=3
 activity vortex.dataset.commit [Unset]: vortex.operation=append, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=4
+activity vortex.dataset.compaction.unions [Unset]: 
 activity vortex.dataset.compaction.write [Unset]: 
 activity vortex.dataset.commit [Unset]: vortex.operation=compaction, vortex.location=observed-dataset, vortex.outcome=applied, vortex.attempts=1, vortex.version=5
-activity vortex.dataset.compaction [Unset]: vortex.trigger=level_zero_ceiling, vortex.level.from=0, vortex.level.to=1, vortex.objects_in=3, vortex.bytes_in=10725, vortex.location=observed-dataset, vortex.outcome=applied, vortex.objects_out=1, vortex.objects_moved=0, vortex.bytes_out=2956, vortex.rows=6, vortex.version=5
+activity vortex.dataset.compaction [Unset]: vortex.trigger=level_zero_ceiling, vortex.level.from=0, vortex.level.to=1, vortex.objects_in=3, vortex.bytes_in=6801, vortex.location=observed-dataset, vortex.outcome=applied, vortex.objects_out=1, vortex.objects_moved=0, vortex.bytes_out=1676, vortex.rows=6, vortex.version=5
 activity vortex.dataset.vacuum [Unset]: vortex.dry_run=True, vortex.location=observed-dataset, vortex.deleted=0, vortex.young=0, vortex.locked=0, vortex.retained=5
 ```
 
@@ -213,8 +219,8 @@ Console.WriteLine($"scan {run}: {stats.Rows} rows in {stats.Batches} batches, {s
 ```
 
 ```
-scan 1: 100000 rows in 5 batches, 6 requests, 180368 bytes, 14 blocks decoded, 109 pruned, 0 cache hits
-scan 2: 100000 rows in 5 batches, 6 requests, 180368 bytes, 14 blocks decoded, 109 pruned, 6 cache hits
+scan 1: 100000 rows in 5 batches, 6 requests, 194096 bytes, 14 blocks decoded, 109 pruned, 0 cache hits
+scan 2: 100000 rows in 5 batches, 6 requests, 194096 bytes, 14 blocks decoded, 109 pruned, 6 cache hits
 ```
 
 `ScanMetrics` is a `readonly record struct` with seven `long`s (`Rows`, `Batches`, `Requests`,

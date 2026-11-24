@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
 namespace Vorticity.Types.Numerics;
@@ -654,21 +655,25 @@ internal readonly struct Int256 : IEquatable<Int256>, IComparable<Int256>
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowByteCount(int length) =>
         throw new VortexFormatException(
             $"An i256 value is exactly {ByteCount} bytes; got {length}.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowDestinationTooShort(string paramName, int length) =>
         throw new ArgumentException(
             $"Writing an i256 needs {ByteCount} bytes; the destination holds {length}.", paramName);
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowDigitBufferTooSmall(int length) =>
         throw new VortexFormatException(
             $"Rendering an i256 needs a {MaxDigitCount}-char digit buffer; got {length}.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowNegateOverflow() =>
         throw new OverflowException(
             "Negating Int256.MinValue overflows: -2^255 has no positive counterpart in 256 bits.");

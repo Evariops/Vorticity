@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -64,6 +65,7 @@ internal static class ColumnData
         }
     }
 
+    [DoesNotReturn]
     internal static void ThrowRow(int index, int length) =>
         throw new ArgumentOutOfRangeException(nameof(index), index, $"The column has {length} rows.");
 

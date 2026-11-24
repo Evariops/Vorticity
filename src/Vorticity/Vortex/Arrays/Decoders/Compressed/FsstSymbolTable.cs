@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -526,6 +527,7 @@ internal readonly ref struct FsstDecodeTable
             $"{encodingId}: the code stream names a symbol the {_count}-entry table does not hold.");
     }
 
+    [DoesNotReturn]
     private static int ThrowOverrun(string encodingId, int capacity) =>
         CompressedThrow.Format<int>(
             $"{encodingId}: the code stream decodes to more than the {capacity} bytes its " +

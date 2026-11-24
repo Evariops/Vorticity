@@ -127,10 +127,9 @@ internal static class VortexTelemetry
     internal static void ScanEnded(ScanCounters metrics, Activity? activity)
     {
         // Each instrument on its own: a listener may enable some and not others, and an Add to an
-        // instrument nobody listens to returns at once.
+        // instrument nobody listens to returns at once. The requests were counted as they were made
+        // (Requested).
         Rows.Add(metrics.Rows);
-        Requests.Add(metrics.SegmentRequests);
-        BytesRequested.Add(metrics.BytesRequested);
         BlocksDecoded.Add(metrics.BlocksDecoded);
         BlocksPruned.Add(metrics.BlocksPruned);
 
@@ -144,6 +143,19 @@ internal static class VortexTelemetry
             activity.SetTag("vortex.blocks_pruned", metrics.BlocksPruned);
             activity.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Segments a scan asked its source for, and their bytes, as it asks: the meter's <c>vortex.scan.requests</c> and
+    /// <c>vortex.scan.bytes_requested</c>, and the event source's <c>segments-requested</c> and <c>bytes-requested</c>.
+    /// One hook for both channels, so that they count the same requests: the meter counted them at a scan's end, from
+    /// the scans that end through a sink alone, and the event source as each split asked.
+    /// </summary>
+    internal static void Requested(long segments, long bytes)
+    {
+        Requests.Add(segments);
+        BytesRequested.Add(bytes);
+        Diagnostics.VortexEventSource.Requested(segments, bytes);
     }
 
     internal static void CacheHit(int count) => CacheHits.Add(count);

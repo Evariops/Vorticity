@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -596,6 +597,7 @@ internal static class BitPacking
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowWidth(int bitWidth, int most) =>
         throw new ParquetFormatException($"A bit width of {bitWidth} passes the {most} bits the values hold.");
 

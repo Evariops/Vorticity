@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 
 namespace Vorticity.IO;
 
@@ -90,6 +91,7 @@ internal readonly struct CoalescedRun : IEquatable<CoalescedRun>
             System.Globalization.CultureInfo.InvariantCulture,
             $"[{Start}, {End}) covering specs [{FirstIndex}, {FirstIndex + Count})");
 
+    [DoesNotReturn]
     private static void ThrowUnaligned(long start) =>
         throw new ArgumentOutOfRangeException(
             nameof(start),
