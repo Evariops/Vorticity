@@ -17,6 +17,60 @@ public sealed partial class ClrMappingTests
     [VortexRecord]
     public partial record struct DayValue(int Day, long Value);
 
+    [VortexRecord]
+    public partial record struct Priced(int Id, ReadOnlyMemory<decimal> Prices);
+
+    /// <summary>
+    /// A decimal read from a column of 28 digits whose file holds a value past the 96 bits a decimal holds is a format
+    /// error: read as its low 96 bits, it was a wrong decimal without a word.
+    /// </summary>
+    [Fact]
+    public void ADecimalPastNinetySixBitsIsAFormatError()
+    {
+        VortexType column = VortexType.Decimal(28, 2);
+        Assert.Equal(1.5m, LiteralValues.Decimal(150, column));
+        Assert.Equal(-1.5m, LiteralValues.Decimal(-150, column));
+        Assert.Throws<VortexFormatException>(() => LiteralValues.Decimal(Int128.One << 96, column));
+        Assert.Throws<VortexFormatException>(() => LiteralValues.Decimal(Int128.MinValue, column));
+    }
+
+    /// <summary>
+    /// A list of decimals is filtered by Contains at its elements' scale, as a comparison is: 1.5 finds the rows that hold
+    /// it, a value its scale holds that no row holds finds none, and one finer than its scale finds none without a word.
+    /// It threw that a list is filtered by Contains.
+    /// </summary>
+    [Fact]
+    public async Task AListOfDecimalsIsFilteredByContains()
+    {
+        string directory = Path.Combine(AppContext.BaseDirectory, "clr-mapping");
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, $"prices-{Environment.ProcessId}-{Guid.NewGuid():N}.vortex");
+        await using (VortexFileWriter writer = VortexSession.Default.CreateWriter<Priced>(path))
+        {
+            await writer.WriteAsync<Priced>(
+                [new Priced(1, new[] { 1.5m, 2.25m }), new Priced(2, new[] { 3m }), new Priced(3, new[] { 1.5m })],
+                TestContext.Current.CancellationToken);
+            await writer.CompleteAsync(TestContext.Current.CancellationToken);
+        }
+
+        await using VortexFile file = await VortexFile.OpenAsync(path, TestContext.Current.CancellationToken);
+        async Task<int[]> Ids(Func<Probe<Priced>, Predicate> filter)
+        {
+            System.Collections.Generic.List<int> ids = [];
+            await foreach (Priced row in file.Scan<Priced>().Where(filter).ToRecordsAsync(TestContext.Current.CancellationToken))
+            {
+                ids.Add(row.Id);
+            }
+
+            return [.. ids];
+        }
+
+        int[] found = await Ids(r => r.Prices.Contains(1.5m));
+        Assert.Equal(new[] { 1, 3 }, found);
+        Assert.Empty(await Ids(r => r.Prices.Contains(1.555m)));
+        Assert.Empty(await Ids(r => r.Prices.Contains(1.50000000001m)));
+    }
+
     /// <summary>
     /// A list of nullable elements is refused to a member whose elements are not, as a nullable column is to a member
     /// that is not: the elements of 1, null, 3 read as 1, 0, 3, without a word. A member of nullable elements reads them.
