@@ -2485,7 +2485,8 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// runs of about <see cref="DatasetOptions.RollupFanout"/> consecutive objects, then of as many rollups, each summed
     /// from what its children keep, with no row read. A question over a long range of the key then reads a rollup where it
     /// would read the counts of its objects. A commit that puts or takes away an object takes away the rollups over it,
-    /// which a later call sums again; <see cref="RunCompactionAsync"/> calls this when no job is due.
+    /// which a later call sums again; <see cref="RunCompactionAsync"/> calls this when no job is due. An encrypted dataset's
+    /// rollups are sealed as its data objects are, each bound to the uid its entry names.
     /// </summary>
     /// <param name="cancellationToken">Stops the work between rollups or inside one; a rollup written and not put is swept by a vacuum.</param>
     /// <returns>The rollups put.</returns>
@@ -4970,11 +4971,17 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// <summary>
     /// A page source for one version, holding what the read that opened it brought back, and reading
     /// through the pages this handle kept from the versions before, then through the disk of the
-    /// session's synopsis cache, where a handle opened earlier left the pages it read.
+    /// session's synopsis cache, where a handle opened earlier left the pages it read: a sealed
+    /// dataset's as the frames that hold them, as the store holds them.
     /// </summary>
     private CommitPageSource PagesOf(ulong version, CommitObject commit)
     {
-        CommitPageSource pages = new CommitPageSource(_store, _pageCache, PlaintextDisk) { Reading = version };
+        CommitPageSource pages = new CommitPageSource(_store, _pageCache, PlaintextDisk)
+        {
+            Reading = version,
+            SealedDisk = SealedPageDisk.Of(_store, Session.Options.SynopsisCache),
+        };
+
         pages.Open(version, commit);
         return pages;
     }
@@ -4982,7 +4989,8 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
     /// <summary>
     /// The session's synopsis cache, for what the handle draws from the dataset's plaintext and keeps on the disk, the tree
     /// pages it reads and its filters' pages: null for none, and for a sealed dataset, which leaves no plaintext on the disk,
-    /// nor anything drawn from it. Its objects' frames go to the cache as the store holds them (<see cref="SealedSynopsisCache"/>).
+    /// nor anything drawn from it. Its objects' frames go to the cache as the store holds them (<see cref="SealedSynopsisCache"/>),
+    /// and so do the frames of its tree pages (<see cref="SealedPageDisk"/>).
     /// </summary>
     internal SynopsisCache? PlaintextDisk => _store is SealedObjectStore { Seals: true } ? null : Session.Options.SynopsisCache;
 

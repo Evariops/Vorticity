@@ -673,29 +673,7 @@ be checked against the service ([Azure's checksums](#83-checksums)).
 
 ### 10.5 The synopsis cache on the local disk
 
-A session may keep on the local disk what questions read of a dataset's objects without their data
-(`VortexSessionOptions.SynopsisCache`): every region an object's table of contents declares, its chunk
-directory and marks, its index directory, its granules' statistics and locates, its sparse key index and
-its variant columns' path directories, and the fence pages and run segments a lookup of an identifier
-reads; and the pages of the dataset's tree, by the hash of their bytes ([the pages a handle
-keeps](13-dataset.md#3-objects-and-keys)), unless the dataset is sealed. Only a region of an index
-enters it, never the data nor the footer: one an object's table of contents declares, with a checksum,
-or a page or a segment of a run its reader names with the checksum the directory or the parent page
-gave. An object never changes, so an entry is never stale: its key is the object's uid, the region's
-place and length and its checksum, all known before the region is read. Given a quota of its own
-(`dataCapacityBytes`), it keeps besides the other segments a reader reads of a plain object, its data
-and its footer, by the object's uid and the segment's place and length: no directory gives their
-checksum, so their file holds their XXH3-64 after them, which each read from the disk checks, within
-their own S3-FIFO queues and capacity, so that they never push a region out. Of a sealed object it keeps
-within the same quota the frames those segments lie in, as the store holds them (below). A segment or a
-frame whose write would wait past the bytes waiting for their writes is not kept, so that a question
-never writes data on its own time. Warm, a lookup asks the store for the chunks
-of the blocks it found alone: a count per service and per 12 hours of every row but one request's, over
-3 objects of 180 M rows, asked for 11 regions in 23 ms, a fence page and two segments of each object's
-postings beside the chunks of the block that holds the id, and asks for those 2 chunks in 12.7 ms. An
-object the dataset opens to read its rows reads the same regions through the cache: the rows of one
-request id over the same objects take 2 requests in one round trip warm, against 7 in 5, 14.6 ms against
-37.4.
+A session may keep on the local disk what questions read of a dataset's objects without their data (`VortexSessionOptions.SynopsisCache`): every region an object's table of contents declares, its chunk directory and marks, its index directory, its granules' statistics and locates, its sparse key index and its variant columns' path directories, and the fence pages and run segments a lookup of an identifier reads; and the pages of the dataset's tree, by the hash of their bytes ([the pages a handle keeps](13-dataset.md#3-objects-and-keys)), a sealed dataset's as the frames that hold each and the header of its commit object, as the store holds them. Only a region of an index enters it, never the data nor the footer: one an object's table of contents declares, with a checksum, or a page or a segment of a run its reader names with the checksum the directory or the parent page gave. An object never changes, so an entry is never stale: its key is the object's uid, the region's place and length and its checksum, all known before the region is read. Given a quota of its own (`dataCapacityBytes`), it keeps besides the other segments a reader reads of a plain object, its data and its footer, by the object's uid and the segment's place and length: no directory gives their checksum, so their file holds their XXH3-64 after them, which each read from the disk checks, within their own S3-FIFO queues and capacity, so that they never push a region out. Of a sealed object it keeps within the same quota the frames those segments lie in, as the store holds them (below). A segment or a frame whose write would wait past the bytes waiting for their writes is not kept, so that a question never writes data on its own time. Warm, a lookup asks the store for the chunks of the blocks it found alone: a count per service and per 12 hours of every row but one request's, over 3 objects of 180 M rows, asked for 11 regions in 23 ms, a fence page and two segments of each object's postings beside the chunks of the block that holds the id, and asks for those 2 chunks in 12.7 ms. An object the dataset opens to read its rows reads the same regions through the cache: the rows of one request id over the same objects take 2 requests in one round trip warm, against 7 in 5, 14.6 ms against 37.4.
 
 An entry is a file named by that key, in directories sharded by the uid, written under a temporary
 name and then renamed, so a reader never sees half a file. It is written behind the question that read
@@ -721,19 +699,9 @@ no writer changes: a region hashed at each read, then again by the decode of its
 of a question at sixteen lanes, whose reads of the disk's cache contend for the memory's bandwidth
 (11 ms a question against 5.7 once). Questions that miss the same region at once wait for one read.
 
-A sealed object leaves no plaintext on the disk. The cache keeps the bytes the store holds: the
-object's trailer, which names its data key wrapped and its epochs, and the frames that hold a region its
-table of contents declares, each a file named by the object's uid and the frame's place. A read with no
-open of the object opens it from the trailer kept, with no request, and reads from the disk every group
-of frames whose segments' frames the cache keeps all: a frame of a gap the group's runs read across is
-not asked, so a group whose regions lie a frame apart is served too. The reader decrypts them as it
-decrypts the store's: a frame whose tag fails, or a region whose plaintext fails its checksum, is dropped
-with its group and read again from the store, and a trailer that does not open the object is dropped and
-read again too. No key reaches the disk: the session unwraps the data key as it does for a read from the
-store, from its keyring or from the keys it holds in memory. A frame of 64 KiB is the unit kept, so a
-small region costs the disk its frame. On six hours of sealed requests, a count per service from the
-synopsis tables of the time took 12 requests in two round trips cold and none warm, where every question
-read them again before. Questions that miss the same frames of a sealed object at once read them each.
+A sealed object leaves no plaintext on the disk. The cache keeps the bytes the store holds: the object's trailer, which names its data key wrapped and its epochs, and the frames that hold a region its table of contents declares, each a file named by the object's uid and the frame's place. A read with no open of the object opens it from the trailer kept, with no request, and reads from the disk every group of frames whose segments' frames the cache keeps all: a frame of a gap the group's runs read across is not asked, so a group whose regions lie a frame apart is served too. The reader decrypts them as it decrypts the store's: a frame whose tag fails, or a region whose plaintext fails its checksum, is dropped with its group and read again from the store, and a trailer that does not open the object is dropped and read again too. No key reaches the disk: the session unwraps the data key as it does for a read from the store, from its keyring or from the keys it holds in memory. A frame of 64 KiB is the unit kept, so a small region costs the disk its frame. On six hours of sealed requests, a count per service from the synopsis tables of the time took 12 requests in two round trips cold and none warm, where every question read them again before.
+
+Questions that miss the same frames of a sealed object at once wait for one read, as those that miss a plain object's region do. The cache notes which frames a read fetches from the store, by the object's uid and the frame's place, and a group of frames whose every frame another read fetches waits for that read, then reads them from the disk. It waits only for frames the cache keeps once read: a declared region's, or any frame given a quota for data. A read fetches its own frames and lets them go before it waits for another's, so two reads whose groups cross never wait for each other, and what the other read did not leave on the disk, a frame its quota refused or a read that failed, is read from the store. A group that shares only some of its frames with another read is read whole, so its shared frames come twice, never those of two questions asking the same segments. A range read alone, as the open of an object read whole reads it, does not wait: a dataset's handle opens an object once for the questions that ask it at once.
 
 Given a quota for data, the cache keeps a sealed object's data the same way: the frames of every
 segment its reader reads that is no declared region, and the last frames the open of the object

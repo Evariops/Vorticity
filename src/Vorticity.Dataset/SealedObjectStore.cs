@@ -28,15 +28,15 @@ namespace Vorticity.Dataset;
 /// </para>
 /// <para>
 /// What it seals: the commit objects, each bound to the dataset's id and its version, and the data
-/// objects, each bound to the uid its key and its entry name. Anything else under the store stays as
-/// it is, since the dataset neither writes nor reads it. A writer seals under the
+/// objects and the rollups' objects, each bound to the uid its key and its entry name. Anything else
+/// under the store stays as it is, since the dataset neither writes nor reads it. A writer seals under the
 /// data key of the newest commit object it has read, so the writers of a dataset share one, and
 /// <see cref="RekeyAsync"/> draws another for the next commit.
 /// </para>
 /// <para>
 /// What it opens: the commit objects only, by their head, in the one request a plain one costs when the
-/// store gives the object's length with its answer. A data object is opened by the dataset's object
-/// cache through a sealed reader over the store's own bytes (<see cref="OpenDataAsync(string, UInt128, long, CancellationToken, ISealedFrameCache?, bool)"/>),
+/// store gives the object's length with its answer. A data object, and a rollup's object, is opened through
+/// a sealed reader over the store's own bytes (<see cref="OpenDataAsync(string, UInt128, long, CancellationToken, ISealedFrameCache?, bool)"/>),
 /// which serves the Vortex open from the read that brought the trailer. A read with no open keeps the
 /// trailer and the frames of the declared regions in the session's synopsis cache, the sealed bytes as
 /// the store holds them. A head says what the store holds: the sealed length.
@@ -340,7 +340,7 @@ internal sealed class SealedObjectStore : IObjectStore
             Interlocked.CompareExchange(ref _kind, Plain, Unknown);
         }
 
-        if (!Seals || (!commit && !TryUid(key, out _)))
+        if (!Seals || (!commit && !TryUid(key, out _) && !TryRollupUid(key, out _)))
         {
             return (await _inner.PutAsync(key, content, condition, cancellationToken).ConfigureAwait(false), content.Length);
         }
@@ -366,13 +366,15 @@ internal sealed class SealedObjectStore : IObjectStore
     {
         bool commit = CommitKey.TryParse(key, out ulong version);
         bool data = !commit && TryUid(key, out _);
+        UInt128 rollup = default;
+        bool rolledUp = !commit && !data && TryRollupUid(key, out rollup);
         if (commit)
         {
             // The first commit of a dataset created plain in a session that holds a keyring.
             Interlocked.CompareExchange(ref _kind, Plain, Unknown);
         }
 
-        if (!Seals || (!commit && !data))
+        if (!Seals || (!commit && !data && !rolledUp))
         {
             return (await _inner.PutAsync(key, content, length, maxLength, condition, cancellationToken).ConfigureAwait(false), length);
         }
@@ -389,6 +391,11 @@ internal sealed class SealedObjectStore : IObjectStore
         if (commit)
         {
             RandomNumberGenerator.Fill(objectId);
+        }
+        else if (rolledUp)
+        {
+            // Bound as a data object is, to the uid its entry names, which its reader checks (OpenDataAsync).
+            UidBytes(rollup).CopyTo(objectId, 0);
         }
         else
         {
@@ -573,7 +580,8 @@ internal sealed class SealedObjectStore : IObjectStore
         return range;
     }
 
-    private async ValueTask<ObjectRange?> ReadCommitAsync(string key, ulong version, long offset, int length, bool ifPresent, CancellationToken cancellationToken)
+    private async ValueTask<ObjectRange?> ReadCommitAsync(
+        string key, ulong version, long offset, int length, bool ifPresent, CancellationToken cancellationToken, KeptPage? keep = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(offset);
         ArgumentOutOfRangeException.ThrowIfNegative(length);
@@ -619,7 +627,11 @@ internal sealed class SealedObjectStore : IObjectStore
                 (long cipherStart, long cipherEnd) = layout.Cipher(frameStart, frameEnd);
                 if (resolved.Layout is not null && cipherEnd <= resolved.Head.Length)
                 {
-                    return layout.Open(resolved.Head.Contiguous().Span, 0, frameStart, frameEnd, offset, wanted, layout.Token);
+                    // Handed over only once the frames authenticate.
+                    byte[]? heldBytes = keep is null ? null : layout.Kept(resolved.Head.Contiguous().Span, 0, frameStart, frameEnd, offset);
+                    ObjectRange opened = layout.Open(resolved.Head.Contiguous().Span, 0, frameStart, frameEnd, offset, wanted, layout.Token);
+                    keep?.Bytes = heldBytes;
+                    return opened;
                 }
 
                 if (await InnerRangeAsync(key, cipherStart, checked((int)(cipherEnd - cipherStart)), ifPresent, cancellationToken).ConfigureAwait(false)
@@ -648,7 +660,10 @@ internal sealed class SealedObjectStore : IObjectStore
                     throw new CommitFormatException($"'{key}' ends before the frames its layout names.");
                 }
 
-                return layout.Open(cipher.Contiguous().Span, cipherStart, frameStart, frameEnd, offset, wanted, cipher.Token);
+                byte[]? keptBytes = keep is null ? null : layout.Kept(cipher.Contiguous().Span, cipherStart, frameStart, frameEnd, offset);
+                ObjectRange range = layout.Open(cipher.Contiguous().Span, cipherStart, frameStart, frameEnd, offset, wanted, cipher.Token);
+                keep?.Bytes = keptBytes;
+                return range;
             }
             finally
             {
@@ -705,10 +720,13 @@ internal sealed class SealedObjectStore : IObjectStore
                 throw new CommitFormatException($"'{key}' claims a descriptor of {descriptorLength} bytes.");
             }
 
+            // The header as the store holds it, which a synopsis cache keeps with the frames of a page (KeptPage).
             SealDescriptor descriptor;
+            byte[] headerBytes;
             if (SealedFormat.HeaderPrefixBytes + descriptorLength <= bytes.Length)
             {
                 descriptor = Descriptor(bytes.Slice(SealedFormat.HeaderPrefixBytes, descriptorLength), descriptorLength, key);
+                headerBytes = bytes[..(SealedFormat.HeaderPrefixBytes + descriptorLength)].ToArray();
             }
             else
             {
@@ -721,6 +739,7 @@ internal sealed class SealedObjectStore : IObjectStore
                 }
 
                 descriptor = Descriptor(header[SealedFormat.HeaderPrefixBytes..], descriptorLength, key);
+                headerBytes = header.ToArray();
             }
 
             long objectLength = head.ObjectLength >= 0
@@ -736,7 +755,7 @@ internal sealed class SealedObjectStore : IObjectStore
                 throw new CommitFormatException($"'{key}' is {objectLength} bytes, which no whole sealed commit object of its descriptor measures: it is torn.");
             }
 
-            CommitLayout layout = await LayoutAsync(key, version, descriptor, framesStart, plainLength, head.Token, cancellationToken).ConfigureAwait(false);
+            CommitLayout layout = await LayoutAsync(key, version, descriptor, headerBytes, plainLength, head.Token, cancellationToken).ConfigureAwait(false);
             Remember(key, version, layout);
             kept = true;
             return new Resolved(layout, head);
@@ -750,9 +769,12 @@ internal sealed class SealedObjectStore : IObjectStore
         }
     }
 
-    /// <summary>The cipher of a commit object, once its descriptor is checked against the dataset and the version, and its commitment against the key.</summary>
+    /// <summary>
+    /// The cipher of a commit object whose header, as the store holds it, is <paramref name="header"/>, once its descriptor is
+    /// checked against the dataset and the version, and its commitment against the key.
+    /// </summary>
     private async ValueTask<CommitLayout> LayoutAsync(
-        string key, ulong version, SealDescriptor descriptor, long framesStart, long plainLength, string token, CancellationToken cancellationToken)
+        string key, ulong version, SealDescriptor descriptor, byte[] header, long plainLength, string token, CancellationToken cancellationToken)
     {
         if (descriptor.KeyContext.Length != SealedFormat.ObjectIdBytes)
         {
@@ -777,11 +799,172 @@ internal sealed class SealedObjectStore : IObjectStore
         DataKey dataKey = await _keys.UnwrapAsync(descriptor, cancellationToken).ConfigureAwait(false);
         try
         {
-            return new CommitLayout(key, descriptor, framesStart, plainLength, token, Cipher(dataKey, descriptor, key));
+            return new CommitLayout(key, descriptor, header, plainLength, token, Cipher(dataKey, descriptor, key));
         }
         finally
         {
             dataKey.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// A range of commit object <paramref name="key"/>'s plaintext, as a read of it gives, and what a synopsis cache keeps of it
+    /// for a tree page: the object's header and the frames that hold the range, as the store holds them, with their places
+    /// (<see cref="OpenKeptPageAsync"/>). The kept form is null when the dataset turned out plain.
+    /// </summary>
+    internal async ValueTask<(ObjectRange Range, byte[]? Kept)> ReadCommitKeptAsync(
+        string key, ulong version, long offset, int length, CancellationToken cancellationToken)
+    {
+        KeptPage keep = new KeptPage();
+        ObjectRange range = await ReadCommitAsync(key, version, offset, length, ifPresent: false, cancellationToken, keep).ConfigureAwait(false)
+            ?? throw ObjectNotFoundException.For(key);
+        return (range, keep.Bytes);
+    }
+
+    /// <summary>
+    /// The <paramref name="length"/> bytes of the page whose kept form <paramref name="kept"/> is, decrypted: the header in it
+    /// checked as a read from the store checks it, against this dataset and the commit object's
+    /// <paramref name="version"/>, its key unwrapped by the session and every frame authenticated. Null when it does not
+    /// open: malformed, another dataset's or version's, a key the session cannot unwrap, a frame that fails. The caller
+    /// checks the page against its hash.
+    /// </summary>
+    /// <remarks>
+    /// Only once the store knows the dataset from a commit object it read, or from its creation: a kept form never names the
+    /// dataset, which the first commit object read does.
+    /// </remarks>
+    internal async ValueTask<byte[]?> OpenKeptPageAsync(ulong version, ReadOnlyMemory<byte> kept, int length, CancellationToken cancellationToken)
+    {
+        byte[] id;
+        lock (_gate)
+        {
+            if (_kind != Sealed || _datasetId is null)
+            {
+                return null;
+            }
+
+            id = _datasetId;
+        }
+
+        if (!KeptPage.TryRead(kept.Span, out int headerLength, out long plainLength, out long frameStart, out long offset)
+            || length <= 0 || offset < frameStart || offset + length > plainLength)
+        {
+            return null;
+        }
+
+        string key = CommitKey.For(version);
+        SealDescriptor descriptor;
+        try
+        {
+            ReadOnlySpan<byte> header = kept.Span.Slice(KeptPage.HeadBytes, headerLength);
+            int descriptorLength = BinaryPrimitives.ReadInt32LittleEndian(header[8..]);
+            if (!header.StartsWith(SealedFormat.HeaderMagic) || descriptorLength != headerLength - SealedFormat.HeaderPrefixBytes)
+            {
+                return null;
+            }
+
+            descriptor = Descriptor(header[SealedFormat.HeaderPrefixBytes..], descriptorLength, key);
+        }
+        catch (VortexException)
+        {
+            return null;
+        }
+
+        if (descriptor.KeyContext.Length != SealedFormat.ObjectIdBytes
+            || !descriptor.KeyContext.Span.SequenceEqual(id) || !descriptor.Binding.SequenceEqual(Binding(id, version)))
+        {
+            return null;
+        }
+
+        CommitLayout layout;
+        try
+        {
+            DataKey dataKey = await _keys.UnwrapAsync(descriptor, cancellationToken).ConfigureAwait(false);
+            try
+            {
+                byte[] header = kept.Span.Slice(KeptPage.HeadBytes, headerLength).ToArray();
+                layout = new CommitLayout(key, descriptor, header, plainLength, KeptPage.Token, Cipher(dataKey, descriptor, key));
+            }
+            finally
+            {
+                dataKey.Dispose();
+            }
+        }
+        catch (VortexEncryptionException)
+        {
+            return null;
+        }
+
+        try
+        {
+            (long start, long end) = layout.Frames(offset, length);
+            (long cipherStart, long cipherEnd) = layout.Cipher(start, end);
+            ReadOnlySpan<byte> frames = kept.Span[(KeptPage.HeadBytes + headerLength)..];
+            if (start != frameStart || frames.Length != cipherEnd - cipherStart)
+            {
+                return null;
+            }
+
+            using ObjectRange page = layout.Open(frames, cipherStart, start, end, offset, length, KeptPage.Token);
+            return page.Bytes.ToArray();
+        }
+        catch (VortexEncryptionException)
+        {
+            return null;
+        }
+        finally
+        {
+            layout.Release();
+        }
+    }
+
+    /// <summary>
+    /// What a synopsis cache keeps of a sealed dataset's tree page: the header of the commit object that holds it and the
+    /// frames that hold it, as the store holds them, after their places, so that a handle opened later reads the page with no
+    /// request. Its header: the header's length, the object's plaintext length, the plaintext offset of the first frame and
+    /// of the page, little-endian.
+    /// </summary>
+    private sealed class KeptPage
+    {
+        /// <summary>The bytes before the commit object's header.</summary>
+        internal const int HeadBytes = 4 + 8 + 8 + 8;
+
+        /// <summary>The token of a range opened from a kept form, which no store gave.</summary>
+        internal const string Token = "kept";
+
+        /// <summary>The kept form a read of the store made, or null.</summary>
+        internal byte[]? Bytes { get; set; }
+
+        /// <summary>The kept form of the frames <paramref name="frames"/>, from plaintext <paramref name="frameStart"/>, that hold a page at plaintext <paramref name="offset"/>.</summary>
+        internal static byte[] Write(ReadOnlySpan<byte> header, long plainLength, long frameStart, long offset, ReadOnlySpan<byte> frames)
+        {
+            byte[] kept = new byte[HeadBytes + header.Length + frames.Length];
+            BinaryPrimitives.WriteInt32LittleEndian(kept, header.Length);
+            BinaryPrimitives.WriteInt64LittleEndian(kept.AsSpan(4), plainLength);
+            BinaryPrimitives.WriteInt64LittleEndian(kept.AsSpan(12), frameStart);
+            BinaryPrimitives.WriteInt64LittleEndian(kept.AsSpan(20), offset);
+            header.CopyTo(kept.AsSpan(HeadBytes));
+            frames.CopyTo(kept.AsSpan(HeadBytes + header.Length));
+            return kept;
+        }
+
+        /// <summary>What the head of <paramref name="kept"/> says; false when it cannot be a kept form.</summary>
+        internal static bool TryRead(ReadOnlySpan<byte> kept, out int headerLength, out long plainLength, out long frameStart, out long offset)
+        {
+            headerLength = 0;
+            plainLength = frameStart = offset = 0;
+            if (kept.Length < HeadBytes + SealedFormat.HeaderPrefixBytes)
+            {
+                return false;
+            }
+
+            headerLength = BinaryPrimitives.ReadInt32LittleEndian(kept);
+            plainLength = BinaryPrimitives.ReadInt64LittleEndian(kept[4..]);
+            frameStart = BinaryPrimitives.ReadInt64LittleEndian(kept[12..]);
+            offset = BinaryPrimitives.ReadInt64LittleEndian(kept[20..]);
+            return headerLength > SealedFormat.HeaderPrefixBytes
+                && headerLength <= SealedFormat.HeaderPrefixBytes + SealedFormat.MaxDescriptorBytes
+                && headerLength <= kept.Length - HeadBytes
+                && plainLength > 0 && frameStart >= 0 && offset >= 0;
         }
     }
 
@@ -1069,6 +1252,16 @@ internal sealed class SealedObjectStore : IObjectStore
             && Guid.TryParseExact(key.AsSpan(CommitKey.DataPrefix.Length, 32), "N", out uid);
     }
 
+    /// <summary>The uid a rollup's key names: <c>rollups/&lt;uid&gt;.vxr</c>, the uid in 32 hexadecimal digits (<see cref="CommitKey.ForRollup"/>).</summary>
+    internal static bool TryRollupUid(string key, out UInt128 uid)
+    {
+        uid = default;
+        return key.Length == CommitKey.RollupPrefix.Length + 32 + CommitKey.RollupSuffix.Length
+            && key.StartsWith(CommitKey.RollupPrefix, StringComparison.Ordinal)
+            && key.EndsWith(CommitKey.RollupSuffix, StringComparison.Ordinal)
+            && UInt128.TryParse(key.AsSpan(CommitKey.RollupPrefix.Length, 32), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out uid);
+    }
+
     /// <summary>The 16 bytes of an entry's uid as a sealed object's id holds them: the identity's own bytes.</summary>
     internal static byte[] UidBytes(UInt128 uid)
     {
@@ -1152,16 +1345,20 @@ internal sealed class SealedObjectStore : IObjectStore
         private readonly EpochCipher _cipher;
         private int _holds = 1;
 
-        internal CommitLayout(string key, SealDescriptor descriptor, long framesStart, long plainLength, string token, EpochCipher cipher)
+        internal CommitLayout(string key, SealDescriptor descriptor, byte[] header, long plainLength, string token, EpochCipher cipher)
         {
             Key = key;
             Node = new LinkedListNode<CommitLayout>(this);
             Descriptor = descriptor;
-            _framesStart = framesStart;
+            Header = header;
+            _framesStart = header.Length;
             PlainLength = plainLength;
             Token = token;
             _cipher = cipher;
         }
+
+        /// <summary>The object's header as the store holds it, its frames after it.</summary>
+        internal byte[] Header { get; }
 
         /// <summary>The commit object's key.</summary>
         internal string Key { get; }
@@ -1233,6 +1430,18 @@ internal sealed class SealedObjectStore : IObjectStore
                 buffer.Dispose();
                 throw;
             }
+        }
+
+        /// <summary>
+        /// The kept form of the frames between plaintext <paramref name="frameStart"/> and <paramref name="frameEnd"/>, out of
+        /// <paramref name="cipher"/>, whose first byte is object offset <paramref name="cipherBase"/>, for a page at plaintext
+        /// <paramref name="offset"/>: what <see cref="Open"/> authenticated, as the store holds it.
+        /// </summary>
+        internal byte[] Kept(ReadOnlySpan<byte> cipher, long cipherBase, long frameStart, long frameEnd, long offset)
+        {
+            (long start, long end) = Cipher(frameStart, frameEnd);
+            ReadOnlySpan<byte> frames = cipher.Slice(checked((int)(start - cipherBase)), checked((int)(end - start)));
+            return KeptPage.Write(Header, PlainLength, frameStart, offset, frames);
         }
 
         /// <summary>One more hold; only on a layout that is held already, as one the store keeps is.</summary>

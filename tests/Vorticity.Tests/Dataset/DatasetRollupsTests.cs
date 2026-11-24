@@ -362,10 +362,10 @@ public sealed partial class DatasetRollupsTests
     /// over blocks of a few kilobytes: objects of some 1,500 rows, two an hour as a rule, some of them together in the
     /// deepest level, each keeping its counts, and the sketches of its service's values, which hold 256 rows each and more.
     /// </summary>
-    private static async Task<VortexDataset> WriteAsync(MemoryObjectStore store, int rowsPerHour = RowsPerHour)
+    private static async Task<VortexDataset> WriteAsync(MemoryObjectStore store, int rowsPerHour = RowsPerHour, DatasetOptions? options = null)
     {
         int RowsPerHour = rowsPerHour;
-        VortexDataset dataset = await VortexDataset.CreateAsync(store, Hit.Schema, Options() with
+        VortexDataset dataset = await VortexDataset.CreateAsync(store, Hit.Schema, (options ?? Options()) with
         {
             Layout = new DatasetLayout { Partition = LayoutValue.Column(nameof(Hit.At)).Truncate(CalendarUnit.Hour), SortKey = [LayoutValue.Column(nameof(Hit.At))], Organization = LayoutOrganization.Leveled, ObjectBytes = 9L << 10 },
             Write = new VortexWriteOptions { RowBlockSize = 256, DataBlockTargetBytes = 2 << 10 },

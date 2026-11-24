@@ -40,7 +40,9 @@ namespace Vorticity;
 /// A page of a dataset's tree is kept by the XXH3-128 hash of its bytes, which the page or the header naming
 /// it gives: a page never changes, and every version that names it holds the same bytes, so a handle opened
 /// later, whose own pages start empty, reads the tree from the disk. Its reader checks the hash at each read.
-/// A sealed dataset's pages stay off the disk: they are plaintext of its commit objects.
+/// A sealed dataset's pages are plaintext of its commit objects: the cache keeps, under the same hash, the header of
+/// the commit object that holds a page and the frames that hold it, as the store holds them, which the page's reader
+/// decrypts at each read.
 /// </para>
 /// <para>
 /// A region read from the store enters the cache behind the question that read it: the buffer its reader
@@ -65,7 +67,7 @@ namespace Vorticity;
 /// then renamed, so a reader never sees half a file. The cache walks its directory when it opens to know
 /// what it holds. One cache owns a directory, through a lock of the operating system: a second one, in
 /// this process or another, is refused. Questions that miss the same region of a plain object at once wait
-/// for one read. Those that miss the same frames of a sealed object at once read them each.
+/// for one read, and so do those that miss the same frames of a sealed object, when the cache keeps them.
 /// </para>
 /// <para>
 /// The caches of several processes share a root through <see cref="OpenShared(string, long)"/>: each owns a directory under
@@ -144,6 +146,10 @@ public sealed class SynopsisCache : IAsyncDisposable
     private readonly Tier _regions;
     private readonly Tier _data;
     private readonly Dictionary<string, TaskCompletionSource> _reading = new Dictionary<string, TaskCompletionSource>(StringComparer.Ordinal);
+
+    // The frames of sealed objects a reader is fetching from the store, by the object's uid and the frame's place in it: no
+    // string is made for one, a read of a megabyte asking sixteen.
+    private readonly Dictionary<(UInt128 Uid, long Frame), TaskCompletionSource> _framesReading = new Dictionary<(UInt128, long), TaskCompletionSource>();
     private readonly Dictionary<string, Pending> _pending = new Dictionary<string, Pending>(StringComparer.Ordinal);
 
     // How many writes wait, as the gate last left them: what a read asks before it takes the gate to look among them.
@@ -966,6 +972,87 @@ public sealed class SynopsisCache : IAsyncDisposable
     /// <summary>Drops the page kept under <paramref name="hash"/>, which did not hash to it: a corrupt entry.</summary>
     internal void DropPage(UInt128 hash, int length) => DropSealed(PageNameOf(hash, length));
 
+    /// <summary>
+    /// Keeps what a sealed dataset's tree page is on the disk, named by the XXH3-128 <paramref name="hash"/> of its
+    /// <paramref name="length"/> bytes of plaintext: the header of the commit object that holds it and the frames that hold
+    /// it, as the store holds them, with their places (<paramref name="kept"/>). No plaintext and no key: the page's reader
+    /// decrypts it at each read. Written behind its reader, as a plain page is: <paramref name="kept"/> is held until then,
+    /// and must not change.
+    /// </summary>
+    internal void AdmitSealedPage(UInt128 hash, int length, byte[] kept)
+    {
+        string name = SealedPageNameOf(hash, length);
+        if (!TryQueue(hash, name, owner: null, default, kept, _regions, checksum: false))
+        {
+            Keep(hash, name, kept);
+        }
+    }
+
+    /// <summary>
+    /// What <see cref="AdmitSealedPage"/> kept of the page of <paramref name="length"/> bytes under its
+    /// <paramref name="hash"/>, read whole into a new array, or the one waiting for its write; null when the cache does not
+    /// hold it, holds it torn, or holds more than <paramref name="maxLength"/> bytes of it. Its reader opens it and checks the
+    /// page against the hash, and drops it through <see cref="DropSealedPage"/> when either fails.
+    /// </summary>
+    internal byte[]? TryReadSealedPage(UInt128 hash, int length, int maxLength)
+    {
+        string name = SealedPageNameOf(hash, length);
+        byte[]? waiting = null;
+        lock (_gate)
+        {
+            if (_pending.Count > 0 && _pending.TryGetValue(name, out Pending? pending) && pending.Page is { } held)
+            {
+                pending.Hits = Math.Min(MaxHits, pending.Hits + 1);
+                waiting = held;
+            }
+        }
+
+        if (waiting is not null)
+        {
+            Served(waiting.Length);
+            return waiting;
+        }
+
+        if (Find(name) is not { } entry)
+        {
+            if (_root is null || !TryPeerWhole(name, maxLength, out SegmentOwner peer))
+            {
+                return null;
+            }
+
+            try
+            {
+                return peer.Buffer.Span.ToArray();
+            }
+            finally
+            {
+                peer.Release();
+            }
+        }
+
+        if (entry.Bytes <= 0 || entry.Bytes > maxLength)
+        {
+            Drop(entry, corrupt: true);
+            return null;
+        }
+
+        byte[] kept = new byte[entry.Bytes];
+        if (!ReadWhole(entry, kept))
+        {
+            Drop(entry, corrupt: true);
+            return null;
+        }
+
+        Served(kept.Length);
+        return kept;
+    }
+
+    /// <summary>Drops what the cache kept of a sealed page under <paramref name="hash"/>, which did not open or did not hash to it: a corrupt entry.</summary>
+    internal void DropSealedPage(UInt128 hash, int length) => DropSealed(SealedPageNameOf(hash, length));
+
+    /// <summary>The file name of what a sealed dataset's tree page is on the disk: its plaintext's hash and length, apart from a plain page's.</summary>
+    internal static string SealedPageNameOf(UInt128 hash, int length) => string.Create(CultureInfo.InvariantCulture, $"{hash:x32}-{length:x}-sealed-page");
+
     /// <summary>The file name of a tree page: its hash and its length.</summary>
     internal static string PageNameOf(UInt128 hash, int length) => string.Create(CultureInfo.InvariantCulture, $"{hash:x32}-{length:x}-page");
 
@@ -1773,6 +1860,49 @@ public sealed class SynopsisCache : IAsyncDisposable
 
     /// <summary>Ends a read <see cref="TryBeginRead"/> handed to the caller: those who wait on it look again.</summary>
     internal void EndRead(UInt128 uid, IndexSegment region, TaskCompletionSource mine) => EndReadOf(NameOf(uid, region), mine);
+
+    /// <summary>
+    /// Makes <paramref name="mine"/> the read of each frame of the sealed object <paramref name="uid"/>, at the places
+    /// <paramref name="frames"/> gives, that no other read is fetching, and adds its place to <paramref name="registered"/>;
+    /// adds to <paramref name="theirs"/> the reads that fetch the others. Every place registered is the caller's to end with
+    /// <see cref="EndReadFrames"/>.
+    /// </summary>
+    internal void BeginReadFrames(UInt128 uid, ReadOnlySpan<long> frames, TaskCompletionSource mine, List<long> registered, List<Task> theirs)
+    {
+        lock (_gate)
+        {
+            foreach (long frame in frames)
+            {
+                if (!_framesReading.TryGetValue((uid, frame), out TaskCompletionSource? other))
+                {
+                    _framesReading.Add((uid, frame), mine);
+                    registered.Add(frame);
+                }
+                else if (theirs.Count == 0 || !ReferenceEquals(theirs[^1], other.Task))
+                {
+                    // A read fetches the frames of a group, which follow one another: one wait for them.
+                    theirs.Add(other.Task);
+                }
+            }
+        }
+    }
+
+    /// <summary>Ends the reads of the frames <see cref="BeginReadFrames"/> registered to <paramref name="mine"/>, and lets those who wait on it look again.</summary>
+    internal void EndReadFrames(UInt128 uid, ReadOnlySpan<long> frames, TaskCompletionSource mine)
+    {
+        lock (_gate)
+        {
+            foreach (long frame in frames)
+            {
+                if (_framesReading.TryGetValue((uid, frame), out TaskCompletionSource? held) && ReferenceEquals(held, mine))
+                {
+                    _framesReading.Remove((uid, frame));
+                }
+            }
+        }
+
+        mine.TrySetResult();
+    }
 
     private void EndReadOf(string name, TaskCompletionSource mine)
     {

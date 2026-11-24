@@ -409,12 +409,7 @@ await using VortexDataset dataset = await VortexDataset.OpenAsync(store, new Dat
 long warmed = await dataset.WarmAsync<Request>(r => r.At >= DateTimeOffset.UtcNow.AddDays(-30));
 ```
 
-By default only what an object's table of contents declares enters the cache: the directories that
-find its rows, of its chunks, its pages, its indexes and its variants' paths, never its data, along with
-the filters' pages questions evaluated, which an encrypted dataset keeps in memory alone. A read with no open of an object, such as a
-lookup of an identifier in a large one, needs nothing else before its data; a read that opens the
-object reads its last 64 KiB from the store first. An object never changes, so an entry never goes
-stale. An object of 64 KiB at most holds its table of contents itself and is read through its open, which brings it whole: the cache keeps it when it keeps data, and nothing of it otherwise.
+By default only what an object's table of contents declares enters the cache: the directories that find its rows, of its chunks, its pages, its indexes and its variants' paths, never its data, along with the filters' pages questions evaluated, which an encrypted dataset keeps in memory alone. A read with no open of an object, such as a lookup of an identifier in a large one, needs nothing else before its data; a read that opens the object reads its last 64 KiB from the store first. An object never changes, so an entry never goes stale. An object of 64 KiB at most holds its table of contents itself and is read through its open, which brings it whole: the cache keeps it when it keeps data, and nothing of it otherwise. The pages of the dataset's tree, which say where its objects are, enter the cache too, so a handle opened after a restart finds its objects with no request: an encrypted dataset's as the store holds them, which each read from the disk decrypts.
 
 Given a quota of its own, the cache keeps the data a question reads of a dataset's objects too, their
 footers included, so that the same question asked again, by this process or the next, reads no data

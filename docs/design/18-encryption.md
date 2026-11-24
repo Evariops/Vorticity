@@ -435,7 +435,7 @@ from its own sealed commits.
 A dataset is encrypted when it is created with `DatasetOptions.Encrypted`. Its first commit object is
 sealed under a data key drawn for it, with a dataset id of 16 random bytes, minted at creation, as the
 key context. From then on a handle knows the dataset is encrypted because its latest commit is sealed.
-It seals every object it writes, data objects and commit objects, and refuses a dataset that mixes
+It seals every object it writes, data objects, rollups' objects and commit objects, and refuses a dataset that mixes
 sealed and plain objects, a plain commit after a sealed one included. Given to a handle of an existing
 dataset, `Encrypted` refuses one that is plain. Nothing in the commit header changes, so the dataset's
 format does not either, and a plain dataset becomes encrypted only by being copied into a new one.
@@ -445,6 +445,7 @@ Each object is bound to what names it:
 | object | the reader checks | so that |
 |---|---|---|
 | data object | its object id against the uid its leaf entry records | an object swapped for another sealed object, of this dataset or another, fails |
+| rollup's object | its object id against the uid its rollup entry records, as a data object's; its entry records the bytes the store holds | the same, and a rollup's regions keep their checksums as a plain dataset's do |
 | commit object | its binding against the SHA-256 of the dataset's id and the version its key names | a commit object copied under another version's key, or into another dataset, fails |
 | page, fragment, deletion vector | nothing of its own | they are covered by the frames of the commit object they live in |
 

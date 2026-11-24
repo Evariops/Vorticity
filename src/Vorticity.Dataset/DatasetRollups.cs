@@ -36,13 +36,14 @@ internal static class DatasetRollups
 
     /// <summary>
     /// Writes the rollups the latest version lacks, rank by rank, a commit a rank; the rollups put. None for a dataset with
-    /// no key, on a sealed store, with a fanout of 0, or with no level past 0. With <paramref name="refreshed"/>,
-    /// the handle stands on the latest version already, which the first rank reads as it is: a compaction loop's turn.
+    /// no key, with a fanout of 0, or with no level past 0. An encrypted dataset's rollups are sealed as its data objects
+    /// are. With <paramref name="refreshed"/>, the handle stands on the latest version already, which the first rank reads as
+    /// it is: a compaction loop's turn.
     /// </summary>
     internal static async ValueTask<int> RollUpAsync(VortexDataset dataset, CancellationToken cancellationToken, bool refreshed = false)
     {
         int fanout = dataset.Options.RollupFanout;
-        if (fanout < 2 || dataset.Snapshot.Schema.RollupKey is null || dataset.Store is SealedObjectStore { Seals: true })
+        if (fanout < 2 || dataset.Snapshot.Schema.RollupKey is null)
         {
             return 0;
         }
@@ -56,8 +57,7 @@ internal static class DatasetRollups
             }
 
             DatasetSnapshot version = dataset.Snapshot;
-            if (fanout < 2 || version.Schema.RollupKey is not { } key || dataset.Store is SealedObjectStore { Seals: true }
-                || Bottom(version.Levels) is not int bottom)
+            if (fanout < 2 || version.Schema.RollupKey is not { } key || Bottom(version.Levels) is not int bottom)
             {
                 return put;
             }
@@ -333,21 +333,18 @@ internal static class DatasetRollups
             children[i - run.First] = child;
         }
 
-        byte[][] objectBytes = new byte[children.Length][];
-        Task<ObjectRead>[] reads = new Task<ObjectRead>[children.Length];
+        Task<byte[]?>[] reads = new Task<byte[]?>[children.Length];
         for (int c = 0; c < children.Length; c++)
         {
-            objectBytes[c] = new byte[children[c].Bytes];
-            reads[c] = dataset.Store.ReadAsync(children[c].Key, 0, objectBytes[c], null, cancellationToken).AsTask();
+            reads[c] = PlaintextAsync(dataset.Store, children[c], cancellationToken);
         }
 
-        ObjectRead[] done = await Task.WhenAll(reads).ConfigureAwait(false);
+        byte[]?[] objectBytes = await Task.WhenAll(reads).ConfigureAwait(false);
         RollupBuilder builder = new RollupBuilder(level, rank, key, version.Schema.Cut);
         for (int c = 0; c < children.Length; c++)
         {
             RollupEntry child = children[c];
-            byte[] bytes = objectBytes[c];
-            if (done[c].BytesRead != bytes.Length)
+            if (objectBytes[c] is not { } bytes)
             {
                 return null;
             }
@@ -380,7 +377,30 @@ internal static class DatasetRollups
             ? bytes.AsSpan((int)region.Offset, (int)region.Length).ToArray()
             : null;
 
-    /// <summary>The rollup <paramref name="builder"/> summed, its object written under a new key.</summary>
+    /// <summary>
+    /// The plaintext of the rollup <paramref name="rollup"/>'s object, read whole through the reader of a data object, sealed
+    /// or plain as the dataset is; null when the store holds fewer bytes than the reader says.
+    /// </summary>
+    private static async Task<byte[]?> PlaintextAsync(IObjectStore store, RollupEntry rollup, CancellationToken cancellationToken)
+    {
+        ISegmentReader reader = await SealedObjectStore.OpenDataAsync(store, rollup.Key, rollup.Uid, rollup.Bytes, cancellationToken).ConfigureAwait(false);
+        await using (reader.ConfigureAwait(false))
+        {
+            long length = await reader.GetLengthAsync(cancellationToken).ConfigureAwait(false);
+            if (length is <= 0 or > int.MaxValue)
+            {
+                return null;
+            }
+
+            using Buffers.SegmentOwner whole = await reader.ReadRangeAsync(0, (int)length, 1, cancellationToken).ConfigureAwait(false);
+            return whole.Length == length ? whole.Buffer.Span.ToArray() : null;
+        }
+    }
+
+    /// <summary>
+    /// The rollup <paramref name="builder"/> summed, its object written under a new key: sealed, as a data object is, on an
+    /// encrypted dataset, whose entry then records the bytes the store holds, as a data object's does.
+    /// </summary>
     private static async ValueTask<RollupEntry?> WriteAsync(VortexDataset dataset, RollupBuilder builder, CancellationToken cancellationToken)
     {
         Span<byte> random = stackalloc byte[16];
@@ -389,6 +409,13 @@ internal static class DatasetRollups
         if (builder.Finish(CommitKey.ForRollup(uid), uid) is not ({ } bytes, { } entry))
         {
             return null;
+        }
+
+        if (dataset.Store is SealedObjectStore { Seals: true } sealedStore)
+        {
+            (_, long stored) = await sealedStore
+                .PutSealedAsync(entry.Key, new System.Buffers.ReadOnlySequence<byte>(bytes), PutCondition.IfAbsent, cancellationToken).ConfigureAwait(false);
+            return entry with { Bytes = stored };
         }
 
         await dataset.Store.PutIfAbsentAsync(entry.Key, bytes, cancellationToken).ConfigureAwait(false);

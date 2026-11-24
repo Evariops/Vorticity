@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Buffers;
 using Vorticity.Indexes;
 using Vorticity.Sealing;
@@ -92,4 +93,9 @@ internal sealed class SealedSynopsisCache : ISealedFrameCache
     }
 
     public void DropFrame(long cipherOffset, int length) => _cache.DropFrame(_uid, cipherOffset, length);
+
+    public void BeginReadFrames(ReadOnlySpan<long> frames, TaskCompletionSource mine, List<long> registered, List<Task> theirs) =>
+        _cache.BeginReadFrames(_uid, frames, mine, registered, theirs);
+
+    public void EndReadFrames(ReadOnlySpan<long> frames, TaskCompletionSource mine) => _cache.EndReadFrames(_uid, frames, mine);
 }

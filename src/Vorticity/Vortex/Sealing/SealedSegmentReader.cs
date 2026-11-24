@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -42,11 +43,23 @@ namespace Vorticity.Sealing;
 /// tail an open decrypted, written behind the read; a range read alone, as an open reads its tail, comes
 /// from the disk too when the cache keeps its frames.
 /// </para>
+/// <para>
+/// Readers of the object that miss the same frames at once, through the same cache, wait for one read of them, as those
+/// of a plain object's regions do: a group of a batch whose every frame another reader is fetching waits for that read, then
+/// reads them from the disk, and from the store what the other read did not leave there. A batch reads its own frames and
+/// ends its reads before it waits for another's, so two batches whose groups cross never wait for each other.
+/// </para>
 /// </remarks>
 internal sealed class SealedSegmentReader : ISegmentReader
 {
     /// <summary>A run at or below this size is always published by slicing, as a plain source does.</summary>
     private const int AlwaysSliceRunBytes = 64 * 1024;
+
+    /// <summary>A group of a batch the disk served, or that its frames were published for: no slot among the store's ranges.</summary>
+    private const int Served = -1;
+
+    /// <summary>A group of a batch whose every frame another reader is fetching: it waits for that read.</summary>
+    private const int Waiting = -2;
 
     private readonly ISegmentReader _inner;
     private readonly bool _ownsInner;
@@ -405,6 +418,8 @@ internal sealed class SealedSegmentReader : ISegmentReader
         Block<long> stretches = _cache is null ? default : Blocks.Rent<long>(2 * registered);
         SegmentRequestSet ciphertext = RentSet();
         ciphertext.Account = requests.Account;
+        SegmentRequestSet? late = null;
+        Joining? joining = null;
         try
         {
             int pending = CoalescedReads.CollectPending(requests, order, scratch.Keys);
@@ -418,27 +433,66 @@ internal sealed class SealedSegmentReader : ISegmentReader
             int runCount = CoalescedReads.PlanRuns(requests, order, scratch.Keys, sorted, runs, pending, _plainLength, _options);
             int groupCount = Group(runs, runCount, groups);
 
-            // The groups whose every frame the cache keeps come from the disk, the rest from the store in one
-            // batch: stored[g] is group g's slot among the store's ranges, or -1 when the disk served it.
+            // The groups whose every frame the cache keeps come from the disk, those whose every frame another reader is
+            // fetching wait for it, and the rest come from the store in one batch: stored[g] is group g's slot among the
+            // store's ranges, or Served, or Waiting.
+            bool waits = false;
             for (int g = 0; g < groupCount; g++)
             {
-                stored[g] = _cache is not null && ServeKept(requests, runs, groups[g], groups[g + 1], sorted, order, stretches.AsSpan())
-                    ? -1
-                    : Register(ciphertext, FrameStart(runs[groups[g]].Start), FrameEnd(runs[groups[g + 1] - 1].End - 1));
-            }
-
-            if (ciphertext.Count > 0)
-            {
-                await _inner.ReadManyAsync(ciphertext, cancellationToken).ConfigureAwait(false);
-            }
-
-            for (int g = 0; g < groupCount; g++)
-            {
-                if (stored[g] >= 0)
+                if (_cache is not null && ServeKept(requests, runs, groups[g], groups[g + 1], sorted, order, stretches.AsSpan()))
                 {
-                    Publish(
-                        requests, ciphertext.GetOwner(stored[g]), ciphertext.GetBuffer(stored[g]), runs, groups[g], groups[g + 1], sorted, order,
-                        stretches.AsSpan());
+                    stored[g] = Served;
+                }
+                else if (_cache is not null && Joins(runs, groups[g], groups[g + 1], sorted, stretches.AsSpan(), ref joining))
+                {
+                    stored[g] = Waiting;
+                    waits = true;
+                }
+                else
+                {
+                    stored[g] = Register(ciphertext, FrameStart(runs[groups[g]].Start), FrameEnd(runs[groups[g + 1] - 1].End - 1));
+                }
+            }
+
+            try
+            {
+                if (ciphertext.Count > 0)
+                {
+                    await _inner.ReadManyAsync(ciphertext, cancellationToken).ConfigureAwait(false);
+                }
+
+                PublishStored(requests, ciphertext, stored.AsSpan(), groupCount, runs, groups, sorted, order, stretches.AsSpan());
+            }
+            finally
+            {
+                // The frames this read fetched are kept: the readers that wait for them read them from the disk. Ended before
+                // this read waits for another's, as a plain object's reader releases its own, so that two readers whose groups
+                // cross never wait for each other.
+                joining?.End(_cache!);
+            }
+
+            if (waits)
+            {
+                await joining!.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+                // What the other read left on the disk is read from it, and what it did not, a frame its cache refused or a
+                // read that failed, from the store.
+                late = RentSet();
+                late.Account = requests.Account;
+                for (int g = 0; g < groupCount; g++)
+                {
+                    if (stored[g] == Waiting)
+                    {
+                        stored[g] = ServeKept(requests, runs, groups[g], groups[g + 1], sorted, order, stretches.AsSpan())
+                            ? Served
+                            : Register(late, FrameStart(runs[groups[g]].Start), FrameEnd(runs[groups[g + 1] - 1].End - 1));
+                    }
+                }
+
+                if (late.Count > 0)
+                {
+                    await _inner.ReadManyAsync(late, cancellationToken).ConfigureAwait(false);
+                    PublishStored(requests, late, stored.AsSpan(), groupCount, runs, groups, sorted, order, stretches.AsSpan());
                 }
             }
 
@@ -452,6 +506,11 @@ internal sealed class SealedSegmentReader : ISegmentReader
         finally
         {
             ReturnSet(ciphertext);
+            if (late is not null)
+            {
+                ReturnSet(late);
+            }
+
             Blocks.Return(stretches);
             Blocks.Return(stored);
             Blocks.Return(groups);
@@ -764,6 +823,124 @@ internal sealed class SealedSegmentReader : ISegmentReader
 
         groups[groupCount] = runCount;
         return groupCount;
+    }
+
+    /// <summary>
+    /// Publishes every group whose frames <paramref name="read"/> holds, <paramref name="stored"/> giving its slot there, and
+    /// marks it served.
+    /// </summary>
+    private void PublishStored(
+        SegmentRequestSet requests, SegmentRequestSet read, Span<int> stored, int groupCount, ReadOnlySpan<CoalescedRun> runs, ReadOnlySpan<int> groups,
+        ReadOnlySpan<SegmentSpec> sorted, ReadOnlySpan<int> order, Span<long> stretches)
+    {
+        for (int g = 0; g < groupCount; g++)
+        {
+            if (stored[g] >= 0)
+            {
+                Publish(requests, read.GetOwner(stored[g]), read.GetBuffer(stored[g]), runs, groups[g], groups[g + 1], sorted, order, stretches);
+                stored[g] = Served;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether the group of runs <c>[firstRun, endRun)</c>, which the disk did not serve, waits for other readers' reads of its
+    /// frames: the cache keeps them once read, a declared region's or, when it keeps data, any, and other readers fetch every
+    /// one. Otherwise this reader reads the group, its frames no one else fetches registered as its own in
+    /// <paramref name="joining"/>, made at the first.
+    /// </summary>
+    /// <remarks>
+    /// The frames are those the group's segments lie in, those a gap between them holds left out, as the disk serves them. A
+    /// group that shares some frames with another reader's read is read whole: the frames another reader fetches are read
+    /// twice, those of two questions asking the same segments at once never.
+    /// </remarks>
+    private bool Joins(
+        ReadOnlySpan<CoalescedRun> runs, int firstRun, int endRun, ReadOnlySpan<SegmentSpec> sorted, Span<long> stretches, ref Joining? joining)
+    {
+        ISealedFrameCache cache = _cache!;
+        if (!cache.KeepsData && !AllDeclared(cache, runs, firstRun, endRun, sorted))
+        {
+            // A frame of the group that the cache would not keep: a reader that waited for it would read it again.
+            return false;
+        }
+
+        joining ??= new Joining();
+        List<long> frames = joining.Frames;
+        frames.Clear();
+        int count = Stretches(runs, firstRun, endRun, sorted, stretches, skipDeclared: null);
+        for (int s = 0; s < count; s += 2)
+        {
+            for (long at = stretches[s]; at < stretches[s + 1]; at = FrameEnd(at))
+            {
+                frames.Add(FrameAt(at).Offset);
+            }
+        }
+
+        int before = joining.Registered.Count;
+        List<Task> theirs = joining.Group;
+        theirs.Clear();
+        cache.BeginReadFrames(CollectionsMarshal.AsSpan(frames), joining.Mine, joining.Registered, theirs);
+        if (joining.Registered.Count > before || theirs.Count == 0)
+        {
+            return false;
+        }
+
+        joining.Theirs.AddRange(theirs);
+        return true;
+    }
+
+    /// <summary>Whether every segment of the runs <c>[firstRun, endRun)</c> is a region the object's table of contents declares.</summary>
+    private static bool AllDeclared(ISealedFrameCache cache, ReadOnlySpan<CoalescedRun> runs, int firstRun, int endRun, ReadOnlySpan<SegmentSpec> sorted)
+    {
+        for (int r = firstRun; r < endRun; r++)
+        {
+            for (int k = runs[r].FirstIndex; k < runs[r].FirstIndex + runs[r].Count; k++)
+            {
+                if (sorted[k].Length > 0 && !cache.Declares(sorted[k].Offset, sorted[k].Length))
+                {
+                    return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// What a batch that missed the disk holds of the cache's reads in flight: the frames it reads for others, and the reads of
+    /// others it waits for. Made only by a batch whose frames the store sends, so a batch the disk serves allocates none.
+    /// </summary>
+    private sealed class Joining
+    {
+        private bool _ended;
+
+        /// <summary>This batch's read, which the readers that wait for its frames wait on.</summary>
+        internal TaskCompletionSource Mine { get; } = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>The frames this batch registered as its read's, by their place in the object.</summary>
+        internal List<long> Registered { get; } = [];
+
+        /// <summary>The other readers' reads the groups that wait wait for.</summary>
+        internal List<Task> Theirs { get; } = [];
+
+        /// <summary>The frames of the group being planned, reused from group to group.</summary>
+        internal List<long> Frames { get; } = [];
+
+        /// <summary>The reads the group being planned would wait for, reused from group to group.</summary>
+        internal List<Task> Group { get; } = [];
+
+        /// <summary>Ends this batch's reads, once: the readers that wait for its frames look again.</summary>
+        internal void End(ISealedFrameCache cache)
+        {
+            if (!_ended)
+            {
+                _ended = true;
+                cache.EndReadFrames(CollectionsMarshal.AsSpan(Registered), Mine);
+            }
+        }
+
+        /// <summary>Waits for the other readers' reads of the frames this batch's waiting groups lie in.</summary>
+        internal Task WaitAsync(CancellationToken cancellationToken) => Task.WhenAll(Theirs).WaitAsync(cancellationToken);
     }
 
     /// <summary>Registers the ciphertext of the frames covering plaintext <c>[frameStart, frameEnd)</c>: its slot.</summary>
