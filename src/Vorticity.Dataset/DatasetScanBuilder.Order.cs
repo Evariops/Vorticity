@@ -150,6 +150,7 @@ internal sealed partial class DatasetScanBuilder
         FieldMask mask = _mask ?? FieldMask.All;
         bool drop = !mask.IsAll && !Array.TrueForAll(paths, path => Covers(mask, _version.Schema.DType, path));
         ScanProjection? kept = null;
+        ProjectedSchemas? schemas = null;
         // Read downward in their own order, objects give the reverse of the key's order, the nulls of its first column last.
         SortKey key = SortKey.OfColumns(_version.Schema.DType, paths, _descending, reversed: InObjectOrder(paths));
         KeyOrderedMerge merge = new KeyOrderedMerge(
@@ -179,7 +180,8 @@ internal sealed partial class DatasetScanBuilder
                     }
 
                     kept ??= ScanProjection.Parse(run.DType, PathsOf(mask, _version.Schema.DType));
-                    RecordBatch projected = run.Project(kept.Value);
+                    schemas ??= new ProjectedSchemas();
+                    RecordBatch projected = run.Project(kept.Value, schemas);
                     try
                     {
                         yield return InDataset(projected, firstRow, ref view);
