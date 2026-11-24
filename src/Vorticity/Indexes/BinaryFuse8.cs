@@ -277,8 +277,10 @@ internal sealed class BinaryFuse8
         uint segmentLength = BinaryPrimitives.ReadUInt32LittleEndian(bytes[8..]);
         uint segmentCount = BinaryPrimitives.ReadUInt32LittleEndian(bytes[12..]);
         uint length = BinaryPrimitives.ReadUInt32LittleEndian(bytes[16..]);
-        if (segmentLength == 0 || (segmentLength & (segmentLength - 1)) != 0 || segmentLength > (1u << 18)
-            || length != (ulong)(segmentCount + 2) * segmentLength || length > (uint)(bytes.Length - HeaderBytes))
+        // A filter has a segment at least, which its writer always lays out: with none, the third
+        // slot of a key lands a segment past the fingerprints.
+        if (segmentLength == 0 || (segmentLength & (segmentLength - 1)) != 0 || segmentLength > (1u << 18) || segmentCount == 0
+            || length != ((ulong)segmentCount + 2) * segmentLength || length > (uint)(bytes.Length - HeaderBytes))
         {
             throw new VortexFormatException($"A presence filter declares {length} slots in segments of {segmentLength}, which its bytes do not hold.");
         }
