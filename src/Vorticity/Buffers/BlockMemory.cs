@@ -21,9 +21,15 @@ internal sealed unsafe class BlockMemory<T>(Block<T> block) : MemoryManager<T>
 
     public override MemoryHandle Pin(int elementIndex = 0)
     {
-        if ((uint)elementIndex > (uint)block.Length || block.Bytes is not { } bytes)
+        if ((uint)elementIndex > (uint)block.Length)
         {
             throw new ArgumentOutOfRangeException(nameof(elementIndex));
+        }
+
+        // No bytes to pin behind an empty block: an empty handle, as an empty memory over an array gives.
+        if (block.Bytes is not { } bytes)
+        {
+            return default;
         }
 
         // The block's bytes are an array the collector may move: pinned while the handle lives.

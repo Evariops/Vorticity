@@ -171,6 +171,82 @@ public sealed class BlocksTests
         Assert.Throws<VortexMemoryException>(() => Blocks.Rent<long>(memory, 1 << 20, "a test"));
     }
 
+    /// <summary>
+    /// A block made longer than the longest array holds leaves its owner empty: the bytes it held are back in the pool,
+    /// and an owner that still named them would give them back a second time, for two renters to share.
+    /// </summary>
+    [Fact]
+    public void A_block_ensured_past_the_longest_array_is_left_empty()
+    {
+        Block<long> block = Blocks.Rent<long>(4);
+        Assert.Throws<ArgumentOutOfRangeException>(() => Blocks.Ensure(ref block, int.MaxValue));
+        Assert.True(block.IsDefault);
+    }
+
+    /// <summary>
+    /// A growth stays a power of two up to 2^30 elements, and past it is the longest array's length, or the length needed
+    /// when it passes that: never the negative length doubling and rounding in 32 bits made of it.
+    /// </summary>
+    [Fact]
+    public void A_growth_past_two_to_the_thirty_is_never_negative()
+    {
+        Assert.Equal(1024, Blocks.Grown(1, 0));
+        Assert.Equal(1 << 30, Blocks.Grown((1 << 29) + 1, 0));
+        Assert.Equal(1 << 30, Blocks.Grown(5, 1 << 29));
+        Assert.Equal(Array.MaxLength, Blocks.Grown((1 << 30) + 1, 0));
+        Assert.Equal(Array.MaxLength, Blocks.Grown(10, 1 << 30));
+        Assert.Equal(Array.MaxLength, Blocks.Grown(10, (int.MaxValue / 2) + 1));
+        Assert.Equal(int.MaxValue, Blocks.Grown(int.MaxValue, 0));
+    }
+
+    /// <summary>
+    /// A rent the longest array refuses after its account or its query took the bytes gives them back with the failure:
+    /// the reservation would otherwise stay until the work or the question ends.
+    /// </summary>
+    [Fact]
+    public void A_rent_past_the_longest_array_gives_back_what_it_reserved()
+    {
+        CountedAccount account = new CountedAccount(MemoryAccount.Caller);
+        Assert.Throws<ArgumentOutOfRangeException>(() => Blocks.Rent<long>(account, int.MaxValue));
+        Assert.Equal(0, account.Held);
+
+        using QueryMemory memory = new QueryMemory(new QueryMemoryBudget(1L << 40, process: null));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Blocks.TryRent<long>(memory, int.MaxValue, out _));
+        Assert.Equal(0, memory.Held);
+    }
+
+    /// <summary>A block over bytes from outside the pool is refused a length its bytes do not hold, or a negative one.</summary>
+    [Fact]
+    public void A_block_over_bytes_is_refused_a_length_they_do_not_hold()
+    {
+        byte[] bytes = new byte[8];
+        Assert.Equal(2, Block<int>.Over(bytes, 2).Length);
+        Assert.Throws<ArgumentOutOfRangeException>(() => Block<int>.Over(bytes, 3));
+        Assert.Throws<ArgumentOutOfRangeException>(() => Block<int>.Over(bytes, -1));
+        Assert.True(Block<int>.Over(null, 3).IsDefault);
+    }
+
+    /// <summary>A run of bytes refuses an advance past its block whatever its size, a negative one, and a negative truncation.</summary>
+    [Fact]
+    public void A_run_of_bytes_refuses_an_advance_past_its_block_whatever_its_size()
+    {
+        using BlockBytes bytes = new BlockBytes();
+        bytes.Write([1, 2, 3]);
+        Assert.Throws<ArgumentOutOfRangeException>(() => bytes.Advance(int.MaxValue));
+        Assert.Throws<ArgumentOutOfRangeException>(() => bytes.Advance(-1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => bytes.Truncate(-1));
+        Assert.Equal(3, bytes.Length);
+    }
+
+    /// <summary>The memory over an empty block pins as an empty memory over an array does: an empty handle, no failure.</summary>
+    [Fact]
+    public unsafe void Pinning_the_memory_of_an_empty_block_gives_an_empty_handle()
+    {
+        System.Buffers.MemoryHandle handle = new BlockMemory<int>(default).Memory.Pin();
+        Assert.True(handle.Pointer == null);
+        handle.Dispose();
+    }
+
     private readonly record struct Triple(int A, int B, int C);
 }
 

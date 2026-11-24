@@ -67,11 +67,16 @@ internal sealed class BlockBytes : IBufferWriter<byte>, IDisposable
     }
 
     /// <summary>Drops the bytes past <paramref name="length"/>.</summary>
-    internal void Truncate(int length) => _length = Math.Min(_length, length);
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="length"/> is negative.</exception>
+    internal void Truncate(int length)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(length);
+        _length = Math.Min(_length, length);
+    }
 
     public void Advance(int count)
     {
-        if (count < 0 || _length + count > _block.Length)
+        if ((uint)count > (uint)(_block.Length - _length))
         {
             throw new ArgumentOutOfRangeException(nameof(count));
         }

@@ -245,8 +245,9 @@ internal sealed class BlockPool : IHeldMemory
         // The block kept past the classes may be longer than asked: the account takes the rest of it too.
         if (owner.Capacity > capacity && !account.TryTake(owner.Capacity - capacity))
         {
-            // Counted nowhere: the release parks it again.
+            // Told as rented and given back, for what watches the blocks; counted nowhere, the release parks it again.
             account.Give(capacity);
+            Watch?.Rented(owner);
             owner.Release();
             throw account.Refused(owner.Capacity);
         }
