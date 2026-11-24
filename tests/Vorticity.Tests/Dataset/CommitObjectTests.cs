@@ -136,6 +136,53 @@ public sealed class CommitObjectTests
         }
     }
 
+    /// <summary>
+    /// A header whose level, depth, counts or chunker no writer makes is refused at the open, where it was taken on its word
+    /// and sized an array a level and a frame a depth: a level of 64, a depth of 65, entries past a long, a chunker whose
+    /// target is under its floor.
+    /// </summary>
+    [Fact]
+    public void AHeaderPastWhatAWriterMakesIsRefused()
+    {
+        CommitObjectBuilder pages = new CommitObjectBuilder(7);
+        PageReference page = pages.AddPage(Page(1, 100));
+        foreach (CommitHeader header in (CommitHeader[])
+        [
+            new CommitHeader { Version = 7, Levels = [new CommitLevel(64, 1, page)] },
+            new CommitHeader { Version = 7, Levels = [new CommitLevel(0, 1, page) { Depth = 65 }] },
+            new CommitHeader { Version = 7, Levels = [new CommitLevel(0, -1, page)] },
+            new CommitHeader { Version = 7, Chunker = new ChunkerSettings(64 << 10, 32 << 10, 256 << 10) },
+        ])
+        {
+            byte[] bytes = new CommitObjectBuilder(7).Build(header);
+            Assert.Throws<CommitFormatException>(() => CommitObject.Open(bytes));
+        }
+    }
+
+    /// <summary>
+    /// A page is read whole before its hash is checked: a reference that claims more than any page holds is refused before
+    /// the read, where up to 2 GiB was asked of the store.
+    /// </summary>
+    [Fact]
+    public async Task APageReferenceThatClaimsMoreThanAPageHoldsIsRefusedBeforeItIsRead()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        PageReference claimed = new PageReference(1, 0, int.MaxValue, 0);
+        await Assert.ThrowsAsync<CommitFormatException>(
+            async () => await CommitObject.ReadPageAsync(store, "commits/1", claimed, CommitFormat.PreambleBytes, TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>
+    /// A partition index's directory that declares more objects than its bytes can hold is read as no index, where the
+    /// array it sized was allocated first, past what an array holds.
+    /// </summary>
+    [Fact]
+    public void APartitionIndexDeclaringMoreThanItsBytesHoldIsNoIndex()
+    {
+        byte[] directory = [(byte)PartitionIndex.Version, 0xFF, 0xFF, 0xFF, 0xFF, 0x07, 0, 0, 0];
+        Assert.Null(PartitionIndex.Read(directory, System.IO.Hashing.XxHash3.HashToUInt64(directory)));
+    }
+
     [Fact]
     public void AFragmentAddedBeforeAPageIsWhereItsReferenceSays()
     {

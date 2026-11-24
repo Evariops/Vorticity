@@ -1289,7 +1289,9 @@ internal sealed partial class DatasetScanBuilder
             }
             catch (VortexFormatException)
             {
-                // A page that does not hold the keys its table names: the object is read as if it kept no index.
+                // A page that does not hold the keys its table names: the object is read as if it kept no index, and the
+                // damage counted, which a read that only slowed would leave nobody to learn.
+                DatasetTelemetry.KeyIndexUnreadable();
                 return null;
             }
         }

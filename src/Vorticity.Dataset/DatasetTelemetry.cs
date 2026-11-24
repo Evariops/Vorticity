@@ -104,6 +104,19 @@ internal static class DatasetTelemetry
         "vortex.dataset.layout.avoidable_bytes", "By",
         "Bytes the objects read as rows under a filter would have been spared by an order of the rows by the filter's column or variant key, by value (ComponentAdvice).");
 
+    private static readonly Counter<long> KeyIndexesUnreadable = VortexTelemetry.Meter.CreateCounter<long>(
+        "vortex.dataset.key_index.unreadable", "{object}",
+        "Objects read without their key index, its pages not holding the keys its table names: a damaged index, which slows a read and changes no answer.");
+
+    /// <summary>Counts an object read without its key index, which did not decode, once an object.</summary>
+    internal static void KeyIndexUnreadable()
+    {
+        if (KeyIndexesUnreadable.Enabled)
+        {
+            KeyIndexesUnreadable.Add(1);
+        }
+    }
+
     /// <summary>Counts the bytes an order by <paramref name="value"/> would have spared an object read as rows, once an object.</summary>
     internal static void LayoutAvoidable(string value, long bytes)
     {

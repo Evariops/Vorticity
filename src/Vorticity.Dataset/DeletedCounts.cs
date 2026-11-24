@@ -394,7 +394,10 @@ internal sealed class DeletedCounts
         List<(int Field, ColumnCounts Counts)> columns = new List<(int Field, ColumnCounts Counts)>((int)count);
         for (ulong c = 0; c < count; c++)
         {
-            int field = checked((int)reader.ReadVarint());
+            ulong declared = reader.ReadVarint();
+            int field = declared <= int.MaxValue
+                ? (int)declared
+                : throw new VortexFormatException($"The counts of an object's deleted rows name column {declared}, past any schema's.");
             columns.Add((field, ColumnCounts.From(reader.ReadLengthDelimited())));
         }
 

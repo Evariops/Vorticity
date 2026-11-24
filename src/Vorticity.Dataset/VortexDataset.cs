@@ -4855,11 +4855,11 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             {
                 ReadOnlyMemory<byte> node = await version.Pages.ReadPageAsync(at, cancellationToken).ConfigureAwait(false);
                 IReadOnlyList<InternalEntry> children = TreePage.ReadInternal(node);
-                at = children[^1].Child;
+                at = children.Count > 0 ? children[^1].Child : throw new CommitFormatException("An internal page of an occupied tree holds no child.");
             }
 
             IReadOnlyList<TreeEntry> leaves = TreePage.ReadLeaf(await version.Pages.ReadPageAsync(at, cancellationToken).ConfigureAwait(false));
-            TreeEntry last = leaves[^1];
+            TreeEntry last = leaves.Count > 0 ? leaves[^1] : throw new CommitFormatException("A leaf of an occupied tree holds no entry.");
             end = Math.Max(end, PositionAt(last.Key.Span) + last.Rows);
         }
 
