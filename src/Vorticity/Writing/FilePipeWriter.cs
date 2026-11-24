@@ -170,8 +170,12 @@ internal class FilePipeWriter : PipeWriter
     {
     }
 
-    /// <summary>Closes the handle; what was not flushed is dropped, since a synchronous write here would be a blocking one.</summary>
-    public override void Complete(Exception? exception = null) => Close();
+    /// <summary>
+    /// Closes the handle; what was not flushed is dropped, since a synchronous write here would be a blocking one. A created
+    /// file cannot be put in place without that write, so it is given up as a failed completion gives it up, its file under
+    /// a name of its own deleted rather than left beside its destination; one written from an offset keeps what was flushed.
+    /// </summary>
+    public override void Complete(Exception? exception = null) => Fail();
 
     /// <summary>
     /// Flushes, closes, and puts a created file in place of its destination. With an exception, a

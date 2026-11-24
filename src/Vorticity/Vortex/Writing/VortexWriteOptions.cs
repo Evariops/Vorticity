@@ -180,8 +180,11 @@ public sealed record VortexWriteOptions
     /// the rest, so that a power cut never leaves a postscript over bytes that are not there: an
     /// append cut short is then a torn tail, which an open steps back from. A created file is then
     /// renamed over its path, and after a power cut the path holds either it, whole, or what was
-    /// there before; the rename is made durable by the file system's own journal. A sink the caller
-    /// brings is the caller's to make durable. Each completion costs two flushes to the device.
+    /// there before. The rename itself is not flushed: .NET has no managed call that flushes a
+    /// directory, so a power cut right after <c>CompleteAsync</c> may leave the path holding what was
+    /// there before, until the file system writes its directory; a caller that must know flushes it
+    /// itself. A sink the caller brings is the caller's to make durable. Each completion costs two
+    /// flushes to the device.
     /// </remarks>
     public bool Durable { get; init; }
 
