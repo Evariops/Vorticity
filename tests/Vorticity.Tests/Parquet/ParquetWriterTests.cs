@@ -31,6 +31,31 @@ public sealed partial class ParquetWriterTests
     [VortexRecord]
     public partial record struct Reading(int Sensor, long Time, double? Value);
 
+    /// <summary>
+    /// A block of a wide column stages its values whole before its pages are cut: 64 MiB of them,
+    /// staged in a block not yet full, are held in the writer's account, where the staging buffers
+    /// once went uncounted and only the compressed chunk was.
+    /// </summary>
+    [Fact]
+    public async Task AWideColumnsStagedValuesAreCountedByTheWriter()
+    {
+        using TempPath path = new();
+        string wide = new('a', 64 << 10);
+        await using ParquetFileWriter writer = VortexSession.Default.CreateParquetWriter(
+            path.Value, [("text", VortexType.Utf8)], new ParquetWriteOptions { Compression = ParquetCompression.Zstd, BlockRows = 2_048, DegreeOfParallelism = 1 });
+        ColumnsBuilder builder = writer.Builder();
+        for (int row = 0; row < 1_024; row++)
+        {
+            builder.Column<string>(0).Append(wide);
+        }
+
+        long built = writer.Account.Held;
+        await writer.WriteAsync(builder, Ct);
+        long staged = writer.Account.Held - built;
+        Assert.True(staged >= 64L << 20, $"The writer's account holds {staged} bytes more with 64 MiB of values staged.");
+        await writer.CompleteAsync(Ct);
+    }
+
     [Fact]
     public async Task WritesEveryValueOnTheBlockGrid()
     {
