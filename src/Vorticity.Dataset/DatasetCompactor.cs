@@ -498,7 +498,8 @@ internal static partial class DatasetCompactor
         // no postings of their identifiers.
         using PartitionPostings? postings = merge && indexed && job.Trigger == CompactionTrigger.Consolidation
             ? new PartitionPostings(
-                schema.Identifiers, dataset.UnitBlocksOf(schema.DType, schema.Identifiers), ColumnNames(schema), dataset.Store is SealedObjectStore { Seals: true })
+                schema.Identifiers, dataset.UnitBlocksOf(schema.DType, schema.Identifiers), ColumnNames(schema), dataset.Store is SealedObjectStore { Seals: true },
+                QueryMemoryBudget.JobsOf(dataset.Session))
             : null;
 
         // Each object it streams is announced to the store as at most what the job reads, times what a job

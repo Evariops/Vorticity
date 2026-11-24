@@ -123,19 +123,29 @@ public static partial class RowEncoder
     /// into pooled row keys the caller disposes.
     /// </summary>
     internal static RowKeys Encode(
-        CanonicalArena arena, ReadOnlySpan<int> columns, ReadOnlySpan<RowSortField> fields)
+        CanonicalArena arena, ReadOnlySpan<int> columns, ReadOnlySpan<RowSortField> fields) => Encode(arena, columns, fields, account: null);
+
+    /// <summary>
+    /// <see cref="Encode(CanonicalArena, ReadOnlySpan{int}, ReadOnlySpan{RowSortField})"/>, the keys' blocks and those of
+    /// their sorts counted in <paramref name="account"/>, the work's that encodes them: as much as the rows they order.
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The account refuses a block.</exception>
+    internal static RowKeys Encode(
+        CanonicalArena arena, ReadOnlySpan<int> columns, ReadOnlySpan<RowSortField> fields, MemoryAccount? account)
     {
         int rowCount = Validate(arena, columns, fields);
 
-        Block<int> sizes = Blocks.Rent<int>(rowCount);
-        Block<int> offsets = Blocks.Rent<int>(rowCount);
+        Block<int> sizes = default;
+        Block<int> offsets = default;
         Block<byte> elements = default;
         bool kept = false;
         try
         {
+            sizes = RowKeys.Rent<int>(account, rowCount);
+            offsets = RowKeys.Rent<int>(account, rowCount);
             int total = ComputeSizes(arena, columns, fields, sizes);
             _ = ComputeOffsets(sizes, offsets);
-            elements = Blocks.Rent<byte>(total);
+            elements = RowKeys.Rent<byte>(account, total);
 
             // Cursors start at zero and end as the per-row sizes, so one buffer serves as both the
             // output of pass 1 and the write cursor of pass 2.
@@ -143,7 +153,7 @@ public static partial class RowEncoder
             cursors.Clear();
             Encode(arena, columns, fields, offsets, cursors, elements);
 
-            RowKeys keys = new RowKeys(elements, offsets, sizes, rowCount, total);
+            RowKeys keys = new RowKeys(elements, offsets, sizes, rowCount, total, account);
             kept = true;
             return keys;
         }
@@ -151,9 +161,9 @@ public static partial class RowEncoder
         {
             if (!kept)
             {
-                Blocks.Return(elements);
-                Blocks.Return(offsets);
-                Blocks.Return(sizes);
+                RowKeys.Return(account, elements);
+                RowKeys.Return(account, offsets);
+                RowKeys.Return(account, sizes);
             }
         }
     }

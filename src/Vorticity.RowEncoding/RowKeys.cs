@@ -26,13 +26,17 @@ public sealed class RowKeys : IEncodedKeys
     private int _totalBytes;
     private bool _disposed;
 
-    internal RowKeys(Block<byte> elements, Block<int> offsets, Block<int> sizes, int rowCount, int totalBytes)
+    // The account its blocks and its sorts' scratch are counted in, the work's that encodes them; none, and nothing is.
+    private readonly MemoryAccount? _account;
+
+    internal RowKeys(Block<byte> elements, Block<int> offsets, Block<int> sizes, int rowCount, int totalBytes, MemoryAccount? account = null)
     {
         _elements = elements;
         _offsets = offsets;
         _sizes = sizes;
         _rowCount = rowCount;
         _totalBytes = totalBytes;
+        _account = account;
     }
 
     /// <summary>How many rows were encoded.</summary>
@@ -112,18 +116,22 @@ public sealed class RowKeys : IEncodedKeys
             return;
         }
 
-        Block<ulong> prefixes = Blocks.Rent<ulong>(indices.Length);
-        Block<ulong> spare = Blocks.Rent<ulong>(indices.Length);
-        Block<int> places = Blocks.Rent<int>(indices.Length);
+        // Twenty bytes a row, as much as the keys of a part sorted whole: counted with them.
+        Block<ulong> prefixes = default;
+        Block<ulong> spare = default;
+        Block<int> places = default;
         try
         {
+            prefixes = Rent<ulong>(_account, indices.Length);
+            spare = Rent<ulong>(_account, indices.Length);
+            places = Rent<int>(_account, indices.Length);
             Radix(indices, prefixes, spare, places, elements, 0);
         }
         finally
         {
-            Blocks.Return(prefixes);
-            Blocks.Return(spare);
-            Blocks.Return(places);
+            Return(_account, prefixes);
+            Return(_account, spare);
+            Return(_account, places);
         }
     }
 
@@ -336,8 +344,8 @@ public sealed class RowKeys : IEncodedKeys
     internal (Block<int> Sizes, Block<int> Offsets) Rows(int rowCount)
     {
         _ = Live();
-        Room(ref _sizes, rowCount);
-        Room(ref _offsets, rowCount);
+        Room(_account, ref _sizes, rowCount);
+        Room(_account, ref _offsets, rowCount);
         (_rowCount, _totalBytes) = (0, 0);
         return (_sizes, _offsets);
     }
@@ -345,26 +353,50 @@ public sealed class RowKeys : IEncodedKeys
     /// <summary>Room for <paramref name="totalBytes"/> bytes of keys, after <see cref="Rows"/>.</summary>
     internal Block<byte> Bytes(int totalBytes)
     {
-        Room(ref _elements, totalBytes);
+        Room(_account, ref _elements, totalBytes);
         return _elements;
     }
 
     /// <summary>Holds the keys of <paramref name="rowCount"/> rows, <paramref name="totalBytes"/> bytes, written in the room made.</summary>
     internal void Hold(int rowCount, int totalBytes) => (_rowCount, _totalBytes) = (rowCount, totalBytes);
 
-    /// <summary>A block of <paramref name="length"/> elements at least, what <paramref name="rented"/> held let go: within its bytes, or rented anew.</summary>
-    private static void Room<T>(ref Block<T> rented, int length)
+    /// <summary>
+    /// A block of <paramref name="length"/> elements at least, what <paramref name="rented"/> held let go: within its bytes, or
+    /// rented anew in <paramref name="account"/>.
+    /// </summary>
+    private static void Room<T>(MemoryAccount? account, ref Block<T> rented, int length)
         where T : unmanaged
     {
         int wanted = Math.Max(length, 1);
         if (wanted > rented.Capacity)
         {
-            Blocks.Return(rented);
-            rented = Blocks.Rent<T>(Math.Max(wanted, rented.Capacity * 2));
+            int grown = Math.Max(wanted, rented.Capacity * 2);
+            Return(account, rented);
+            rented = default;
+            rented = Rent<T>(account, grown);
         }
         else if (wanted > rented.Length)
         {
             rented = rented.WithLength(rented.Capacity);
+        }
+    }
+
+    /// <summary>A block of <paramref name="length"/> elements, counted in <paramref name="account"/> when there is one.</summary>
+    /// <exception cref="VortexMemoryException">The account refuses the block.</exception>
+    internal static Block<T> Rent<T>(MemoryAccount? account, int length)
+        where T : unmanaged => account is null ? Blocks.Rent<T>(length) : Blocks.Rent<T>(account, length);
+
+    /// <summary>Gives back a block <see cref="Rent{T}(MemoryAccount?, int)"/> handed out, its bytes to <paramref name="account"/>.</summary>
+    internal static void Return<T>(MemoryAccount? account, Block<T> block)
+        where T : unmanaged
+    {
+        if (account is null)
+        {
+            Blocks.Return(block);
+        }
+        else
+        {
+            Blocks.Return(account, block);
         }
     }
 
@@ -377,9 +409,9 @@ public sealed class RowKeys : IEncodedKeys
         }
 
         _disposed = true;
-        Blocks.Return(_elements);
-        Blocks.Return(_offsets);
-        Blocks.Return(_sizes);
+        Return(_account, _elements);
+        Return(_account, _offsets);
+        Return(_account, _sizes);
         _elements = default;
         _offsets = default;
         _sizes = default;
