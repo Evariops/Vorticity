@@ -2231,6 +2231,31 @@ internal partial class CanonicalArena
         // gather below writes into a buffer it never has to grow.
         (long referenced, int lastBuffered) = GatheredBytes(src.BufferA.Span, rows, shareRepeats);
 
+        // Rows that name more bytes than the source's buffers hold, a column a dictionary decoded, its rows naming its few
+        // values in any order, are copied with those buffers whole: gathered, a batch of 65 536 rows over a dictionary of a
+        // thousand values of a kibibyte copied 64 MiB of a 1 MiB heap. The gather keeps a window from dragging a heap
+        // larger than what it names; the copies that share or view repeats gather as they always did.
+        if (!shareRepeats && !viewRepeats && referenced > 0)
+        {
+            long held = 0;
+            for (int b = 0; b < src.DataBufferCount; b++)
+            {
+                held += source._dataBuffers[src.DataBufferStart + b].Length;
+            }
+
+            if (held < referenced)
+            {
+                return CopyVarBinViewWhole(source, in src, validity);
+            }
+        }
+
+        // Past it, a checked cast threw an OverflowException, which no reader's contract names.
+        if (referenced > Array.MaxLength - GatherSlack)
+        {
+            ArraysThrow.Format(
+                $"The {rows} rows of a text column name {referenced} bytes, past the {Array.MaxLength - GatherSlack} one buffer of a copy holds.");
+        }
+
         // The views start on a boundary of their own size, as a decoder puts them, whatever the
         // slab holds before them: see CopyBuffer.
         VortexBuffer views = VortexBuffer.Empty;
@@ -2355,7 +2380,7 @@ internal partial class CanonicalArena
             data = data.Slice(0, at);
         }
 
-        System.Threading.Interlocked.Add(ref BytesMaterialized, viewBytes + at);
+        Materialized(viewBytes + at);
 
         CanonicalRecord copy = New(CanonicalKind.VarBinView, src.DType, rows, validity);
         copy.BufferA = views;
@@ -2372,15 +2397,118 @@ internal partial class CanonicalArena
     }
 
     /// <summary>
+    /// A copy of the view column <paramref name="src"/> with its data buffers whole, each view naming what it named: for rows
+    /// that name more bytes than the buffers hold. Every buffered view is checked against its buffer first, as the gather
+    /// checks it, for <see cref="Decoders.Canonical.CanonicalConcat"/>'s reason.
+    /// </summary>
+    private int CopyVarBinViewWhole(CanonicalArena source, in CanonicalRecord src, Validity validity)
+    {
+        const int ViewSize = Decoders.Canonical.CanonicalSupport.ViewSize;
+        const uint MaxInline = Decoders.Canonical.CanonicalSupport.MaxInlineViewLength;
+
+        int rows = src.Length;
+        int viewBytes = rows * ViewSize;
+        ReadOnlySpan<byte> sourceViews = src.BufferA.Span[..viewBytes];
+        ReadOnlySpan<uint> words = MemoryMarshal.Cast<byte, uint>(sourceViews);
+        for (int j = 0; j < rows; j++)
+        {
+            int w = j * 4;
+            uint size = words[w];
+            if (size <= MaxInline)
+            {
+                continue;
+            }
+
+            uint index = words[w + 2];
+            if (index >= (uint)src.DataBufferCount)
+            {
+                ArraysThrow.Format($"Row {j} references data buffer {index}; the node has {src.DataBufferCount}.");
+            }
+
+            int length = source._dataBuffers[src.DataBufferStart + (int)index].Length;
+            if ((ulong)words[w + 3] + size > (ulong)length)
+            {
+                ArraysThrow.Format($"Row {j} names bytes {words[w + 3]}..{words[w + 3] + size} of a {length}-byte buffer.");
+            }
+        }
+
+        VortexBuffer views = VortexBuffer.Empty;
+        if (rows > 0)
+        {
+            views = AllocateUninitialized(viewBytes, ViewSize, out Span<byte> writable);
+            sourceViews.CopyTo(writable);
+        }
+
+        // The buffers copied before the record takes its run of them, which they are added in.
+        int buffers = src.DataBufferCount;
+        long copied = viewBytes;
+        CanonicalRecord copy = New(CanonicalKind.VarBinView, src.DType, rows, validity);
+        copy.BufferA = views;
+        copy.PaddedViews = src.PaddedViews;
+        int index2 = Commit(ref copy);
+        _records[index2].DataBufferStart = _dataBufferCount;
+        _records[index2].DataBufferCount = buffers;
+        for (int b = 0; b < buffers; b++)
+        {
+            VortexBuffer from = source._dataBuffers[src.DataBufferStart + b];
+            VortexBuffer to = VortexBuffer.Empty;
+            if (from.Length > 0)
+            {
+                // A block of slack past the bytes, as the gather leaves one.
+                to = AllocateUninitialized(from.Length + GatherSlack, 1, out Span<byte> into).Slice(0, from.Length);
+                from.Span.CopyTo(into);
+            }
+
+            AddDataBuffer(to);
+            copied += from.Length;
+        }
+
+        Materialized(copied);
+        return index2;
+    }
+
+    /// <summary>
     /// Bytes <see cref="CopyFrom"/> has materialized, across every scan in the process.
     /// </summary>
     /// <remarks>
     /// Internal and diagnostic: the quantity that catches a per-batch copy is exact and
     /// machine-independent, where the timing that catches it needs a million rows and a quiet
     /// machine. A cross-arena window is supposed to cost records and nothing else; this is what lets
-    /// a test assert that rather than hope it.
+    /// a test assert that rather than hope it. Counted only while a test listens
+    /// (<see cref="CountMaterialized"/>): written by every lane at each copy, its line of cache was
+    /// shared by all of them for an observation no one made.
     /// </remarks>
     internal static long BytesMaterialized;
+
+    // The tests that listen to BytesMaterialized now: a plain read where a copy is made, which no lane writes.
+    private static int s_materializedListeners;
+
+    /// <summary>Whether <see cref="BytesMaterialized"/> is counted: a test listens.</summary>
+    internal static bool CountsMaterialized => s_materializedListeners > 0;
+
+    /// <summary>Counts <see cref="BytesMaterialized"/> until the scope ends, for a test.</summary>
+    internal static Listening CountMaterialized()
+    {
+        System.Threading.Interlocked.Increment(ref s_materializedListeners);
+        return new Listening(static () => System.Threading.Interlocked.Decrement(ref s_materializedListeners));
+    }
+
+    /// <summary>A test's listening to a diagnostic count, which stops when it is disposed.</summary>
+    internal sealed class Listening(Action stop) : IDisposable
+    {
+        private Action? _stop = stop;
+
+        public void Dispose() => System.Threading.Interlocked.Exchange(ref _stop, null)?.Invoke();
+    }
+
+    /// <summary>Adds <paramref name="bytes"/> to <see cref="BytesMaterialized"/> while a test listens.</summary>
+    internal static void Materialized(long bytes)
+    {
+        if (CountsMaterialized)
+        {
+            System.Threading.Interlocked.Add(ref BytesMaterialized, bytes);
+        }
+    }
 
     /// <summary>Materializes one buffer's bytes into storage this arena owns.</summary>
     /// <remarks>
@@ -2407,7 +2535,7 @@ internal partial class CanonicalArena
 
         // Uninitialized because the copy below writes every byte of it, which is the only thing
         // that makes skipping the zero-fill safe.
-        System.Threading.Interlocked.Add(ref BytesMaterialized, source.Length);
+        Materialized(source.Length);
         VortexBuffer copy = AllocateUninitialized(
             source.Length, Decoders.Canonical.CanonicalSupport.MaxRequiredAlignment, out Span<byte> destination);
         source.Span.CopyTo(destination);

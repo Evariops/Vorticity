@@ -204,7 +204,7 @@ internal static class CanonicalFill
                 // row empty. The entries' struct is composed in the decode's arena, never in the file's.
                 DTypeArena types = context?.Types ?? new DTypeArena();
                 Span<int> names = [types.InternName("key"u8), types.InternName("value"u8)];
-                DType[] fields = [DTypeImport.Into(types, dtype.KeyType), DTypeImport.Into(types, dtype.ValueType)];
+                Span<DType> fields = [DTypeImport.Into(types, dtype.KeyType), DTypeImport.Into(types, dtype.ValueType)];
                 DType entries = types.Struct(names, fields, Nullability.NonNullable);
                 int elements = BuildZeroed(arena, context, entries, 0, Validity.NonNullable, depth + 1);
                 int bytes = ArrayDecodeContext.CheckedMultiply(length, 8, "map offsets");

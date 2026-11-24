@@ -49,6 +49,7 @@ public sealed class SparsePatchRetentionTests
         using DecodeHarness harness = DecodeHarness.Load(root, TestMetadata.Scalar(store.Int64(0)));
         DType i64 = harness.Types.Primitive(PType.I64, Nullability.NonNullable);
         uint? outer = harness.Scan.Decode.BeginNodeCheckScope(3);
+        using CanonicalArena.Listening listening = ArrayDecodeContext.CountSharedChildren();
         long before = ArrayDecodeContext.SharedChildrenDecoded;
         try
         {
@@ -96,6 +97,7 @@ public sealed class SparsePatchRetentionTests
         using DecodeHarness harness = DecodeHarness.Load(root, TestPacking.Pack(packedValues, 12, 32));
         DType u32 = harness.Types.Primitive(PType.U32, Nullability.NonNullable);
         uint? outer = harness.Scan.Decode.BeginNodeCheckScope(5);
+        using CanonicalArena.Listening listening = ArrayDecodeContext.CountSharedChildren();
         long before = ArrayDecodeContext.SharedChildrenDecoded;
         try
         {

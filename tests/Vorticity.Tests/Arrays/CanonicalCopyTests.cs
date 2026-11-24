@@ -292,7 +292,7 @@ public sealed class CanonicalCopyTests
     /// <summary>
     /// A copy that shares repeats keeps once a text whose view names the bytes the buffered view before it names, and every
     /// row reads back once its source is refilled; a text met again after another is copied again, and a copy that does not
-    /// share copies each row's bytes.
+    /// share, its rows naming more than the source's heap holds, copies that heap whole.
     /// </summary>
     [Fact]
     public void ACopyThatSharesRepeatsKeepsOnceATextTheRowBeforeNames()
@@ -312,7 +312,7 @@ public sealed class CanonicalCopyTests
 
         // A three times as one, B twice as one, A again after B: twenty, twenty-nine and twenty bytes.
         Assert.Equal(a.Length + b.Length + a.Length, shared.GetNode(kept).GetDataBuffer(0).Length);
-        Assert.Equal((4 * a.Length) + (2 * b.Length), whole.GetNode(copied).GetDataBuffer(0).Length);
+        Assert.Equal(a.Length + b.Length, whole.GetNode(copied).GetDataBuffer(0).Length);
         for (int row = 0; row < rows.Length; row++)
         {
             byte[] expected = rows[row] switch { "A" => a, "B" => b, _ => "c"u8.ToArray() };
@@ -411,6 +411,75 @@ public sealed class CanonicalCopyTests
 
         // The bytes a repeat's own copy holds are its value's, as a copy that does not view repeats leaves them.
         Assert.Equal(a, node.GetDataBuffer(0).Span.Slice(a.Length, a.Length).ToArray());
+    }
+
+    /// <summary>
+    /// A column whose rows name its few values in any order, as a dictionary decodes, copies with its heap whole: gathered
+    /// row by row, 16 384 rows over 256 values of a kibibyte copied 16 MiB of a heap of 256 KiB. The copy survives its
+    /// source refilled, each row reading its value.
+    /// </summary>
+    [Fact]
+    public void ACopyOfRowsThatNameMoreThanTheirHeapCopiesTheHeapWhole()
+    {
+        const int Values = 256;
+        const int ValueBytes = 1_024;
+        const int Rows = 16_384;
+        DTypeArena types = new DTypeArena();
+        CanonicalArena source = new CanonicalArena();
+        CanonicalArena kept = new CanonicalArena();
+        Random random = new Random(7);
+        int[] picks = new int[Rows];
+        for (int row = 0; row < Rows; row++)
+        {
+            picks[row] = random.Next(Values);
+        }
+
+        int original = Dictionary(types, source, picks, seed: 1);
+        int copied = kept.CopyFrom(source, original);
+        source.Reset();
+        _ = Dictionary(types, source, picks, seed: 2);
+
+        CanonicalNode node = kept.GetNode(copied);
+        long data = 0;
+        for (int b = 0; b < node.DataBufferCount; b++)
+        {
+            data += node.GetDataBuffer(b).Length;
+        }
+
+        Assert.Equal((long)Values * ValueBytes, data);
+        for (int row = 0; row < Rows; row += 997)
+        {
+            Assert.Equal(ValueOf(picks[row], seed: 1), Vorticity.Compute.LiteralReader.ViewAt(node, row).ToArray());
+        }
+
+        static byte[] ValueOf(int value, int seed)
+        {
+            byte[] bytes = new byte[ValueBytes];
+            bytes.AsSpan().Fill((byte)(value + seed));
+            System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(bytes, value);
+            return bytes;
+        }
+
+        static int Dictionary(DTypeArena types, CanonicalArena arena, int[] picks, int seed)
+        {
+            VortexBuffer heap = arena.Allocate(Values * ValueBytes, 1, out Span<byte> heapBytes);
+            for (int value = 0; value < Values; value++)
+            {
+                ValueOf(value, seed).CopyTo(heapBytes[(value * ValueBytes)..]);
+            }
+
+            VortexBuffer views = arena.Allocate(picks.Length * 16, 16, out Span<byte> viewBytes);
+            for (int row = 0; row < picks.Length; row++)
+            {
+                Span<byte> view = viewBytes.Slice(row * 16, 16);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(view, ValueBytes);
+                heapBytes.Slice(picks[row] * ValueBytes, 4).CopyTo(view[4..]);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(view[8..], 0);
+                System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(view[12..], (uint)(picks[row] * ValueBytes));
+            }
+
+            return arena.AddVarBinView(types.Utf8(Nullability.NonNullable), picks.Length, Validity.NonNullable, views, [heap]);
+        }
     }
 
     /// <summary>

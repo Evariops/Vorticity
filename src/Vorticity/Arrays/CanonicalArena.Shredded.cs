@@ -116,13 +116,29 @@ internal partial class CanonicalArena
             }
         }
 
+        // The buffers the twin takes, in a block of the pool given back once they are added: an array of them was made at
+        // each reconstitution.
         int own = node.DataBufferCount;
-        VortexBuffer[] buffers = new VortexBuffer[own + 1];
+        Block<VortexBuffer> buffers = Blocks.Rent<VortexBuffer>(own + 1);
+        try
+        {
+            return MaterializeShredded(nodeIndex, in node, rows, first, length, hollow, words, viewBytes, low, high, own, buffers.AsSpan());
+        }
+        finally
+        {
+            Blocks.Return(buffers);
+        }
+    }
+
+    private int MaterializeShredded(
+        int nodeIndex, in CanonicalRecord node, ITakenRows rows, int first, int length, ReadOnlySpan<byte> hollow, ReadOnlySpan<uint> words,
+        int viewBytes, uint low, ulong high, int own, Span<VortexBuffer> buffers)
+    {
         DataBufferRange(node.DataBufferStart, own).CopyTo(buffers);
         if (low == uint.MaxValue)
         {
             // No value to put back: the views as they are.
-            int same = AddVarBinView(node.DType, length, node.Validity, node.BufferA.Slice(0, viewBytes), buffers.AsSpan(0, own));
+            int same = AddVarBinView(node.DType, length, node.Validity, node.BufferA.Slice(0, viewBytes), buffers[..own]);
             RecordRefMutable(nodeIndex).Materialized = same;
             return same;
         }

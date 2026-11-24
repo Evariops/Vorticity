@@ -32,35 +32,16 @@ internal static class ZstdDecoders
     /// </summary>
     internal static readonly int Capacity = System.Math.Max(16, System.Environment.ProcessorCount);
 
-    private static readonly ZstdDecompressor?[] Decoders = new ZstdDecompressor?[Capacity];
-    private static readonly Lock Gate = new Lock();
-    private static int _count;
+    /// <summary>What a decompressor holds at the least, 160 KB; 1.4 MB once it decoded a frame of several blocks.</summary>
+    private const long DecoderBytes = 160 * 1024;
+
+    // Kept as memory the registry asks back: those no decode took since its last turn go, and all of them when a
+    // reservation needs room. Outside it, up to 90 MiB of decompressors on 64 processors never came back under a low limit.
+    private static readonly Buffers.KeptObjects<ZstdDecompressor> Kept = new Buffers.KeptObjects<ZstdDecompressor>("decoders", Capacity, DecoderBytes);
 
     /// <summary>A decompressor an earlier decode gave back, or a new one when none waits.</summary>
-    internal static ZstdDecompressor Rent()
-    {
-        lock (Gate)
-        {
-            if (_count > 0)
-            {
-                ZstdDecompressor decoder = Decoders[--_count]!;
-                Decoders[_count] = null;
-                return decoder;
-            }
-        }
-
-        return new ZstdDecompressor();
-    }
+    internal static ZstdDecompressor Rent() => Kept.Take() ?? new ZstdDecompressor();
 
     /// <summary>Keeps <paramref name="decoder"/> for a later decode, or lets it go past the bound.</summary>
-    internal static void Return(ZstdDecompressor decoder)
-    {
-        lock (Gate)
-        {
-            if (_count < Capacity)
-            {
-                Decoders[_count++] = decoder;
-            }
-        }
-    }
+    internal static void Return(ZstdDecompressor decoder) => Kept.Give(decoder);
 }
