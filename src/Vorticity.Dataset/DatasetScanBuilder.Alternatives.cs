@@ -711,7 +711,10 @@ internal sealed partial class DatasetScanBuilder
             {
                 if (read && _considers && _metrics is { } skipped)
                 {
-                    skipped.ObjectsPrunedByKey++;
+                    lock (skipped)
+                    {
+                        skipped.ObjectsPrunedByKey++;
+                    }
                 }
 
                 continue;

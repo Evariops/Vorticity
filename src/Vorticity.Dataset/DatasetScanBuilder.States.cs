@@ -360,12 +360,15 @@ internal sealed partial class DatasetScanBuilder
                     {
                         if (_metrics is { } metrics)
                         {
-                            metrics.ObjectsAnswered += unit.Run?.Objects ?? 1;
-                            metrics.RollupsAnswered += unit.Run is null ? 0 : 1;
-                            metrics.StateRows += rows?.Count ?? 0;
-                            for (int b = 0; b < (byBucket?.Count ?? 0); b++)
+                            lock (metrics)
                             {
-                                metrics.StateRows += byBucket![b].Count;
+                                metrics.ObjectsAnswered += unit.Run?.Objects ?? 1;
+                                metrics.RollupsAnswered += unit.Run is null ? 0 : 1;
+                                metrics.StateRows += rows?.Count ?? 0;
+                                for (int b = 0; b < (byBucket?.Count ?? 0); b++)
+                                {
+                                    metrics.StateRows += byBucket![b].Count;
+                                }
                             }
                         }
 
@@ -420,8 +423,11 @@ internal sealed partial class DatasetScanBuilder
                         held, stats, histograms, runs, held.Entry.Deletions, new RowRange(lower, upper), GranuleAnswer()!.Exclusion?.PlacesOf(held.Entry.Uid));
                     if (_metrics is { } counted)
                     {
-                        counted.GranulesAnswered += answered;
-                        counted.StateRows += settled?.Count ?? 0;
+                        lock (counted)
+                        {
+                            counted.GranulesAnswered += answered;
+                            counted.StateRows += settled?.Count ?? 0;
+                        }
                     }
 
                     // Each batch copies its rows of states into the arena: their arrays go back to the pools after the last.

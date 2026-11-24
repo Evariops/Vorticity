@@ -368,7 +368,10 @@ internal sealed partial class DatasetScanBuilder
                     {
                         if (_metrics is { } metrics)
                         {
-                            metrics.ObjectsPassedByPartitionIndex++;
+                            lock (metrics)
+                            {
+                                metrics.ObjectsPassedByPartitionIndex++;
+                            }
                         }
 
                         continue;
@@ -758,7 +761,10 @@ internal sealed partial class DatasetScanBuilder
 
         if (_metrics is { } metrics)
         {
-            metrics.ObjectsLookedUp++;
+            lock (metrics)
+            {
+                metrics.ObjectsLookedUp++;
+            }
         }
 
         RecordBatch? view = null;
@@ -1061,7 +1067,10 @@ internal sealed partial class DatasetScanBuilder
     {
         if (_metrics is { } metrics)
         {
-            metrics.GranulesSettled++;
+            lock (metrics)
+            {
+                metrics.GranulesSettled++;
+            }
         }
 
         return settling.Batch(block, scratch, firstRow + deletions.Logical(settling.Range(block).Start));

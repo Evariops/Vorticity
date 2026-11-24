@@ -335,7 +335,10 @@ internal static class SheetPruning
     {
         if (metrics is not null)
         {
-            metrics.ObjectsRefutedBySheets++;
+            lock (metrics)
+            {
+                metrics.ObjectsRefutedBySheets++;
+            }
         }
     }
 

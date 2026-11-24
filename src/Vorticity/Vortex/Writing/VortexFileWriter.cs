@@ -786,6 +786,25 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     /// <summary>What every blob of the file is assembled in, created with the first one.</summary>
     private ArrayBlobWriter.Workspace? _blobs;
 
+    private WriteProbes? _probes;
+
+    /// <summary>
+    /// What a test watches the writer's chooser with, set before the first write: the writer hands it to each workspace it
+    /// compresses in, and compresses its chunks on its own flow while one is set. None in production.
+    /// </summary>
+    internal WriteProbes? Probes
+    {
+        get => _probes;
+        set
+        {
+            _probes = value;
+            if (_blobs is not null)
+            {
+                _blobs.Probes = value;
+            }
+        }
+    }
+
     /// <summary>The threads the writer spreads its work over: the columns' ingest, a column's zstd frames.</summary>
     private int _lanes = 1;
 
@@ -1593,10 +1612,10 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private const int CensusSliceRows = 16_384;
 
     /// <summary>
-    /// The calls whose rows a writer's census counted in slices, across every writer in the process. Internal and
-    /// diagnostic: without it, a census counted on one lane is invisible to the tests.
+    /// The calls whose rows the writer's census counted in slices. Internal and diagnostic: without it, a census counted on
+    /// one lane is invisible to the tests.
     /// </summary>
-    internal static long CensusesSliced;
+    internal int CensusesSliced { get; private set; }
 
     /// <summary>
     /// Counts the paths of the rows of <paramref name="root"/> into each variant column's census, made ready here, which may
@@ -1632,7 +1651,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
         int slices = Math.Max(1, Math.Min(_lanes, rows / CensusSliceRows));
         if (slices > 1)
         {
-            Interlocked.Increment(ref CensusesSliced);
+            CensusesSliced++;
             PathCensus?[][] sliced = _sliceCensus ??= new PathCensus?[census.Length][];
             for (int field = 0; field < census.Length; field++)
             {
@@ -4011,6 +4030,7 @@ public sealed partial class VortexFileWriter : IAsyncDisposable, IChunkLedger, I
     private ArrayBlobWriter.Workspace Blobs => _blobs ??= new ArrayBlobWriter.Workspace
     {
         FrameRows = _rowBlock, GranuleRows = GranuleReadRows, SizeFirst = _sizeFirst, ZstdLevel = _zstdLevel, Account = Account,
+        Probes = _probes,
     };
 
     /// <summary>The writer's threads, or null when it has one.</summary>

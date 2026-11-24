@@ -198,7 +198,10 @@ internal sealed partial class DatasetScanBuilder
             {
                 if (_metrics is { } metrics)
                 {
-                    metrics.Cursors = Math.Max(metrics.Cursors, merge.MostOpen);
+                    lock (metrics)
+                    {
+                        metrics.Cursors = Math.Max(metrics.Cursors, merge.MostOpen);
+                    }
                 }
             }
         }

@@ -128,7 +128,7 @@ public sealed partial class VortexFileWriter
     private bool UsesLine =>
         FlightDepth > 1 && _lanes > 1 && _rowBlock > 0 && _stagedRows == _rowBlock && _blockRows == _rowBlock && _automaticChunks && _isTabular
         && _fieldCount > 1 && _fieldCount <= MostLineFields && _rowBlock < 2 * CensusSliceRows && (_line is not null || !_blocksExactly || _flown >= FlightsAhead)
-        && ColumnCompressor.Differential.Value is null && ArrayBlobWriter.ElementsHanded.Value is null;
+        && _probes is null;
 
     /// <summary>
     /// The most columns a flight on the line takes: an item names its field in twenty bits and its place in a flight in

@@ -3,7 +3,6 @@ using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Pipelines;
-using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
@@ -26,10 +25,10 @@ internal class FilePipeWriter : PipeWriter
     private const int SegmentBytes = 256 * 1024;
 
     /// <summary>
-    /// The file lengths the device flushes of each watched pipe covered, in order; null until a pipe
-    /// is watched, so that a pipe nobody watches does not look.
+    /// The file lengths the device flushes of the pipe covered, in order, for a test that watches
+    /// them; null otherwise.
     /// </summary>
-    private static ConditionalWeakTable<FilePipeWriter, List<long>>? DiskFlushes;
+    private List<long>? _diskFlushes;
 
     private readonly SafeFileHandle _handle;
     private readonly MemoryPool<byte> _pool;
@@ -218,17 +217,13 @@ internal class FilePipeWriter : PipeWriter
         }
 
         RandomAccess.FlushToDisk(_handle);
-        if (DiskFlushes is { } watched && watched.TryGetValue(this, out List<long>? flushes))
-        {
-            flushes.Add(_offset);
-        }
+        _diskFlushes?.Add(_offset);
     }
 
     /// <summary>Records, from now on, the file length each device flush of <paramref name="pipe"/> covers.</summary>
     /// <param name="pipe">The pipe to watch.</param>
     /// <returns>The lengths, one per flush, in order.</returns>
-    internal static List<long> WatchDiskFlushes(FilePipeWriter pipe) =>
-        LazyInitializer.EnsureInitialized(ref DiskFlushes).GetValue(pipe, static _ => []);
+    internal static List<long> WatchDiskFlushes(FilePipeWriter pipe) => pipe._diskFlushes ??= [];
 
     /// <summary>
     /// Drops what was not flushed and closes the file: a created one is deleted, and its destination

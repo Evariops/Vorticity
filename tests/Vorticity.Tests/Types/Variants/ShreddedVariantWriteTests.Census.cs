@@ -84,7 +84,7 @@ public sealed partial class ShreddedVariantWriteTests
     public async Task AWriterCountsThePathsOfTheRowsItCompletesWith()
     {
         Doc[] rows = Counted(new Random(9));
-        string path = await CountedAsync(rows, degree: 1);
+        (string path, _) = await CountedAsync(rows, degree: 1);
         PathCensus census = new PathCensus(new VortexWriteOptions().StringBoundBytes, 1_024);
         try
         {
@@ -115,12 +115,11 @@ public sealed partial class ShreddedVariantWriteTests
     public async Task AWritersCensusCountedInSlicesWritesTheDirectoryOneLaneWrites()
     {
         Doc[] rows = Counted(new Random(9));
-        string one = await CountedAsync(rows, degree: 1);
-        long sliced = System.Threading.Interlocked.Read(ref VortexFileWriter.CensusesSliced);
-        string eight = await CountedAsync(rows, degree: 8);
+        (string one, _) = await CountedAsync(rows, degree: 1);
+        (string eight, int sliced) = await CountedAsync(rows, degree: 8);
         try
         {
-            Assert.True(System.Threading.Interlocked.Read(ref VortexFileWriter.CensusesSliced) > sliced, "no call was counted in slices");
+            Assert.True(sliced > 0, "no call was counted in slices");
             await using VortexFile alone = await VortexFile.OpenAsync(one, Ct);
             await using VortexFile lanes = await VortexFile.OpenAsync(eight, Ct);
             foreach (string column in new[] { nameof(Doc.Attributes), nameof(Doc.Extra) })
@@ -145,7 +144,7 @@ public sealed partial class ShreddedVariantWriteTests
         [.. Enumerable.Range(0, 70_000).Select(i => new Doc(i, Document(random), random.Next(10) == 0 ? null : Document(random)))];
 
     /// <summary>The rows written in one chunk by a writer that counts their paths itself, at <paramref name="degree"/> lanes.</summary>
-    private static async Task<string> CountedAsync(Doc[] rows, int degree)
+    private static async Task<(string Path, int Sliced)> CountedAsync(Doc[] rows, int degree)
     {
         string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"vorticity-counted-{Guid.NewGuid():N}.vortex");
         VortexWriteOptions options = new VortexWriteOptions { BlockRows = 1_024, ChunkTargetBytes = 1 << 28, CountsPaths = true, CarriesContents = true, DegreeOfParallelism = degree };
@@ -156,7 +155,7 @@ public sealed partial class ShreddedVariantWriteTests
         await using VortexFileWriter writer = session.CreateWriter<Doc>(path, options);
         await writer.WriteAsync<Doc>(rows, Ct);
         await writer.CompleteAsync(Ct);
-        return path;
+        return (path, writer.CensusesSliced);
     }
 
     /// <summary>The keys a document may hold, "missing" not among them, which a shredding may name.</summary>

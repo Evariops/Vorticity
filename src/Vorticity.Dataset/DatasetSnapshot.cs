@@ -133,7 +133,10 @@ internal sealed class DatasetSnapshot
 
                 if (metrics is { } counters)
                 {
-                    counters.SubtreesSkipped++;
+                    lock (counters)
+                    {
+                        counters.SubtreesSkipped++;
+                    }
                 }
 
                 return false;
@@ -199,7 +202,10 @@ internal sealed class DatasetSnapshot
 
                     if (metrics is { } counters)
                     {
-                        counters.SubtreesSkipped++;
+                        lock (counters)
+                        {
+                            counters.SubtreesSkipped++;
+                        }
                     }
                 }
                 else if (row + walk.Entry.Rows > from && Keeps(walk.Entry, pruner, reader, metrics))
@@ -254,7 +260,10 @@ internal sealed class DatasetSnapshot
     {
         if (metrics is { } counters)
         {
-            counters.ObjectsConsidered++;
+            lock (counters)
+            {
+                counters.ObjectsConsidered++;
+            }
         }
 
         if (pruner is null || pruner.MayMatch(reader!.Of(ObjectEntry.SummaryOf(held.Value)), held.Rows))
@@ -264,7 +273,10 @@ internal sealed class DatasetSnapshot
 
         if (metrics is { } skipped)
         {
-            skipped.ObjectsSkipped++;
+            lock (skipped)
+            {
+                skipped.ObjectsSkipped++;
+            }
         }
 
         return false;

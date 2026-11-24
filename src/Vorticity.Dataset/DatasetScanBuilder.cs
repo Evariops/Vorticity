@@ -19,6 +19,10 @@ namespace Vorticity.Dataset;
 /// What a dataset scan skipped, and how: counters rather than timings, so that a caller can check
 /// how few objects were read instead of believing a speed.
 /// </summary>
+/// <remarks>
+/// Every count is added under a lock of the counters themselves: a scan's walk, its lanes, its parts and its lookups count
+/// at once, some into the same count. Each is an object's or a granule's, never a row's.
+/// </remarks>
 internal sealed class DatasetScanCounters
 {
     /// <summary>Leaf entries the walk reached.</summary>
@@ -1065,7 +1069,10 @@ internal sealed partial class DatasetScanBuilder
             {
                 if (_considers && _metrics is { } skipped)
                 {
-                    skipped.ObjectsPrunedByKey++;
+                    lock (skipped)
+                    {
+                        skipped.ObjectsPrunedByKey++;
+                    }
                 }
 
                 continue;
@@ -1106,7 +1113,10 @@ internal sealed partial class DatasetScanBuilder
             {
                 if (_considers && _metrics is { } skipped)
                 {
-                    skipped.ObjectsPrunedByKey++;
+                    lock (skipped)
+                    {
+                        skipped.ObjectsPrunedByKey++;
+                    }
                 }
 
                 continue;
@@ -1202,8 +1212,11 @@ internal sealed partial class DatasetScanBuilder
 
         if (_considers && _metrics is { } metrics)
         {
-            metrics.GranulesPrunedByKey += keys.Granules - granules;
-            metrics.ObjectsPrunedByKey += ranges.Count == 0 ? 1 : 0;
+            lock (metrics)
+            {
+                metrics.GranulesPrunedByKey += keys.Granules - granules;
+                metrics.ObjectsPrunedByKey += ranges.Count == 0 ? 1 : 0;
+            }
         }
 
         return ranges.Count == 1 && ranges[0] == (0, keys.Granules);
