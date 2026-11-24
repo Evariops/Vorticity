@@ -230,6 +230,43 @@ public sealed class KeyCursorTests
         Assert.Equal(0, cursor.Row);
     }
 
+    [Fact]
+    public async Task ARowLeftOutKeepsTheTwoZerosOneKey()
+    {
+        // With row 0, the negative zero, left out, the key's first kept entry is +0.0 at row 1: an
+        // exact seek for either zero lands there, as it does without rows left out.
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        await using Written written = await Written.CreateAsync();
+        await using KeyCursor cursor = await written.File.Keys("floats_f64")
+            .Excluding(new OneRowLeftOut(0), ranksAreRows: false, keys: null)
+            .OpenAsync(ct);
+
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(-0.0), SeekMode.Exact, ct));
+        Assert.Equal(1, cursor.Row);
+        Assert.Equal(2L, await cursor.CountAtKeyAsync(ct));
+        Assert.True(await cursor.SeekAsync(FilterLiteral.From(0.0), SeekMode.Exact, ct));
+        Assert.Equal(1, cursor.Row);
+    }
+
+    /// <summary>One row left out, a run of its own.</summary>
+    private sealed class OneRowLeftOut(long row) : IRowExclusion
+    {
+        public int Runs => 1;
+
+        public bool Excludes(long at) => at == row;
+
+        public long ExcludedBefore(long at) => at > row ? 1 : 0;
+
+        public long KeptRow(long kept) => kept < row ? kept : kept + 1;
+
+        public int FirstEndingAfter(long at) => at <= row ? 0 : 1;
+
+        public long StartOf(int run) => row;
+
+        public long EndOf(int run) => row + 1;
+    }
+
     [Theory]
     [InlineData("dups_u32")]
     [InlineData("nulls_i32")]

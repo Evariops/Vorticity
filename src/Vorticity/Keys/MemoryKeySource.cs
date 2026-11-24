@@ -436,6 +436,8 @@ internal abstract class MemoryKeySource : KeySource
             {
                 if (Bytes(entry - 1).SequenceCompareTo(Bytes(entry)) > 0)
                 {
+                    // Counted as the keys are: the order is held as long as they are.
+                    _memory?.Hold((long)Count * sizeof(int), "order of a result's keys");
                     int[] order = new int[Count];
                     for (int i = 0; i < order.Length; i++)
                     {
