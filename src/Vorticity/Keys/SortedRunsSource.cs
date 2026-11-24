@@ -1127,8 +1127,12 @@ internal sealed partial class SortedRunsSource : KeySource
 
         // The first segment whose last key does not come before the key: a binary search over the
         // bounds in memory, or a descent through the fence pages when they are paged out.
+        // For the place past every entry of the key, the first segment whose last key comes after it: a segment the key
+        // fills, its last key the key, holds nothing past it, and was loaded and searched to learn what its bounds say.
         ISegmentReader source = _file.IndexSourceOf(run.Meta);
-        long low = await table.LowerBoundAsync(source, new MaxProbe<TKey>(key), cancellationToken).ConfigureAwait(false);
+        long low = row == long.MaxValue
+            ? await table.LowerBoundAsync(source, new PastProbe<TKey>(key), cancellationToken).ConfigureAwait(false)
+            : await table.LowerBoundAsync(source, new MaxProbe<TKey>(key), cancellationToken).ConfigureAwait(false);
         for (long s = low; s < table.SegmentCount; s++)
         {
             Fence fence = await table.GetAsync(source, s, cancellationToken).ConfigureAwait(false);
@@ -1490,6 +1494,13 @@ internal sealed partial class SortedRunsSource : KeySource
         where TKey : struct, IKeyOrder
     {
         public bool Below(ReadOnlySpan<byte> max) => key.Order(max) < 0;
+    }
+
+    /// <summary>A descent's comparison for the place past every entry of a key: a fence whose last key is not after it.</summary>
+    private readonly struct PastProbe<TKey>(TKey key) : IFenceProbe
+        where TKey : struct, IKeyOrder
+    {
+        public bool Below(ReadOnlySpan<byte> max) => key.Order(max) <= 0;
     }
 
     /// <summary>A key sought, ordered against the keys of a run.</summary>
