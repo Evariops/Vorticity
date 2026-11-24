@@ -109,9 +109,20 @@ public sealed partial class Scan<TRecord>
     {
         TState state = TAggregator.Seed();
         part._options = part._options with { DegreeOfParallelism = degree };
-        await foreach (Columns<TRecord> batch in part.WithCancellation(cancellationToken))
+
+        // By hand rather than by `await foreach`: the scan's enumerator is no IAsyncEnumerable, so neither ConfigureAwait
+        // nor the analyzers reach the awaits that loop makes, which resumed on the caller's context.
+        AsyncEnumerator batches = part.GetAsyncEnumerator(cancellationToken);
+        try
         {
-            TAggregator.Step(ref state, batch);
+            while (await batches.MoveNextAsync().ConfigureAwait(false))
+            {
+                TAggregator.Step(ref state, batches.Current);
+            }
+        }
+        finally
+        {
+            await batches.DisposeAsync().ConfigureAwait(false);
         }
 
         return state;

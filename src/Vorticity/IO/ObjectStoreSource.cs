@@ -410,13 +410,12 @@ internal sealed class ObjectStoreSource : ISegmentReader
         _store.ReadTailAsync(_readKey, destination, cancellationToken);
 
     /// <summary>
-    /// A 64-byte aligned block of <paramref name="length"/> bytes: pooled up to the pool's largest size class, counted for
-    /// <paramref name="account"/>, the scan whose batch reads it or the memory a file keeps for its own reads.
+    /// A 64-byte aligned block of <paramref name="length"/> bytes, as a local read rents it: pooled up to the pool's largest
+    /// size class, and past it by the one block the pool keeps beyond them, counted for <paramref name="account"/>, the scan
+    /// whose batch reads it or the memory a file keeps for its own reads. Allocated outside any account past 32 MiB, a
+    /// segment of 82 MB another writer wrote went unseen by the governor, a gigabyte at fourteen lanes.
     /// </summary>
-    private BlockOwner Rent(int length, MemoryAccount account) =>
-        length <= _options.MaxPooledBytes
-            ? account.Rent(length, VortexLimits.MaxAlignment)
-            : BlockOwner.Allocate(length, VortexLimits.MaxAlignment);
+    private BlockOwner Rent(int length, MemoryAccount account) => CoalescedReads.RentBlock(length, _options, account);
 
     /// <summary>Records the object's token, and refuses an answer about another object.</summary>
     private void Note(string token)

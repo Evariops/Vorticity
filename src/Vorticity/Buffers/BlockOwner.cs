@@ -137,6 +137,13 @@ internal sealed class BlockOwner : SegmentOwner
     /// <exception cref="ObjectDisposedException">The memory has already been released.</exception>
     public Span<byte> WritableSpan => new Span<byte>(Array, _offset, Length);
 
+    /// <summary>
+    /// A writable view over every byte the block holds, its <see cref="Capacity"/>, which its account counts: for a lender
+    /// that hands the whole block out. Valid until the memory is released.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The memory has already been released.</exception>
+    internal Span<byte> WholeSpan => new Span<byte>(Array, _offset, _capacity);
+
     /// <summary>Bytes actually allocated, which for a pooled block exceeds <see cref="SegmentOwner.Length"/>.</summary>
     internal int Capacity => _capacity;
 

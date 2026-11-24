@@ -22,10 +22,10 @@ namespace Vorticity;
 /// thread-safe; it may be handed to another thread, a channel for instance, and disposed there.
 /// </para>
 /// <para>
-/// A batch never disposed keeps its buffers until a collection finalizes it, and they then go back
-/// to the system rather than to the pool. The library asks for a collection in the background once
-/// the batches callers own hold 256 MiB, or an eighth of the memory the GC may use when that is
-/// less, and again each time what they hold doubles.
+/// A batch never disposed keeps its buffers for as long as something references it; they are
+/// managed arrays, which the collector then takes rather than the pool getting them back. Nothing
+/// counts the buffers of the batches a caller owns, and the library asks no collection for them:
+/// dispose each batch once it is read.
 /// </para>
 /// </remarks>
 public sealed class RecordBatch : IDisposable
@@ -48,8 +48,10 @@ public sealed class RecordBatch : IDisposable
     private bool _isTabular;
 
     // Allocated on the first NullCount() of a bitmap column and never before, so a scan that does
-    // not ask for null counts stays allocation-free per batch.
+    // not ask for null counts stays allocation-free per batch; kept across the batches a stream binds
+    // this object to, blanked for each, where it was made anew for every batch that asked.
     private int[]? _nullCounts;
+    private bool _nullCountsBound;
     private bool _disposed;
 
     /// <summary>
@@ -664,9 +666,10 @@ public sealed class RecordBatch : IDisposable
     /// releases nothing.
     /// </para>
     /// </remarks>
+    /// <param name="schemas">The projected schema the stream's batches share, kept by its reader; null to compose it for this batch alone.</param>
     /// <exception cref="ArgumentException">The projection names fields and the batch's root is not a struct.</exception>
     /// <exception cref="ObjectDisposedException">The batch has been disposed.</exception>
-    internal RecordBatch Project(ScanProjection projection)
+    internal RecordBatch Project(ScanProjection projection, ProjectedSchemas? schemas = null)
     {
         ThrowIfDisposed();
         if (projection.IsAll)
@@ -680,7 +683,7 @@ public sealed class RecordBatch : IDisposable
                 "Only a batch whose root is a struct has columns to project.", nameof(projection));
         }
 
-        DType target = projection.ProjectedSchema(_schema, new DTypeArena());
+        DType target = schemas is null ? projection.ProjectedSchema(_schema, new DTypeArena()) : schemas.Of(projection, _schema);
         FieldMask read = FieldMask.All;
         FieldMask keep = projection.RootMask;
         int root = ProjectionTrim.Apply(_arena, _root, in read, in keep, target);
@@ -704,7 +707,7 @@ public sealed class RecordBatch : IDisposable
         }
 
         _disposed = true;
-        _nullCounts = null;
+        _nullCountsBound = false;
         _context?.ResetBatch();
         if (_owns)
         {
@@ -748,7 +751,6 @@ public sealed class RecordBatch : IDisposable
             return _arena;
         }
     }
-
     /// <summary>The root node's index in <see cref="Arena"/>.</summary>
     internal int RootIndex
     {
@@ -787,7 +789,7 @@ public sealed class RecordBatch : IDisposable
                 break;
         }
 
-        int[] cache = _nullCounts ??= NewNullCountCache();
+        int[] cache = NullCountCache();
         bool cacheable = (uint)nodeIndex < (uint)cache.Length;
         if (cacheable && cache[nodeIndex] >= 0)
         {
@@ -804,10 +806,21 @@ public sealed class RecordBatch : IDisposable
         return nulls;
     }
 
-    private int[] NewNullCountCache()
+    /// <summary>The counts of this binding's nodes, none counted yet when it is the first asking since the batch was bound.</summary>
+    private int[] NullCountCache()
     {
-        int[] cache = new int[Math.Max(_arena.NodeCount, 1)];
-        cache.AsSpan().Fill(-1);
+        int nodes = Math.Max(_arena.NodeCount, 1);
+        if (_nullCounts is not { } cache || cache.Length < nodes)
+        {
+            cache = _nullCounts = new int[nodes];
+            cache.AsSpan().Fill(-1);
+        }
+        else if (!_nullCountsBound)
+        {
+            cache.AsSpan().Fill(-1);
+        }
+
+        _nullCountsBound = true;
         return cache;
     }
 

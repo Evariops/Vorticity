@@ -41,6 +41,12 @@ internal abstract class KeySource : IAsyncDisposable
     {
     }
 
+    /// <summary>
+    /// Orders two keys as this source's entries are ordered: the total order, but on a sorted column, whose floats follow
+    /// IEEE and hold the two zeros as one key (<see cref="KeyOrder"/>).
+    /// </summary>
+    internal virtual int CompareKeys(FilterLiteral left, FilterLiteral right) => KeyOrder.Total(left, right);
+
     /// <summary>Whether the source is positioned on an entry.</summary>
     internal abstract bool IsValid { get; }
 

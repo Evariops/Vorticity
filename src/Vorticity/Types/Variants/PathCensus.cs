@@ -104,6 +104,10 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
     private int _lastLength = -1;
     private long _repeats;
 
+    // The nodes the value being counted may still hold: one a byte of it. A node takes a byte of its own at least, so only
+    // a value whose fields name the same bytes over and over, which unfolds into exponentially many, runs out.
+    private int _visits;
+
     /// <summary>
     /// Counts the rows that repeated the last value in its paths, all at once: each count takes them, each bound the value
     /// once, and each path's spans the rows they lie in, which follow each other.
@@ -118,6 +122,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         long times = _repeats;
         _repeats = 0;
         VariantDictionary dictionary = VariantDictionary.Read(_metadata.AsSpan(0, _metadataLength));
+        _visits = _lastLength;
         _root.Add(this, in dictionary, _last.AsSpan(0, _lastLength), depth: 1, times);
     }
 
@@ -154,8 +159,14 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
     {
         _repeats = 0;
         _lastLength = -1;
-        _root.Release();
+        _root.Release(Account);
     }
+
+    /// <summary>
+    /// What counts the spans the paths keep, a block a path and class growing with the rows: the account of the work that
+    /// owns the census, its writer's or its question's; null for none.
+    /// </summary>
+    internal Buffers.MemoryAccount? Account { get; init; }
 
     /// <summary>
     /// Forgets every row counted and keeps its tree of paths for the next rows: a key met again counts from nothing, as
@@ -332,6 +343,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
 
         _runRows++;
         VariantDictionary dictionary = VariantDictionary.Read(metadata);
+        _visits = value.Length;
         _root.Add(this, in dictionary, value, depth: 1);
         Remember(value);
     }
@@ -561,6 +573,12 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
             return _nameNumbers[id];
         }
 
+        // The id comes from the value's bytes: held to the dictionary before it sizes the arrays below.
+        if ((uint)id >= (uint)dictionary.Count)
+        {
+            throw new VortexFormatException($"A variant object names field id {id}, past the {dictionary.Count} keys of its metadata.");
+        }
+
         if (_names.Count >= MaxNames)
         {
             // Every number forgotten, those of the run's ids with them: the counts find their keys by name again.
@@ -711,11 +729,11 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         private const PathClass NoClass = (PathClass)byte.MaxValue;
 
         /// <summary>Appends <paramref name="spans"/>, a first and a last row each, <paramref name="offset"/> rows on, to the spans of <paramref name="class"/>.</summary>
-        private void Spans(PathClass @class, ReadOnlySpan<long> spans, long offset, long gap)
+        private void Spans(PathClass @class, ReadOnlySpan<long> spans, long offset, long gap, Buffers.MemoryAccount? account)
         {
             for (int i = 0; i < spans.Length; i += 2)
             {
-                SpanListOf(@class).Append(spans[i] + offset, spans[i + 1] + offset, gap);
+                SpanListOf(@class).Append(spans[i] + offset, spans[i + 1] + offset, gap, account);
             }
         }
 
@@ -737,20 +755,20 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         }
 
         /// <summary>Notes a value of <paramref name="class"/> at <paramref name="row"/>, in its class's spans.</summary>
-        private void Occur(PathClass @class, long row, long gap)
+        private void Occur(PathClass @class, long row, long gap, Buffers.MemoryAccount? account)
         {
             if (@class == _spanClass)
             {
-                _spans.Occur(row, gap);
+                _spans.Occur(row, gap, account);
             }
             else if (_spanClass == NoClass)
             {
                 _spanClass = @class;
-                _spans.Occur(row, gap);
+                _spans.Occur(row, gap, account);
             }
             else
             {
-                (_classSpans ??= new SpanList[PathClasses])[(int)@class].Occur(row, gap);
+                (_classSpans ??= new SpanList[PathClasses])[(int)@class].Occur(row, gap, account);
             }
         }
 
@@ -781,8 +799,11 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                 return spans.AsSpan(0, 2 * _count);
             }
 
-            /// <summary>Notes a value at <paramref name="row"/>, in the open span when it is within <paramref name="gap"/> rows of its end.</summary>
-            internal void Occur(long row, long gap)
+            /// <summary>
+            /// Notes a value at <paramref name="row"/>, in the open span when it is within <paramref name="gap"/> rows of its
+            /// end; a block grown for it is counted by <paramref name="account"/>, when given.
+            /// </summary>
+            internal void Occur(long row, long gap, Buffers.MemoryAccount? account)
             {
                 if (_count > 0 && row - _openEnd <= gap)
                 {
@@ -800,6 +821,13 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                 if (last + 2 >= spans.Length)
                 {
                     Block<long> grown = Blocks.Rent<long>(Blocks.Grown(last + 3, spans.Length, least: 4));
+                    long more = (grown.Bytes?.Length ?? 0) - (_bytes?.Length ?? 0);
+                    if (account is not null && !account.TryTake(more))
+                    {
+                        Blocks.Return(grown);
+                        throw account.Refused(more);
+                    }
+
                     spans.AsSpan(0, 2 * _count).CopyTo(grown);
                     Blocks.Return(spans);
                     _bytes = grown.Bytes;
@@ -817,7 +845,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
             /// taken on to <paramref name="last"/> when <paramref name="first"/> is within <paramref name="gap"/> rows of it, as
             /// noting its rows one by one would.
             /// </summary>
-            internal void Append(long first, long last, long gap)
+            internal void Append(long first, long last, long gap, Buffers.MemoryAccount? account)
             {
                 if (_count > 0 && first - _openEnd <= gap)
                 {
@@ -825,16 +853,17 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                     return;
                 }
 
-                Occur(first, gap);
+                Occur(first, gap, account);
                 _openEnd = last;
             }
 
             /// <summary>No span, the buffer kept.</summary>
             internal void Clear() => _count = 0;
 
-            /// <summary>The block given back to the pool.</summary>
-            internal void Release()
+            /// <summary>The block given back to the pool, and its bytes to <paramref name="account"/>, which counted them.</summary>
+            internal void Release(Buffers.MemoryAccount? account)
             {
+                account?.Give(_bytes?.Length ?? 0);
                 Blocks.ReturnBytes(_bytes);
                 _bytes = null;
                 _count = 0;
@@ -866,15 +895,15 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         internal bool MaxTextCut => _maxTextCut;
 
         /// <summary>The spans of this path and of every key below given back to the pool, and kept no more.</summary>
-        internal void Release()
+        internal void Release(Buffers.MemoryAccount? account)
         {
-            _spans.Release();
+            _spans.Release(account);
             _spanClass = NoClass;
             if (_classSpans is { } others)
             {
                 for (int c = 0; c < others.Length; c++)
                 {
-                    others[c].Release();
+                    others[c].Release(account);
                 }
             }
 
@@ -882,7 +911,7 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
             {
                 foreach (PathCount key in keys.Values)
                 {
-                    key.Release();
+                    key.Release(account);
                 }
             }
         }
@@ -940,6 +969,16 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         /// <param name="at">The first of the rows that hold the value, when they are not the census's last; -1 for the last.</param>
         internal void Add(PathCensus census, in VariantDictionary dictionary, ReadOnlySpan<byte> value, int depth, long times = 1, long at = -1)
         {
+            if (value.IsEmpty)
+            {
+                throw new VortexFormatException("A variant value holds no byte, not even its header.");
+            }
+
+            if (--census._visits < 0)
+            {
+                throw new VortexFormatException("A variant value names more nodes than its bytes hold: its fields share their bytes.");
+            }
+
             Values += times;
 
             // At the rows being counted, the census's last ones: one row, or the rows that repeated a value, which follow each
@@ -949,15 +988,15 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
                 PathClass spanned = ApartCensus.ClassOf(value);
                 if (times == 1)
                 {
-                    Occur(spanned, at >= 0 ? at : census.Rows - 1, census._gap);
+                    Occur(spanned, at >= 0 ? at : census.Rows - 1, census._gap, census.Account);
                 }
                 else if (at >= 0)
                 {
-                    SpanListOf(spanned).Append(at, at + times - 1, census._gap);
+                    SpanListOf(spanned).Append(at, at + times - 1, census._gap, census.Account);
                 }
                 else
                 {
-                    SpanListOf(spanned).Append(census.Rows - times, census.Rows - 1, census._gap);
+                    SpanListOf(spanned).Append(census.Rows - times, census.Rows - 1, census._gap, census.Account);
                 }
             }
 
@@ -1103,11 +1142,11 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
 
             if (times == 1)
             {
-                Occur(@class, row, census._gap);
+                Occur(@class, row, census._gap, census.Account);
             }
             else
             {
-                SpanListOf(@class).Append(row, row + times - 1, census._gap);
+                SpanListOf(@class).Append(row, row + times - 1, census._gap, census.Account);
             }
         }
 
@@ -1178,8 +1217,11 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
         /// <paramref name="row"/> on, as a row's value is counted: its class, and an object's keys below it, named by
         /// <paramref name="dictionary"/>.
         /// </summary>
-        internal void TakenValue(PathCensus census, long row, in VariantDictionary dictionary, ReadOnlySpan<byte> value, int depth, long times) =>
+        internal void TakenValue(PathCensus census, long row, in VariantDictionary dictionary, ReadOnlySpan<byte> value, int depth, long times)
+        {
+            census._visits = value.Length;
             Add(census, in dictionary, value, depth, times, row);
+        }
 
         /// <summary>
         /// Counts the keys of <paramref name="kept"/>, the object of the keys a shredding left of the object at
@@ -1191,6 +1233,8 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
             {
                 return;
             }
+
+            census._visits = kept.Length;
 
             VariantNested fields = VariantNested.Read(kept);
             for (int i = 0; i < fields.Count; i++)
@@ -1458,12 +1502,12 @@ internal sealed class PathCensus(int stringBoundBytes = 0, long groupRows = 0)
             {
                 if (other._spanClass != NoClass)
                 {
-                    Spans(other._spanClass, other._spans.View(), offset, census._gap);
+                    Spans(other._spanClass, other._spans.View(), offset, census._gap, census.Account);
                 }
 
                 for (int @class = 0; other._classSpans is { } others && @class < others.Length; @class++)
                 {
-                    Spans((PathClass)@class, others[@class].View(), offset, census._gap);
+                    Spans((PathClass)@class, others[@class].View(), offset, census._gap, census.Account);
                 }
             }
 

@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
 namespace Vorticity.Serialization.FlatBuffers;
@@ -94,11 +95,13 @@ internal readonly ref struct FlatBufferVector
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowIndex(int index, int count) =>
         throw new VortexFormatException(
             $"FlatBuffers vector index {index} is outside the {count} elements it declares.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowElementOffset(int pos, uint relative, int length) =>
         throw new VortexFormatException(
             $"FlatBuffers vector element uoffset {relative} at {pos} is zero or points outside the " +

@@ -164,20 +164,25 @@ internal sealed class TreeWalk : IAsyncDisposable
     }
 
     /// <inheritdoc/>
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        // A walk stopped early leaves reads in flight: each is observed, so that one that fails
-        // after nobody wants it is not an unobserved exception.
+        // A walk stopped early leaves reads in flight: each is awaited, whatever it found, so that none reads past the walk
+        // and one that fails after nobody wants it is no unobserved exception.
         foreach (Pending pending in _stack)
         {
-            _ = pending.Read?.ContinueWith(
-                static read => read.Exception, CancellationToken.None,
-                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
-                TaskScheduler.Default);
+            if (pending.Read is { } read)
+            {
+                try
+                {
+                    await read.ConfigureAwait(false);
+                }
+                catch (Exception) when (read.IsFaulted || read.IsCanceled)
+                {
+                }
+            }
         }
 
         _stack.Clear();
-        return ValueTask.CompletedTask;
     }
 
     /// <summary>

@@ -232,6 +232,30 @@ public sealed class AppendTests
     }
 
     [Fact]
+    public async Task AnAppendWhoseWriterCannotBeMadeGivesItsReopenedRowsBack()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        Decoders.EnsureRegistered();
+        string path = TempPath();
+        QueryMemoryBudget jobs = new QueryMemoryBudget(1L << 30);
+        await using VortexSession session = VortexSession.Create(o => o.JobMemoryBudget = jobs);
+        try
+        {
+            // Inside a block: the last chunk is read again, its rows copied under an account of the append's.
+            await WriteAsync(path, 0, 5_000);
+            await Assert.ThrowsAsync<IOException>(async () => await VortexFileWriter.AppendAsync(
+                path, null, (_, _) => throw new IOException("The sink is refused."), session, ct));
+
+            // Given back at the failure: left to the account's finalizer, they stayed counted until a collection.
+            Assert.Equal(0, jobs.ReservedBytes);
+        }
+        finally
+        {
+            System.IO.File.Delete(path);
+        }
+    }
+
+    [Fact]
     public async Task ATornAppendIsRepairedToTheFileBeforeIt()
     {
         CancellationToken ct = TestContext.Current.CancellationToken;

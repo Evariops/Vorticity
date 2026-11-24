@@ -136,6 +136,53 @@ public sealed class CommitObjectTests
         }
     }
 
+    /// <summary>
+    /// A header whose level, depth, counts or chunker no writer makes is refused at the open, where it was taken on its word
+    /// and sized an array a level and a frame a depth: a level of 64, a depth of 65, entries past a long, a chunker whose
+    /// target is under its floor.
+    /// </summary>
+    [Fact]
+    public void AHeaderPastWhatAWriterMakesIsRefused()
+    {
+        CommitObjectBuilder pages = new CommitObjectBuilder(7);
+        PageReference page = pages.AddPage(Page(1, 100));
+        foreach (CommitHeader header in (CommitHeader[])
+        [
+            new CommitHeader { Version = 7, Levels = [new CommitLevel(64, 1, page)] },
+            new CommitHeader { Version = 7, Levels = [new CommitLevel(0, 1, page) { Depth = 65 }] },
+            new CommitHeader { Version = 7, Levels = [new CommitLevel(0, -1, page)] },
+            new CommitHeader { Version = 7, Chunker = new ChunkerSettings(64 << 10, 32 << 10, 256 << 10) },
+        ])
+        {
+            byte[] bytes = new CommitObjectBuilder(7).Build(header);
+            Assert.Throws<CommitFormatException>(() => CommitObject.Open(bytes));
+        }
+    }
+
+    /// <summary>
+    /// A page is read whole before its hash is checked: a reference that claims more than any page holds is refused before
+    /// the read, where up to 2 GiB was asked of the store.
+    /// </summary>
+    [Fact]
+    public async Task APageReferenceThatClaimsMoreThanAPageHoldsIsRefusedBeforeItIsRead()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        PageReference claimed = new PageReference(1, 0, int.MaxValue, 0);
+        await Assert.ThrowsAsync<CommitFormatException>(
+            async () => await CommitObject.ReadPageAsync(store, "commits/1", claimed, CommitFormat.PreambleBytes, TestContext.Current.CancellationToken));
+    }
+
+    /// <summary>
+    /// A partition index's directory that declares more objects than its bytes can hold is read as no index, where the
+    /// array it sized was allocated first, past what an array holds.
+    /// </summary>
+    [Fact]
+    public void APartitionIndexDeclaringMoreThanItsBytesHoldIsNoIndex()
+    {
+        byte[] directory = [(byte)PartitionIndex.Version, 0xFF, 0xFF, 0xFF, 0xFF, 0x07, 0, 0, 0];
+        Assert.Null(PartitionIndex.Read(directory, System.IO.Hashing.XxHash3.HashToUInt64(directory)));
+    }
+
     [Fact]
     public void AFragmentAddedBeforeAPageIsWhereItsReferenceSays()
     {
@@ -311,6 +358,68 @@ public sealed class CommitObjectTests
         finally
         {
             writer.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// A commit object and an object's entry whose bytes were changed, a few thousand mutations of a fixed seed: each fails
+    /// with a format error or reads, its table, its summaries, its last key, its deletions; nothing else comes out.
+    /// </summary>
+    [Fact]
+    public void MutatedCommitsAndEntriesFailCleanlyOrRead()
+    {
+        byte[] commit = Build().Bytes;
+        ObjectSummaries summaries = ObjectSummaries.From(
+            [new Vorticity.Scanning.ColumnSummary("k", Vorticity.Expressions.FilterLiteral.From(3L), true, Vorticity.Expressions.FilterLiteral.From(90L), true, true, 0, true)]);
+        byte[] entry = new ObjectEntry("data/0001.vortex", 11, 1_000, 5_000_000, 22, [new PageReference(7, 100, 40, 0xFEED)], summaries)
+            .WithFooterBytes(300_000)
+            .WithDeletions(DeletionVector.Of([4, 5, 6, 7, 8, 40]))
+            .ToBytes();
+        Random random = new Random(20261124);
+        for (int i = 0; i < 3_000; i++)
+        {
+            bool isCommit = i % 2 == 0;
+            byte[] bytes = (byte[])(isCommit ? commit : entry).Clone();
+            int at = random.Next(bytes.Length);
+            switch (random.Next(3))
+            {
+                case 0:
+                    bytes[at] ^= (byte)(1 << random.Next(8));
+                    break;
+                case 1:
+                    bytes[at] = 0xFF;
+                    break;
+                default:
+                    bytes.AsSpan(at, Math.Min(5, bytes.Length - at)).Fill(0xFF);
+                    break;
+            }
+
+            try
+            {
+                if (isCommit)
+                {
+                    CommitObject opened = CommitObject.Open(bytes);
+                    foreach (CommitLevel level in opened.Header.Levels)
+                    {
+                        _ = level.Top;
+                    }
+                }
+                else
+                {
+                    ObjectEntry read = ObjectEntry.FromBytes(bytes.AsSpan());
+                    _ = read.Summaries;
+                    _ = read.Deletions.IsEmpty ? null : read.Deletions;
+                    _ = ObjectEntry.SummaryOf(bytes);
+                    _ = ObjectEntry.LastKeyOf(bytes);
+                }
+            }
+            catch (Exception expected) when (expected is CommitFormatException or VortexFormatException)
+            {
+            }
+            catch (Exception error)
+            {
+                Assert.Fail($"mutation {i} of the {(isCommit ? "commit" : "entry")} at byte {at} threw {error.GetType().Name}: {error.Message}\n{error.StackTrace}");
+            }
         }
     }
 

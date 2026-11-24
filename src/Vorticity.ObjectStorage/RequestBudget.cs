@@ -137,22 +137,35 @@ public sealed class RequestBudget
 
         try
         {
-            while (true)
+            // The turn taken now, owed when none is left, and waited for until the rate pays it: the requests that wait are
+            // served in the order they came, each at its own turn's time. Woken by the next turn's time each, they raced for
+            // it, the others going back to sleep, in no order.
+            TimeSpan wait;
+            lock (_gate)
             {
-                TimeSpan wait;
-                lock (_gate)
+                Refill();
+                _tokens--;
+                if (_tokens >= 0)
                 {
-                    Refill();
-                    if (_tokens >= 1)
-                    {
-                        _tokens--;
-                        return;
-                    }
-
-                    wait = TimeSpan.FromSeconds((1 - _tokens) / _rate);
+                    return;
                 }
 
+                wait = TimeSpan.FromSeconds(-_tokens / _rate);
+            }
+
+            try
+            {
                 await Task.Delay(wait, _time, cancellationToken).ConfigureAwait(false);
+            }
+            catch
+            {
+                // The turn given back, the requests behind it having counted it.
+                lock (_gate)
+                {
+                    _tokens++;
+                }
+
+                throw;
             }
         }
         catch
@@ -186,7 +199,9 @@ public sealed class RequestBudget
 
             _episode++;
             _rate = Math.Max(RequestsPerSecond * FloorShare, _rate / 2);
-            _tokens = 0;
+
+            // The turns in hand dropped, the turns owed kept: requests waiting for theirs still come first.
+            _tokens = Math.Min(_tokens, 0);
             _refilled = _time.GetTimestamp();
             _calmFrom = _time.GetUtcNow() + Calm;
             _grown = _calmFrom;

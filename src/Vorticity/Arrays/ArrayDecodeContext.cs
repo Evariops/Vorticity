@@ -575,13 +575,29 @@ internal sealed class ArrayDecodeContext
     /// </summary>
     /// <remarks>
     /// Internal and diagnostic: without it, a child decoded once per window rather than once per
-    /// chunk is invisible to the tests.
+    /// chunk is invisible to the tests. Counted only while a test listens (<see cref="CountSharedChildren"/>):
+    /// written by every lane at each shared child, its line of cache was shared by all of them for an
+    /// observation no one made.
     /// </remarks>
     internal static long SharedChildrenDecoded;
 
+    // The tests that listen to SharedChildrenDecoded now: a plain read where a shared child is decoded, which no lane writes.
+    private static int s_sharedChildrenListeners;
+
+    /// <summary>Counts <see cref="SharedChildrenDecoded"/> until the scope ends, for a test.</summary>
+    internal static CanonicalArena.Listening CountSharedChildren()
+    {
+        System.Threading.Interlocked.Increment(ref s_sharedChildrenListeners);
+        return new CanonicalArena.Listening(static () => System.Threading.Interlocked.Decrement(ref s_sharedChildrenListeners));
+    }
+
     private int DecodeSharedChild(in ArrayNode child, DType childDType, int childLength)
     {
-        System.Threading.Interlocked.Increment(ref SharedChildrenDecoded);
+        if (s_sharedChildrenListeners > 0)
+        {
+            System.Threading.Interlocked.Increment(ref SharedChildrenDecoded);
+        }
+
         return DecodeNode(in child, childDType, childLength);
     }
 

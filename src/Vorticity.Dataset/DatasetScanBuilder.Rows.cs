@@ -368,7 +368,10 @@ internal sealed partial class DatasetScanBuilder
                     {
                         if (_metrics is { } metrics)
                         {
-                            metrics.ObjectsPassedByPartitionIndex++;
+                            lock (metrics)
+                            {
+                                metrics.ObjectsPassedByPartitionIndex++;
+                            }
                         }
 
                         continue;
@@ -656,19 +659,31 @@ internal sealed partial class DatasetScanBuilder
 
         using CancellationTokenSource stopped = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using SemaphoreSlim reading = new SemaphoreSlim(LookupReads);
-        List<Task<List<RecordBatch>?>> found = new List<Task<List<RecordBatch>?>>(objects.Count);
+        List<Task<List<RecordBatch>?>> found = new List<Task<List<RecordBatch>?>>(Math.Min(objects.Count, LookupReads));
         try
         {
-            foreach (PositionedObject held in objects)
+            // A window of reads ahead of the object the scan yields, the next begun as each is yielded: begun all at once,
+            // a task an object waited on the semaphore, and every object's rows read ahead stayed held until their turn.
+            int begun = 0;
+            for (; begun < Math.Min(LookupReads, objects.Count); begun++)
             {
-                found.Add(ReadAheadAsync(held, reading, stopped.Token));
+                found.Add(ReadAheadAsync(objects[begun], reading, stopped.Token));
             }
 
-            foreach (Task<List<RecordBatch>?> rows in found)
+            for (int o = 0; o < objects.Count; o++)
             {
-                foreach (RecordBatch batch in await rows.ConfigureAwait(false) ?? [])
+                // The read this walk began, above.
+#pragma warning disable VSTHRD003
+                List<RecordBatch>? rows = await found[o].ConfigureAwait(false);
+#pragma warning restore VSTHRD003
+                foreach (RecordBatch batch in rows ?? [])
                 {
                     yield return batch;
+                }
+
+                if (begun < objects.Count)
+                {
+                    found.Add(ReadAheadAsync(objects[begun++], reading, stopped.Token));
                 }
             }
         }
@@ -746,7 +761,10 @@ internal sealed partial class DatasetScanBuilder
 
         if (_metrics is { } metrics)
         {
-            metrics.ObjectsLookedUp++;
+            lock (metrics)
+            {
+                metrics.ObjectsLookedUp++;
+            }
         }
 
         RecordBatch? view = null;
@@ -1049,7 +1067,10 @@ internal sealed partial class DatasetScanBuilder
     {
         if (_metrics is { } metrics)
         {
-            metrics.GranulesSettled++;
+            lock (metrics)
+            {
+                metrics.GranulesSettled++;
+            }
         }
 
         return settling.Batch(block, scratch, firstRow + deletions.Logical(settling.Range(block).Start));

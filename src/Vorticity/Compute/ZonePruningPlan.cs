@@ -19,9 +19,10 @@ namespace Vorticity.Compute;
 /// </summary>
 /// <remarks>
 /// Every step contributes nothing rather than failing: no zoned layout on a column's path, a zone
-/// map whose aggregates this build does not know, an aggregate with no usable column, a zones
-/// child that will not decode -- each of them leaves that column unable to prune, and the scan
-/// then reads everything it would have read without a zone map.
+/// map whose aggregates this build does not know, an aggregate with no usable column, a map of
+/// more zones than any file's rows need -- each of them leaves that column unable to prune, and
+/// the scan then reads everything it would have read without a zone map. A zones child that will
+/// not decode is a malformed file: its format error comes out of the scan, as the data's would.
 /// </remarks>
 internal static class ZonePruningPlan
 {
@@ -947,6 +948,12 @@ internal static class ZonePruningPlan
     }
 
     /// <summary>Copies the per-zone bounds out of the decoded zones struct.</summary>
+    /// <summary>
+    /// The zones a column's map is read for at most: 2^24, which at the 8 192 rows a zone a writer gives covers 137 billion
+    /// rows, a table of 320 MB at some twenty bytes a zone.
+    /// </summary>
+    private const int MostZones = 1 << 24;
+
     private static ZoneColumn Extract(
         ScanContext context, int root, Candidate candidate, long rowCount)
     {
@@ -1009,7 +1016,17 @@ internal static class ZonePruningPlan
         // A decimal's bounds are read as the unscaled values a decimal filter carries, and the
         // column says so, because those bytes order as numbers and not as strings.
         bool isDecimal = IsDecimal(candidate.Node.DType);
-        int count = zones.Length;
+
+        // The zones that cover rows, no more: the file says how many zones its map holds, which nothing holds to its rows,
+        // and a map of constants declares two billion of them in a few kilobytes, which sized 45 GB of tables here. Past
+        // what any file's rows need, the column prunes nothing, as a map it cannot use does.
+        long covering = map.ZoneLength > 0 ? (rowCount / map.ZoneLength) + (rowCount % map.ZoneLength == 0 ? 0 : 1) : 0;
+        if (Math.Min(zones.Length, covering) > MostZones)
+        {
+            return new ZoneColumn(candidate.Field, 0, rowCount, []);
+        }
+
+        int count = (int)Math.Min(zones.Length, covering);
 
         // A numeric column's zones go straight into columns of their own; a bound of another kind
         // than the column's, which no writer makes, sends them back to one summary per zone.
@@ -1069,7 +1086,7 @@ internal static class ZonePruningPlan
 
         return table is not null
             ? new ZoneColumn(candidate.Field, map.ZoneLength, rowCount, table)
-            : new ZoneColumn(candidate.Field, map.ZoneLength, rowCount, bounds!, isDecimal);
+            : new ZoneColumn(candidate.Field, map.ZoneLength, rowCount, bounds!, isDecimal, isDecimal ? Storage(candidate.Node.DType).Scale : 0);
     }
 
     /// <summary>Whether a column's dtype is a decimal, through any extension over one.</summary>

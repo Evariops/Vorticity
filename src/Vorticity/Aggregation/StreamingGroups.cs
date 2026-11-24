@@ -593,8 +593,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
                     // Descending, the batches come greatest first, and the groups of one ascend.
                     (Block<int> sorted, int sortedCount) = GroupSelection.Order(_query, _outcome!, order, _closed, count, long.MaxValue, _cancellationToken);
                     sorted.AsSpan(0, sortedCount).CopyTo(_closed);
-                    GroupSelection.GiveBack(sorted);
-                    _memory?.LetGo((long)sortedCount * sizeof(int));
+                    GroupSelection.LetGo(_memory, sorted, sortedCount);
                     count = sortedCount;
                     break;
                 }
@@ -709,6 +708,11 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         _closedCount = 0;
         _closedNext = 0;
         _openCount = 0;
+
+        // The partition's tables back to the pool once nothing reads its keys, as a blocking group by's are: left to the
+        // collector, the next query grew its own again. Its account forgets them, the query's memory going back whole.
+        _partition?.Delivered();
+        _partition = null;
         if (_begun && !_ended)
         {
             _ended = true;

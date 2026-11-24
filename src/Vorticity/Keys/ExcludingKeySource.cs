@@ -71,6 +71,8 @@ internal sealed class ExcludingKeySource : KeySource
 
     internal override string? KeyFormat => _inner.KeyFormat;
 
+    internal override int CompareKeys(FilterLiteral left, FilterLiteral right) => _inner.CompareKeys(left, right);
+
     internal override bool IsValid => _inner.IsValid;
 
     internal override FilterLiteral Key => _inner.Key;
@@ -91,8 +93,9 @@ internal sealed class ExcludingKeySource : KeySource
         }
 
         // An exact seek landed on the key's first kept entry, or past the key when every one of
-        // its entries is left out, in which case the key is not there.
-        if (op == SeekMode.Exact && KeyOrder.Total(_inner.Key, key) != 0)
+        // its entries is left out, in which case the key is not there. The key is compared as the
+        // source orders its entries: a sorted column holds the two zeros as one key.
+        if (op == SeekMode.Exact && _inner.CompareKeys(_inner.Key, key) != 0)
         {
             _inner.Invalidate();
             return false;

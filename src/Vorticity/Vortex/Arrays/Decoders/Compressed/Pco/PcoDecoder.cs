@@ -1,5 +1,4 @@
 using System;
-using System.Threading;
 
 using Vorticity.Arrays.Decoders.Canonical;
 
@@ -75,7 +74,7 @@ internal sealed class PcoDecoder : ArrayDecoder
         if (valid == length)
         {
             output = CompressedValues.AllocateUninitialized(context, outputBytes, width, Id, out Span<byte> destination);
-            DecodeValues(node, wrapper, number, destination, ranks: default);
+            DecodeValues(node, wrapper, number, destination, ranks: default, context.Canonical.Account);
         }
         else
         {
@@ -84,7 +83,7 @@ internal sealed class PcoDecoder : ArrayDecoder
             Block<byte> dense = Blocks.Rent<byte>(denseBytes);
             try
             {
-                DecodeValues(node, wrapper, number, dense, ranks: default);
+                DecodeValues(node, wrapper, number, dense, ranks: default, context.Canonical.Account);
                 ValidityMask mask = ValidityMask.From(context, validity);
                 ValidRows.Spread(dense.AsSpan(0, valid * width), destination, in mask, length, width, Id);
             }
@@ -128,7 +127,7 @@ internal sealed class PcoDecoder : ArrayDecoder
             : CompressedValues.Allocate(context, outputBytes, width, Id, out destination);
         if (valid != 0)
         {
-            DecodeValues(node, wrapper, number, destination, ranks.Span);
+            DecodeValues(node, wrapper, number, destination, ranks.Span, context.Canonical.Account);
         }
 
         Validity selected = context.DecodeValiditySelected(in node, 0, dtype.Nullability, length, wanted);
@@ -222,7 +221,7 @@ internal sealed class PcoDecoder : ArrayDecoder
     /// value copied into its row of <paramref name="destination"/>.
     /// </summary>
     private static void DecodeValues(
-        in ArrayNode node, PcoWrapperMetadata wrapper, PcoNumber number, Span<byte> destination, ReadOnlySpan<int> ranks)
+        in ArrayNode node, PcoWrapperMetadata wrapper, PcoNumber number, Span<byte> destination, ReadOnlySpan<int> ranks, MemoryAccount account)
     {
         int width = number.LatentBits / 8;
         bool selected = !ranks.IsEmpty;
@@ -245,6 +244,13 @@ internal sealed class PcoDecoder : ArrayDecoder
         // kept for the next decode rather than built by each, since neither holds a file's data
         // past the page or the chunk that refills it.
         Reused reused = TakeSpare();
+
+        // The windows of lookbacks rented under the decode's account while it holds the states, never past it.
+        foreach (PcoLatentState state in reused.States)
+        {
+            state.Account = account;
+        }
+
         try
         {
             PcoBatchScratch batchScratch = new PcoBatchScratch(
@@ -326,8 +332,13 @@ internal sealed class PcoDecoder : ArrayDecoder
         }
         finally
         {
-            // A dictionary is rented by its chunk; the metadata kept for the next decode holds none.
+            // A dictionary is rented by its chunk; the metadata kept for the next decode holds none, and the states no account.
             reused.Meta.Release();
+            foreach (PcoLatentState state in reused.States)
+            {
+                state.Account = null;
+            }
+
             GiveSpare(reused);
             Blocks.Return(pageRental);
 
@@ -339,44 +350,21 @@ internal sealed class PcoDecoder : ArrayDecoder
     }
 
     /// <summary>
-    /// What no decode holds, taken by the next: a slot a processor, up to 64, looked over from the processor the decode
-    /// runs on; a decode that finds nothing builds its own, and one that finds no empty slot leaves what it used to the
-    /// collector. One slot alone left every lane but one building its own: a column of 32 chunks read at eight lanes
-    /// allocated 700 KB a scan.
+    /// What no decode holds, taken by the next: as many as decodes run at once, one a processor up to 64, in one stack
+    /// under one lock that the registry of kept memory empties of those no decode took since its last turn; a decode that
+    /// finds nothing builds its own, and one past the bound leaves what it used to the collector. One kept alone left every
+    /// lane but one building its own: a column of 32 chunks read at eight lanes allocated 700 KB a scan. A slot a
+    /// processor, looked over from the decode's, made which state a decode took depend on the machine, and never gave
+    /// back the tables, up to three of 512 KiB each, under a low limit.
     /// </summary>
-    private static readonly Reused?[] Spares = new Reused?[Math.Clamp(Environment.ProcessorCount, 1, 64)];
+    /// <remarks>Their tables are not read for the registry's report, as the arenas kept are not: they count for nothing there.</remarks>
+    private static readonly KeptObjects<Reused> Spares = new KeptObjects<Reused>("pco states", Math.Clamp(Environment.ProcessorCount, 1, 64), bytesEach: 0);
 
     /// <summary>A decode's reusable state, from the spares or new.</summary>
-    private static Reused TakeSpare()
-    {
-        Reused?[] spares = Spares;
-        int start = Thread.GetCurrentProcessorId() % spares.Length;
-        for (int i = 0; i < spares.Length; i++)
-        {
-            ref Reused? slot = ref spares[(start + i) % spares.Length];
-            if (Volatile.Read(ref slot) is not null && Interlocked.Exchange(ref slot, null) is { } found)
-            {
-                return found;
-            }
-        }
+    private static Reused TakeSpare() => Spares.Take() ?? new Reused();
 
-        return new Reused();
-    }
-
-    /// <summary><paramref name="reused"/> back among the spares, in the first empty slot from the decode's processor.</summary>
-    private static void GiveSpare(Reused reused)
-    {
-        Reused?[] spares = Spares;
-        int start = Thread.GetCurrentProcessorId() % spares.Length;
-        for (int i = 0; i < spares.Length; i++)
-        {
-            ref Reused? slot = ref spares[(start + i) % spares.Length];
-            if (Volatile.Read(ref slot) is null && Interlocked.CompareExchange(ref slot, reused, null) is null)
-            {
-                return;
-            }
-        }
-    }
+    /// <summary>Keeps <paramref name="reused"/> for a later decode, or leaves it to the collector past the bound.</summary>
+    private static void GiveSpare(Reused reused) => Spares.Give(reused);
 
     /// <summary>What a decode keeps for the next: the latent states, and the chunk metadata with its tables.</summary>
     private sealed class Reused

@@ -102,7 +102,8 @@ internal static class HttpAnswers
             : default;
 
     /// <summary>How long <c>Retry-After</c> asks to wait, in seconds or until a date.</summary>
-    internal static TimeSpan? RetryAfter(HttpResponseMessage response)
+    /// <remarks>A date is read against <paramref name="time"/>, the transport's clock.</remarks>
+    internal static TimeSpan? RetryAfter(HttpResponseMessage response, TimeProvider time)
     {
         RetryConditionHeaderValue? retry = response.Headers.RetryAfter;
         if (retry?.Delta is { } delta)
@@ -110,6 +111,6 @@ internal static class HttpAnswers
             return delta;
         }
 
-        return retry?.Date is { } until ? until - DateTimeOffset.UtcNow : null;
+        return retry?.Date is { } until ? until - time.GetUtcNow() : null;
     }
 }

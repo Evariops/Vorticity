@@ -50,13 +50,14 @@ internal sealed class BloomCollector : IDisposable
     /// <param name="column">The column.</param>
     /// <param name="rate">The false-positive rate asked, in (0, 1).</param>
     /// <param name="mostValues">The most values a chunk holds: a flat column's row group's rows.</param>
-    internal BloomCollector(WriteColumn column, double rate, long mostValues)
+    /// <param name="account">What counts the filter's words and header, the writer's account.</param>
+    internal BloomCollector(WriteColumn column, double rate, long mostValues, MemoryAccount account)
     {
         _ppm = (int)Math.Clamp(Math.Round(rate * 1_000_000), 1, 999_999);
         _width = column.Conversion == ValueConversion.ByteArray ? 0 : column.ValueWidth;
         _initialBlocks = SplitBlockBloom.BlocksFor(mostValues, _ppm, MaximumBlocks);
-        _words = new BlockBytes();
-        _header = new BlockBytes();
+        _words = new BlockBytes(account);
+        _header = new BlockBytes(account);
     }
 
     /// <summary>Whether the chunk closed with a filter that <see cref="WriteToAsync"/> has yet to write.</summary>

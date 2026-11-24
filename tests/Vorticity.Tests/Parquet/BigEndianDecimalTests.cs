@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Numerics;
+using Vorticity.Parquet;
 using Vorticity.Parquet.Encodings;
 using Xunit;
 
@@ -48,6 +49,35 @@ public sealed class BigEndianDecimalTests
 
             Assert.True(expected.AsSpan().SequenceEqual(each), $"width {width} into {slot}, a value at a time");
         }
+    }
+
+    /// <summary>
+    /// A value stored wider than its storage, as other writers lay a decimal out in a fixed length
+    /// past its precision: its leading bytes the sign's are dropped, and one that is not is refused.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(Slots))]
+    public void NarrowsAValueWhoseLeadingBytesExtendItsSign(int slot)
+    {
+        Random random = new(slot + 100);
+        int width = slot + 3;
+        List<BigInteger> values = Values(slot, random);
+        byte[] source = new byte[values.Count * width];
+        byte[] expected = new byte[values.Count * slot];
+        for (int i = 0; i < values.Count; i++)
+        {
+            Write(values[i], width, source.AsSpan(i * width, width), bigEndian: true);
+            Write(values[i], slot, expected.AsSpan(i * slot, slot), bigEndian: false);
+        }
+
+        byte[] into = new byte[values.Count * slot];
+        BigEndianDecimals.WidenFixed(source, width, into, slot, values.Count);
+        Assert.True(expected.AsSpan().SequenceEqual(into), $"width {width} into {slot}");
+
+        // One past the storage's greatest: its leading bytes are no longer the sign's.
+        byte[] past = new byte[width];
+        Write((BigInteger.One << ((8 * slot) - 1)) + 1, width, past, bigEndian: true);
+        Assert.Throws<ParquetFormatException>(() => BigEndianDecimals.Widen(past, 0, width, new byte[slot]));
     }
 
     [Fact]

@@ -179,10 +179,24 @@ public class ColumnsBuilder
 public sealed class ColumnsBuilder<TRecord> : ColumnsBuilder
     where TRecord : IVortexRecord<TRecord>
 {
+    private RecordScratch? _scratch;
+
     internal ColumnsBuilder(StructStore store, int[]? map, object? owner)
         : base(store, TRecord.Schema, map, owner)
     {
     }
+
+    /// <summary>
+    /// Room for <paramref name="count"/> values of a member, which the code the generator emits fills before it writes
+    /// them: an array this builder holds from one write to the next, the same for the same <paramref name="slot"/>. The
+    /// values are the caller's to clear once written, when they hold references.
+    /// </summary>
+    /// <typeparam name="TMember">The member's type.</typeparam>
+    /// <param name="slot">Which of the record's uses: four a member, the generated code's own numbering.</param>
+    /// <param name="count">The values the room holds.</param>
+    /// <returns>The room, valid until the next write.</returns>
+    [System.ComponentModel.EditorBrowsable(System.ComponentModel.EditorBrowsableState.Never)]
+    public Span<TMember> Scratch<TMember>(int slot, int count) => (_scratch ??= new RecordScratch()).Take<TMember>(0, slot, count).AsSpan(0, count);
 
     /// <summary>The builder of the nested record held by member <paramref name="index"/>.</summary>
     /// <typeparam name="TNested">The nested record type.</typeparam>

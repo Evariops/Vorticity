@@ -746,6 +746,11 @@ internal sealed class RunMerge(
         TableArrays account = new TableArrays(memory) { Exact = true };
         GroupKeys keys = kind.ForSpill(account);
         AggregateSlot[] slots = AggregationPartition.NewSlots(plan, settled, source, out _, account);
+
+        // The states each section is read into, counted under an account of their own and given back at each section's
+        // end, the part's account holding its table alone: made on none and never given back, fifty runs of 256 sections
+        // left 12 800 sets of slots to the collector, uncounted, as the query ran short of memory.
+        TableArrays reading = new TableArrays(memory) { Exact = true };
         SpillBuffer? buffer = null;
         long room = 0;
         try
@@ -770,7 +775,7 @@ internal sealed class RunMerge(
                         if (length > 0)
                         {
                             await run.File.ReadAsync(run.Starts[section], buffer.Ensure(length), cancellationToken).ConfigureAwait(false);
-                            MergeSections(run, section, end, buffer.Span(length), keys, slots, which);
+                            MergeSections(run, section, end, buffer.Span(length), keys, slots, which, reading);
                         }
 
                         section = end;
@@ -792,6 +797,7 @@ internal sealed class RunMerge(
 
             buffer.Release();
             buffer = null;
+            reading.LetGo();
 
             // The table as its account counts it, and as much again for the batches its builder makes of it.
             room = account.Out;
@@ -813,6 +819,7 @@ internal sealed class RunMerge(
         catch
         {
             buffer?.Release();
+            reading.LetGo();
             account.LetGo();
             memory.Shrink(room);
             throw;
@@ -824,13 +831,13 @@ internal sealed class RunMerge(
     /// <paramref name="bytes"/>, merged into the part's table: in a pass past the first (<paramref name="pass"/>), the
     /// distinct pairs of its share alone, the other states merged once already.
     /// </summary>
-    private void MergeSections(SpillRun run, int first, int past, ReadOnlySpan<byte> bytes, GroupKeys keys, AggregateSlot[] slots, PairPass pass)
+    private void MergeSections(SpillRun run, int first, int past, ReadOnlySpan<byte> bytes, GroupKeys keys, AggregateSlot[] slots, PairPass pass, TableArrays reading)
     {
         SpillReader reader = new SpillReader(bytes);
         ScratchBlock<int> map = default;
         try
         {
-            MergeSections(run, first, past, ref reader, keys, slots, pass, ref map);
+            MergeSections(run, first, past, ref reader, keys, slots, pass, ref map, reading);
         }
         finally
         {
@@ -838,7 +845,8 @@ internal sealed class RunMerge(
         }
     }
 
-    private void MergeSections(SpillRun run, int first, int past, ref SpillReader reader, GroupKeys keys, AggregateSlot[] slots, PairPass pass, ref ScratchBlock<int> map)
+    private void MergeSections(
+        SpillRun run, int first, int past, ref SpillReader reader, GroupKeys keys, AggregateSlot[] slots, PairPass pass, ref ScratchBlock<int> map, TableArrays reading)
     {
         for (int section = first; section < past; section++)
         {
@@ -853,23 +861,38 @@ internal sealed class RunMerge(
             Scratch.Grow(ref map, count);
             Span<int> into = map.AsSpan(0, count);
             keys.ReadKeys(ref reader, into);
-            AggregateSlot[] read = AggregationPartition.NewSlots(plan, settled, source, out GroupRecords? records);
-            records?.Read(ref reader, count);
-            for (int i = 0; i < read.Length; i++)
+            AggregateSlot[] read = AggregationPartition.NewSlots(plan, settled, source, out GroupRecords? records, reading);
+            try
             {
-                if (inputs[i] != AggregationPartition.Settled && read[i].StateBytes == 0)
+                records?.Read(ref reader, count);
+                for (int i = 0; i < read.Length; i++)
                 {
-                    read[i].ReadStates(ref reader, count, pass);
+                    if (inputs[i] != AggregationPartition.Settled && read[i].StateBytes == 0)
+                    {
+                        read[i].ReadStates(ref reader, count, pass);
+                    }
+                }
+
+                ReadOnlySpan<int> all = Numbers.Upto(count);
+                for (int i = 0; i < slots.Length; i++)
+                {
+                    slots[i].EnsureGroups(keys.Count);
+                    if (inputs[i] != AggregationPartition.Settled && (pass.Pass == 0 || slots[i].CountsPairs))
+                    {
+                        slots[i].MergeFrom(read[i], all, into);
+                    }
                 }
             }
-
-            ReadOnlySpan<int> all = Numbers.Upto(count);
-            for (int i = 0; i < slots.Length; i++)
+            finally
             {
-                slots[i].EnsureGroups(keys.Count);
-                if (inputs[i] != AggregationPartition.Settled && (pass.Pass == 0 || slots[i].CountsPairs))
+                // The section's states back to their account, the shared answers of settled slots left alone.
+                records?.Release();
+                for (int i = 0; i < read.Length; i++)
                 {
-                    slots[i].MergeFrom(read[i], all, into);
+                    if (inputs[i] != AggregationPartition.Settled)
+                    {
+                        read[i].Release();
+                    }
                 }
             }
         }

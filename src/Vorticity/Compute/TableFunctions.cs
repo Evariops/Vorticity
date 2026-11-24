@@ -196,7 +196,11 @@ internal sealed class ValueTable
 /// </summary>
 internal sealed class MappedFieldExpr : FieldExpr
 {
-    private static readonly DType TextType = new DTypeArena().Utf8(Nullability.Nullable);
+    // Both made once, as the type initializer runs on one thread: a type derived from them at each batch was committed into
+    // their arena, shared by every lane of every scan, which no lock guards.
+    private static readonly DTypeArena TextTypes = new DTypeArena();
+    private static readonly DType TextType = TextTypes.Utf8(Nullability.Nullable);
+    private static readonly DType ImageType = TextTypes.Utf8(Nullability.NonNullable);
     private static readonly DType BitType = new DTypeArena().Bool(Nullability.NonNullable);
 
     internal MappedFieldExpr(FieldExpr column, ValueTable table)
@@ -416,7 +420,7 @@ internal sealed class MappedFieldExpr : FieldExpr
             }
         }
 
-        return arena.AddVarBinView(TextType.WithNullability(Nullability.NonNullable), images.Length, Validity.NonNullable, views, [data], padded: true);
+        return arena.AddVarBinView(ImageType, images.Length, Validity.NonNullable, views, [data], padded: true);
     }
 }
 

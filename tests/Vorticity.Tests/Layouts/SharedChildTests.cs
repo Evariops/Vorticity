@@ -48,6 +48,7 @@ public sealed class SharedChildTests
         {
             await using VortexFile file = await VortexFile.OpenAsync(path, TestContext.Current.CancellationToken);
             Scan<Tagged> scan = file.Scan<Tagged>().With(new ScanOptions { Prefetch = prefetch, DegreeOfParallelism = degree });
+            using CanonicalArena.Listening listening = ArrayDecodeContext.CountSharedChildren();
             long before = ArrayDecodeContext.SharedChildrenDecoded;
             long seen = 0;
             Tagged[] buffer = new Tagged[FlatLayoutReader.WindowRows];
@@ -97,6 +98,7 @@ public sealed class SharedChildTests
 
             global::Vorticity.Indexes.SpanReader reader = (await global::Vorticity.Indexes.SpanReader.OpenAsync(new global::Vorticity.Tests.File.TestSegmentSource(bytes), bytes.Length, schema, null, ct))!;
             RowRange[] spans = [.. Enumerable.Range(0, 100).Select(static s => RowRange.FromLength(s * 2_999L, 100))];
+            using CanonicalArena.Listening listening = ArrayDecodeContext.CountSharedChildren();
             long before = ArrayDecodeContext.SharedChildrenDecoded;
             RecordBatch[] batches = await reader.ReadSpansAsync(spans, null, ct);
             try

@@ -77,11 +77,52 @@ internal static class ShreddingChoice
             // The paths held most, ties by path, so that two writers of one object choose alike.
             candidates.Sort(static (left, right) => right.Held != left.Held
                 ? right.Held.CompareTo(left.Held)
-                : string.CompareOrdinal(string.Join('\0', left.Path), string.Join('\0', right.Path)));
+                : ComparePaths(left.Path, right.Path));
             candidates.RemoveRange(most, candidates.Count - most);
         }
 
         return Build(candidates, 0);
+    }
+
+    /// <summary>
+    /// The order of two paths as their keys joined by <c>'\0'</c> compare ordinally, a code unit at a time, without joining
+    /// them: the sort met half a million comparisons past 50 000 candidates, two strings built each.
+    /// </summary>
+    internal static int ComparePaths(string[] left, string[] right)
+    {
+        int leftKey = 0, leftAt = 0, rightKey = 0, rightAt = 0;
+        while (true)
+        {
+            int x = Next(left, ref leftKey, ref leftAt);
+            int y = Next(right, ref rightKey, ref rightAt);
+            if (x != y)
+            {
+                return x < y ? -1 : 1;
+            }
+
+            if (x < 0)
+            {
+                return 0;
+            }
+        }
+    }
+
+    /// <summary>The next code unit of <paramref name="path"/> joined by <c>'\0'</c>, from key <paramref name="key"/> at <paramref name="at"/>; -1 past its end.</summary>
+    private static int Next(string[] path, ref int key, ref int at)
+    {
+        if (key >= path.Length)
+        {
+            return -1;
+        }
+
+        if (at < path[key].Length)
+        {
+            return path[key][at++];
+        }
+
+        key++;
+        at = 0;
+        return key < path.Length ? 0 : -1;
     }
 
     /// <summary>

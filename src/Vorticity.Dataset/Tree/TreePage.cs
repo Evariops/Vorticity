@@ -122,7 +122,7 @@ internal static class TreePage
 
             _page = page;
             _at = 1;
-            Count = checked((int)ReadVarint(page.Span, ref _at));
+            Count = ReadCount(page.Span, ref _at);
             _left = Count;
         }
 
@@ -185,7 +185,7 @@ internal static class TreePage
 
             _page = page;
             _at = 1;
-            Count = checked((int)ReadVarint(page.Span, ref _at));
+            Count = ReadCount(page.Span, ref _at);
             _left = Count;
         }
 
@@ -287,6 +287,18 @@ internal static class TreePage
                 throw new CommitFormatException("A varint of more than ten bytes is not a varint.");
             }
         }
+    }
+
+    /// <summary>
+    /// The entries a page says it holds, read at <paramref name="at"/>: past the bytes left, a byte an entry at the fewest,
+    /// a malformed page, where a checked cast threw the arithmetic's overflow.
+    /// </summary>
+    private static int ReadCount(ReadOnlySpan<byte> page, ref int at)
+    {
+        ulong count = ReadVarint(page, ref at);
+        return count <= (ulong)(page.Length - at)
+            ? (int)count
+            : throw new CommitFormatException($"A page of {page.Length} bytes says it holds {count} entries.");
     }
 
     private static ReadOnlyMemory<byte> ReadBytes(ReadOnlyMemory<byte> page, ref int at)

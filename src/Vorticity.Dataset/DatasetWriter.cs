@@ -766,17 +766,19 @@ public sealed class DatasetWriter
             int root = store.Build(arena, rows);
             if (_key is { } key)
             {
+                // The keys of the whole part, their order and the sort's scratch weigh as much as the part: counted with its
+                // stores, in the writer's account.
                 RecordBatch all = RecordBatch.Over(arena, root, 0, null);
                 try
                 {
-                    keys = key.Encode(all);
+                    keys = key.Encode(all, _account);
                 }
                 finally
                 {
                     all.Dispose();
                 }
 
-                order = Blocks.Rent<int>(rows);
+                order = Blocks.Rent<int>(_account, rows);
                 Span<int> places = order;
                 for (int i = 0; i < rows; i++)
                 {
@@ -846,7 +848,7 @@ public sealed class DatasetWriter
             }
 
             keys?.Dispose();
-            Blocks.Return(order);
+            Blocks.Return(_account, order);
 
             arena.ResetKeepingBlocks();
         }

@@ -60,7 +60,10 @@ public static class VortexFileIndexer
     /// <remarks>
     /// The runs are built beside the file and copied behind it only once they are whole, so a
     /// failure leaves the file as it was. The file takes a new identity: an index fragment built
-    /// for the old bytes does not describe the new ones.
+    /// for the old bytes does not describe the new ones. The runs lie in a file named after it,
+    /// <c>.indexing-</c> and an id behind its name, deleted at the end whatever became of the call:
+    /// a process that dies meanwhile leaves it, and it can then be deleted, the file being as it was
+    /// or whole with its indexes.
     /// </remarks>
     /// <exception cref="ArgumentNullException">An argument is null.</exception>
     /// <exception cref="ArgumentException">The policy names a column the file does not have.</exception>

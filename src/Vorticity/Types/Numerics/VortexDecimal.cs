@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using Vorticity.Types.Numerics;
 
@@ -376,6 +377,7 @@ public readonly struct VortexDecimal : IEquatable<VortexDecimal>, IComparable<Vo
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowDecimalOverflow() =>
         throw new OverflowException(
             "The decimal value is outside System.Decimal's range: its scale must be within -28..28 " +

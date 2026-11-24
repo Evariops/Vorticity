@@ -253,6 +253,12 @@ internal struct RleHybridDecoder
                 ParquetThrow.Format("A bit-packed run is empty or longer than its data.");
             }
 
+            // At a width of zero a run's groups take no byte, so its data cannot bound them.
+            if (groups > int.MaxValue / 8)
+            {
+                ParquetThrow.Format($"A bit-packed run declares {groups} groups of eight values, more than a page holds.");
+            }
+
             _packed = true;
             _remaining = groups * 8;
             _packedStart = _position;

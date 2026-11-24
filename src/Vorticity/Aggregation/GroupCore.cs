@@ -637,11 +637,14 @@ internal sealed partial class GroupCore
         }
     }
 
-    /// <summary>A sub-table of a part, empty, holding the groups whose hashes share <paramref name="depth"/> bits past the part's.</summary>
-    internal SubTable NewTable(int depth)
+    /// <summary>
+    /// A sub-table of a part, empty, holding the groups whose hashes share <paramref name="depth"/> bits past the part's,
+    /// those bits <paramref name="prefix"/>.
+    /// </summary>
+    internal SubTable NewTable(int depth, int prefix = 0)
     {
         AggregateSlot[] slots = AggregationPartition.NewSlots(_plan, _settled, _source, out GroupRecords? records, _account, _layout);
-        return new SubTable(Kind.ForTable(_account), slots, records, depth);
+        return new SubTable(Kind.ForTable(_account), slots, records, depth) { Prefix = prefix };
     }
 
     /// <summary>The groups past which a sub-table splits.</summary>
@@ -852,8 +855,8 @@ internal sealed partial class GroupCore
         // Each half made at the bound, with a batch's room past it: it then never grows before it
         // splits in turn, and its arrays are the blocks the split before gave back.
         applier.Halves(table.Keys, PartShift - 1 - depth, out ReadOnlySpan<int> clear, out ReadOnlySpan<int> set);
-        SubTable lower = NewTable(depth + 1);
-        SubTable upper = NewTable(depth + 1);
+        SubTable lower = NewTable(depth + 1, table.Prefix << 1);
+        SubTable upper = NewTable(depth + 1, (table.Prefix << 1) | 1);
         int room = (int)_tableGroups + _batchEntries;
         lower.Reserve(room);
         upper.Reserve(room);
@@ -864,17 +867,14 @@ internal sealed partial class GroupCore
         part.Tables[index] = lower;
         part.Tables.Add(upper);
 
-        // The sub-table's places in the directory share its bits; the half of them past the next bit
-        // go to the upper half.
-        int bit = part.Depth - depth - 1;
+        // The directory is indexed by the hash's top bits (Grow doubles each place into two neighbours), so the sub-table's
+        // places are the run its bits begin, and its upper half's the second half of that run: written whole, where a walk
+        // of the whole directory, two to the twenty-fourth places at its deepest, met every split.
+        int below = part.Depth - depth - 1;
+        int start = upper.Prefix << below;
         Block<int> directory = part.Directory;
-        for (int j = 0; j < directory.Length; j++)
-        {
-            if (directory[j] == index && ((j >> bit) & 1) != 0)
-            {
-                directory[j] = added;
-            }
-        }
+        System.Diagnostics.Debug.Assert(directory[start] == index, "A sub-table's places are the run its prefix begins.");
+        directory.AsSpan(start, 1 << below).Fill(added);
 
         Interlocked.Increment(ref _splits);
         return added;
@@ -1550,12 +1550,19 @@ internal sealed class PartBatch
     // The batches cores let go of, linked by Next, for the next query's: a query of a group a row made
     // one for every 150 or so of its rows, 29 000 on 4M rows of six keys, which lived to its end on
     // the small object heap, copied by every collection.
-    private static readonly Lock s_gate = new Lock();
     private static PartBatch? s_kept;
     private static int s_keptCount;
 
+    // Kept as a holder of the registry of kept memory: all of them go when no query took one since the registry last asked,
+    // and when a reservation needs the room. Kept outside it, 6 MB stayed for the process's life.
+    private static readonly KeptWhole s_keeping = new KeptWhole(
+        "part batches", static () => Volatile.Read(ref s_keptCount) * KeptBatchBytes, static () => (s_kept, s_keptCount) = (null, 0));
+
     /// <summary>The batches the process keeps for the next queries at most: some 6 MB.</summary>
     private const int MostKept = 1 << 17;
+
+    /// <summary>What a batch kept holds, its slab let go: 6 MB for <see cref="MostKept"/> of them.</summary>
+    private const long KeptBatchBytes = 48;
 
     internal PartBatch(Block<ulong> slab, int start, int capacity)
     {
@@ -1596,8 +1603,9 @@ internal sealed class PartBatch
     internal static PartBatch Linked(Block<ulong> slab, int count, int words, int capacity)
     {
         PartBatch? kept;
-        lock (s_gate)
+        lock (s_keeping.Gate)
         {
+            s_keeping.Took();
             kept = s_kept;
             PartBatch? last = null;
             int taken = 0;
@@ -1674,7 +1682,7 @@ internal sealed class PartBatch
             return;
         }
 
-        lock (s_gate)
+        lock (s_keeping.Gate)
         {
             if (s_keptCount + count > MostKept)
             {
@@ -1700,6 +1708,9 @@ internal sealed class SubTable(GroupKeys keys, AggregateSlot[] slots, GroupRecor
 
     /// <summary>The bits of the hash past the part's its groups share; <see cref="GroupCore.MostDepth"/> for a paged part's, which never splits.</summary>
     internal int Depth { get; } = depth;
+
+    /// <summary>Those bits, its places in the part's directory the run they begin: 0 for a sub-table of no bits.</summary>
+    internal int Prefix { get; init; }
 
     internal long Footprint => Keys.Footprint + AggregateSlot.FootprintOf(Slots);
 
@@ -2407,8 +2418,12 @@ internal sealed class CoreApplier
     private ScratchBlock<int> _entryAt;
     private ScratchBlock<int> _batchAt;
 
-    /// <summary>The numbers 0, 1, 2 and on, as many as a batch of entries has held: shared by every applier, never written once made.</summary>
-    private static int[] s_identity = [];
+    /// <summary>
+    /// The numbers 0, 1, 2 and on past those every thread shares (<see cref="Numbers"/>), for a batch of more entries: a
+    /// part's share of a lane's table emptied under pressure. A table shared by every applier grew to the largest batch
+    /// a process met and stayed for its life.
+    /// </summary>
+    private int[]? _numbers;
 
     private ScratchBlock<byte> _bits;
     private ScratchBlock<int> _clear;
@@ -2446,6 +2461,7 @@ internal sealed class CoreApplier
     internal void Release()
     {
         _taken = [];
+        _numbers = null;
         Scratch.Return(ref _map);
         Scratch.Return(ref _keys);
         Scratch.Return(ref _tableOf);
@@ -2580,7 +2596,7 @@ internal sealed class CoreApplier
             for (int i = 0; i < count; i++)
             {
                 int length = _taken[i].Count;
-                Identity(length).CopyTo(_entryAt.AsSpan(place, length));
+                Numbers.Upto(length, ref _numbers).CopyTo(_entryAt.AsSpan(place, length));
                 _batchAt.AsSpan(place, length).Fill(i);
                 place += length;
             }
@@ -2632,25 +2648,6 @@ internal sealed class CoreApplier
         }
 
         return tables;
-    }
-
-    /// <summary>The first <paramref name="length"/> numbers from 0; two appliers that grow them at once make two equal arrays, either one right.</summary>
-    private static ReadOnlySpan<int> Identity(int length)
-    {
-        int[] identity = Volatile.Read(ref s_identity);
-        if (identity.Length < length)
-        {
-            int[] grown = new int[Math.Max(length, 2 * identity.Length)];
-            for (int i = 0; i < grown.Length; i++)
-            {
-                grown[i] = i;
-            }
-
-            Volatile.Write(ref s_identity, grown);
-            identity = grown;
-        }
-
-        return identity.AsSpan(0, length);
     }
 
     /// <summary>

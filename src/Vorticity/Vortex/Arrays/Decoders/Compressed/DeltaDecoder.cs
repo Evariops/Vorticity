@@ -176,6 +176,13 @@ internal sealed class DeltaDecoder : ArrayDecoder
         int offset,
         int length)
     {
+        // No row: nothing to sum. The last block, (offset + length - 1) / BlockSize, is 0 and not -1 at an empty array's
+        // offset 0, and a block of deltas was sliced off an empty span.
+        if (length == 0)
+        {
+            return;
+        }
+
         switch (width)
         {
             case 1:

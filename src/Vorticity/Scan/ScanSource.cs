@@ -242,7 +242,7 @@ internal sealed class FileScanSource : ScanSource, IRowsCapability, IStatisticsC
 
     private async ValueTask<long> CountAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
     {
-        if (spec.MatchesNothing || await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false))
+        if (spec.MatchesNothing || Refuse(spec, metrics))
         {
             return 0;
         }
@@ -253,7 +253,7 @@ internal sealed class FileScanSource : ScanSource, IRowsCapability, IStatisticsC
     /// <summary>The paths of variant columns among the rows the scan keeps: none when the statistics refute it, its file's answer otherwise.</summary>
     public async ValueTask PathsAsync(ScanSpec spec, PathsQuestion question, ScanCounters metrics, CancellationToken cancellationToken)
     {
-        if (spec.MatchesNothing || await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false))
+        if (spec.MatchesNothing || Refuse(spec, metrics))
         {
             return;
         }
@@ -268,12 +268,12 @@ internal sealed class FileScanSource : ScanSource, IRowsCapability, IStatisticsC
 
     private async ValueTask<bool> AnyAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken) =>
         !spec.MatchesNothing
-        && !await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false)
+        && !Refuse(spec, metrics)
         && await Builder(spec, metrics).AnyAsync(cancellationToken).ConfigureAwait(false);
 
     private async ValueTask<FilterLiteral> ExtremeAsync(ScanSpec spec, FieldExpr column, bool min, ScanCounters metrics, CancellationToken cancellationToken)
     {
-        if (spec.MatchesNothing || await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false))
+        if (spec.MatchesNothing || Refuse(spec, metrics))
         {
             return FilterLiteral.Null;
         }
@@ -288,7 +288,8 @@ internal sealed class FileScanSource : ScanSource, IRowsCapability, IStatisticsC
     private async IAsyncEnumerable<RecordBatch> RefusedAsync(
         ScanSpec spec, ScanCounters metrics, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        await RefuseAsync(spec, metrics, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        Refuse(spec, metrics);
         yield break;
     }
 
@@ -296,14 +297,16 @@ internal sealed class FileScanSource : ScanSource, IRowsCapability, IStatisticsC
     /// Whether the file statistics refute the scan; when they do, its blocks are counted pruned, as
     /// its plan counts them, and nothing is read.
     /// </summary>
-    private async ValueTask<bool> RefuseAsync(ScanSpec spec, ScanCounters metrics, CancellationToken cancellationToken)
+    private bool Refuse(ScanSpec spec, ScanCounters metrics)
     {
         if (!Refuted(spec))
         {
             return false;
         }
 
-        metrics.AddBlocksPruned((await WholeAsync(spec, cancellationToken).ConfigureAwait(false)).Blocks);
+        // The blocks the rows touch, which the plan of the scan without its filter counts: arithmetic on the rows, where
+        // that plan walked every split and registered its segments for the one number.
+        metrics.AddBlocksPruned(Builder(spec with { Filter = null, OrderPath = null }, new ScanCounters()).TouchedBlocks());
         return true;
     }
 

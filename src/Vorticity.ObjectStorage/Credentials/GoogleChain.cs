@@ -138,6 +138,15 @@ internal sealed class GoogleChain : TokenSource
         string subjectType = Required(root, "subject_token_type", path);
         string tokenUrl = Text(root, "token_url") ?? "https://sts.googleapis.com/v1/token";
         string? impersonation = Text(root, "service_account_impersonation_url");
+
+        // The federated token goes to these two, which the file names: a file from another hand could name any host. Held
+        // to HTTPS within the credentials' universe, Google's own unless the file names another.
+        string universe = Text(root, "universe_domain") ?? "googleapis.com";
+        RequireUniverse(tokenUrl, universe, "token_url", path);
+        if (impersonation is not null)
+        {
+            RequireUniverse(impersonation, universe, "service_account_impersonation_url", path);
+        }
         if (!root.TryGetProperty("credential_source", out JsonElement source))
         {
             throw new ObjectStoreException($"'{path}' names no credential source.");
@@ -279,4 +288,14 @@ internal sealed class GoogleChain : TokenSource
 
     private static string Required(JsonElement element, string name, string path) =>
         Text(element, name) ?? throw new ObjectStoreException($"'{path}' has no '{name}'.");
+
+    /// <summary>Refuses a <paramref name="url"/> a token is sent to that is not HTTPS on <paramref name="universe"/> or a host under it.</summary>
+    private static void RequireUniverse(string url, string universe, string name, string path)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out Uri? uri) || uri.Scheme != Uri.UriSchemeHttps
+            || !(uri.IdnHost.Equals(universe, StringComparison.OrdinalIgnoreCase) || uri.IdnHost.EndsWith("." + universe, StringComparison.OrdinalIgnoreCase)))
+        {
+            throw new ObjectStoreException($"'{path}' sends its token to '{url}' ({name}), which is not HTTPS on {universe}: a token goes to its universe's services alone.");
+        }
+    }
 }

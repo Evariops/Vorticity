@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 
 namespace Vorticity;
@@ -78,6 +79,7 @@ public static class VortexLimits
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowAlignmentExponent(byte exponent) =>
         throw new VortexFormatException(
             $"alignment_exponent {exponent} exceeds the cap of {MaxAlignmentExponent} " +
@@ -88,10 +90,8 @@ public static class VortexLimits
     /// <param name="max">The cap for this kind of tree; one of the constants above.</param>
     /// <param name="what">What is being nested, for the message.</param>
     /// <remarks>
-    /// This stays internal, unlike <see cref="CheckAlignmentExponent"/>: the alignment check is
-    /// named in <c>SegmentSpec</c>'s own documentation as something an implementer of a segment
-    /// source calls, whereas this one runs only while parsing or decoding, on trees a caller never
-    /// builds.
+    /// Internal, as <see cref="CheckAlignmentExponent"/> is: both run only while the library parses
+    /// or decodes what a file declares, on segment specifications and trees a caller never builds.
     /// </remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static void CheckDepth(int depth, int max, string what)
@@ -103,6 +103,7 @@ public static class VortexLimits
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowDepth(int depth, int max, string what) =>
         throw new VortexFormatException($"{what} nesting depth {depth} exceeds the cap of {max}.");
 }

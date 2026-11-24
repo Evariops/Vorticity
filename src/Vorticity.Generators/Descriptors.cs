@@ -5,7 +5,8 @@ namespace Vorticity.Generators;
 /// <summary>Every diagnostic the package reports.</summary>
 internal static class Descriptors
 {
-    private const string HelpLink = "docs/guide/diagnostics.md#";
+    // An absolute address, which an IDE opens; a path relative to the repository opened nothing.
+    private const string HelpLink = "https://github.com/Evariops/Vorticity/blob/main/docs/guide/diagnostics.md#";
 
     public static readonly DiagnosticDescriptor BorrowedSpanEscapes = new DiagnosticDescriptor(
         "VX1001",

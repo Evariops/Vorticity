@@ -199,6 +199,16 @@ public sealed class BlockMaskTests
             }
 
             Assert.Equal(Math.Min(found, mask.BlockCount), mask.NextLive(from));
+
+            // And the previous one, as a descending walk finds it.
+            int back = random.Next(-2, mask.BlockCount + 3);
+            int before = Math.Clamp(back, -1, mask.BlockCount - 1);
+            while (before >= 0 && !mask.IsLive(before))
+            {
+                before--;
+            }
+
+            Assert.Equal(before, mask.PreviousLive(back));
         }
     }
 

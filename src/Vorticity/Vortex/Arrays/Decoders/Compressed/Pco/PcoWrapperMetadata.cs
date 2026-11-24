@@ -134,7 +134,14 @@ internal readonly ref struct PcoWrapperMetadata
         {
             if (field == 1)
             {
-                values = (int)MetadataProto.ReadUInt32(ref page, wire, MessageName, "n_values");
+                // Past an int, a cast read it as negative, and the decoder multiplied it by the width into a negative slice.
+                uint declared = MetadataProto.ReadUInt32(ref page, wire, MessageName, "n_values");
+                if (declared > int.MaxValue)
+                {
+                    MetadataProto.ThrowOutOfDomain(MessageName, "n_values", $"{declared} values, past what a page holds");
+                }
+
+                values = (int)declared;
             }
             else
             {

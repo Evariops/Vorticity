@@ -67,6 +67,7 @@ public sealed partial class DatasetTwoPhaseTests
 
         await using VortexSession session = VortexSession.Create(_ => { });
         await using VortexDataset dataset = await VortexDataset.OpenAsync(store, options with { Session = session }, Ct);
+        using IDisposable listening = FlatLayoutReader.CountRangesAnswered();
         long answered = FlatLayoutReader.RangesAnswered;
         List<string> bodies = [];
         await foreach (Tagged row in dataset.Scan<Tagged>().Where(r => r.Id == RareId).ToRecordsAsync(Ct))

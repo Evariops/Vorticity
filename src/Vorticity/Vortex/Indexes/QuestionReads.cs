@@ -20,6 +20,9 @@ namespace Vorticity.Indexes;
 /// <remarks>Under one lock, its own: the lanes of the question's scans plan their pruning side by side.</remarks>
 internal sealed class QuestionReads
 {
+    // The lock, the reads' own: on the instance, any holder of it could take it too.
+    private readonly System.Threading.Lock _gate = new System.Threading.Lock();
+
     // Each made at the first read it keeps, a question that reads none holding nothing.
     private Dictionary<(VortexFile File, int Field, string Paths), VariantDirectory?>? _directories;
 
@@ -47,7 +50,7 @@ internal sealed class QuestionReads
     {
         get
         {
-            lock (this)
+            lock (_gate)
             {
                 return (_directories?.Count ?? 0) + (_pathMaps?.Count ?? 0) + (_keyReads?.Count ?? 0) + (_geometries?.Count ?? 0);
             }
@@ -57,7 +60,7 @@ internal sealed class QuestionReads
     /// <summary>A scan of the question holds <paramref name="file"/>, a lease of its object: what the question reads of it stays until the last such hold is released.</summary>
     internal void Hold(VortexFile file)
     {
-        lock (this)
+        lock (_gate)
         {
             for (int i = 0; i < _held; i++)
             {
@@ -80,7 +83,7 @@ internal sealed class QuestionReads
     /// <summary>A hold of <paramref name="file"/> ended: at the last one, what the question read of it goes, for a collection to take while it is young.</summary>
     internal void Release(VortexFile file)
     {
-        lock (this)
+        lock (_gate)
         {
             for (int i = 0; i < _held; i++)
             {
@@ -144,7 +147,7 @@ internal sealed class QuestionReads
     /// <summary>The variant directory of column <paramref name="field"/> of <paramref name="file"/> for <paramref name="paths"/> the question read, if any.</summary>
     internal bool TryGetDirectory(VortexFile file, int field, string paths, out VariantDirectory? directory)
     {
-        lock (this)
+        lock (_gate)
         {
             directory = null;
             return _directories is { } kept && kept.TryGetValue((file, field, paths), out directory);
@@ -154,7 +157,7 @@ internal sealed class QuestionReads
     /// <summary>Keeps <paramref name="directory"/>, the variant directory of column <paramref name="field"/> of <paramref name="file"/> for <paramref name="paths"/>, for the question's other scans.</summary>
     internal void KeepDirectory(VortexFile file, int field, string paths, VariantDirectory? directory)
     {
-        lock (this)
+        lock (_gate)
         {
             (_directories ??= []).TryAdd((file, field, paths), directory);
         }
@@ -163,7 +166,7 @@ internal sealed class QuestionReads
     /// <summary>The path map of column <paramref name="field"/> of <paramref name="file"/> for the keys <paramref name="wanted"/> (every key under null) the question read, if any.</summary>
     internal bool TryGetPathMap(VortexFile file, int field, IReadOnlyCollection<string>? wanted, out VariantPathMap? map)
     {
-        lock (this)
+        lock (_gate)
         {
             map = null;
             return _pathMaps is { } kept && kept.TryGetValue(new Read<string>(file, field, wanted), out map);
@@ -173,7 +176,7 @@ internal sealed class QuestionReads
     /// <summary>Keeps <paramref name="map"/>, the path map of column <paramref name="field"/> of <paramref name="file"/> for <paramref name="wanted"/>, for the question's other scans.</summary>
     internal void KeepPathMap(VortexFile file, int field, IReadOnlyCollection<string>? wanted, VariantPathMap? map)
     {
-        lock (this)
+        lock (_gate)
         {
             (_pathMaps ??= []).TryAdd(new Read<string>(file, field, wanted), map);
         }
@@ -182,7 +185,7 @@ internal sealed class QuestionReads
     /// <summary>The reads of <paramref name="file"/>'s columns by the keys <paramref name="columns"/> names the question made, if any.</summary>
     internal bool TryGetKeyReads(VortexFile file, IReadOnlyDictionary<string, string[]> columns, out VariantKeyReads? reads)
     {
-        lock (this)
+        lock (_gate)
         {
             reads = null;
             return _keyReads is { } kept && kept.TryGetValue(new KeyedColumns(file, columns), out reads);
@@ -192,7 +195,7 @@ internal sealed class QuestionReads
     /// <summary>Keeps <paramref name="reads"/>, the reads of <paramref name="file"/>'s columns by the keys <paramref name="columns"/> names, for the question's other scans.</summary>
     internal void KeepKeyReads(VortexFile file, IReadOnlyDictionary<string, string[]> columns, VariantKeyReads? reads)
     {
-        lock (this)
+        lock (_gate)
         {
             (_keyReads ??= []).TryAdd(new KeyedColumns(file, columns), reads);
         }
@@ -201,7 +204,7 @@ internal sealed class QuestionReads
     /// <summary>The geometry of the granules of <paramref name="file"/>'s chunks the question read, null for none, if it read it.</summary>
     internal bool TryGetGeometry(VortexFile file, out GranuleGeometry? geometry)
     {
-        lock (this)
+        lock (_gate)
         {
             geometry = null;
             return _geometries is { } kept && kept.TryGetValue(file, out geometry);
@@ -211,7 +214,7 @@ internal sealed class QuestionReads
     /// <summary>Keeps <paramref name="geometry"/>, null for none, the geometry of the granules of <paramref name="file"/>'s chunks, for the question's other scans; the first kept stays.</summary>
     internal void KeepGeometry(VortexFile file, GranuleGeometry? geometry)
     {
-        lock (this)
+        lock (_gate)
         {
             (_geometries ??= new Dictionary<VortexFile, GranuleGeometry?>(ReferenceEqualityComparer.Instance)).TryAdd(file, geometry);
         }
@@ -231,7 +234,7 @@ internal sealed class QuestionReads
     /// </summary>
     internal DType Projected(in ScanProjection keep, DType root)
     {
-        lock (this)
+        lock (_gate)
         {
             for (int i = 0; i < _projectedCount; i++)
             {

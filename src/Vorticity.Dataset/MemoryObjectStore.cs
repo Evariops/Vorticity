@@ -13,6 +13,12 @@ namespace Vorticity.Dataset;
 /// An <see cref="IObjectStore"/> in memory, with injectable latency and faults. Thread-safe: one
 /// lock over a sorted map, never held across an await.
 /// </summary>
+/// <remarks>
+/// Public on purpose, as a test double for an application's own tests: its hooks
+/// (<see cref="Fails"/>, <see cref="CrashesAfterPut"/>, <see cref="Latency"/>, <see cref="RetainFor"/>)
+/// exercise the error paths a real store reaches rarely. It holds every object in the managed heap
+/// and is not meant to serve data.
+/// </remarks>
 public sealed class MemoryObjectStore : IObjectStore
 {
     private const int ListPage = 1_000;

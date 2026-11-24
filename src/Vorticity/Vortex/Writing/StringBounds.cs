@@ -577,8 +577,10 @@ internal sealed class StringBounds
     /// </summary>
     internal void FoldValue(ReadOnlySpan<byte> whole)
     {
+        // On the stack under a kibibyte, a block of the pool past it: the limit is the caller's option, which has no cap.
         int length = Math.Min(whole.Length, _limit + 1);
-        Span<byte> padded = stackalloc byte[Math.Max(length, 8)];
+        using Vorticity.Arrays.Decoders.Canonical.Scratch<byte> scratch = new(Math.Max(length, 8), stackalloc byte[1024]);
+        Span<byte> padded = scratch.Span;
         padded.Clear();
         whole[..length].CopyTo(padded);
         Take(padded[..length], Key(padded, length));

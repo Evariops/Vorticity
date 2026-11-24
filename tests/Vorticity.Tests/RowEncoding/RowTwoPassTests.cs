@@ -247,6 +247,39 @@ public sealed class RowTwoPassTests
         }
     }
 
+    /// <summary>
+    /// Keys sharing a text of 64 KiB: the radix passes stop going down past 512 bytes, and the rest of each run is sorted by
+    /// comparison, a permutation in key order, rows of one key in ascending order. Each eight bytes shared went a frame down
+    /// before, 8 400 frames for these keys, past a thread's stack.
+    /// </summary>
+    [Fact]
+    public void KeysSharingALongPrefixSortWithoutGoingDownAFrameAnEightBytes()
+    {
+        using RowFixture fixture = new RowFixture();
+        Random random = new Random(2026_11_24);
+        const int Rows = 200;
+        string shared = new string('k', 64 << 10);
+        byte[]?[] texts = new byte[]?[Rows];
+        for (int i = 0; i < Rows; i++)
+        {
+            // Some rows part from the others at 1 000 or 30 000 bytes in, the rest at the end, a few with one key.
+            string text = i % 17 == 0 ? shared[..1_000] + "a" + shared : i % 23 == 0 ? shared[..30_000] + "b" + shared : shared;
+            texts[i] = System.Text.Encoding.UTF8.GetBytes(text + (char)('a' + random.Next(4)));
+        }
+
+        int column = fixture.VarBin(texts);
+        using RowKeys keys = RowEncoder.Encode(fixture.Arena, [column], [RowSortField.Ascending]);
+        int[] ordered = [.. Enumerable.Range(0, Rows)];
+        keys.SortIndices(ordered);
+
+        Assert.Equal(Enumerable.Range(0, Rows), ordered.Order());
+        for (int i = 1; i < Rows; i++)
+        {
+            int compared = keys.Compare(ordered[i - 1], ordered[i]);
+            Assert.True(compared < 0 || (compared == 0 && ordered[i - 1] < ordered[i]), $"rows {ordered[i - 1]} and {ordered[i]} at {i}");
+        }
+    }
+
     [Fact]
     public void DisposedKeysRefuseEveryAccessor()
     {

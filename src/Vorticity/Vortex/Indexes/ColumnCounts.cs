@@ -326,7 +326,7 @@ internal sealed class ColumnCounts
             held += chunkEntries;
         }
 
-        ColumnCounts counts = new ColumnCounts(directory.MeasureFields, directory.Kinds, new CountGroup[groups], new long[held * StateWords.Count(directory.Kinds)])
+        ColumnCounts counts = new ColumnCounts(directory.MeasureFields, directory.Kinds, new CountGroup[groups], new long[StateLength(held, directory.Kinds)])
         {
             Sketched = directory.Sketched,
             AttachedFields = directory.AttachedFields,
@@ -396,6 +396,35 @@ internal sealed class ColumnCounts
             (last ? directory.Entries : directory.Chunks[chunk + 1].FirstEntry) - at.FirstEntry);
     }
 
+    /// <summary>The words <paramref name="entries"/> entries' states take, computed wide: a format error past what an array holds.</summary>
+    private static int StateLength(int entries, MeasureKind[] kinds)
+    {
+        long words = (long)entries * StateWords.Count(kinds);
+        return words <= Array.MaxLength ? (int)words : throw new VortexFormatException($"A column's counts claim {entries} entries, whose states take {words} words.");
+    }
+
+    /// <summary>
+    /// Holds a directory's chunks to the groups and entries they split: each chunk's first group and first entry rising
+    /// to the next's, the last's to the whole's, and its groups and entries no more than its bytes, a byte each at least.
+    /// A read of chunks sizes its arrays from these differences before it reads one.
+    /// </summary>
+    /// <exception cref="VortexFormatException">A chunk starts past the next, or holds more than its bytes can.</exception>
+    private static void RequireChunks(CountsChunk[] chunks, int groups, int entries)
+    {
+        for (int c = 0; c < chunks.Length; c++)
+        {
+            CountsChunk chunk = chunks[c];
+            int endGroup = c + 1 < chunks.Length ? chunks[c + 1].FirstGroup : groups;
+            int endEntry = c + 1 < chunks.Length ? chunks[c + 1].FirstEntry : entries;
+            if (chunk.FirstGroup > endGroup || chunk.FirstEntry > endEntry
+                || endGroup - chunk.FirstGroup > chunk.Length || endEntry - chunk.FirstEntry > chunk.Length)
+            {
+                throw new VortexFormatException(
+                    $"A chunk of a column's counts spans groups {chunk.FirstGroup} to {endGroup} and entries {chunk.FirstEntry} to {endEntry} in {chunk.Length} bytes.");
+            }
+        }
+    }
+
     /// <summary>The counts' header and directory, from <paramref name="at"/>, past which the groups start.</summary>
     private static CountsDirectory Head(ReadOnlySpan<byte> bytes, ref int at)
     {
@@ -405,7 +434,15 @@ internal sealed class ColumnCounts
         }
 
         at = 2;
+
+        // Each count sizes an array before the bytes behind it are read: held first to what the bytes left can hold, a
+        // measure its field and its kind, two bytes at least, an attached field a byte.
         int measures = Count(bytes, ref at);
+        if (measures > (bytes.Length - at) / 2)
+        {
+            throw new VortexFormatException($"A column's counts claim {measures} measures in the {bytes.Length - at} bytes left of their header.");
+        }
+
         int[] fields = new int[measures];
         MeasureKind[] kinds = new MeasureKind[measures];
         for (int i = 0; i < measures; i++)
@@ -419,7 +456,13 @@ internal sealed class ColumnCounts
         int[] attached = [];
         if ((bytes[1] & DistinctFlag) != 0)
         {
-            attached = new int[Count(bytes, ref at)];
+            int fieldsAttached = Count(bytes, ref at);
+            if (fieldsAttached > bytes.Length - at)
+            {
+                throw new VortexFormatException($"A column's counts claim {fieldsAttached} attached fields in the {bytes.Length - at} bytes left of their header.");
+            }
+
+            attached = new int[fieldsAttached];
             for (int a = 0; a < attached.Length; a++)
             {
                 attached[a] = Count(bytes, ref at);
@@ -465,6 +508,8 @@ internal sealed class ColumnCounts
             chunks = [];
         }
 
+        RequireChunks(chunks, groups, buckets == 0 ? groups : entries);
+
         return new CountsDirectory(at, fields, kinds, (bytes[1] & SketchesFlag) != 0, attached, buckets, buckets == 0 ? groups : entries, groups, chunks);
     }
 
@@ -482,7 +527,7 @@ internal sealed class ColumnCounts
             throw new VortexFormatException($"A column's counts claim {entries} entries for {groups} groups in {bytes.Length} bytes.");
         }
 
-        ColumnCounts counts = new ColumnCounts(head.MeasureFields, head.Kinds, new CountGroup[groups], new long[entries * StateWords.Count(head.Kinds)])
+        ColumnCounts counts = new ColumnCounts(head.MeasureFields, head.Kinds, new CountGroup[groups], new long[StateLength(entries, head.Kinds)])
         {
             Sketched = head.Sketched,
             AttachedFields = head.AttachedFields,
@@ -652,7 +697,9 @@ internal sealed class ColumnCounts
                         throw new VortexFormatException($"A column's counts hold a float sum they cannot read at {at}.");
                     }
 
-                    state[sum + 3] = IndexedSum.MetaOf(values - (long)skipped, (int)(top & 0x7F), (int)(top >> 7));
+                    // Held to the bins a sum holds: a merge adopts the state whole, and rows folded in after read the
+                    // extractors' tables at its top.
+                    state[sum + 3] = IndexedSum.CheckedMeta(IndexedSum.MetaOf(values - (long)skipped, (int)(top & 0x7F), (int)(top >> 7)));
                     state[sum + 4] = Varint.ZigZagDecode64(Varint.Read64<Errors>(bytes, ref at));
                     state[m + MeasureLayout.FloatLeast] = Long(bytes, ref at);
                     state[m + MeasureLayout.FloatGreatest] = Long(bytes, ref at);

@@ -101,9 +101,11 @@ combined: City in ('Lyon', 'Nice') and not (Celsius < 40), 61426 rows
 ```
 
 The grammar covers comparisons of a column with a literal or with another column, `and`, `or`, `not`,
-parentheses, `in (…)`, `is [not] null`, `like`, `starts with` and `contains`. Text outside it throws
-`FormatException`. `&`, `|` and `!` combine parsed filters, and a `VortexExpr` prints back in the
-same grammar.
+parentheses, `in (…)`, `is [not] null`, `like`, `starts with`, `has token` and `contains`. Text
+outside it throws `FormatException`. `&`, `|` and `!` combine parsed filters, and a `VortexExpr`
+prints back in the same grammar. A membership built over typed values the grammar has no literal
+for, dates, instants, ids or decimals, prints them as quoted text, which reads as the filter but
+parses back as a membership of text.
 
 The interpolated form, `Where($"Day >= {threshold}")`, is the one to use with values. Each hole
 reaches the filter as a typed value rather than being formatted into the text, and it is checked

@@ -1517,6 +1517,13 @@ internal sealed class KeyIndexPruner
         {
             for (int k = lo; k < hi; k++)
             {
+                // A key's list bounds, of the file's, held to the blocks' list: past it, the index came out as the runtime's
+                // out of range, past the format and overflow errors that cost the segment alone.
+                if (starts[k + 1] > (uint)blocks.Length)
+                {
+                    throw new VortexFormatException($"A postings list ends at {starts[k + 1]}, past the {blocks.Length} blocks its segment lists.");
+                }
+
                 for (uint p = starts[k]; p < starts[k + 1]; p++)
                 {
                     Present(literal, firstBlock + blocks[(int)p]);

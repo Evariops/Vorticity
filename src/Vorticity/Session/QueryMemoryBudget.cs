@@ -415,21 +415,37 @@ public sealed class QueryMemoryBudget
     private int _serveAgain;
 
     /// <summary>One turn of <see cref="Serve"/>.</summary>
+    /// <remarks>
+    /// The head's reservation is tried out of the gate: the process's may let go of the memory kept and run a full
+    /// collection, which every caller of <see cref="ReserveAsync"/> waited on to queue. The head stays the head meanwhile:
+    /// only a turn takes waiters out, and one turn runs at a time.
+    /// </remarks>
     private void ServeTurn()
     {
         Waiter? served = null;
         Waiter? lastServed = null;
-        lock (_waitGate)
+        while (true)
         {
-            while (_firstWaiter is { } head)
+            Waiter? head;
+            lock (_waitGate)
             {
-                bool cancelled = head.Task.IsCompleted;
-                bool granted = !cancelled && CanReserve(head.Bytes) && TryReserve(head.Bytes);
-                if (!cancelled && !granted && ReservedBytes > 0)
-                {
-                    break;
-                }
+                head = _firstWaiter;
+            }
 
+            if (head is null)
+            {
+                break;
+            }
+
+            bool cancelled = head.Task.IsCompleted;
+            bool granted = !cancelled && CanReserve(head.Bytes) && TryReserve(head.Bytes);
+            if (!cancelled && !granted && ReservedBytes > 0)
+            {
+                break;
+            }
+
+            lock (_waitGate)
+            {
                 _firstWaiter = head.Next;
                 if (_firstWaiter is null)
                 {
@@ -438,21 +454,22 @@ public sealed class QueryMemoryBudget
 
                 Interlocked.Decrement(ref _waiting);
                 head.Next = null;
-                if (!cancelled)
-                {
-                    // Kept in their order, ended in it.
-                    head.Granted = granted;
-                    if (lastServed is null)
-                    {
-                        served = head;
-                    }
-                    else
-                    {
-                        lastServed.Next = head;
-                    }
+            }
 
-                    lastServed = head;
+            if (!cancelled)
+            {
+                // Kept in their order, ended in it.
+                head.Granted = granted;
+                if (lastServed is null)
+                {
+                    served = head;
                 }
+                else
+                {
+                    lastServed.Next = head;
+                }
+
+                lastServed = head;
             }
         }
 
@@ -492,9 +509,11 @@ public sealed class QueryMemoryBudget
         /// <summary>Leaves the turn at once, the ones behind it served when the room is there.</summary>
         internal void Cancel(CancellationToken token)
         {
-            if (TrySetCanceled(token))
+            if (TrySetCanceled(token) && Budget is { } budget)
             {
-                Budget?.Serve();
+                // Served on a thread of the pool rather than on the one that cancels, which runs this in its callback: a
+                // turn may let go of the memory kept and run a full collection.
+                Execution.Waits.Upkeep(static budget => budget.Serve(), budget);
             }
         }
     }
@@ -681,9 +700,17 @@ public sealed class QueryMemoryBudget
         long over = soft.ReservedBytes + pool.ParkedBytes - soft.CeilingBytes - PoolSlackBytes;
         if (over > 0)
         {
-            pool.GiveBack(KeptKind.Blocks, over);
+            Process.LetGoKept(pool.GiveBack(KeptKind.Blocks, over));
         }
     }
+
+    /// <summary>
+    /// Tells the process's budget of <paramref name="bytes"/> the memory kept let go of outside its own asking: a sweep of the
+    /// registry of kept memory, the pool trimmed under a hard budget, an outsized block replaced. They were live at the last
+    /// full collection, so the rest still reads them so until it is told, and would refuse a reservation over bytes that
+    /// only a collection it then does not ask for takes back.
+    /// </summary>
+    internal void LetGoKept(long bytes) => LetGo(bytes);
 
     /// <summary>Notes a reservation refused, once: a job reads it to tell its own failure from another's.</summary>
     private void Refuse()

@@ -182,8 +182,9 @@ internal static class CanonicalFill
             case DTypeKind.Variant:
             {
                 // The struct of its metadata and its value wearing the variant dtype, the shape a read delivers, both
-                // empty in every row, as a writer leaves a null row's.
-                DType binary = dtype.Arena.Binary(Nullability.NonNullable);
+                // empty in every row, as a writer leaves a null row's. Their binary dtype is composed in the decode's
+                // arena, never in the dtype's own, which may be the file's, shared by every lane that reads it.
+                DType binary = (context?.Types ?? new DTypeArena()).Binary(Nullability.NonNullable);
                 Span<int> fields = [
                     BuildZeroed(arena, context, binary, length, Validity.NonNullable, depth + 1),
                     BuildZeroed(arena, context, binary, length, Validity.NonNullable, depth + 1)];
@@ -203,7 +204,7 @@ internal static class CanonicalFill
                 // row empty. The entries' struct is composed in the decode's arena, never in the file's.
                 DTypeArena types = context?.Types ?? new DTypeArena();
                 Span<int> names = [types.InternName("key"u8), types.InternName("value"u8)];
-                DType[] fields = [DTypeImport.Into(types, dtype.KeyType), DTypeImport.Into(types, dtype.ValueType)];
+                Span<DType> fields = [DTypeImport.Into(types, dtype.KeyType), DTypeImport.Into(types, dtype.ValueType)];
                 DType entries = types.Struct(names, fields, Nullability.NonNullable);
                 int elements = BuildZeroed(arena, context, entries, 0, Validity.NonNullable, depth + 1);
                 int bytes = ArrayDecodeContext.CheckedMultiply(length, 8, "map offsets");

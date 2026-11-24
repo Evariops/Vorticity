@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -1272,6 +1273,7 @@ internal static partial class FastLanes
         }
     }
 
+    [DoesNotReturn]
     private static T ThrowWidth<T>(int elementBits) =>
         throw new ArgumentOutOfRangeException(
             nameof(elementBits), elementBits, "FastLanes element widths are 8, 16, 32 and 64.");

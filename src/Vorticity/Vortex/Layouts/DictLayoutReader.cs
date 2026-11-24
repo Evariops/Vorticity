@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 
 using Vorticity.Arrays;
 using Vorticity.Arrays.Decoders.Compressed;
@@ -425,6 +426,7 @@ internal sealed class DictLayoutReader : LayoutReader
     /// three call sites carries a `ReadInteger` for an error path; `DictDecoder.ThrowCode` is
     /// written the same way.
     /// </remarks>
+    [DoesNotReturn]
     private static void ThrowCode(
         ReadOnlySpan<byte> codes, PType codesPType, int row, int valuesLength) =>
         LayoutsThrow.Format(

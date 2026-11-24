@@ -7,8 +7,15 @@ namespace Vorticity.Generators;
 internal static class RecordEmitter
 {
     private const string Vortex = "global::Vorticity.";
-    private const string Pool = "global::System.Buffers.ArrayPool<";
     private const string ContainsReferences = "global::System.Runtime.CompilerServices.RuntimeHelpers.IsReferenceOrContainsReferences<";
+
+    // The room a member's values are filled in before the records are built is the reader's or the builder's own
+    // (Columns<T>.Scratch, ColumnsBuilder<T>.Scratch), four uses a member, never the runtime's shared pool: each use of
+    // member k takes slot 4k plus its own.
+    private const int TempSlot = 0;
+    private const int CopySlot = 1;
+    private const int NestedSlot = 2;
+    private const int ListSlot = 3;
 
     public static string Emit(RecordModel model)
     {
@@ -148,7 +155,7 @@ internal static class RecordEmitter
 
         foreach ((string type, string name) in temps)
         {
-            w.Line($"{type}[] {name} = {Pool}{type}>.Shared.Rent(count);");
+            w.Line($"global::System.Span<{type}> {name} = columns.Scratch<{type}>({Slot(name, TempSlot)}, count);");
         }
 
         bool guarded = temps.Count > 0;
@@ -167,7 +174,7 @@ internal static class RecordEmitter
 
             if (value.Kind == ValueKind.Record && !value.IsNullable)
             {
-                w.Line($"ReadNested(columns.Struct<{value.CoreType}>({k}), new global::System.Span<{value.CoreType}>(temp{k}, 0, count));");
+                w.Line($"ReadNested(columns.Struct<{value.CoreType}>({k}), temp{k});");
             }
             else
             {
@@ -184,7 +191,7 @@ internal static class RecordEmitter
             w.Open("finally");
             foreach ((string type, string name) in temps)
             {
-                w.Line($"{Pool}{type}>.Shared.Return({name}, {ContainsReferences}{type}>());");
+                Clear(w, type, name);
             }
 
             w.Close();
@@ -319,17 +326,17 @@ internal static class RecordEmitter
                 else if (Copies(value) && buffer is not null)
                 {
                     // The column copies itself whole: its node resolved once, a conversion per row.
-                    w.Line($"columns.Column<{value.ColumnType}>({k}).CopyTo(new global::System.Span<{value.MemberType}>({buffer}, 0, count));");
+                    w.Line($"columns.Column<{value.ColumnType}>({k}).CopyTo({buffer});");
                 }
                 else if (Copies(value))
                 {
-                    w.Line($"{value.MemberType}[] copy = {Pool}{value.MemberType}>.Shared.Rent(count);");
+                    w.Line($"global::System.Span<{value.MemberType}> copy = columns.Scratch<{value.MemberType}>({(4 * k) + CopySlot}, count);");
                     w.Open("try");
-                    w.Line($"columns.Column<{value.ColumnType}>({k}).CopyTo(new global::System.Span<{value.MemberType}>(copy, 0, count));");
+                    w.Line($"columns.Column<{value.ColumnType}>({k}).CopyTo(copy);");
                     Loop(w, $"{target} = copy[i];");
                     w.Close();
                     w.Open("finally");
-                    w.Line($"{Pool}{value.MemberType}>.Shared.Return(copy, {ContainsReferences}{value.MemberType}>());");
+                    Clear(w, value.MemberType, "copy");
                     w.Close();
                 }
                 else
@@ -364,16 +371,16 @@ internal static class RecordEmitter
             w.Line($"{Vortex}Columns<{nested}> nestedColumns = columns.Struct<{nested}>({k});");
         }
 
-        w.Line($"{nested}[] nested = {Pool}{nested}>.Shared.Rent(count);");
+        w.Line($"global::System.Span<{nested}> nested = columns.Scratch<{nested}>({(4 * k) + NestedSlot}, count);");
         w.Open("try");
         if (!value.IsNullable)
         {
-            w.Line($"ReadNested(columns.Struct<{nested}>({k}), new global::System.Span<{nested}>(nested, 0, count));");
+            w.Line($"ReadNested(columns.Struct<{nested}>({k}), nested);");
             Loop(w, $"{target} = nested[i];");
         }
         else
         {
-            w.Line($"ReadNested(nestedColumns, new global::System.Span<{nested}>(nested, 0, count));");
+            w.Line("ReadNested(nestedColumns, nested);");
             w.Open("if (nestedColumns.IsAllValid)");
             Loop(w, $"{target} = nested[i];");
             w.Close();
@@ -385,7 +392,18 @@ internal static class RecordEmitter
 
         w.Close();
         w.Open("finally");
-        w.Line($"{Pool}{nested}>.Shared.Return(nested, {ContainsReferences}{nested}>());");
+        Clear(w, nested, "nested");
+        w.Close();
+    }
+
+    /// <summary>The slot of a temporary named for member k, <c>temp{k}</c>, for <paramref name="use"/>.</summary>
+    private static int Slot(string name, int use) => (4 * int.Parse(name.Substring("temp".Length), System.Globalization.CultureInfo.InvariantCulture)) + use;
+
+    /// <summary>Clears <paramref name="name"/>'s values once read or written, when they hold references the room would keep alive.</summary>
+    private static void Clear(SourceWriter w, string type, string name)
+    {
+        w.Open($"if ({ContainsReferences}{type}>())");
+        w.Line($"{name}.Clear();");
         w.Close();
     }
 
@@ -424,17 +442,17 @@ internal static class RecordEmitter
         w.Line($"{Vortex}ListColumns<{nested}> lists = columns.ListOf<{nested}>({k});");
         w.Line($"{Vortex}Columns<{nested}> elements = lists.Elements;");
         w.Line("int total = elements.RowCount;");
-        w.Line($"{nested}[] all = {Pool}{nested}>.Shared.Rent(total);");
+        w.Line($"global::System.Span<{nested}> all = columns.Scratch<{nested}>({(4 * k) + ListSlot}, total);");
         w.Open("try");
-        w.Line($"ReadNested(elements, new global::System.Span<{nested}>(all, 0, total));");
+        w.Line("ReadNested(elements, all);");
         w.Open("for (int i = 0; i < count; i++)");
         w.Line("(int offset, int length) = lists[i].GetOffsetAndLength(total);");
-        string read = $"RecordList{k}(new global::System.ReadOnlySpan<{nested}>(all, offset, length))";
+        string read = $"RecordList{k}(all.Slice(offset, length))";
         w.Line(value.IsNullable ? $"{target} = lists.IsValid(i) ? {read} : default({value.MemberType});" : $"{target} = {read};");
         w.Close();
         w.Close();
         w.Open("finally");
-        w.Line($"{Pool}{nested}>.Shared.Return(all, {ContainsReferences}{nested}>());");
+        Clear(w, nested, "all");
         w.Close();
     }
 
@@ -718,13 +736,13 @@ internal static class RecordEmitter
     private static void EmitWriteNested(SourceWriter w, ValueModel value, int k, string source)
     {
         string nested = value.CoreType;
-        string span = $"new global::System.ReadOnlySpan<{nested}>(nested, 0, ";
+        string span = "nested[..";
         if (value.IsNullable)
         {
             w.Line($"{Vortex}ColumnsBuilder<{nested}> nestedBuilder = builder.Struct<{nested}>({k});");
         }
 
-        w.Line($"{nested}[] nested = {Pool}{nested}>.Shared.Rent(count);");
+        w.Line($"global::System.Span<{nested}> nested = builder.Scratch<{nested}>({(4 * k) + NestedSlot}, count);");
         w.Open("try");
         if (value.IsNullable)
         {
@@ -736,7 +754,7 @@ internal static class RecordEmitter
             w.Close();
             w.Line();
             w.Open("if (run > 0)");
-            w.Line($"WriteNested(nestedBuilder, {span}run));");
+            w.Line($"WriteNested(nestedBuilder, {span}run]);");
             w.Line("run = 0;");
             w.Close();
             w.Line();
@@ -744,19 +762,19 @@ internal static class RecordEmitter
             w.Close();
             w.Line();
             w.Open("if (run > 0)");
-            w.Line($"WriteNested(nestedBuilder, {span}run));");
+            w.Line($"WriteNested(nestedBuilder, {span}run]);");
             w.Close();
         }
         else
         {
             Loop(w, $"nested[i] = {source};");
             w.Line();
-            w.Line($"WriteNested(builder.Struct<{nested}>({k}), {span}count));");
+            w.Line($"WriteNested(builder.Struct<{nested}>({k}), {span}count]);");
         }
 
         w.Close();
         w.Open("finally");
-        w.Line($"{Pool}{nested}>.Shared.Return(nested, {ContainsReferences}{nested}>());");
+        Clear(w, nested, "nested");
         w.Close();
     }
 
@@ -997,5 +1015,10 @@ internal static class RecordEmitter
         }
     }
 
-    private static string Cref(MemberModel member) => member.DeclaringType + "." + RecordAnalysis.Escape(member.Name);
+    /// <summary>
+    /// The member as a <c>cref</c> names it, by the type that declares it: a member taken from a closed generic base,
+    /// <c>Base&lt;int&gt;</c>, by the base's definition and its type parameters in braces, <c>Base{T}</c>, the one form a
+    /// <c>cref</c> accepts, angle brackets leaving the comment's XML malformed.
+    /// </summary>
+    private static string Cref(MemberModel member) => member.DeclaringType.Replace('<', '{').Replace('>', '}') + "." + RecordAnalysis.Escape(member.Name);
 }

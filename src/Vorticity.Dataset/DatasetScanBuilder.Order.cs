@@ -80,7 +80,8 @@ internal sealed partial class DatasetScanBuilder
     {
         SortKey tree = _version.Schema.Tree!;
         int last = order.Positions[count - 1] + skip;
-        Span<int> ends = stackalloc int[tree.Count];
+        using Vorticity.Arrays.Decoders.Canonical.Scratch<int> endScratch = new(tree.Count, stackalloc int[64]);
+        Span<int> ends = endScratch.Span;
         if (key.IsEmpty || !tree.Ends(key.Span, ends[..(last + 1)]))
         {
             return default;
@@ -126,7 +127,8 @@ internal sealed partial class DatasetScanBuilder
     private ReadOnlyMemory<byte> HighBound(ReadOnlyMemory<byte> last, ColumnOrder order, int skip, int count, SortKey merged)
     {
         SortKey tree = _version.Schema.Tree!;
-        Span<int> ends = stackalloc int[tree.Count];
+        using Vorticity.Arrays.Decoders.Canonical.Scratch<int> endScratch = new(tree.Count, stackalloc int[64]);
+        Span<int> ends = endScratch.Span;
         if (last.IsEmpty || !tree.Ends(last.Span, ends[..(order.Positions[count - 1] + skip + 1)]))
         {
             return default;
@@ -150,6 +152,7 @@ internal sealed partial class DatasetScanBuilder
         FieldMask mask = _mask ?? FieldMask.All;
         bool drop = !mask.IsAll && !Array.TrueForAll(paths, path => Covers(mask, _version.Schema.DType, path));
         ScanProjection? kept = null;
+        ProjectedSchemas? schemas = null;
         // Read downward in their own order, objects give the reverse of the key's order, the nulls of its first column last.
         SortKey key = SortKey.OfColumns(_version.Schema.DType, paths, _descending, reversed: InObjectOrder(paths));
         KeyOrderedMerge merge = new KeyOrderedMerge(
@@ -179,7 +182,8 @@ internal sealed partial class DatasetScanBuilder
                     }
 
                     kept ??= ScanProjection.Parse(run.DType, PathsOf(mask, _version.Schema.DType));
-                    RecordBatch projected = run.Project(kept.Value);
+                    schemas ??= new ProjectedSchemas();
+                    RecordBatch projected = run.Project(kept.Value, schemas);
                     try
                     {
                         yield return InDataset(projected, firstRow, ref view);
@@ -194,7 +198,10 @@ internal sealed partial class DatasetScanBuilder
             {
                 if (_metrics is { } metrics)
                 {
-                    metrics.Cursors = Math.Max(metrics.Cursors, merge.MostOpen);
+                    lock (metrics)
+                    {
+                        metrics.Cursors = Math.Max(metrics.Cursors, merge.MostOpen);
+                    }
                 }
             }
         }

@@ -760,7 +760,11 @@ internal sealed class VariantDirectory
     }
 
     /// <summary>The groups of <paramref name="groupRows"/> rows of <paramref name="rows"/>; 0 for none.</summary>
-    internal static int Groups(long rows, long groupRows) => groupRows <= 0 ? 0 : (int)((rows + groupRows - 1) / groupRows);
+    internal static int Groups(long rows, long groupRows)
+    {
+        long groups = groupRows <= 0 || rows <= 0 ? 0 : ((rows - 1) / groupRows) + 1;
+        return groups <= int.MaxValue ? (int)groups : 0;
+    }
 
     private static VariantDirectory? BodyFrom(ReadOnlySpan<byte> bytes, bool valued, IReadOnlyList<byte[][]>? wanted)
     {
@@ -1044,6 +1048,14 @@ internal sealed class VariantDirectory
         }
 
         (VariantDirectory? Directory, int Segments, long Bytes) read = await ReadFromAsync(file, field, wanted, cancellationToken).ConfigureAwait(false);
+
+        // The rows and the groups the directory declares size what judges it, a verdict a group: a directory of other rows
+        // than the file's describes another file, and bounds nothing here.
+        if (read.Directory is { } directory && directory.Rows != file.RowCount)
+        {
+            read = (null, read.Segments, read.Bytes);
+        }
+
         question?.KeepDirectory(file, field, paths!, read.Directory);
         return read;
     }

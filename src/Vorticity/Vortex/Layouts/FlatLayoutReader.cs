@@ -1211,10 +1211,24 @@ internal sealed class FlatLayoutReader : LayoutReader
         }
     }
 
-    /// <summary>The reads by granules whose encoding answered a pushed comparison over their rows, over the process: for a test, run alone.</summary>
+    /// <summary>
+    /// The reads by granules whose encoding answered a pushed comparison over their rows, over the process, counted only while
+    /// a test listens (<see cref="CountRangesAnswered"/>): written by every lane at each such read, its line of cache would be
+    /// shared by all of them for an observation no one makes.
+    /// </summary>
     internal static long RangesAnswered => System.Threading.Interlocked.Read(ref s_rangesAnswered);
 
     private static long s_rangesAnswered;
+
+    // The tests that listen to RangesAnswered now: a plain read where a range is answered, which no lane writes.
+    private static int s_rangesListeners;
+
+    /// <summary>Counts <see cref="RangesAnswered"/> until the scope ends, for a test.</summary>
+    internal static CanonicalArena.Listening CountRangesAnswered()
+    {
+        System.Threading.Interlocked.Increment(ref s_rangesListeners);
+        return new CanonicalArena.Listening(static () => System.Threading.Interlocked.Decrement(ref s_rangesListeners));
+    }
 
     /// <summary>
     /// The rows a read by granules answers a pushed comparison over: the batch's, or its selection when that is one range;
@@ -1254,7 +1268,11 @@ internal sealed class FlatLayoutReader : LayoutReader
                 return -1;
             }
 
-            System.Threading.Interlocked.Increment(ref s_rangesAnswered);
+            if (s_rangesListeners > 0)
+            {
+                System.Threading.Interlocked.Increment(ref s_rangesAnswered);
+            }
+
             context.PredicateAnswered = true;
             return Answer(context, ref bits);
         }

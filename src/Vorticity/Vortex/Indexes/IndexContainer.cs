@@ -103,9 +103,12 @@ internal static class IndexContainer
             return (0, 0, "the fragment's version is not one this library reads");
         }
 
+        // Compared without a sum, which an offset near 2^64 wrapped back inside the fragment, and with the size held to an
+        // int, which a cast past 2^31 turned negative.
         ulong offset = BinaryPrimitives.ReadUInt64LittleEndian(bytes);
         uint size = BinaryPrimitives.ReadUInt32LittleEndian(bytes[8..]);
-        return offset < (ulong)Magic.Length || offset + size > (ulong)(length - TrailerSize)
+        ulong room = (ulong)(length - TrailerSize);
+        return offset < (ulong)Magic.Length || size > int.MaxValue || size > room || offset > room - size
             ? (0, 0, "the fragment's trailer names a directory outside it")
             : ((long)offset, (int)size, null);
     }

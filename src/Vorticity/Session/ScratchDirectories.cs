@@ -28,8 +28,8 @@ internal static class ScratchDirectories
     /// temporary one lies in memory, <paramref name="inMemory"/> says, and the cache's does not.
     /// </summary>
     /// <param name="temporary">The system's temporary directory.</param>
-    /// <param name="cache">The user's cache, <c>$XDG_CACHE_HOME</c>; null or empty for none.</param>
-    /// <param name="home">The user's home, whose <c>.cache</c> stands in for an unset cache.</param>
+    /// <param name="cache">The user's cache, <c>$XDG_CACHE_HOME</c>; null, empty or relative for none, as the specification says.</param>
+    /// <param name="home">The user's home, whose <c>.cache</c> stands in for an unset cache; empty or relative for none.</param>
     /// <param name="inMemory">Whether a directory lies on a file system in memory.</param>
     internal static string Choose(string temporary, string? cache, string home, Func<string, bool> inMemory)
     {
@@ -38,7 +38,17 @@ internal static class ScratchDirectories
             return temporary;
         }
 
-        string directory = Path.Combine(string.IsNullOrEmpty(cache) ? Path.Combine(home, ".cache") : cache, "vorticity");
+        // A container without HOME gives an empty home: its .cache was relative, and a group by spilled under the
+        // application's working directory. Without a rooted cache or home, the temporary directory stays.
+        string? root = !string.IsNullOrEmpty(cache) && Path.IsPathRooted(cache) ? cache
+            : !string.IsNullOrEmpty(home) && Path.IsPathRooted(home) ? Path.Combine(home, ".cache")
+            : null;
+        if (root is null)
+        {
+            return temporary;
+        }
+
+        string directory = Path.Combine(root, "vorticity");
         return inMemory(directory) ? temporary : directory;
     }
 

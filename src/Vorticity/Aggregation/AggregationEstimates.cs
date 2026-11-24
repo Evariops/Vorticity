@@ -61,6 +61,15 @@ internal sealed class EstimateRun
     // products of the values and of the sum with the ranges' rows.
     private readonly Dictionary<long, double[]> _sums = [];
     private readonly object _gate = new object();
+
+    // What the run holds of its session's memory: the sample's tables and the scaled ones, the sums by stratum and group,
+    // the totals and orders of a tier. Given back whole once the tiers end; the estimates handed out keep reading their
+    // tables, which the collector then takes, as a result's. Held nowhere, a million groups over a hundred strata were a
+    // hundred million entries no budget saw.
+    private readonly QueryMemory _memory;
+
+    // Each row's sums of the batch folded, reused from one batch to the next under the lock the folds take.
+    private double[]?[] _rowSums = [];
     private Stratum[] _strata = [];
     private long _total;
     private long _read;
@@ -84,7 +93,8 @@ internal sealed class EstimateRun
         AggregationPlan plan = question.Plan;
         AggregateSlot?[] settled = new AggregateSlot?[plan.Aggregates.Length];
         (_columns, _inputs) = AggregationEngine.Columns(plan, settled);
-        _sample = new AggregationPartition(plan, settled, _columns, _inputs, sorted: false);
+        _memory = QueryMemory.Start(question.Session);
+        _sample = new AggregationPartition(plan, settled, _columns, _inputs, sorted: false, memory: _memory);
         _rows = Array.FindIndex(plan.Aggregates, static a => a.Kind == AggregateKind.Count && a.Input is null);
         List<Measure> measures = [];
         foreach (IAggregateNode aggregate in plan.Aggregates)
@@ -126,6 +136,22 @@ internal sealed class EstimateRun
 
     /// <summary>The tiers: one a share of the ranges, each reading those the share adds, then the exact answer.</summary>
     internal async IAsyncEnumerable<AggregationEstimate> TiersAsync([EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            await foreach (AggregationEstimate tier in TiersHeldAsync(cancellationToken).ConfigureAwait(false))
+            {
+                yield return tier;
+            }
+        }
+        finally
+        {
+            _memory.Dispose();
+        }
+    }
+
+    /// <summary>The tiers, under the run's memory, which <see cref="TiersAsync"/> gives back once they end.</summary>
+    private async IAsyncEnumerable<AggregationEstimate> TiersHeldAsync([EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         AggregationHost host = _question.Host;
         ScanSpec pass = AggregationEngine.PassSpec(host.Spec(_question.RowFilter), _columns, _question.Plan, host.Source.Schema);
@@ -323,10 +349,22 @@ internal sealed class EstimateRun
 
         _sample.Process(RecordBatch.OfPartial(batch.Arena, batch.RootIndex, 0));
         ReadOnlySpan<int> groups = _sample.StateGroups(rows);
-        double[][] sums = new double[rows][];
+        if (_rowSums.Length < rows)
+        {
+            _rowSums = new double[]?[rows];
+        }
+
+        double[]?[] sums = _rowSums;
         for (int row = 0; row < rows; row++)
         {
             sums[row] = Sums(stratum, groups[row]);
+        }
+
+        if (_newSums > 0)
+        {
+            long added = _newSums;
+            _newSums = 0;
+            _memory.Hold(added, "sums of an estimate's groups by stratum");
         }
 
         CanonicalArena arena = batch.Arena;
@@ -337,9 +375,10 @@ internal sealed class EstimateRun
             for (int row = 0; row < rows; row++)
             {
                 double counted = counts[row];
-                sums[row][0] += counted;
-                sums[row][1] += counted * counted;
-                sums[row][2] += counted * length;
+                double[] summed = sums[row]!;
+                summed[0] += counted;
+                summed[1] += counted * counted;
+                summed[2] += counted * length;
             }
         }
 
@@ -368,7 +407,7 @@ internal sealed class EstimateRun
                     s = (double)new Int128(unchecked((ulong)word1[row]), unchecked((ulong)word0[row]));
                 }
 
-                double[] summed = sums[row];
+                double[] summed = sums[row]!;
                 summed[at] += x;
                 summed[at + 1] += x * x;
                 summed[at + 2] += s;
@@ -386,12 +425,26 @@ internal sealed class EstimateRun
         long key = ((long)stratum << 32) | (uint)group;
         if (!_sums.TryGetValue(key, out double[]? sums))
         {
-            sums = new double[Rows + (Measured * _measures.Length)];
+            // Counted with the batch's others once it is folded (Fold): the array, its header and its doubles, and the
+            // dictionary's entry, its key, its reference, its hash and its link.
+            int length = Rows + (Measured * _measures.Length);
+            _newSums += SumsEntryOverhead + ((long)length * sizeof(double));
+            sums = new double[length];
             _sums.Add(key, sums);
         }
 
         return sums;
     }
+
+    // The bytes of the sums' entries the batch being folded added, held once its rows are summed: an entry at a time, a
+    // hundred million entries were as many reservations, each a fence.
+    private long _newSums;
+
+    /// <summary>
+    /// What a group's entry of the sums by stratum holds beside its doubles, on a 64-bit runtime: the array's header and
+    /// length, 24 bytes, and the dictionary's entry, its key, its value's reference, its hash and its link, 24 more.
+    /// </summary>
+    private const long SumsEntryOverhead = 48;
 
     /// <summary>The 64-bit integers of the column <paramref name="name"/> of a batch of a range's states.</summary>
     private static ReadOnlySpan<long> Words(CanonicalArena arena, CanonicalNode root, string name) =>
@@ -418,10 +471,21 @@ internal sealed class EstimateRun
             return new AggregationEstimate(answers, 1, _ranges, groups, exact: true, _exactCost);
         }
 
-        Totals totals = TotalsOf(groups);
-        (AggregationOutcome scaled, int[] place) = Scaled(totals, groups);
-        EstimateQuery estimate = new EstimateQuery(_question, scaled, groups, Margins(totals, place, groups), _counters);
-        return new AggregationEstimate(estimate, _total == 0 ? 1 : (double)_read / _total, _ranges, groups, exact: false, _exactCost);
+        // The totals and the groups' places in the scaled states live while the tier is made, held for it and let go after:
+        // two doubles a group, four a measure, and a place.
+        long totalsBytes = ((long)groups * sizeof(double) * (2 + (4L * _measures.Length))) + ((long)groups * sizeof(int));
+        _memory.Hold(totalsBytes, "totals of an estimate's groups");
+        try
+        {
+            Totals totals = TotalsOf(groups);
+            (AggregationOutcome scaled, int[] place) = Scaled(totals, groups);
+            EstimateQuery estimate = new EstimateQuery(_question, scaled, groups, Margins(totals, place, groups), _counters);
+            return new AggregationEstimate(estimate, _total == 0 ? 1 : (double)_read / _total, _ranges, groups, exact: false, _exactCost);
+        }
+        finally
+        {
+            _memory.LetGo(totalsBytes);
+        }
     }
 
     /// <summary>The estimates of every group's totals over every row, and their variances.</summary>
@@ -493,7 +557,7 @@ internal sealed class EstimateRun
         MemoryAccount account = QueryMemoryBudget.Process.Account;
         StructStore store = (StructStore)ColumnStores.Create(dtype, account, options.Extensions);
         CanonicalArena arena = new CanonicalArena(GroupBatches.ResultNodes(dtype.FieldCount), account);
-        AggregationPartition scaled = new AggregationPartition(plan, new AggregateSlot?[plan.Aggregates.Length], _columns, _inputs, sorted: false);
+        AggregationPartition scaled = new AggregationPartition(plan, new AggregateSlot?[plan.Aggregates.Length], _columns, _inputs, sorted: false, memory: _memory);
         int[] place = new int[groups];
         try
         {
@@ -555,6 +619,8 @@ internal sealed class EstimateRun
                 continue;
             }
 
+            // Kept by the estimate, which its caller reads: held until the run's memory is given back.
+            _memory.Hold((long)groups * sizeof(double), "margins of an estimate");
             double[] margin = new double[groups];
             if (totals is not null)
             {
@@ -570,9 +636,10 @@ internal sealed class EstimateRun
         return [.. margins];
     }
 
-    /// <summary>The groups <c>0</c> to <paramref name="groups"/> − 1, in order.</summary>
-    private static Block<int> Order(int groups)
+    /// <summary>The groups <c>0</c> to <paramref name="groups"/> − 1, in order: the estimate's, which its caller reads, held until the run's memory is given back.</summary>
+    private Block<int> Order(int groups)
     {
+        _memory.Hold((long)groups * sizeof(int), "order of an estimate's groups");
         Block<int> order = Blocks.Allocate<int>(groups);
         for (int g = 0; g < groups; g++)
         {

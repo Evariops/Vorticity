@@ -172,9 +172,11 @@ internal static class CompactionLoop
         {
             await dataset.VacuumAsync(new VacuumOptions { TimeProvider = dataset.Options.TimeProvider }, cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception failed) when (!(failed is OperationCanceledException && cancellationToken.IsCancellationRequested))
+        catch (Exception failed) when (!(failed is OperationCanceledException && cancellationToken.IsCancellationRequested)
+            && VortexTelemetry.LetsGo(failed, "dataset.vacuum"))
         {
-            // Told by the vacuum's activity: a store that fails now may answer at the next.
+            // Told by the vacuum's activity, and counted: a store that fails now may answer at the next, and one that fails
+            // at each shows by the count rather than only by the store's growth.
         }
 
         // A quarter of the period either way: loops that vacuumed together drift apart.

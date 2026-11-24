@@ -66,7 +66,9 @@ internal abstract class StateTable
     /// </summary>
     internal RecordBatch Batch(CanonicalArena arena, int start, int count, long firstRow, RecordBatch? spare = null)
     {
-        Span<int> nodes = stackalloc int[_type.FieldCount];
+        // On the stack for the keys and measures of a few columns, a block of the pool past them: the question's, of any width.
+        using Vorticity.Arrays.Decoders.Canonical.Scratch<int> nodeScratch = new(_type.FieldCount, stackalloc int[64]);
+        Span<int> nodes = nodeScratch.Span;
         int at = 0;
         for (int k = 0; k < _keys; k++)
         {
@@ -115,14 +117,19 @@ internal abstract class StateTable
     private int Bytes(CanonicalArena arena, DType dtype, int start, int count, int column, bool key)
     {
         DType storage = Storage(dtype);
+        // Summed in 64 bits, refused past what a buffer holds: in 32, a batch of long values wrapped to a small heap.
         bool nulls = false;
-        int data = 0;
+        long summed = 0;
         for (int row = start; row < start + count; row++)
         {
             bool held = ValueOf(row, column, key, out ReadOnlySpan<byte> value);
             nulls |= !held;
-            data += value.Length > CanonicalSupport.MaxInlineViewLength ? value.Length : 0;
+            summed += value.Length > CanonicalSupport.MaxInlineViewLength ? value.Length : 0;
         }
+
+        int data = summed <= Array.MaxLength
+            ? (int)summed
+            : throw new NotSupportedException($"A batch of states holds {summed} bytes of values in a column, past what a buffer holds.");
 
         Validity validity = Valid(storage);
         if (nulls)

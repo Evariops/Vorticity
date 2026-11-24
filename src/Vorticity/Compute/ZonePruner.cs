@@ -1550,7 +1550,9 @@ internal sealed class ZonePruner : IBlockPruner
     /// </remarks>
     private static Proof ProvePair(ZoneColumn left, ZoneBounds a, ComparisonOp op, ZoneColumn right, ZoneBounds b)
     {
-        if (left.IsDecimal != right.IsDecimal)
+        // Two decimals order by their unscaled values only at one scale: the evaluator refuses two scales, and a proof
+        // that ordered 1.0 at scale 1, 10, past 2 at scale 0 would prune rows it keeps.
+        if (left.IsDecimal != right.IsDecimal || left.Scale != right.Scale)
         {
             return Proof.Open;
         }

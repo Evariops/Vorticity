@@ -382,8 +382,9 @@ internal sealed class CardinalitySketch : IGroupSketch<CardinalitySketch>
                 long index = 0;
                 for (ulong e = 0; e < count; e++)
                 {
+                    // A gap past a long's range wraps the index below zero: refused with the ones past the sketch.
                     index += (long)Varint.Read64<Errors>(bytes, ref at);
-                    if (index >= Registers || at >= bytes.Length || bytes[at] is 0 or > MaxRank)
+                    if (index < 0 || index >= Registers || at >= bytes.Length || bytes[at] is 0 or > MaxRank)
                     {
                         throw new VortexFormatException($"A distinct sketch's register {index} is out of the sketch or of its ranks.");
                     }

@@ -166,6 +166,8 @@ public sealed class IndexDirectoryTests
         ("wrapping", [new IndexRun(0, 1, [new IndexSegment(ulong.MaxValue - 2, 16, 0)], [])]),
         ("alignment", [new IndexRun(0, 1, [new IndexSegment(0, 16, 40)], [])]),
         ("dtype count", [new IndexRun(0, 1, [Seg(0), Seg(64)], [[1]])]),
+        ("blocks wrapping", [new IndexRun(ulong.MaxValue - 1, 4, [Seg(0)], [])]),
+        ("rows past a long", [new IndexRun((ulong)long.MaxValue / 1_024, 1, [Seg(0)], [])]),
     ];
 
     // The runs are internal, so the theory is keyed by label and looks its runs up.

@@ -133,12 +133,14 @@ public sealed class PlanMemoryTests
         {
             long fromTable;
             long withoutTable;
-            ColumnCompressor.Differential.Value = new ColumnCompressor.DifferentialProbe(
-                false,
-                (node, chosen, reference) => disagreements.Add("node " + node + ": " + chosen + " => " + reference));
-            try
+            await using (VortexFileWriter writer = VortexFileWriter.Create(path, dtype, options))
             {
-                await using VortexFileWriter writer = VortexFileWriter.Create(path, dtype, options);
+                writer.Probes = new WriteProbes
+                {
+                    Differential = new ColumnCompressor.DifferentialProbe(
+                        false,
+                        (node, chosen, reference) => disagreements.Add("node " + node + ": " + chosen + " => " + reference)),
+                };
                 for (int c = 0; c < Chunks; c++)
                 {
                     await writer.WriteAsync(f.Batch(roots[c], (long)c * Rows), CancellationToken.None);
@@ -147,10 +149,6 @@ public sealed class PlanMemoryTests
                 await writer.CompleteAsync(CancellationToken.None);
                 fromTable = writer.ChunksFromTable;
                 withoutTable = writer.ChunksWithoutTable;
-            }
-            finally
-            {
-                ColumnCompressor.Differential.Value = null;
             }
 
             Assert.True(
@@ -306,12 +304,14 @@ public sealed class PlanMemoryTests
             // to the one that decides, and reports each chunk where the two differ; a verdict plan
             // memory reached is prefixed "memory ". None is allowed here: memory may skip pricing,
             // it may not change the plan.
-            ColumnCompressor.Differential.Value = new ColumnCompressor.DifferentialProbe(
-                false,
-                (node, chosen, reference) => disagreements.Add("node " + node + ": " + chosen + " => " + reference));
-            try
+            await using (VortexFileWriter writer = VortexFileWriter.Create(path, dtype, options))
             {
-                await using VortexFileWriter writer = VortexFileWriter.Create(path, dtype, options);
+                writer.Probes = new WriteProbes
+                {
+                    Differential = new ColumnCompressor.DifferentialProbe(
+                        false,
+                        (node, chosen, reference) => disagreements.Add("node " + node + ": " + chosen + " => " + reference)),
+                };
                 for (int c = 0; c < roots.Length; c++)
                 {
                     using RecordBatch batch = new RecordBatch(arena, roots[c], (long)c * Rows);
@@ -319,10 +319,6 @@ public sealed class PlanMemoryTests
                 }
 
                 await writer.CompleteAsync(CancellationToken.None);
-            }
-            finally
-            {
-                ColumnCompressor.Differential.Value = null;
             }
 
             long size = new FileInfo(path).Length;

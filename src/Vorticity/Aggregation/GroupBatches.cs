@@ -378,7 +378,10 @@ internal sealed class GroupBatches : IAsyncEnumerator<RecordBatch>
         {
             if (SortedWindow() is not { } sorted)
             {
+                // The parts' merge workers started with them: stopped before their files and memory go, as a full window
+                // stops them, where a worker in flight would read closed files and reserve on memory given back.
                 int parts = _parts.Count;
+                await _parts.StopAsync().ConfigureAwait(false);
                 Release();
                 throw new VortexMemoryException(
                     $"The group by spilled {parts} parts of its groups to its scratch, its memory budget holding no more: an order over them sorts in runs with filters alone before it and windows alone after it, and a window without an order needs every group at once. Give its session a larger QueryMemoryBudget, or filter the rows first.");
@@ -1026,6 +1029,26 @@ internal static class GroupSelection
 
     /// <summary>Gives back a block of groups an operator made (<see cref="Order"/>, <see cref="Filter"/>) once read, when no result holds it.</summary>
     internal static void GiveBack(Block<int> groups) => Blocks.Return(groups);
+
+    /// <summary>
+    /// Gives back the <paramref name="count"/> groups <see cref="Order"/> made, read and not delivered, with what it held of
+    /// them in <paramref name="memory"/> and the block's rounding it measured past them: an operator that orders at every
+    /// batch it closes, or at every prune of a lane's top, let the held part go and left the rounding measured, up to a
+    /// quarter of a megabyte a call, until the query ended.
+    /// </summary>
+    internal static void LetGo(QueryMemory? memory, Block<int> groups, int count)
+    {
+        if (memory is not null)
+        {
+            memory.LetGo((long)count * sizeof(int));
+            if (!groups.IsDefault)
+            {
+                memory.Measure(-(((long)groups.Length - count) * sizeof(int)));
+            }
+        }
+
+        Blocks.Return(groups);
+    }
 
     private static long Saturated(long skip, long take) => take == long.MaxValue || skip > long.MaxValue - take ? long.MaxValue : skip + take;
 

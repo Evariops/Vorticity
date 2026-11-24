@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 
@@ -518,6 +519,7 @@ internal readonly ref struct FlatBufferTable
             ref Unsafe.Add(ref MemoryMarshal.GetReference(buffer), (nint)(uint)offset));
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowTableBudget() =>
         throw new VortexFormatException(
             $"FlatBuffers traversal visited more than {VortexLimits.MaxFlatBufferTables} tables. " +
@@ -525,50 +527,59 @@ internal readonly ref struct FlatBufferTable
             "shared between parents can cost exponentially more work than its size suggests.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowRootTruncated(int length) =>
         ThrowHelper.ThrowTruncated("FlatBuffers root offset", 4, length);
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowRootOffset(uint rootOffset, int length) =>
         throw new VortexFormatException(
             $"FlatBuffers root offset {rootOffset} is not a valid forward reference into a " +
             $"{length}-byte buffer.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowVTableOutOfBounds(int tablePos, int soffset, int length) =>
         throw new VortexFormatException(
             $"FlatBuffers table at {tablePos} has vtable soffset {soffset}, which resolves outside " +
             $"the {length}-byte buffer.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowVTableSize(int vtableSize, int vtablePos, int length) =>
         throw new VortexFormatException(
             $"FlatBuffers vtable at {vtablePos} declares {vtableSize} bytes, which is shorter than " +
             $"its 4-byte header or escapes the {length}-byte buffer.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowTableSize(int tableSize, int tablePos, int length) =>
         throw new VortexFormatException(
             $"FlatBuffers table at {tablePos} declares {tableSize} bytes, which is shorter than its " +
             $"4-byte header or escapes the {length}-byte buffer.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowSlot(int fieldId, int slot, int width, int tableSize) =>
         throw new VortexFormatException(
             $"FlatBuffers field {fieldId} has vtable slot {slot}, so its {width}-byte value escapes " +
             $"the {tableSize}-byte table body.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowUOffset(int pos, uint relative, int length) =>
         throw new VortexFormatException(
             $"FlatBuffers uoffset {relative} at {pos} is zero or points outside the {length}-byte buffer.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowStringTerminator(int pos, uint length) =>
         throw new VortexFormatException(
             $"FlatBuffers string at {pos} of length {length} is not NUL-terminated.");
 
     [MethodImpl(MethodImplOptions.NoInlining)]
+    [DoesNotReturn]
     private static void ThrowMisaligned(int fieldId, int alignment) =>
         throw new VortexFormatException(
             $"FlatBuffers struct vector in field {fieldId} is not {alignment}-byte aligned, so it " +

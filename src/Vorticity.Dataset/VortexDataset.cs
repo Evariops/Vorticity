@@ -92,8 +92,12 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
         _ => 0,
     };
 
-    /// <summary>At a turn of the registry's slow timer, lets go of what no question used since the turn before, above the floors.</summary>
-    void Buffers.IHeldMemory.LetGoUnused(bool collection)
+    /// <summary>
+    /// At a turn of the registry's slow timer, lets go of what no question used since the turn before, above the floors:
+    /// none told as leaving the heap, its pages' and objects' blocks going back to the pool, which tells what it lets go
+    /// itself, where counting them here too would count them twice.
+    /// </summary>
+    long Buffers.IHeldMemory.LetGoUnused(bool collection)
     {
         if (!collection)
         {
@@ -101,6 +105,8 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             _pageCache.LetGo(long.MaxValue, stale: true);
             LetGoMemos(long.MaxValue, stale: true);
         }
+
+        return 0;
     }
 
     /// <summary>
@@ -1047,20 +1053,29 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             return 0;
         }
 
-        List<Task<long>> reads = [];
-        await foreach (PositionedObject held in Snapshot.WalkAsync(filter is null ? null : new SummaryPruner(filter), 0, long.MaxValue, null, cancellationToken)
+        List<ObjectEntry> held = [];
+        await foreach (PositionedObject walked in Snapshot.WalkAsync(filter is null ? null : new SummaryPruner(filter), 0, long.MaxValue, null, cancellationToken)
             .ConfigureAwait(false))
         {
-            if (held.Entry.Contents is { } contents)
+            if (walked.Entry.Contents is not null)
             {
-                reads.Add(WarmObjectAsync(cache, held.Entry, contents, cancellationToken));
+                held.Add(walked.Entry);
             }
         }
 
+        // As many objects at once as the session reads, as AskByValuesAsync does: a task and a request each for every object
+        // of the version at once was a hundred thousand of each on a dataset of as many objects, their answers held until read.
+        long[] read = new long[held.Count];
+        await Execution.Waits.ForAsync(
+            held.Count,
+            Session.Options.MaxConcurrentReads,
+            async (i, token) => read[i] = await WarmObjectAsync(cache, held[i], held[i].Contents!, token).ConfigureAwait(false),
+            cancellationToken).ConfigureAwait(false);
+
         long bytes = 0;
-        foreach (long read in await Task.WhenAll(reads).ConfigureAwait(false))
+        foreach (long one in read)
         {
-            bytes += read;
+            bytes += one;
         }
 
         return bytes;
@@ -4849,11 +4864,11 @@ public sealed class VortexDataset : IAsyncDisposable, Buffers.IHeldMemory
             {
                 ReadOnlyMemory<byte> node = await version.Pages.ReadPageAsync(at, cancellationToken).ConfigureAwait(false);
                 IReadOnlyList<InternalEntry> children = TreePage.ReadInternal(node);
-                at = children[^1].Child;
+                at = children.Count > 0 ? children[^1].Child : throw new CommitFormatException("An internal page of an occupied tree holds no child.");
             }
 
             IReadOnlyList<TreeEntry> leaves = TreePage.ReadLeaf(await version.Pages.ReadPageAsync(at, cancellationToken).ConfigureAwait(false));
-            TreeEntry last = leaves[^1];
+            TreeEntry last = leaves.Count > 0 ? leaves[^1] : throw new CommitFormatException("A leaf of an occupied tree holds no entry.");
             end = Math.Max(end, PositionAt(last.Key.Span) + last.Rows);
         }
 

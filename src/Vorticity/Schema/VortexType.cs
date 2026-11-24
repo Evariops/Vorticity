@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Text;
+using System.Threading;
 using Vorticity.Types;
 
 namespace Vorticity;
@@ -88,13 +89,24 @@ public readonly record struct VortexField(string Name, VortexType Type)
 public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8SpanFormattable
 {
     /// <summary>
-    /// What the types kept for reuse weigh at most: a type weighs one, a field one and its name's
-    /// length, and an extension its id and metadata. Past it, a new type is not kept and compares by
-    /// structure.
+    /// What the types kept for reuse take of the heap at most, 8 MiB, each weighed at its bytes (<see cref="InternBytes"/>).
+    /// Past it, a new type is not kept and compares by structure. A weight of one a type, one a field and one a name's
+    /// character let a family of types of one field or none each, fixed-size lists of every size, keep a million of them,
+    /// 173 MB for the life of the process. 8 MiB keeps some 1 600 structs of 50 fields named in 15 characters, where that
+    /// weight kept 1 300, and 48 000 types without fields.
     /// </summary>
-    private const long MaxInternedWeight = 1L << 20;
+    private const long MaxInternedBytes = 8L << 20;
 
-    private static readonly InternTable<VortexType> Interned = new InternTable<VortexType>(MaxInternedWeight);
+    /// <summary>
+    /// What a type kept takes beside its fields, names and metadata: the type, its node in the table and its slot there.
+    /// 100 000 fixed-size lists of new sizes kept 173 bytes each (2026-11-24).
+    /// </summary>
+    private const int InternedTypeBytes = 176;
+
+    private static readonly InternTable<VortexType> Interned = new InternTable<VortexType>(MaxInternedBytes);
+
+    /// <summary>What the types kept for reuse take of the heap, as <see cref="InternBytes"/> weighs them: for the tests.</summary>
+    internal static long InternedBytes => Interned.Weight;
 
     private readonly VortexField[]? _fields;
     private readonly byte[]? _metadata;
@@ -296,11 +308,14 @@ public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8
     /// <param name="unit">The unit, stored as <c>i64</c>.</param>
     /// <param name="timeZone">An IANA zone id such as <c>Europe/Paris</c> or <c>UTC</c>; null for a naive timestamp.</param>
     /// <returns>The non-nullable timestamp type.</returns>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="unit"/> is <see cref="TimeUnit.Days"/> or not a defined unit.</exception>
     public static VortexType Timestamp(TimeUnit unit, string? timeZone = null)
     {
-        if (!Enum.IsDefined(unit))
+        // Days has no instant, and the reference refuses a timestamp in days as it reads its type: a file written with one
+        // would not be read there.
+        if (unit is not (TimeUnit.Seconds or TimeUnit.Milliseconds or TimeUnit.Microseconds or TimeUnit.Nanoseconds))
         {
-            throw new ArgumentOutOfRangeException(nameof(unit), unit, "Not a defined time unit.");
+            throw new ArgumentOutOfRangeException(nameof(unit), unit, "A timestamp is in seconds, milliseconds, microseconds or nanoseconds.");
         }
 
         int zoneBytes = timeZone is null ? 0 : Encoding.UTF8.GetByteCount(timeZone);
@@ -358,28 +373,78 @@ public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8
         nullable ? type.Nullable : type.NonNullable;
 
     /// <summary>The unit of a time, a timestamp or a date; null for any other type.</summary>
+    /// <exception cref="VortexFormatException">
+    /// The metadata names no unit: a type read from a file is validated only when the field that carries it is read, and
+    /// an unknown unit taken as is read as zero ticks a unit, or as seconds.
+    /// </exception>
     internal TimeUnit? Unit =>
         ExtensionId is ExtensionIds.Date or ExtensionIds.Time or ExtensionIds.Timestamp && _metadata is { Length: > 0 } m
-            ? (TimeUnit)m[0]
+            ? Defined(m[0])
             : null;
+
+    /// <summary><paramref name="raw"/> as a unit, when it names one.</summary>
+    private TimeUnit Defined(byte raw) => raw <= (byte)TimeUnit.Days
+        ? (TimeUnit)raw
+        : throw new VortexFormatException($"The type {ExtensionId} declares the time unit {raw}; 0 to 4 are defined.");
 
     /// <summary>The zone of a timestamp, resolved once on this host; UTC for a naive one.</summary>
     internal TimeZoneInfo ZoneInfo
     {
         get
         {
-            TimeZoneInfo? zone = _zone;
-            if (zone is null)
+            if (Volatile.Read(ref _zoneState) == 0)
             {
-                zone = TimeZone is { } id && TimeZones.TryResolve(id, out TimeZoneInfo found) ? found : TimeZoneInfo.Utc;
-                _zone = zone;
+                ReadZone();
             }
 
-            return zone;
+            return _zone!;
         }
     }
 
+    /// <summary>
+    /// What a timestamp's zone is on this host, read once: <see cref="ZoneState.Naive"/> for a naive timestamp and any
+    /// other type. What a check of a column asks at every batch, where the zone decoded was a string a batch.
+    /// </summary>
+    internal ZoneState Zone
+    {
+        get
+        {
+            byte state = Volatile.Read(ref _zoneState);
+            if (state == 0)
+            {
+                ReadZone();
+                state = _zoneState;
+            }
+
+            return (ZoneState)state;
+        }
+    }
+
+    /// <summary>Reads the zone and what it is once; two threads that read it at once read the same.</summary>
+    private void ReadZone()
+    {
+        TimeZoneInfo zone = TimeZoneInfo.Utc;
+        ZoneState state = ZoneState.Naive;
+        if (TimeZone is { } id)
+        {
+            if (TimeZones.TryResolve(id, out TimeZoneInfo found))
+            {
+                zone = found;
+                state = TimeZones.IsUtc(id) ? ZoneState.Utc : ZoneState.Resolved;
+            }
+            else
+            {
+                state = ZoneState.Unresolved;
+            }
+        }
+
+        // The zone before its state: a reader that sees the state finds the zone.
+        _zone = zone;
+        Volatile.Write(ref _zoneState, (byte)state);
+    }
+
     private TimeZoneInfo? _zone;
+    private byte _zoneState;
 
     /// <summary>The zone of a timestamp, or null for a naive one and any other type.</summary>
     /// <remarks>Decoded at each call: a test of whether there is one is <see cref="IsZoned"/>.</remarks>
@@ -427,21 +492,38 @@ public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8
         return twin;
     }
 
-    private static VortexType Intern(VortexType type) => Interned.Intern(type, type.InternWeight());
+    private static VortexType Intern(VortexType type) => Interned.Intern(type, type.InternBytes());
 
-    private long InternWeight()
+    /// <summary>
+    /// What keeping this type takes of the heap: <see cref="InternedTypeBytes"/>, an extension's id and metadata, and for
+    /// each field its place in the type's array, its name, and its entry in the index of names a lookup builds. A struct
+    /// of 1 000 fields kept 16 400 bytes past the names it was given (2026-11-24).
+    /// </summary>
+    private long InternBytes()
     {
-        long weight = 1 + (ExtensionId?.Length ?? 0) + (_metadata?.Length ?? 0);
+        long bytes = InternedTypeBytes + StringBytes(ExtensionId) + (_metadata is null ? 0 : ArrayHeaderBytes + _metadata.Length);
         if (_fields is not null)
         {
+            bytes += ArrayHeaderBytes;
             foreach (VortexField field in _fields)
             {
-                weight += 1 + field.Name.Length;
+                bytes += FieldBytes + StringBytes(field.Name) + NameEntryBytes;
             }
         }
 
-        return weight;
+        return bytes;
     }
+
+    /// <summary>An array's header, its length included.</summary>
+    private const int ArrayHeaderBytes = 24;
+
+    /// <summary>A <see cref="VortexField"/> in the type's array: its name and its type.</summary>
+    private const int FieldBytes = 16;
+
+    /// <summary>A name's entry in the index a lookup by name builds, and its bucket: its hash, its next, its key, its value.</summary>
+    private const int NameEntryBytes = 28;
+
+    private static long StringBytes(string? text) => text is null ? 0 : ArrayHeaderBytes + (2L * text.Length);
 
     private int ComputeHash()
     {
@@ -552,8 +634,33 @@ public sealed class VortexType : IEquatable<VortexType>, ISpanFormattable, IUtf8
     }
 
     /// <inheritdoc/>
-    public bool TryFormat(Span<byte> utf8Destination, out int bytesWritten, ReadOnlySpan<char> format, IFormatProvider? provider) =>
-        System.Text.Unicode.Utf8.FromUtf16(ToString(), utf8Destination, out _, out bytesWritten) == System.Buffers.OperationStatus.Done;
+    /// <remarks>A destination too short takes nothing: false, and no byte said written, as the base types do.</remarks>
+    public bool TryFormat(Span<byte> utf8Destination, out int bytesWritten, ReadOnlySpan<char> format, IFormatProvider? provider)
+    {
+        if (System.Text.Unicode.Utf8.FromUtf16(ToString(), utf8Destination, out _, out bytesWritten) == System.Buffers.OperationStatus.Done)
+        {
+            return true;
+        }
+
+        bytesWritten = 0;
+        return false;
+    }
+}
+
+/// <summary>What a timestamp's zone is on this host (<see cref="VortexType.Zone"/>).</summary>
+internal enum ZoneState : byte
+{
+    /// <summary>No zone: a naive timestamp, or a type that is no timestamp.</summary>
+    Naive = 1,
+
+    /// <summary>A zone named as UTC.</summary>
+    Utc,
+
+    /// <summary>A zone this host resolves, named otherwise.</summary>
+    Resolved,
+
+    /// <summary>A zone this host does not know.</summary>
+    Unresolved,
 }
 
 /// <summary>The extension ids the core knows by name.</summary>

@@ -21,6 +21,20 @@ public sealed partial class ShreddingChoiceTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     [Fact]
+    public void PathsCompareAsTheirKeysJoinedByANulDo()
+    {
+        Random random = new(23);
+        string[] pieces = ["", "a", "ab", "b", "a\0", "\0", "ba", "zz"];
+        for (int trial = 0; trial < 5_000; trial++)
+        {
+            string[] left = [.. Enumerable.Range(0, random.Next(0, 4)).Select(_ => pieces[random.Next(pieces.Length)])];
+            string[] right = [.. Enumerable.Range(0, random.Next(0, 4)).Select(_ => pieces[random.Next(pieces.Length)])];
+            int expected = Math.Sign(string.CompareOrdinal(string.Join('\0', left), string.Join('\0', right)));
+            Assert.Equal(expected, ShreddingChoice.ComparePaths(left, right));
+        }
+    }
+
+    [Fact]
     public void ThePathsThatPayAreChosenInTheirClass()
     {
         Random random = new Random(1);

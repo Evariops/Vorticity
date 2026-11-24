@@ -11,9 +11,10 @@ namespace Vorticity.Arrays.Decoders.Compressed;
 /// every row starting with it shares, and the bytes of it past those.
 /// </summary>
 /// <remarks>
-/// Compression takes the longest symbol matching at each position, and a symbol is at most eight
-/// bytes, so the code chosen at a position depends on the eight bytes from it and on nothing else
-/// while eight remain. A row that starts with the prefix has the prefix's own bytes at each of its
+/// Compression takes the longest symbol matching at each position, where the table leaves no
+/// choice (<see cref="FsstSymbolTable.TryCompress"/> declines a prefix that meets one), and a
+/// symbol is at most eight bytes, so the code chosen at a position depends on the eight bytes from
+/// it and on nothing else while eight remain. A row that starts with the prefix has the prefix's own bytes at each of its
 /// positions that end eight bytes or more before the prefix does: the same codes as the prefix
 /// compressed alone, in the same place. So the prefix's codes up to the first that starts within
 /// its last seven bytes open that row's codes, and past them fewer than eight bytes are left to

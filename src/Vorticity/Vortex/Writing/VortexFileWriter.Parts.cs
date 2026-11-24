@@ -49,6 +49,13 @@ public sealed partial class VortexFileWriter
             _partTurn ??= new SemaphoreSlim(1, 1);
         }
 
+        // The parts settled at the queue's head, a part given up among them, taken before the wait for a place, which their
+        // places are: a part given up drains nothing itself, and a caller that gave one up then made another waited on it.
+        if (slots.CurrentCount == 0)
+        {
+            await TakePartAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         await slots.WaitAsync(cancellationToken).ConfigureAwait(false);
         StructStore root;
         try
@@ -125,8 +132,12 @@ public sealed partial class VortexFileWriter
         }
     }
 
-    /// <summary>Takes <paramref name="part"/>'s rows once it is written, and the rows of every part after it written already, in their order.</summary>
-    internal async ValueTask TakePartAsync(WritePart part, CancellationToken cancellationToken)
+    /// <summary>
+    /// Takes the rows of every part at the queue's head settled already, in their order: a part just written, the parts
+    /// after it written before it, and past a part given up the ones after it. Called by a part's write, and by the file's
+    /// completion, which awaits it.
+    /// </summary>
+    internal async ValueTask TakePartAsync(CancellationToken cancellationToken)
     {
         SemaphoreSlim turn = _partTurn!;
         await turn.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -240,18 +251,17 @@ public abstract class WritePart : IDisposable
             throw new InvalidOperationException("A part is written once.");
         }
 
-        return _writer.TakePartAsync(this, cancellationToken);
+        return _writer.TakePartAsync(cancellationToken);
     }
 
-    /// <summary>Gives the part up when it was not written: the file takes the parts after it without it.</summary>
-    public void Dispose()
-    {
-        if (Interlocked.CompareExchange(ref _state, 2, 0) == 0)
-        {
-            // Settled given up: the parts after it are taken without it, the next time one of them is written.
-            _ = _writer.TakePartAsync(this, CancellationToken.None).AsTask();
-        }
-    }
+    /// <summary>
+    /// Gives the part up when it was not written: the file takes the parts after it without it, at the next part written or
+    /// at the file's completion, which await the writes they make.
+    /// </summary>
+    public void Dispose() =>
+        // Settled given up, and nothing more: a drain started here was a task nobody awaited, whose failure was lost and
+        // which wrote beside the file's completion.
+        Interlocked.CompareExchange(ref _state, 2, 0);
 }
 
 /// <summary>A part of a file being written, whose builder takes records of <typeparamref name="TRecord"/>.</summary>

@@ -33,6 +33,16 @@ public sealed class GoogleTests
             Transport = new StoreTransportOptions { RetryBaseDelay = TimeSpan.Zero },
         });
 
+    /// <summary>
+    /// An object's metadata with a null where a date or a size stands is a malformed answer: an
+    /// <see cref="ObjectStoreException"/>, where a null reference and an argument error escaped the reader's filter.
+    /// </summary>
+    [Theory]
+    [InlineData("{\"name\":\"k\",\"timeCreated\":null}")]
+    [InlineData("{\"name\":\"k\",\"size\":null}")]
+    public void AnObjectsMetadataWithANullDateOrSizeIsMalformed(string json) =>
+        Assert.Throws<ObjectStoreException>(() => Vorticity.ObjectStorage.Google.GoogleAnswers.ParseObject(Encoding.UTF8.GetBytes(json)));
+
     [Fact]
     public async Task AReadIsBoundToTheGenerationAndATailTakesTheMetadataFirst()
     {
@@ -172,6 +182,32 @@ public sealed class GoogleTests
         await using GoogleCloudStorageObjectStore store = Store(emulator);
         Assert.Equal(PutOutcome.Created, await PutAsync(store, "commit/1", Bytes(100, 6), PutCondition.IfAbsent, ct));
         Assert.Equal(["PUT /warehouse/commit/1", "GET /storage/v1/b/warehouse/o/commit%2F1"], emulator.Log);
+    }
+
+    /// <summary>
+    /// An upload in parts whose completion was applied and its answer lost, the metadata read after it not finding the object
+    /// yet, as when the completion lands after that read: sent again, the completion finds its upload gone, and the metadata
+    /// read then, which carries this put's id, says the put made it. Mapped by its status alone, the completion sent again
+    /// was a missing object.
+    /// </summary>
+    [Fact]
+    public async Task AnUploadWhoseCompletionAnswerIsLostLearnsItsOutcomeFromTheMetadata()
+    {
+        CancellationToken ct = TestContext.Current.CancellationToken;
+        using GoogleEmulator emulator = new GoogleEmulator();
+        int lost = 0;
+        int read = 0;
+        emulator.LoseAnswer = request => request.Method == HttpMethod.Post && request.RequestUri!.Query.Contains("uploadId=", StringComparison.Ordinal)
+            && Interlocked.Increment(ref lost) == 1;
+        emulator.Intercept = (request, _) => request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath.EndsWith("/o/data%2Fbig", StringComparison.Ordinal)
+            && Interlocked.Increment(ref read) == 1
+                ? new HttpResponseMessage(System.Net.HttpStatusCode.NotFound) { Content = new StringContent("{\"error\":{\"code\":404,\"message\":\"No such object.\"}}", Encoding.UTF8, "application/json") }
+                : null;
+        await using GoogleCloudStorageObjectStore store = Store(emulator, threshold: 256 << 10, part: 64 << 10);
+        byte[] large = Bytes(600_000, 7);
+        Assert.Equal(PutOutcome.Created, await PutAsync(store, "data/big", large, PutCondition.None, ct));
+        Assert.Equal(large, emulator.BytesOf(Bucket, "data/big"));
+        Assert.Equal(0, emulator.OpenUploads);
     }
 
     [Fact]

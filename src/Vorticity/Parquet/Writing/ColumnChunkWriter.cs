@@ -290,8 +290,8 @@ internal sealed class ColumnChunkWriter : IDisposable
         if (column.Nested)
         {
             _shredder = new Shredder(account);
-            _repetitionLevels = new BlockBytes();
-            _definitionLevels = new BlockBytes();
+            _repetitionLevels = new BlockBytes(account);
+            _definitionLevels = new BlockBytes(account);
         }
 
         _column = column;
@@ -299,17 +299,19 @@ internal sealed class ColumnChunkWriter : IDisposable
         _level = level;
         _compressors = compressors;
         _blockRows = blockRows;
-        _values = new BlockBytes();
-        _levels = new BlockBytes();
-        _compressed = new BlockBytes();
+        // Every buffer of the column's staging and layout is counted by the writer's account: a
+        // block's values alone take its rows times their width, and a wide column's take hundreds of MB.
+        _values = new BlockBytes(account);
+        _levels = new BlockBytes(account);
+        _compressed = new BlockBytes(account);
         _chunk = new ChunkBytes(account);
-        _entries = new BlockBytes();
-        _codes = new BlockBytes();
-        _page = new BlockBytes();
-        _dictionaryPage = new BlockBytes();
-        _firstHeader = new BlockBytes();
+        _entries = new BlockBytes(account);
+        _codes = new BlockBytes(account);
+        _page = new BlockBytes(account);
+        _dictionaryPage = new BlockBytes(account);
+        _firstHeader = new BlockBytes(account);
         _account = account;
-        _measured = new BlockBytes();
+        _measured = new BlockBytes(account);
         _validity = new byte[(blockRows + 7) / 8 + 8];
         _mask = new ulong[(blockRows + 63) >> 6];
         _statistics = new ChunkStatistics(column);
@@ -317,13 +319,13 @@ internal sealed class ColumnChunkWriter : IDisposable
         if (bloomRate > 0 && column.Conversion is not (ValueConversion.Bool or ValueConversion.Null))
         {
             // A flat column's chunk holds a value a row at most, a nested one's any number.
-            _bloom = new BloomCollector(column, bloomRate, column.Nested || rowGroupRows <= 0 ? long.MaxValue : rowGroupRows);
+            _bloom = new BloomCollector(column, bloomRate, column.Nested || rowGroupRows <= 0 ? long.MaxValue : rowGroupRows, account);
         }
         _eligible = profile != CompressionProfile.None && column.Conversion is not (ValueConversion.Bool or ValueConversion.Null) && !column.FixedElements;
         _encodings = profile is CompressionProfile.Auto or CompressionProfile.Smallest;
         _trials = profile == CompressionProfile.Smallest;
-        _encoded = new BlockBytes();
-        _data = new BlockBytes();
+        _encoded = new BlockBytes(account);
+        _data = new BlockBytes(account);
         _dictionary = _eligible;
     }
 
@@ -788,7 +790,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// </summary>
     private int EncryptHeader(Encryption.ColumnEncryptor encryptor, in PageHeader header, Encryption.ModuleType type, int page, System.Buffers.IBufferWriter<byte> into)
     {
-        BlockBytes plain = _plain ??= new BlockBytes();
+        BlockBytes plain = _plain ??= new BlockBytes(_account);
         plain.Clear();
         ThriftCompactWriter writer = new(plain);
         header.Write(ref writer, default);
@@ -805,7 +807,7 @@ internal sealed class ColumnChunkWriter : IDisposable
             return;
         }
 
-        BlockBytes plain = _plain ??= new BlockBytes();
+        BlockBytes plain = _plain ??= new BlockBytes(_account);
         plain.Clear();
         plain.Write(levels);
         plain.Write(stored);
@@ -1447,7 +1449,7 @@ internal sealed class ColumnChunkWriter : IDisposable
     /// </summary>
     private ReadOnlySpan<byte> EntryValues(ulong entries)
     {
-        BlockBytes values = _entriesBounded ??= new BlockBytes();
+        BlockBytes values = _entriesBounded ??= new BlockBytes(_account);
         values.Clear();
         ReadOnlySpan<byte> all = _entries.WrittenSpan;
         for (ulong rest = entries; rest != 0; rest &= rest - 1)

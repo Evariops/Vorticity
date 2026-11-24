@@ -23,6 +23,17 @@ public sealed class ColumnCountsTests
 {
     private const long MicrosPerHour = 3_600_000_000L;
 
+    /// <summary>
+    /// A count a region's header declares is held to the bytes behind it before an array is sized from it: six bytes that
+    /// claim 2^30 measures once asked for two arrays of 4 GiB and 1 GiB.
+    /// </summary>
+    [Fact]
+    public void ACountOfMeasuresPastItsBytesIsAFormatError()
+    {
+        byte[] head = [ColumnCounts.Version, 0, 0x80, 0x80, 0x80, 0x80, 0x04];
+        Assert.Throws<VortexFormatException>(() => ColumnCounts.From(head));
+    }
+
     [Fact]
     public void AColumnPastItsBudgetKeepsItsMostFrequentValuesAndTheOthersTogether()
     {

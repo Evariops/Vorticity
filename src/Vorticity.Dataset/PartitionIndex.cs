@@ -489,7 +489,9 @@ internal sealed class PartitionIndex
                 return null;
             }
 
-            Covered[] objects = new Covered[checked((int)reader.ReadVarint())];
+            // Each count held to what the bytes left can hold, at the fewest bytes an element of it takes: an object two
+            // words and two varints, an entry seven fields, a rank a word, a page two words and a varint.
+            Covered[] objects = new Covered[Count(ref reader, 18)];
             for (int rank = 0; rank < objects.Length; rank++)
             {
                 ulong low = reader.ReadFixed64();
@@ -497,7 +499,7 @@ internal sealed class PartitionIndex
                 objects[rank] = new Covered(new UInt128(high, low), checked((long)reader.ReadVarint()), checked((int)reader.ReadVarint()));
             }
 
-            Entry[] entries = new Entry[checked((int)reader.ReadVarint())];
+            Entry[] entries = new Entry[Count(ref reader, 7)];
             for (int i = 0; i < entries.Length; i++)
             {
                 string name = Encoding.UTF8.GetString(reader.ReadLengthDelimited());
@@ -510,13 +512,13 @@ internal sealed class PartitionIndex
                     return null;
                 }
 
-                ulong[] ranks = new ulong[checked((int)reader.ReadVarint())];
+                ulong[] ranks = new ulong[Count(ref reader, sizeof(ulong))];
                 for (int word = 0; word < ranks.Length; word++)
                 {
                     ranks[word] = reader.ReadFixed64();
                 }
 
-                Page[] pages = new Page[checked((int)reader.ReadVarint())];
+                Page[] pages = new Page[Count(ref reader, 17)];
                 long offset = checked((long)reader.ReadVarint());
                 for (int page = 0; page < pages.Length; page++)
                 {
@@ -535,6 +537,18 @@ internal sealed class PartitionIndex
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// A count the directory declares, of elements of <paramref name="leastBytes"/> bytes at the fewest: past what the bytes
+    /// left can hold, a format error, where the array it sizes was allocated first.
+    /// </summary>
+    private static int Count(ref ProtoReader reader, int leastBytes)
+    {
+        ulong declared = reader.ReadVarint();
+        return declared <= (ulong)(reader.Remaining / leastBytes)
+            ? (int)declared
+            : throw new VortexFormatException($"A partition index declares {declared} elements in {reader.Remaining} bytes.");
     }
 
     /// <summary>

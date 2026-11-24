@@ -17,6 +17,29 @@ public sealed partial class StateWordsTests
     private static CancellationToken Ct => TestContext.Current.CancellationToken;
 
     /// <summary>
+    /// A float sum's words read from bytes are held to what a sum writes before a merge adopts them: a top past the 78 bins
+    /// whose extractors the tables hold, a count past what a sum endures, or a bit past its flags is a format error, where
+    /// rows folded in after read the tables at the top, by reference, past their end.
+    /// </summary>
+    [Theory]
+    [InlineData(1L, 78, 0)]
+    [InlineData(1L, 127, 0)]
+    [InlineData((1L << 36) + 1, 10, 0)]
+    [InlineData(1L, 10, 4)]
+    public void AFloatSumsWordsPastWhatASumWritesAreRefused(long count, int top, int infinities)
+    {
+        long[] words = [0, 0, 0, IndexedSum.MetaOf(count, top, infinities), 0];
+        Assert.Throws<VortexFormatException>(() => StateWords.SumOf(words, 0));
+    }
+
+    [Fact]
+    public void AFloatSumsWordsASumWritesAreRead()
+    {
+        long[] words = [0, 0, 0, IndexedSum.MetaOf(5, 77, 3), 0];
+        Assert.Equal(77, StateWords.SumOf(words, 0).Sum.Top);
+    }
+
+    /// <summary>
     /// The words of float sums over fixed values, pinned as arm64 computed them, so that the x64 runs
     /// of the CI hold them: a sum of tenths; one across magnitudes from 1e-300 to 1e300, whose top bin
     /// leaves the small terms below the three it keeps and whose large terms cancel; and one past an

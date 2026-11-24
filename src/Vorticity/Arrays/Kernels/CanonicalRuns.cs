@@ -405,7 +405,7 @@ internal static class CanonicalRuns
                 offset += count;
             }
 
-            System.Threading.Interlocked.Add(ref CanonicalArena.BytesMaterialized, bytes);
+            CanonicalArena.Materialized(bytes);
             return pass.Into.AddPrimitive(dtype, pass.Rows, validity, ptype, values);
         }
         finally
@@ -589,7 +589,7 @@ internal static class CanonicalRuns
             }
         }
 
-        System.Threading.Interlocked.Add(ref CanonicalArena.BytesMaterialized, viewBytes + filled);
+        CanonicalArena.Materialized(viewBytes + filled);
         return filled > 0
             ? into.AddShredded(dtype, rows, validity, views, [data], metadata)
             : into.AddShredded(dtype, rows, validity, views, default, metadata);
@@ -820,7 +820,14 @@ internal static class CanonicalRuns
         Span<Int128> laid = MemoryMarshal.Cast<byte, Int128>(writable);
 
         // The gather copies whole blocks and writes past a value into the room the next one takes, so the buffer has a
-        // block of slack past the bytes it keeps.
+        // block of slack past the bytes it keeps. Past one buffer, a checked cast threw an OverflowException, which no
+        // reader's contract names.
+        if (referenced > Array.MaxLength - GatherSlack)
+        {
+            throw new VortexFormatException(
+                $"The {rows} rows of a text column name {referenced} bytes, past the {Array.MaxLength - GatherSlack} one buffer of a merge holds.");
+        }
+
         Span<byte> heap = default;
         VortexBuffer data = referenced == 0
             ? VortexBuffer.Empty
@@ -957,7 +964,7 @@ internal static class CanonicalRuns
             data = data.Slice(0, filled);
         }
 
-        System.Threading.Interlocked.Add(ref CanonicalArena.BytesMaterialized, viewBytes + filled);
+        CanonicalArena.Materialized(viewBytes + filled);
         return filled > 0
             ? into.AddVarBinView(dtype, rows, validity, views, [data], padded)
             : into.AddVarBinView(dtype, rows, validity, views, default, padded);

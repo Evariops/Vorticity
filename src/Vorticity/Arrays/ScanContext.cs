@@ -2088,10 +2088,14 @@ internal sealed class ScanContext : IDisposable
         {
             pushed.Field = null;
             pushed.Predicate = null;
+            pushed.Key = null;
             pushed.Fields = Layouts.FieldMask.All;
             pushed.FieldsHonoured = false;
         }
 
+        // The last file's layout tree and the predicates on it, which a context kept in the pool held alive.
+        DictionaryCodes = default;
+        PredicateAtNode = false;
         LiveBlocks = null;
         Metrics = null;
         KeepEncodings = false;
@@ -2100,7 +2104,10 @@ internal sealed class ScanContext : IDisposable
         Options = VortexReadOptions.Default;
     }
 
-    /// <summary>Releases the batch's segments and the blocks the canonical arena rented.</summary>
+    /// <summary>
+    /// Releases the batch's segments and the blocks the canonical arena rented, and closes what a split given up reserved:
+    /// what <see cref="Recycle"/> gives back, for a context disposed without going back to the pool.
+    /// </summary>
     public void Dispose()
     {
         if (_disposed)
@@ -2118,7 +2125,15 @@ internal sealed class ScanContext : IDisposable
             _retained?.Dispose();
         }
 
+        if (_pushed is { Reserve: { } reserve } reserving)
+        {
+            reserve.Close(reserving.Raised);
+            reserving.Raised = 0;
+            reserving.Reserve = null;
+        }
+
         Segments.Dispose();
+        Along?.Clear();
         Along?.Own?.Dispose();
     }
 

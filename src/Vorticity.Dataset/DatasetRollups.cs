@@ -372,8 +372,10 @@ internal static class DatasetRollups
     }
 
     /// <summary>A region's bytes, or null when they fail their checksum.</summary>
+    /// <remarks>Compared without the sum, which an offset near 2^64 wrapped under the length.</remarks>
     private static byte[]? Region(byte[] bytes, IndexSegment region) =>
-        region.Offset + region.Length <= (ulong)bytes.Length && region.Holds(bytes.AsSpan((int)region.Offset, (int)region.Length))
+        region.Offset <= (ulong)bytes.Length && region.Length <= (ulong)bytes.Length - region.Offset
+        && region.Holds(bytes.AsSpan((int)region.Offset, (int)region.Length))
             ? bytes.AsSpan((int)region.Offset, (int)region.Length).ToArray()
             : null;
 

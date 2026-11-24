@@ -75,7 +75,7 @@ internal sealed record ValueModel(
 /// <param name="ColumnName">The column's name.</param>
 /// <param name="Fill">How reading gives the member its value.</param>
 /// <param name="Value">The member's type.</param>
-/// <param name="DeclaringType">The type that declares the member, a base type for an inherited one.</param>
+/// <param name="DeclaringType">The type that declares the member, a base type for an inherited one, by its definition: a generic base by its type parameters, as a <c>cref</c> names it.</param>
 internal sealed record MemberModel(string Name, string ColumnName, MemberFill Fill, ValueModel Value, string DeclaringType);
 
 /// <summary>A type that contains a record, redeclared partial around it.</summary>

@@ -399,6 +399,14 @@ public sealed partial class VortexFileWriter
     public async ValueTask<WriteReport> CompleteAsync(CancellationToken cancellationToken = default)
     {
         ThrowIfDone();
+
+        // The parts settled since the last was taken, those after a part given up among them, written here, awaited, before
+        // the queue is asked whether one is pending: a part given up once drained them in a task nobody awaited.
+        if (_partTurn is not null)
+        {
+            await TakePartAsync(cancellationToken).ConfigureAwait(false);
+        }
+
         RequireNoPartPending();
         Carry();
         if (_root is { } builder && builder.Rows > builder.Committed)

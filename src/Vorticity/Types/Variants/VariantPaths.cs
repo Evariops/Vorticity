@@ -53,7 +53,10 @@ public enum VariantPathClass : byte
 /// </param>
 public readonly record struct VariantPath(IReadOnlyList<string> Keys, VariantPathClass Class, long Rows, bool Exact)
 {
-    /// <summary>The path as a filter writes it, its keys bracketed and quoted: <c>['http.route']</c>, <c>['cart']['items']</c>; empty for the root.</summary>
+    /// <summary>
+    /// The path as a filter writes it, its keys bracketed and quoted, a quote in a key doubled as the filter's grammar reads
+    /// it: <c>['http.route']</c>, <c>['cart']['items']</c>, <c>['it''s']</c>; empty for the root.
+    /// </summary>
     public string Path
     {
         get
@@ -61,7 +64,7 @@ public readonly record struct VariantPath(IReadOnlyList<string> Keys, VariantPat
             StringBuilder text = new StringBuilder();
             foreach (string key in Keys)
             {
-                text.Append("['").Append(key.Replace("'", "\\'", StringComparison.Ordinal)).Append("']");
+                text.Append("['").Append(key.Replace("'", "''", StringComparison.Ordinal)).Append("']");
             }
 
             return text.ToString();

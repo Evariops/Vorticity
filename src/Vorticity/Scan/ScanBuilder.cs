@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
+using Vorticity.Arrays;
 using Vorticity.Columns;
 using Vorticity.Compute;
 using Vorticity.Expressions;
@@ -905,6 +906,12 @@ internal sealed class ScanBuilder
     /// largest over the splits of the plan. A split read ahead holds at most that, over a source that
     /// copies what it reads. The layout is walked, and nothing is read.
     /// </summary>
+    /// <remarks>
+    /// Every split of a span between two boundaries of the plan registers the chunks the span lies in, whole, so one split
+    /// a span says what all of them ask: a day's object cut into 132 000 splits holds a few hundred spans. A list layout
+    /// under the projection registers its offsets by the split's own rows, which its chunks do not bound, and is walked
+    /// split by split.
+    /// </remarks>
     internal long LargestSplitBytes()
     {
         LayoutTree tree = _file.LayoutTree;
@@ -915,13 +922,37 @@ internal sealed class ScanBuilder
         LayoutNode root = tree.Root;
         LayoutReader reader = LayoutReaderTable.Require(in root);
         FieldMask mask = read.RootMask;
+        bool bySpan = !RegistersByRows(in root, in mask);
         SplitCursor cursor = plan.CreateCursor();
         IO.SegmentRequestSet segments = new IO.SegmentRequestSet();
         long largest = 0;
         try
         {
-            while (cursor.TryNext(out RowRange split))
+            for (int span = 0; ; span++)
             {
+                RowRange split;
+                if (bySpan)
+                {
+                    if (span + 1 >= plan.BoundaryCount)
+                    {
+                        break;
+                    }
+
+                    // The span's first split, cut as the cursor cuts it.
+                    long start = plan.BoundaryAt(span);
+                    long end = plan.BoundaryAt(span + 1);
+                    if (end <= start)
+                    {
+                        continue;
+                    }
+
+                    split = new RowRange(start, start + SplitCursor.SubSize(end - start, plan.MaxRows));
+                }
+                else if (!cursor.TryNext(out split))
+                {
+                    break;
+                }
+
                 reader.RegisterSegments(in root, split, in mask, segments);
                 long bytes = 0;
                 for (int i = 0; i < segments.Count; i++)
@@ -939,6 +970,116 @@ internal sealed class ScanBuilder
         }
 
         return largest;
+    }
+
+    /// <summary>
+    /// Whether a split of <paramref name="node"/> under <paramref name="mask"/> can register other segments than the split
+    /// beside it in the same span: a list layout's offsets and validity are registered by the split's rows, and so is any
+    /// layout this build does not walk. Flat, chunked, struct, dictionary and zoned layouts register their chunks whole.
+    /// </summary>
+    private static bool RegistersByRows(in LayoutNode node, in FieldMask mask)
+    {
+        switch (node.Encoding)
+        {
+            case LayoutEncodingId.Flat:
+                return false;
+
+            case LayoutEncodingId.Chunked:
+                for (int i = 0; i < node.ChildCount; i++)
+                {
+                    LayoutNode chunk = node.GetChild(i);
+                    if (chunk.Encoding != LayoutEncodingId.Flat && RegistersByRows(in chunk, in mask))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+
+            case LayoutEncodingId.Struct:
+                DType dtype = node.DType;
+                int validity = !dtype.IsDefault && dtype.IsNullable ? 1 : 0;
+                if (dtype.IsDefault || dtype.Kind != DTypeKind.Struct || node.ChildCount != dtype.FieldCount + validity)
+                {
+                    return true;
+                }
+
+                FieldMask all = FieldMask.All;
+                if (validity == 1)
+                {
+                    LayoutNode valid = node.GetChild(0);
+                    if (RegistersByRows(in valid, in all))
+                    {
+                        return true;
+                    }
+                }
+
+                int selected = mask.SelectedCount(dtype.FieldCount);
+                for (int s = 0; s < selected; s++)
+                {
+                    LayoutNode child = node.GetChild(mask.SelectedField(s) + validity);
+                    FieldMask childMask = mask.SelectedMask(s);
+                    if (RegistersByRows(in child, in childMask))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+
+            case LayoutEncodingId.Dict:
+            case LayoutEncodingId.Zoned:
+            case LayoutEncodingId.Stats:
+                FieldMask whole = FieldMask.All;
+                for (int i = 0; i < node.ChildCount; i++)
+                {
+                    LayoutNode child = node.GetChild(i);
+                    if (RegistersByRows(in child, in whole))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+
+            default:
+                return true;
+        }
+    }
+
+    /// <summary>
+    /// The blocks this scan's rows touch, as its plan counts them: arithmetic on its rows when every row is wanted, and a
+    /// walk of its splits, registering nothing, under a take.
+    /// </summary>
+    internal long TouchedBlocks()
+    {
+        LayoutTree tree = _file.LayoutTree;
+        (RowRange rows, long natural, long cap) = Frame(tree);
+        if (rows.IsEmpty)
+        {
+            return 0;
+        }
+
+        long blockRows = Math.Max(natural, 1);
+        if (_take is null)
+        {
+            return ((rows.End - 1) / blockRows) - (rows.Start / blockRows) + 1;
+        }
+
+        ScanProjection keep = _fields is null ? ScanProjection.All : ScanProjection.Create(_fields.Build());
+        SplitPlan plan = SplitPlan.Compute(tree, rows, keep.RootMask, cap, _windowRows);
+        BlockTally touched = new BlockTally(blockRows);
+        SplitCursor cursor = plan.CreateCursor();
+        long blocks = 0;
+        while (cursor.TryNext(out RowRange split))
+        {
+            if (_take.Touches(split))
+            {
+                blocks += touched.Add(split, _take);
+            }
+        }
+
+        return blocks;
     }
 
     /// <summary>
@@ -1761,15 +1902,36 @@ internal sealed class ScanBuilder
             }
         }
 
-        // Clears the bits of rows [from, to) of a batch whose first row is `first`.
-        static void Clear(Span<ulong> words, long first, long from, long to)
+        static void Clear(Span<ulong> words, long first, long from, long to) => ClearRows(words, first, from, to);
+    }
+
+    /// <summary>
+    /// Clears the bits of rows [<paramref name="from"/>, <paramref name="to"/>) of a batch whose first row is
+    /// <paramref name="first"/>, a word at a time: the two edge words masked, the words between cleared whole, where a bit at
+    /// a time walked a group of rows left out bit by bit.
+    /// </summary>
+    internal static void ClearRows(Span<ulong> words, long first, long from, long to)
+    {
+        if (to <= from)
         {
-            for (long row = from; row < to; row++)
-            {
-                int at = (int)(row - first);
-                words[at >> 6] &= ~(1UL << (at & 63));
-            }
+            return;
         }
+
+        int start = (int)(from - first);
+        int last = (int)(to - first - 1);
+        int startWord = start >> 6;
+        int lastWord = last >> 6;
+        ulong head = ulong.MaxValue << (start & 63);
+        ulong tail = ulong.MaxValue >> (63 - (last & 63));
+        if (startWord == lastWord)
+        {
+            words[startWord] &= ~(head & tail);
+            return;
+        }
+
+        words[startWord] &= ~head;
+        words[(startWord + 1)..lastWord].Clear();
+        words[lastWord] &= ~tail;
     }
 
     /// <summary>The top-level field of the file that <paramref name="column"/> names, when it is a variant column; -1 otherwise.</summary>
@@ -1876,7 +2038,8 @@ internal sealed class ScanBuilder
         return new TerminalScan(
             _file, tree, _filter, rows, wholeFile, cap, read, _take, _prune, _tiers, _metrics, _indexes, excluded, keys, _granules, _degree)
         {
-            Account = _account ?? QueryMemoryBudget.Process.Account,
+            // Under its session's budget, as a scan counts: a session that sets its own held its terminals to the process's.
+            Account = _account ?? QueryMemoryBudget.Of(_file.Session).Account,
         };
     }
 

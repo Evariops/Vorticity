@@ -262,6 +262,26 @@ public sealed partial class ObjectContentsTests
     }
 
     /// <summary>
+    /// A hash two different schemas are interned under names neither from then on, whichever came first, where the first
+    /// kept answered for both: a table that names it reads as no table, and its object is opened. The same bytes interned
+    /// again are no collision. The hash is drawn at random, no schema's.
+    /// </summary>
+    [Fact]
+    public void AHashTwoSchemasAreInternedUnderNamesNeither()
+    {
+        UInt128 hash = new UInt128((ulong)Random.Shared.NextInt64(), (ulong)Random.Shared.NextInt64());
+        byte[] first = [1, 2, 3, 4];
+        SchemaInterns.Intern(hash, first);
+        SchemaInterns.Intern(hash, [1, 2, 3, 4]);
+        Assert.Same(first, SchemaInterns.Find(hash));
+
+        SchemaInterns.Intern(hash, [5, 6, 7, 8]);
+        Assert.Null(SchemaInterns.Find(hash));
+        SchemaInterns.Intern(hash, first);
+        Assert.Null(SchemaInterns.Find(hash));
+    }
+
+    /// <summary>
     /// An hour of calls whose attributes hold a route, and on about one row in a hundred a rare key: a question on that key
     /// reads, cold, the path directory beside the column's chunk directory, then the slices that may hold the key, two round
     /// trips, and warm none at all, whether the session keeps the declared regions in a synopsis cache as well or not; it

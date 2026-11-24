@@ -250,7 +250,7 @@ internal sealed partial class ColumnChunkReader
             return Node(arena, slots, validity, _dense, data);
         }
 
-        int bytes = _slot == 0 ? CanonicalSupport.BitmapByteCount(slots) : checked(slots * _slot);
+        int bytes = _slot == 0 ? CanonicalSupport.BitmapByteCount(slots) : Sized(slots, _slot);
         VortexBuffer spread;
         if (_slot == 0)
         {
@@ -315,7 +315,7 @@ internal sealed partial class ColumnChunkReader
         else
         {
             // Every byte is copied over: bits, values, and views rebased.
-            int bytes = _slot == 0 ? CanonicalSupport.BitmapByteCount(values) : checked(values * _slot);
+            int bytes = _slot == 0 ? CanonicalSupport.BitmapByteCount(values) : Sized(values, _slot);
             _dense = CanonicalSupport.AllocateUninitialized(context.Decode, Math.Max(bytes, 1), 64, out into).Slice(0, bytes);
         }
 

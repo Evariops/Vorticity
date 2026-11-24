@@ -107,8 +107,10 @@ internal sealed class GranuleKeyRuns
 
             return bytes[0] == Version ? Values(ref reader, (int)granules, bytes.Length) : Runs(ref reader, (int)granules, bytes.Length);
         }
-        catch (VortexFormatException)
+        catch (Exception e) when (e is VortexFormatException or OverflowException)
         {
+            // A row read past a long by a checked conversion costs the runs, as a malformed varint does: the neighbours'
+            // filter, where the overflow went past this one.
             return null;
         }
     }
@@ -171,7 +173,10 @@ internal sealed class GranuleKeyRuns
                 ulong shared = reader.ReadVarint();
                 ReadOnlySpan<byte> rest = reader.ReadLengthDelimited();
                 int before = previous < 0 ? 0 : keys.WrittenCount - previous;
-                if (shared > (ulong)before)
+
+                // Front coding lets a key repeat the one before whole for a few bytes, so the keys rebuilt grow as the
+                // square of the region: held to what a decode is allowed.
+                if (shared > (ulong)before || (long)keys.WrittenCount + (long)shared + rest.Length > VortexLimits.DefaultMaxDecompressedBytes)
                 {
                     return null;
                 }

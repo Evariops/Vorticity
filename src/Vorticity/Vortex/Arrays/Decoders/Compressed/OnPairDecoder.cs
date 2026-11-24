@@ -175,11 +175,25 @@ internal sealed class OnPairDecoder : ArrayDecoder
             if (!fewCodes)
             {
                 built = Buffers.Blocks.Rent<long>(tokenCount);
-                made = true;
-                BuildTokenTable(dictOffsets.Values.Span, metadata.DictionaryOffsetsPType, tokenCount, built, dictionary.Length);
+                try
+                {
+                    BuildTokenTable(dictOffsets.Values.Span, metadata.DictionaryOffsetsPType, tokenCount, built, dictionary.Length);
+                }
+                catch
+                {
+                    Buffers.Blocks.Return(built);
+                    throw;
+                }
+
                 tokens = built;
                 ascii = dtype.Kind == DTypeKind.Utf8
                     && Ascii.IsValid(dictionary.Span[..Math.Min(dictionaryBytes, dictionary.Length)]);
+
+                // Kept for the node's next ranges when a reader names the node, before the decode can throw: the context
+                // owns it from here, and no decode of the node's children keeps a table that would push it out of its ring.
+                // A table not kept is ours, given back at the end; one a malformed row throws on is an array of the pool
+                // that no account counts, which the collector takes.
+                made = !context.KeepTable(in node, tag, (uint)dictionaryBytes | (ascii ? AsciiFact : 0), built);
             }
         }
 
@@ -279,8 +293,8 @@ internal sealed class OnPairDecoder : ArrayDecoder
             }
         }
 
-        // The table built, kept for the node's next ranges when a reader names the node; a table not kept goes back.
-        if (made && !context.KeepTable(in node, tag, (uint)dictionaryBytes | (ascii ? AsciiFact : 0), built))
+        // A table built and not kept goes back.
+        if (made)
         {
             Buffers.Blocks.Return(built);
         }

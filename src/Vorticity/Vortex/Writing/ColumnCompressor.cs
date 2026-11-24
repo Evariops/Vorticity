@@ -2,7 +2,6 @@ using System;
 using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
-using System.Threading;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
 using Vorticity.Aggregating;
@@ -1110,7 +1109,7 @@ internal static class ColumnCompressor
         // the one the differential proves byte-identical over the corpus; pricing run-end against
         // the other candidates changes a handful of chunks and is weighed on its own before it is
         // taken.
-        DifferentialProbe? probe = Differential.Value;
+        DifferentialProbe? probe = workspace?.Probes?.Differential;
 
         // A column's chunk says so for itself; a child, which has no chunk of its own, takes it
         // from the writer's workspace, so that the size-first profile reaches every array written.
@@ -1122,8 +1121,8 @@ internal static class ColumnCompressor
 
         // The oracle: when a test has installed a probe, the other chooser runs on the same chunk
         // with the same inputs and the two decisions are compared plan against plan, with the
-        // candidate-by-candidate one standing as the reference. The probe flows with the async
-        // write and nowhere else, so two tests writing at once cannot see each other's chunks.
+        // candidate-by-candidate one standing as the reference. The probe is the writer's, which
+        // hands it to its own workspaces, so two tests writing at once cannot see each other's chunks.
         if (probe is not null)
         {
             ColumnPlan reference = ChooseToday(arena, nodeIndex, target, in stats, cascade, chunk, workspace);
@@ -1156,9 +1155,6 @@ internal static class ColumnCompressor
     /// </param>
     /// <param name="Report">Called per disagreeing chunk with the node and the two descriptions.</param>
     internal sealed record DifferentialProbe(bool RunEndCompetes, Action<int, string, string> Report);
-
-    /// <summary>The probe in force for the current async flow, or none.</summary>
-    internal static readonly AsyncLocal<DifferentialProbe?> Differential = new AsyncLocal<DifferentialProbe?>();
 
     /// <summary>The chooser by order: candidates in a fixed order, the first that wins returns.</summary>
     private static ColumnPlan ChooseToday(

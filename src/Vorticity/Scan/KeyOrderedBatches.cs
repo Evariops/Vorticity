@@ -325,8 +325,8 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                     .ConfigureAwait(false);
                 _live = pruning.Live;
 
-                // The walk skips the rows of a dead block one entry at a time, so the blocks are
-                // counted here, once, as the plan counts them.
+                // The walk passes the rows of a dead block without taking one, a seek over them on a sorted column and an
+                // entry at a time over runs, so the blocks are counted here, once, as the plan counts them.
                 if (_live is { } live && _scan.Metrics is { } metrics)
                 {
                     metrics.AddBlocksPruned(live.BlockCount - live.LiveCount);
@@ -407,8 +407,32 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
                         $"The key source of '{_owner._path}' names row {row} of a {rowCount}-row file.");
                 }
 
-                if ((_live is null || _live.IsLive((int)(row / _live.BlockRows)))
-                    && (_owner.Excluded is not { } excluded || !excluded.Excludes(row)))
+                bool live = _live is null || _live.IsLive((int)(row / _live.BlockRows));
+                if (!live && source is SortedColumnWalker walker)
+                {
+                    // A sorted column's entries are its rows, so the walk passes the dead blocks in one seek, to the next
+                    // live block's first row (its last, descending), where a step at a time decoded every zone of the key
+                    // in them. A landing past the slice ends it.
+                    long past = PastDead(_live!, row, descending);
+                    long skipped = descending ? row - past : past - row;
+                    if (skipped >= _left)
+                    {
+                        _positioned = false;
+                        _slice++;
+                        continue;
+                    }
+
+                    _left -= skipped;
+                    _positioned = await source.SeekRankAsync(past - walker.FirstRow, _token).ConfigureAwait(false);
+                    if (!_positioned)
+                    {
+                        _slice++;
+                    }
+
+                    continue;
+                }
+
+                if (live && (_owner.Excluded is not { } excluded || !excluded.Excludes(row)))
                 {
                     _rows[count++] = row;
                 }
@@ -430,6 +454,23 @@ internal sealed class KeyOrderedBatches : IAsyncEnumerable<RecordBatch>
             }
 
             return count;
+        }
+
+        /// <summary>
+        /// The row a walk lands on past the dead block <paramref name="row"/> lies in: the first row of the next live block,
+        /// or the last row of the one before descending; the file's row count, or -1, when no block is live that way.
+        /// </summary>
+        private static long PastDead(BlockMask live, long row, bool descending)
+        {
+            int block = (int)(row / live.BlockRows);
+            if (descending)
+            {
+                int previous = live.PreviousLive(block - 1);
+                return previous < 0 ? -1 : ((previous + 1) * live.BlockRows) - 1;
+            }
+
+            int next = live.NextLive(block + 1);
+            return next >= live.BlockCount ? live.RowCount : next * live.BlockRows;
         }
 
         /// <summary>

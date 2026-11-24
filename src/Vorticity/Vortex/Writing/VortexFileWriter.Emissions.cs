@@ -323,6 +323,9 @@ public sealed partial class VortexFileWriter
         /// <inheritdoc cref="Frames"/>
         internal bool FramesFailed;
 
+        /// <summary>What failed the first of the frames' items to fail, thrown by the last to end once the column ended.</summary>
+        internal Exception? FramesError;
+
         /// <summary>
         /// Its first rows taken block by block on the writer's line (<see cref="ShredChain"/>), up to where its chain broke,
         /// the rest after them (<see cref="TakenChunk.Rest"/>); null when they are taken here.
@@ -376,12 +379,18 @@ public sealed partial class VortexFileWriter
         {
             try
             {
-                writer._emissionFrames![chunk.Field]!.Run(item);
+                // Past a failed item, the frames are of a column that will not be written: the item only counts itself out.
+                if (!Volatile.Read(ref chunk.FramesFailed))
+                {
+                    writer._emissionFrames![chunk.Field]!.Run(item);
+                }
             }
-            catch
+            catch (Exception error)
             {
+                // Kept, not thrown: an item that throws makes the piece leave the items not claimed yet, which never counted
+                // themselves out, so that the column was never ended and its lane never given back.
+                Interlocked.CompareExchange(ref chunk.FramesError, error, null);
                 Volatile.Write(ref chunk.FramesFailed, true);
-                throw;
             }
             finally
             {
@@ -818,6 +827,7 @@ public sealed partial class VortexFileWriter
                 chunk.Local = local;
                 chunk.FramesLeft = items;
                 chunk.FramesFailed = false;
+                chunk.FramesError = null;
                 chunk.Batch = CoreBatch.Rent(_core, _lanes);
                 apart = true;
                 FrameWork work = chunk.Frames ??= new FrameWork(this, chunk);
@@ -851,6 +861,12 @@ public sealed partial class VortexFileWriter
         finally
         {
             EndColumn(chunk, lane);
+        }
+
+        // The column ended, what failed a frame fails the piece, as the item that failed threw it before.
+        if (Interlocked.Exchange(ref chunk.FramesError, null) is { } error)
+        {
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(error);
         }
     }
 
@@ -1242,7 +1258,7 @@ public sealed partial class VortexFileWriter
                 {
                     await EmittedAsync(chunk).ConfigureAwait(false);
                 }
-                catch (Exception)
+                catch (Exception failure) when (VortexTelemetry.LetsGo(failure, "writer.given_up_piece"))
                 {
                     // Given up with the writer: its failure has no one to report to.
                 }

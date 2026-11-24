@@ -43,8 +43,11 @@ public static class VortexMemory
     // Whether a limit set holds the collector's heap.
     private static bool s_heapHeld;
 
-    // 1 once the variable was read and its limit held, or once a limit set made it moot.
+    // 1 once the variable was read, its limit held or what is wrong with it kept, or once a limit set made it moot.
     private static int s_variableRead;
+
+    // What was wrong with the variable when it was read, null when nothing was; a limit set clears it.
+    private static string? s_variableError;
 
     /// <summary>The limit the host set, through <see cref="SetLimit"/> or <see cref="LimitVariable"/>; null when it set none.</summary>
     /// <exception cref="InvalidOperationException"><see cref="LimitVariable"/> is not a count of bytes.</exception>
@@ -70,13 +73,14 @@ public static class VortexMemory
 
     /// <summary>
     /// Holds the process to the limit <see cref="LimitVariable"/> names, the first time the library needs a limit and none
-    /// was set. A value that is no count of bytes fails that need, and each one after, with the same message: thrown from
-    /// the type's initializer, it left the type unusable, and its message behind a <see cref="TypeInitializationException"/>.
+    /// was set. A value that is no count of bytes, or a limit whose share of heap the collector already holds more than,
+    /// fails that need, and each one after, with the same message: thrown from the type's initializer, it left the type
+    /// unusable, and its message behind a <see cref="TypeInitializationException"/>, for the life of the process.
     /// </summary>
-    /// <exception cref="InvalidOperationException"><see cref="LimitVariable"/> is not a count of bytes.</exception>
+    /// <exception cref="InvalidOperationException"><see cref="LimitVariable"/> is not a count of bytes, or the collector already holds more than three quarters of it.</exception>
     private static void ReadVariable()
     {
-        if (Volatile.Read(ref s_variableRead) == 0 && VariableError() is { } error)
+        if (VariableError() is { } error)
         {
             throw new InvalidOperationException(error);
         }
@@ -84,29 +88,47 @@ public static class VortexMemory
 
     /// <summary>
     /// Holds the process to the limit <see cref="LimitVariable"/> names, once: what is wrong with its value, or null when it
-    /// names a count of bytes or nothing.
+    /// names a count of bytes the process is held to, or nothing. The answer is kept: a limit the heap passes is not tried
+    /// again at each need, a full collection each time.
     /// </summary>
     private static string? VariableError()
     {
+        if (Volatile.Read(ref s_variableRead) != 0)
+        {
+            return Volatile.Read(ref s_variableError);
+        }
+
         lock (Gate)
         {
             if (s_variableRead != 0)
             {
-                return null;
+                return s_variableError;
             }
 
+            string? error = null;
             if (Environment.GetEnvironmentVariable(LimitVariable) is { Length: > 0 } text)
             {
                 if (ParseBytes(text) is not long bytes)
                 {
-                    return $"{LimitVariable} is '{text}', which is not a count of bytes: 4294967296, 4096m and 4g are the same limit.";
+                    error = $"{LimitVariable} is '{text}', which is not a count of bytes: 4294967296, 4096m and 4g are the same limit.";
                 }
-
-                HoldLocked(bytes);
+                else
+                {
+                    try
+                    {
+                        HoldLocked(bytes);
+                    }
+                    catch (InvalidOperationException held)
+                    {
+                        // The heap passes the limit's share already: a host that loaded the library late, past what it asks.
+                        error = $"{LimitVariable} is '{text}': {held.Message}";
+                    }
+                }
             }
 
+            s_variableError = error;
             Volatile.Write(ref s_variableRead, 1);
-            return null;
+            return error;
         }
     }
 
@@ -131,6 +153,7 @@ public static class VortexMemory
         lock (Gate)
         {
             HoldLocked(bytes);
+            s_variableError = null;
             Volatile.Write(ref s_variableRead, 1);
         }
     }

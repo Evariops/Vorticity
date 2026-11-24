@@ -113,21 +113,27 @@ internal sealed record PartitionIndexEntry(
         }
 
         ulong version = reader.ReadVarint();
-        int keyLength = checked((int)reader.ReadVarint());
-        if (keyLength > reader.Remaining)
+        ulong declaredKey = reader.ReadVarint();
+        if (declaredKey > (ulong)reader.Remaining)
         {
             throw new VortexFormatException("An entry of the tree of partition indexes names its object past its bytes.");
         }
 
+        int keyLength = (int)declaredKey;
+
         string key = Encoding.UTF8.GetString(value.Slice(reader.Position, keyLength));
         reader = Skipped(value, reader.Position + keyLength);
         UInt128 uid = Uid128(ref reader);
-        long bytes = checked((long)reader.ReadVarint());
-        int count = checked((int)reader.ReadVarint());
-        if ((long)count * 16 != reader.Remaining)
+        // Compared as read, where a checked cast threw the arithmetic's overflow past a long or an int.
+        ulong declaredBytes = reader.ReadVarint();
+        ulong declaredCount = reader.ReadVarint();
+        if (declaredBytes > long.MaxValue || declaredCount > (ulong)(reader.Remaining / 16) || (long)declaredCount * 16 != reader.Remaining)
         {
             throw new VortexFormatException("An entry of the tree of partition indexes names its objects past its bytes.");
         }
+
+        long bytes = (long)declaredBytes;
+        int count = (int)declaredCount;
 
         UInt128[] covered = new UInt128[count];
         for (int i = 0; i < count; i++)

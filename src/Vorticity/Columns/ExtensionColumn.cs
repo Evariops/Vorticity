@@ -293,14 +293,8 @@ internal readonly ref struct ExtensionColumn
 
     private DateTime Instant(int index, VortexTimeUnit unit)
     {
+        // The unit was read by ExtensionDTypeRegistry.ReadTimestamp, which refuses days.
         long raw = ReadStorageInteger(index);
-        if (unit == VortexTimeUnit.Days)
-        {
-            // A `days` unit passes dtype validation but has no instant, so the failure can only
-            // surface here, when a value is unpacked.
-            ColumnsThrow.Format("A vortex.timestamp with unit `days` has no instant representation.");
-        }
-
         if (!TemporalConvert.TryToTicks(raw, unit, out long ticks))
         {
             ColumnsThrow.Format(

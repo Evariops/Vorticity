@@ -420,25 +420,18 @@ public sealed class ListElementStatisticsTests
 
         List<string> wrong = [];
         int handed = 0;
-        ArrayBlobWriter.ElementsHanded.Value = (arena, elements, stats) => Audit(arena, elements, stats, wrong, ref handed);
-        try
+        await using VortexFileWriter writer = VortexFileWriter.Create(path, shape.Schema, options);
+        writer.Probes = new WriteProbes { ElementsHanded = (arena, elements, stats) => Audit(arena, elements, stats, wrong, ref handed) };
+        for (int start = 0; start < written; start += batchRows)
         {
-            await using VortexFileWriter writer = VortexFileWriter.Create(path, shape.Schema, options);
-            for (int start = 0; start < written; start += batchRows)
-            {
-                int count = Math.Min(batchRows, written - start);
-                int slice = CanonicalSlice.SliceAcross(shape.Arena, shape.Arena, shape.Root, start, count);
-                using RecordBatch batch = new RecordBatch(shape.Arena, slice, start);
-                await writer.WriteAsync(batch);
-            }
+            int count = Math.Min(batchRows, written - start);
+            int slice = CanonicalSlice.SliceAcross(shape.Arena, shape.Arena, shape.Root, start, count);
+            using RecordBatch batch = new RecordBatch(shape.Arena, slice, start);
+            await writer.WriteAsync(batch);
+        }
 
-            WriteReport report = await writer.CompleteAsync();
-            return new Written(path, writer.ElementChunksWithoutStatistics, handed, report.ChunkRows.Length, wrong);
-        }
-        finally
-        {
-            ArrayBlobWriter.ElementsHanded.Value = null;
-        }
+        WriteReport report = await writer.CompleteAsync();
+        return new Written(path, writer.ElementChunksWithoutStatistics, handed, report.ChunkRows.Length, wrong);
     }
 
     private static async Task<(long Unserved, int Handed, List<string> Wrong)> Rewrite(
@@ -446,29 +439,22 @@ public sealed class ListElementStatisticsTests
     {
         List<string> wrong = [];
         int handed = 0;
-        ArrayBlobWriter.ElementsHanded.Value = (arena, elements, stats) => Audit(arena, elements, stats, wrong, ref handed);
-        try
+        await using VortexFile source = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
+        VortexWriteOptions options = new VortexWriteOptions
         {
-            await using VortexFile source = await VortexFile.OpenAsync(Corpus.Path(id), CancellationToken.None);
-            VortexWriteOptions options = new VortexWriteOptions
-            {
-                Identity = Pinned,
-                ElementStatistics = elementStatistics,
-            };
+            Identity = Pinned,
+            ElementStatistics = elementStatistics,
+        };
 
-            await using VortexFileWriter writer = VortexFileWriter.Create(path, source.DType, options);
-            await foreach (RecordBatch batch in source.ScanBuilder().WithMaxBatchRows(1024).ExecuteAsync())
-            {
-                await writer.WriteAsync(batch);
-            }
-
-            await writer.CompleteAsync();
-            return (writer.ElementChunksWithoutStatistics, handed, wrong);
-        }
-        finally
+        await using VortexFileWriter writer = VortexFileWriter.Create(path, source.DType, options);
+        writer.Probes = new WriteProbes { ElementsHanded = (arena, elements, stats) => Audit(arena, elements, stats, wrong, ref handed) };
+        await foreach (RecordBatch batch in source.ScanBuilder().WithMaxBatchRows(1024).ExecuteAsync())
         {
-            ArrayBlobWriter.ElementsHanded.Value = null;
+            await writer.WriteAsync(batch);
         }
+
+        await writer.CompleteAsync();
+        return (writer.ElementChunksWithoutStatistics, handed, wrong);
     }
 
     /// <summary>
