@@ -1051,7 +1051,7 @@ internal sealed class ParquetBatches : IAsyncEnumerator<RecordBatch>
         ParquetFooter footer = _file.Footer;
         Encryption.FileDecryptor decryptor = footer.Decryptor!;
         int leaf = _leaves[reader];
-        byte[] key = decryptor.ColumnKey(footer.ColumnPaths[leaf], chunk.KeyMetadata.Of(footer.Bytes), chunk.Crypto == ChunkCrypto.FooterKey)
+        Sealing.SecretBytes key = decryptor.ColumnKey(footer.ColumnPaths[leaf], chunk.KeyMetadata.Of(footer.Bytes), chunk.Crypto == ChunkCrypto.FooterKey)
             ?? throw new ParquetUnsupportedException("column key", ParquetComponentKind.Encryption,
                 $"The column '{footer.ColumnPaths[leaf]}' is encrypted with {Encryption.FileDecryptor.Describe(chunk.KeyMetadata.Of(footer.Bytes))}, whose key is not given.");
         Encryption.PageDecryption? decryption = _decryptions[reader];

@@ -64,9 +64,8 @@ public sealed class EncryptionDegreeTests : IDisposable
         }
 
         ParquetFile file = await session.OpenParquetAsync(_path, new ParquetOpenOptions { Decryption = new ParquetDecryption { FooterKey = FooterKey } }, Ct);
-        byte[] held = file.Footer.Decryptor!.FooterKey!;
-        Assert.Equal(FooterKey, held);
-        Assert.NotSame(FooterKey, held);
+        Vorticity.Sealing.SecretBytes held = file.Footer.Decryptor!.FooterKey!;
+        Assert.True(held.Span.SequenceEqual(FooterKey));
         long seen = 0;
         await foreach (RecordBatch batch in file.Scan().ToBatchesAsync(Ct))
         {
@@ -87,9 +86,9 @@ public sealed class EncryptionDegreeTests : IDisposable
 
         Assert.Equal(Rows, seen);
 
-        // The file's copy of the key is wiped as it closes; the caller's is left alone.
+        // The file's copy of the key is wiped as it closes, its cell given back; the caller's is left alone.
         await file.DisposeAsync();
-        Assert.All(held, b => Assert.Equal(0, b));
+        Assert.Throws<ObjectDisposedException>(() => held.Span.Length);
         Assert.Equal("footer-key-16byt"u8.ToArray(), FooterKey);
     }
 

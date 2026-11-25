@@ -145,23 +145,25 @@ internal sealed class FileCrypto
 /// from <see cref="ParquetDecryption.FooterKey"/>, else what <see cref="ParquetDecryption.KeyResolver"/>
 /// makes of the metadata the file stores for it. The ciphers made here decrypt the footer and the
 /// columns' metadata, under a lock; a column's reader makes its own from <see cref="ColumnKey"/>.
-/// Every key is held in an array of its own, pinned so that the collector leaves no copy of it, and
-/// wiped when the file is disposed.
+/// Every key is held as a secret (<see cref="Sealing.SecretBytes"/>), in memory the collector never
+/// moves so that it leaves no copy of it, and wiped when the file is disposed.
 /// </remarks>
 [SkipLocalsInit]
 internal sealed class FileDecryptor : IDisposable
 {
     private readonly ParquetDecryption _options;
-    private readonly Dictionary<string, byte[]> _columnKeys = new(StringComparer.Ordinal);
 
-    // A cipher a key, the key named by its array, which this decryptor owns and never replaces.
-    private readonly Dictionary<byte[], ModuleCipher> _ciphers = new(ReferenceEqualityComparer.Instance);
+    // A column's key, once resolved; null where the caller has none for it.
+    private readonly Dictionary<string, Sealing.SecretBytes?> _columnKeys = new(StringComparer.Ordinal);
+
+    // A cipher a key, the key named by its secret, which this decryptor owns and never replaces.
+    private readonly Dictionary<Sealing.SecretBytes, ModuleCipher> _ciphers = new(ReferenceEqualityComparer.Instance);
     private readonly object _gate = new();
 
     /// <summary>The AAD of the module being decrypted, under <see cref="_gate"/>: on the heap, since its length is the file's.</summary>
     private readonly byte[] _aad;
 
-    private FileDecryptor(FileCrypto crypto, ParquetDecryption options, byte[] fileAad, byte[]? footerKey)
+    private FileDecryptor(FileCrypto crypto, ParquetDecryption options, byte[] fileAad, Sealing.SecretBytes? footerKey)
     {
         Crypto = crypto;
         _options = options;
@@ -176,7 +178,7 @@ internal sealed class FileDecryptor : IDisposable
     internal byte[] FileAad { get; }
 
     /// <summary>The footer's key, and that of the columns it encrypts; null where the caller has none.</summary>
-    internal byte[]? FooterKey { get; }
+    internal Sealing.SecretBytes? FooterKey { get; }
 
     /// <summary>
     /// The decryptor of a file of <paramref name="crypto"/>: the AAD prefix the file stores, held to
@@ -208,17 +210,14 @@ internal sealed class FileDecryptor : IDisposable
             prefix = options.AadPrefix.ToArray();
         }
 
-        byte[] footerKey = options.FooterKey.IsEmpty ? Resolve(options, null, crypto.KeyMetadata) : Pinned(options.FooterKey.Span);
-        if (footerKey.Length == 0)
+        Sealing.SecretBytes? footerKey = options.FooterKey.IsEmpty ? Resolve(options, null, crypto.KeyMetadata) : Secret(options.FooterKey.Span);
+        if (footerKey is null && footerKeyRequired)
         {
-            if (footerKeyRequired)
-            {
-                throw new ParquetUnsupportedException("footer key", ParquetComponentKind.Encryption,
-                    "The file's footer is encrypted, and no key is given for it: set ParquetDecryption.FooterKey, or a KeyResolver that knows its key metadata.");
-            }
+            throw new ParquetUnsupportedException("footer key", ParquetComponentKind.Encryption,
+                "The file's footer is encrypted, and no key is given for it: set ParquetDecryption.FooterKey, or a KeyResolver that knows its key metadata.");
         }
 
-        return new FileDecryptor(crypto, options, [.. prefix, .. crypto.AadFileUnique], footerKey.Length == 0 ? null : footerKey);
+        return new FileDecryptor(crypto, options, [.. prefix, .. crypto.AadFileUnique], footerKey);
     }
 
     /// <summary>The AAD of a module of <paramref name="type"/> into <paramref name="into"/>, which holds <see cref="FileAad"/> and <see cref="ModuleAad.SuffixBytes"/> more.</summary>
@@ -229,26 +228,27 @@ internal sealed class FileDecryptor : IDisposable
     /// The key of the column at <paramref name="path"/>, which the footer's encrypts when
     /// <paramref name="footerKey"/>; null when the caller has none for it.
     /// </summary>
-    internal byte[]? ColumnKey(string path, ReadOnlySpan<byte> keyMetadata, bool footerKey)
+    internal Sealing.SecretBytes? ColumnKey(string path, ReadOnlySpan<byte> keyMetadata, bool footerKey)
     {
         if (footerKey)
         {
             return FooterKey;
         }
 
-        byte[]? key;
+        Sealing.SecretBytes? key;
+        bool found;
         lock (_gate)
         {
-            _columnKeys.TryGetValue(path, out key);
+            found = _columnKeys.TryGetValue(path, out key);
         }
 
-        if (key is null)
+        if (!found)
         {
             // The caller's resolver may call a key service: out of the lock, which the scan's lanes
             // take to decrypt the columns' metadata. Two lanes may both resolve a key; the first kept
             // is the one every lane uses, and the other is wiped.
-            byte[] resolved = _options.ColumnKeys is { } keys && keys.TryGetValue(path, out ReadOnlyMemory<byte> given) && !given.IsEmpty
-                ? Pinned(given.Span)
+            Sealing.SecretBytes? resolved = _options.ColumnKeys is { } keys && keys.TryGetValue(path, out ReadOnlyMemory<byte> given) && !given.IsEmpty
+                ? Secret(given.Span)
                 : Resolve(_options, path, keyMetadata.ToArray());
             lock (_gate)
             {
@@ -261,18 +261,18 @@ internal sealed class FileDecryptor : IDisposable
 
             if (!ReferenceEquals(key, resolved))
             {
-                CryptographicOperations.ZeroMemory(resolved);
+                resolved?.Dispose();
             }
         }
 
-        return key.Length == 0 ? null : key;
+        return key;
     }
 
     /// <summary>
     /// Decrypts the GCM module <paramref name="module"/> under <paramref name="key"/>, a footer's or a
     /// column metadata's, into new bytes.
     /// </summary>
-    internal byte[] Decrypt(byte[] key, ReadOnlySpan<byte> module, ModuleType type, int rowGroup, int column)
+    internal byte[] Decrypt(Sealing.SecretBytes key, ReadOnlySpan<byte> module, ModuleType type, int rowGroup, int column)
     {
         int bytes = ModuleCipher.ModuleBytes(module, ModuleCipher.GcmOverhead);
         if (bytes != module.Length)
@@ -303,11 +303,11 @@ internal sealed class FileDecryptor : IDisposable
         return CryptographicOperations.FixedTimeEquals(tag, signature.Slice(ModuleCipher.NonceLength, ModuleCipher.TagLength));
     }
 
-    private ModuleCipher Cipher(byte[] key)
+    private ModuleCipher Cipher(Sealing.SecretBytes key)
     {
         if (!_ciphers.TryGetValue(key, out ModuleCipher? cipher))
         {
-            cipher = new ModuleCipher(key);
+            cipher = new ModuleCipher(key.Span);
             _ciphers[key] = cipher;
         }
 
@@ -325,34 +325,39 @@ internal sealed class FileDecryptor : IDisposable
             }
 
             _ciphers.Clear();
-            foreach (byte[] key in _columnKeys.Values)
+            foreach (Sealing.SecretBytes? key in _columnKeys.Values)
             {
-                CryptographicOperations.ZeroMemory(key);
+                key?.Dispose();
             }
 
             _columnKeys.Clear();
-            if (FooterKey is { } footer)
-            {
-                CryptographicOperations.ZeroMemory(footer);
-            }
+            FooterKey?.Dispose();
         }
     }
 
-    /// <summary>A copy of <paramref name="key"/> the collector never moves, so that wiping it leaves no other.</summary>
-    private static byte[] Pinned(ReadOnlySpan<byte> key)
+    /// <summary>
+    /// A copy of <paramref name="key"/> as a secret, in memory the collector never moves, so that wiping it leaves no other;
+    /// null for an empty key, which names none.
+    /// </summary>
+    /// <exception cref="ParquetUnsupportedException">The key is not of a length AES takes.</exception>
+    private static Sealing.SecretBytes? Secret(ReadOnlySpan<byte> key)
     {
         if (key.IsEmpty)
         {
-            return [];
+            return null;
         }
 
-        byte[] copy = GC.AllocateArray<byte>(key.Length, pinned: true);
-        key.CopyTo(copy);
-        return copy;
+        if (key.Length is not (16 or 24 or 32))
+        {
+            throw new ParquetUnsupportedException("key", ParquetComponentKind.Encryption,
+                $"A key of {key.Length} bytes is given; AES takes 16, 24 or 32.");
+        }
+
+        return new Sealing.SecretBytes(key);
     }
 
-    private static byte[] Resolve(ParquetDecryption options, string? column, byte[] keyMetadata) =>
-        options.KeyResolver is { } resolver ? Pinned(resolver(new ParquetKeyRequest(column, keyMetadata)).Span) : [];
+    private static Sealing.SecretBytes? Resolve(ParquetDecryption options, string? column, byte[] keyMetadata) =>
+        options.KeyResolver is { } resolver ? Secret(resolver(new ParquetKeyRequest(column, keyMetadata)).Span) : null;
 
     /// <summary>The key metadata as text, where it is: what a message names a key by.</summary>
     internal static string Describe(ReadOnlySpan<byte> keyMetadata)

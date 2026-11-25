@@ -415,7 +415,7 @@ internal sealed class ObjectStoreSource : ISegmentReader
     /// whose batch reads it or the memory a file keeps for its own reads. Allocated outside any account past 32 MiB, a
     /// segment of 82 MB another writer wrote went unseen by the governor, a gigabyte at fourteen lanes.
     /// </summary>
-    private BlockOwner Rent(int length, MemoryAccount account) => CoalescedReads.RentBlock(length, _options, account);
+    private static BlockOwner Rent(int length, MemoryAccount account) => CoalescedReads.RentBlock(length, account);
 
     /// <summary>Records the object's token, and refuses an answer about another object.</summary>
     private void Note(string token)

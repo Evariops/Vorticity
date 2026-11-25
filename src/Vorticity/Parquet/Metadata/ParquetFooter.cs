@@ -355,7 +355,7 @@ internal sealed class ParquetFooter
             ?? _decrypted[rowGroup]!;
         if (Volatile.Read(ref decrypted[column]) is not { } plaintext)
         {
-            byte[]? key = decryptor.ColumnKey(ColumnPaths[column], chunk.KeyMetadata.Of(Bytes), chunk.Crypto == ChunkCrypto.FooterKey);
+            Sealing.SecretBytes? key = decryptor.ColumnKey(ColumnPaths[column], chunk.KeyMetadata.Of(Bytes), chunk.Crypto == ChunkCrypto.FooterKey);
             if (key is null)
             {
                 return chunk;

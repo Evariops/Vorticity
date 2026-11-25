@@ -1,5 +1,4 @@
 using System;
-using Vorticity.Buffers;
 
 namespace Vorticity.IO;
 
@@ -16,12 +15,8 @@ internal sealed class SegmentReadOptions
     /// <summary>16 MiB. The ceiling on a single coalesced read, and therefore on one allocation.</summary>
     public const int DefaultMaxCoalescedReadBytes = 16 << 20;
 
-    /// <summary>32 MiB, matching <see cref="BlockPool"/>'s own default ceiling.</summary>
-    public const int DefaultMaxPooledBytes = 32 * 1024 * 1024;
-
     private readonly int _coalesceGapBytes = DefaultCoalesceGapBytes;
     private readonly int _maxCoalescedReadBytes = DefaultMaxCoalescedReadBytes;
-    private readonly int _maxPooledBytes = DefaultMaxPooledBytes;
 
     /// <summary>Creates an options instance carrying every default.</summary>
     public SegmentReadOptions()
@@ -68,21 +63,6 @@ internal sealed class SegmentReadOptions
         {
             ArgumentOutOfRangeException.ThrowIfLessThan(value, VortexLimits.MaxAlignment);
             _maxCoalescedReadBytes = value;
-        }
-    }
-
-    /// <summary>
-    /// Buffers of at most this size come from the library's pool of blocks; larger ones
-    /// are allocated and freed outright. Default <see cref="DefaultMaxPooledBytes"/>.
-    /// </summary>
-    /// <exception cref="ArgumentOutOfRangeException">The value is negative.</exception>
-    public int MaxPooledBytes
-    {
-        get => _maxPooledBytes;
-        init
-        {
-            ArgumentOutOfRangeException.ThrowIfNegative(value);
-            _maxPooledBytes = value;
         }
     }
 }
