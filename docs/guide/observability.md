@@ -140,9 +140,21 @@ The memory the library holds is on the same meter as gauges, read when a listene
 | `vortex.memory.rented` | the bytes of the blocks in use |
 | `vortex.memory.retained`, tagged by `holder` | the bytes kept for the next operations: the pool's (`pool`), its blocks and what its slabs hold free between their pieces, the segment caches' (`segments`), the dataset handles' caches (`datasets`) |
 | `vortex.memory.rest` | the rest of the process, as the library measures it |
+| `vortex.memory.rest.part`, tagged by `part` | the parts of the rest: what the heap held past the work at the last full collection (`live`), what it grew by since (`uncertain`), what the collector keeps committed and free, which a collection gives back (`reclaimable`), the free space between the arrays of the pinned heap, which none does (`pinned_free`), what the work let go and no collection took yet (`pending`), and in a container what it uses past what the library knows (`container`) |
+| `vortex.memory.pinned` | the pinned memory the library holds: its slabs, which its blocks are cut from, and its blocks past the pool's classes |
 | `vortex.dataset.handles` | the dataset handles open |
 
+Three counters go with them, counted since the process started:
+
+| counter | what it counts |
+|---|---|
+| `vortex.memory.slabs_made` | the slabs the library took from the collector, whose rate says how often it asks the pinned heap for memory |
+| `vortex.memory.collections_asked` | the full collections the library asked for to give its work room |
+| `vortex.memory.refusals` | the reservations refused to the work, a query failed or a job's step given way |
+
 `VortexDiagnostics.GetMemoryReport()` returns the same numbers at one instant, for a log line or a health page, with no listener. A handle's caches count from the moment it opens and leave the count when it is disposed. Each number is read on its own, so two of them can disagree by what moved between the reads.
+
+A ceiling that falls while nothing is reserved is the rest growing, and its parts say which. A `pinned_free` that grows with the process's age is free space the pinned heap keeps between arrays that live: the library's are slabs that fill their regions, so it comes from the host's own pinned arrays, or from a collector that spreads them over many heaps ([threads.md](threads.md#the-garbage-collector)).
 
 ## The activities
 
