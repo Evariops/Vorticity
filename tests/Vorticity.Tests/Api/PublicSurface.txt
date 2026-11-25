@@ -1490,14 +1490,19 @@ Vorticity:     method bool op_Equality(MemoryReport, MemoryReport)
 Vorticity:     method bool op_Inequality(MemoryReport, MemoryReport)
 Vorticity:     method int GetHashCode()
 Vorticity:     method string ToString()
+Vorticity:     property IReadOnlyDictionary<string, long> RestByPart { get; init; }
 Vorticity:     property IReadOnlyDictionary<string, long> RetainedByHolder { get; init; }
 Vorticity:     property int DatasetHandles { get; init; }
 Vorticity:     property long CeilingBytes { get; init; }
+Vorticity:     property long CollectionsAsked { get; init; }
 Vorticity:     property long LimitBytes { get; init; }
+Vorticity:     property long PinnedBytes { get; init; }
+Vorticity:     property long Refusals { get; init; }
 Vorticity:     property long RentedBytes { get; init; }
 Vorticity:     property long ReservedBytes { get; init; }
 Vorticity:     property long RestBytes { get; init; }
 Vorticity:     property long RetainedBytes { get; init; }
+Vorticity:     property long SlabsMade { get; init; }
 Vorticity: sealed class Vorticity.OrderPlan : IEquatable<OrderPlan>
 Vorticity:     ctor OrderPlan(string, int, Nullable<long>, bool)
 Vorticity:     method OrderPlan <Clone>$()

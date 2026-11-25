@@ -96,7 +96,7 @@ public sealed class QueryMemoryBudget
     // whether a collection is being asked for, and the full collection after which the last one asked
     // for left the collector holding what it held.
     private long _measured;
-    private Rest _rest = new Rest(-1, -1, -1, -1, 0, 0, 0);
+    private Rest _rest = new Rest(-1, -1, -1, -1, 0, 0, 0, 0);
     private long _pending;
 
     // The fewest bytes measured since the rest was last read from a collection: never more than what was measured when the
@@ -521,35 +521,67 @@ public sealed class QueryMemoryBudget
     /// <summary>
     /// The process's own: the parts <see cref="RestBytes"/> is made of, as last read. What its heap held past the measured
     /// work at the last full collection, less what the work took back from the pool since; what a collection of the
-    /// youngest generations saw held past that; what the collector kept committed past its heap; what the work let go
-    /// since; what a container uses past what the registry knows; then the bytes the work measures now, the fewest it
-    /// measured since the rest was last read, and what it measured when the collector last ran. For a tool that tells
-    /// which part of the rest moves (<c>vortex-queries --memory-timeline</c>).
+    /// youngest generations saw held past that; what the collector kept committed past its heap, which a collection gives
+    /// back; what the pinned heap held free between its arrays, which none does; what the work let go since; what a
+    /// container uses past what the registry knows; then the bytes the work measures now, the fewest it measured since the
+    /// rest was last read, and what it measured when the collector last ran. For a tool that tells which part of the rest
+    /// moves (<c>vortex-queries --memory-timeline</c>), and for the memory report.
     /// </summary>
-    internal (long Live, long Uncertain, long Reclaimable, long Pending, long Container, long Measured, long MeasuredLow, long MeasuredAtCollection) RestParts
+    internal (long Live, long Uncertain, long Reclaimable, long PinnedFree, long Pending, long Container, long Measured, long MeasuredLow, long MeasuredAtCollection) RestParts
     {
         get
         {
             Rest rest = Volatile.Read(ref _rest);
-            return (LiveOf(rest), rest.Uncertain, rest.Reclaimable, Volatile.Read(ref _pending), Volatile.Read(ref _containerRest),
+            return (LiveOf(rest), rest.Uncertain, rest.Reclaimable, rest.Pinned, Volatile.Read(ref _pending), Volatile.Read(ref _containerRest),
                 Volatile.Read(ref _measured), Volatile.Read(ref _measuredLow), Volatile.Read(ref _measuredAtCollection));
         }
     }
 
     /// <summary>
     /// The rest of the process's memory: what its heap held past the queries' tables at the last full
-    /// collection, what the collector kept committed past its heap, and what the queries let go since; in
-    /// a container, what the container uses past what the registry knows, when that is more, which the
-    /// collector's model does not see whole: what the native allocator and the runtime keep.
+    /// collection, what the collector kept committed past its heap, the free space between the pinned heap's
+    /// arrays, which the heap's limit counts, and what the queries let go since; in a container, what the
+    /// container uses past what the registry knows, when that is more, which the collector's model does not see
+    /// whole: what the native allocator and the runtime keep.
     /// </summary>
     internal long RestBytes
     {
         get
         {
             Rest rest = Volatile.Read(ref _rest);
-            long modelled = LiveOf(rest) + rest.Uncertain + rest.Reclaimable + Volatile.Read(ref _pending);
+            long modelled = LiveOf(rest) + rest.Uncertain + rest.Reclaimable + rest.Pinned + Volatile.Read(ref _pending);
             return Volatile.Read(ref _containerTimer) is null ? modelled : Math.Max(modelled, Volatile.Read(ref _containerRest));
         }
+    }
+
+    // The full collections the budget asked for since the process started, those after which the collector still kept what
+    // a collection gives back, and the reservations refused to the work: what the memory report and the meter count.
+    private static long s_collectionsAsked;
+    private static long s_collectionsFutile;
+    private static long s_refusals;
+
+    /// <summary>The full collections the process's budget asked for since the process started.</summary>
+    internal static long CollectionsAsked => Interlocked.Read(ref s_collectionsAsked);
+
+    /// <summary>Of <see cref="CollectionsAsked"/>, those after which the collector still kept a sixteenth of the ceiling it could give back.</summary>
+    internal static long CollectionsFutile => Interlocked.Read(ref s_collectionsFutile);
+
+    /// <summary>The reservations refused to the work since the process started: each a <see cref="VortexMemoryException"/> raised, or a job's step given way.</summary>
+    internal static long Refusals => Interlocked.Read(ref s_refusals);
+
+    /// <summary>Counts one reservation refused to the work, as its refusal is raised: at the rare points where work fails or gives way.</summary>
+    internal static void CountRefusal() => Interlocked.Increment(ref s_refusals);
+
+    /// <summary>
+    /// The process's own: the rest of its memory and its parts, as a refusal's message tells them, so that the reader sees
+    /// which part left the work short. Read when a refusal is raised.
+    /// </summary>
+    internal string RestText()
+    {
+        (long live, long uncertain, long reclaimable, long pinnedFree, long pending, _, _, _, _) = RestParts;
+        return string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"{RestBytes:N0}: {live:N0} live, {uncertain:N0} grown since the last full collection, {reclaimable:N0} the collector keeps committed and free, {pinnedFree:N0} free between the arrays of the pinned heap, which no collection gives back, {pending:N0} let go and not yet collected");
     }
 
     /// <summary>The bytes the work under the budget may hold: the host's ceiling; for the process's own, its limit as last read.</summary>
@@ -1146,9 +1178,14 @@ public sealed class QueryMemoryBudget
                 Interlocked.Exchange(ref _reused, 0);
                 // A blocking collection's numbers are those of the moment it ran, the one the measure was noted at. A
                 // background one's are its end's, which no count tells: the fewest measured since the reading before.
+                // The free space between the pinned heap's arrays is committed, and the heap's limit counts it, but no
+                // collection gives it back: the pinned heap is never compacted. Counted with the rest, it no longer asks for
+                // a collection (Collect): a host that kept 2.5 GB of it had the budget ask for a full collection, blocking
+                // and compacting, each time a reservation found no room, and each gave back nothing (2026-11-24).
                 long inUse = info.HeapSizeBytes - info.FragmentedBytes;
                 long taken = full != rest.Collections && !info.Concurrent ? at : low;
-                rest = new Rest(full, any, info.Index, info.Index, Math.Max(0, inUse - taken), 0, Math.Max(0, info.TotalCommittedBytes - inUse));
+                long pinnedFree = PinnedFree(info);
+                rest = new Rest(full, any, info.Index, info.Index, Math.Max(0, inUse - taken), 0, Math.Max(0, info.TotalCommittedBytes - inUse - pinnedFree), pinnedFree);
             }
 
             // What the queries let go is in the heap or already taken: never more than the heap holds past what lived at the
@@ -1180,7 +1217,8 @@ public sealed class QueryMemoryBudget
     /// The collection that gives back what the collector keeps committed past its heap and takes what
     /// the queries let go, when that is what stands between the reservations and <paramref name="bytes"/>
     /// more, and is worth a sixteenth of the ceiling at least: the ceiling to reserve against after it,
-    /// or null when no collection would help. Each such collection gives back that much, which the
+    /// or null when no collection would help. The free space between the pinned heap's arrays is no part of
+    /// it, which no collection gives back. Each such collection gives back that much, which the
     /// queries must let go again before the next: a refusal fails a whole query, a collection does not.
     /// One whose collector kept what it held is not asked for again before the collector runs a full
     /// collection of its own. A thread that finds one under way waits for it, which every thread that
@@ -1219,10 +1257,12 @@ public sealed class QueryMemoryBudget
 
         try
         {
+            Interlocked.Increment(ref s_collectionsAsked);
             GC.Collect(GC.MaxGeneration, GCCollectionMode.Aggressive, blocking: true, compacting: true);
             Observe();
             if (Volatile.Read(ref _rest).Reclaimable >= ceiling / 16)
             {
+                Interlocked.Increment(ref s_collectionsFutile);
                 Volatile.Write(ref _futile, GC.CollectionCount(2));
             }
 
@@ -1305,5 +1345,15 @@ public sealed class QueryMemoryBudget
     /// of any kind; what its heap held past the queries' tables, and what a collection of the youngest generations since
     /// saw held past that; what the collector kept committed past its heap.
     /// </summary>
-    private sealed record Rest(int Collections, int Ephemeral, long FullIndex, long Read, long Live, long Uncertain, long Reclaimable);
+    private sealed record Rest(int Collections, int Ephemeral, long FullIndex, long Read, long Live, long Uncertain, long Reclaimable, long Pinned);
+
+    /// <summary>The generation of the pinned heap in <see cref="GCMemoryInfo.GenerationInfo"/>: the three generations, then the large objects' heap, then it.</summary>
+    private const int PinnedGeneration = 4;
+
+    /// <summary>The bytes the pinned heap held free between its arrays when <paramref name="info"/>'s collection ended.</summary>
+    internal static long PinnedFree(GCMemoryInfo info)
+    {
+        ReadOnlySpan<GCGenerationInfo> generations = info.GenerationInfo;
+        return generations.Length > PinnedGeneration ? Math.Max(0, generations[PinnedGeneration].FragmentationAfterBytes) : 0;
+    }
 }

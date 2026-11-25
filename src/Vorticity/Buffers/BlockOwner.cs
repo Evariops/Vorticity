@@ -22,8 +22,8 @@ namespace Vorticity.Buffers;
 /// <para>
 /// An instance handed out by <see cref="BlockPool"/> returns itself to that pool when its reference count reaches
 /// zero, instead of letting its array go. Its bytes are a piece of a slab (<see cref="Slabs"/>) when its capacity is a
-/// class of a page to half a slab, given back to the slab when the block lets them go; a larger one, or one allocated
-/// apart, is an array of its own.
+/// class of the pools, a page to 32 MiB, given back to the slab when the block lets them go; a block past the classes, or
+/// one allocated apart, is an array of its own, as long as the region it takes once past half a region.
 /// </para>
 /// </remarks>
 internal sealed class BlockOwner : SegmentOwner
@@ -47,8 +47,10 @@ internal sealed class BlockOwner : SegmentOwner
     // The account the block's bytes are counted in while it is rented, given its capacity back when the block returns.
     private MemoryAccount? _account;
 
-    // The bytes of every block alive, rented or kept by a pool: what the gauge of rented bytes is worked out from.
+    // The bytes of every block alive, rented or kept by a pool: what the gauge of rented bytes is worked out from. And those
+    // of the blocks that are an array of their own, not a piece of a slab: the rest of the pinned memory the library holds.
     private static long s_liveBytes;
+    private static long s_ownBytes;
 
     /// <summary>
     /// The next block rented by the same arena, while an arena holds this one: the arena chains
@@ -70,6 +72,7 @@ internal sealed class BlockOwner : SegmentOwner
         if (slab is null)
         {
             GC.SuppressFinalize(this);
+            Interlocked.Add(ref s_ownBytes, Math.Max(capacity, 1));
         }
 
         _capacity = capacity;
@@ -88,7 +91,15 @@ internal sealed class BlockOwner : SegmentOwner
     internal static long LiveBytes => Interlocked.Read(ref s_liveBytes);
 
     /// <summary>
-    /// Allocates <paramref name="length"/> bytes aligned to <paramref name="alignment"/>.
+    /// The bytes of the blocks alive that are an array of their own: a block past the pools' classes, one a slab could not
+    /// be made for, one allocated apart. With the slabs' (<see cref="Slabs.HeldBytes"/>), every pinned byte the library holds.
+    /// </summary>
+    internal static long OwnBytes => Interlocked.Read(ref s_ownBytes);
+
+    /// <summary>
+    /// Allocates <paramref name="length"/> bytes aligned to <paramref name="alignment"/>, in an array of their own: for the
+    /// tests and the benches, which build a block apart from any pool. The library rents every block from the pool, under an
+    /// account (<see cref="MemoryAccount.Rent"/>), so that its pinned memory is cut from slabs.
     /// </summary>
     /// <param name="length">Length in bytes, non-negative.</param>
     /// <param name="alignment">A power of two in
@@ -102,8 +113,38 @@ internal sealed class BlockOwner : SegmentOwner
     public static BlockOwner Allocate(int length, int alignment)
     {
         int exponent = CheckLengthAndAlignment(length, alignment);
-        (byte[] array, int offset) = AllocRaw(length, alignment);
+        (byte[] array, int offset, _) = AllocRaw(length, alignment);
         return new BlockOwner(array, offset, length, length, exponent, pool: null, bucketIndex: -1);
+    }
+
+    /// <summary>
+    /// A block of <paramref name="length"/> bytes aligned to <paramref name="alignment"/>, apart from any pool and counted in
+    /// no account: a piece of a slab when its size is a class of the pools, which goes back to its slab when its last
+    /// holder lets it go and is never handed out again as the same owner; past the classes, an array as long as its region.
+    /// For memory a holder may still reach once it let it go, the copy a source over a caller's bytes makes, which must
+    /// refuse a late read (<see cref="SegmentOwner.Retain"/>) rather than hand it the bytes of another rental, as a block a
+    /// pool parks and rents again would.
+    /// </summary>
+    /// <exception cref="VortexFormatException"><paramref name="length"/> is negative or <paramref name="alignment"/> out of range.</exception>
+    internal static BlockOwner Apart(int length, int alignment)
+    {
+        int exponent = CheckLengthAndAlignment(length, alignment);
+        if (length <= Slabs.LargestBytes)
+        {
+            int capacity = Math.Max(Slabs.LeastBytes, (int)BitOperations.RoundUpToPowerOf2((uint)Math.Max(length, 1)));
+            if (Slabs.TryTake(capacity) is (Slabs.Slab slab, byte[] slabArray, int start, bool made))
+            {
+                if (made)
+                {
+                    QueryMemoryBudget.SlabMade(slab.Bytes - capacity);
+                }
+
+                return new BlockOwner(slabArray, start, capacity, length, exponent, pool: null, bucketIndex: -1, slab);
+            }
+        }
+
+        (byte[] array, int offset, int filled) = AllocRaw(length, alignment);
+        return new BlockOwner(array, offset, Math.Max(length, filled), length, exponent, pool: null, bucketIndex: -1);
     }
 
     /// <summary>A block aligned to <paramref name="alignment"/> holding a copy of <paramref name="data"/>.</summary>
@@ -206,7 +247,7 @@ internal sealed class BlockOwner : SegmentOwner
     /// collection, the array's, or the slab's when this was its last piece out; none while the slab keeps another, the
     /// piece only free in it. The caller counts them as let go, once.
     /// </summary>
-    internal long FreeParked() => Drop(out bool slabGone) ? _slab is null ? _capacity : slabGone ? Slabs.SlabBytes : 0 : 0;
+    internal long FreeParked() => Drop(out bool slabGone) ? _slab is null ? _capacity : slabGone ? _slab.Bytes : 0 : 0;
 
     /// <summary>Re-arms a parked owner for a new rental of <paramref name="length"/> bytes.</summary>
     /// <param name="length">The new segment length, at most <see cref="Capacity"/>.</param>
@@ -239,6 +280,10 @@ internal sealed class BlockOwner : SegmentOwner
                 slabGone = Slabs.Give(slab, _offset, _capacity);
                 GC.SuppressFinalize(this);
             }
+            else
+            {
+                Interlocked.Add(ref s_ownBytes, -Math.Max(_capacity, 1));
+            }
 
             return true;
         }
@@ -250,7 +295,7 @@ internal sealed class BlockOwner : SegmentOwner
     /// A rented piece of a slab back, the slab gone with it: the slab's free bytes the rest of the process held, and the
     /// whole slab in the heap until a collection takes it.
     /// </summary>
-    private void SlabGone() => QueryMemoryBudget.SlabFreed(Slabs.SlabBytes - _capacity, Slabs.SlabBytes);
+    private void SlabGone() => QueryMemoryBudget.SlabFreed(_slab!.Bytes - _capacity, _slab.Bytes);
 
     /// <summary>A piece of a slab its holder dropped without giving it back: back to its slab, which nothing else would give it.</summary>
     ~BlockOwner()
@@ -266,11 +311,16 @@ internal sealed class BlockOwner : SegmentOwner
         VortexBuffer.FromPointer((byte*)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(array)) + offset, length, alignmentExponent);
 
     /// <summary>
-    /// A pinned array of <paramref name="length"/> bytes and the place in it aligned to <paramref name="alignment"/>: the
-    /// pinned heap aligns an array to a pointer only, so the array is longer by the alignment and the block starts at its
-    /// first aligned byte.
+    /// A pinned array of <paramref name="length"/> bytes and the place in it aligned to <paramref name="alignment"/>, and, for
+    /// an array that fills its region, the bytes from there to its end, 0 otherwise: the pinned heap aligns an array to a
+    /// pointer only, so the array is longer by the alignment and the block starts at its first aligned byte.
     /// </summary>
-    private static unsafe (byte[] Array, int Offset) AllocRaw(int length, int alignment)
+    /// <remarks>
+    /// An array of more than half a region is as long as the region it takes alone (<see cref="Regions.SpanFor"/>): a block
+    /// of 82 MB took a region of 96 MiB, and the 17 MiB past its end held the next pinned arrays of its heap, which kept the
+    /// region from going back once the block went. Its bytes past the length asked are the block's, which its account takes.
+    /// </remarks>
+    private static unsafe (byte[] Array, int Offset, int Filled) AllocRaw(int length, int alignment)
     {
         // A zero-length block keeps a byte of its own, so that its address is real and its alignment meaningful.
         long padded = (long)Math.Max(length, 1) + alignment - 1;
@@ -279,9 +329,16 @@ internal sealed class BlockOwner : SegmentOwner
             ThrowTooLarge(length, alignment);
         }
 
+        bool fills = padded > Regions.LargeBytes / 2;
+        if (fills)
+        {
+            padded = Math.Min(System.Array.MaxLength, Math.Max(padded, Regions.ArrayBytes(Regions.SpanFor(padded))));
+        }
+
         byte[] array = GC.AllocateUninitializedArray<byte>((int)padded, pinned: true);
         nint address = (nint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(array));
-        return (array, (int)(Alignment.AlignUp(address, alignment) - address));
+        int offset = (int)(Alignment.AlignUp(address, alignment) - address);
+        return (array, offset, fills ? array.Length - offset : 0);
     }
 
     /// <summary>A block for a pool's class, of a piece of a slab or of an array of its own.</summary>
@@ -306,15 +363,17 @@ internal sealed class BlockOwner : SegmentOwner
             reused = !made;
             if (made)
             {
-                QueryMemoryBudget.SlabMade(Slabs.SlabBytes - capacity);
+                QueryMemoryBudget.SlabMade(slab.Bytes - capacity);
             }
 
             return new BlockOwner(slabArray, start, capacity, length, VortexLimits.MaxAlignmentExponent, pool, bucketIndex, slab);
         }
 
+        // A block past the classes whose array fills its region holds every byte of it: the account takes them, and the
+        // outsized slot serves a longer read with it. A block of a class keeps its class's size, which its bucket counts.
         reused = false;
-        (byte[] array, int offset) = AllocRaw(capacity, VortexLimits.MaxAlignment);
-        return new BlockOwner(array, offset, capacity, length, VortexLimits.MaxAlignmentExponent, pool, bucketIndex);
+        (byte[] array, int offset, int filled) = AllocRaw(capacity, VortexLimits.MaxAlignment);
+        return new BlockOwner(array, offset, bucketIndex < 0 && filled > capacity ? filled : capacity, length, VortexLimits.MaxAlignmentExponent, pool, bucketIndex);
     }
 
     /// <summary>

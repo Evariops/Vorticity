@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using System.Threading.Tasks;
 using Vorticity.Buffers;
 
 namespace Vorticity.Aggregating;
@@ -131,6 +132,9 @@ internal sealed class QueryMemory : IDisposable
         // What the question's blocks hold now, -1 once its memory is given back; and what they reserved past its own.
         private long _held;
         private long _reserved;
+
+        /// <summary>What the question's blocks reserved past what the question reserved itself.</summary>
+        internal long ReservedPast => Volatile.Read(ref _reserved);
 
         internal override bool TryTake(long bytes) => TryTake(bytes, 0, kept: false);
 
@@ -292,6 +296,30 @@ internal sealed class QueryMemory : IDisposable
         }
 
         Raise(Interlocked.Add(ref _held, bytes));
+        return true;
+    }
+
+    /// <summary>
+    /// Whether the query holds nothing of its budget: neither a reservation of its own nor a block reserved past it. Such a
+    /// query may wait for its first memory (<see cref="WaitToGrowAsync"/>), since no other work waits on what it holds.
+    /// </summary>
+    internal bool HoldsNothing => Held == 0 && (Volatile.Read(ref _account)?.ReservedPast ?? 0) == 0;
+
+    /// <summary>
+    /// Waits for <paramref name="bytes"/> of its budget, in turn behind the reservations that wait already, the oldest first,
+    /// and holds them once granted, as <see cref="TryGrow"/> would have: what a query that holds nothing asks when its budget
+    /// has no room now, rather than fail on memory that the work holding it gives back as it ends. False, nothing held, when
+    /// they can never be granted: past the budget's ceiling, or nothing under it holds what would make the room.
+    /// </summary>
+    /// <exception cref="OperationCanceledException">The wait was cancelled; nothing is held.</exception>
+    internal async ValueTask<bool> WaitToGrowAsync(long bytes, CancellationToken cancellationToken)
+    {
+        if (await _budget.ReserveAsync(bytes, cancellationToken).ConfigureAwait(false) is not { } grant)
+        {
+            return false;
+        }
+
+        Raise(Interlocked.Add(ref _held, grant.TakeOver()));
         return true;
     }
 
@@ -501,6 +529,7 @@ internal sealed class QueryMemory : IDisposable
     /// </summary>
     internal VortexMemoryException Exceeded(string what, long groups, long asking)
     {
+        QueryMemoryBudget.CountRefusal();
         QueryMemoryBudget process = QueryMemoryBudget.Process;
         string holds = groups >= 0
             ? string.Create(CultureInfo.InvariantCulture, $"holds {groups:N0} groups in {Held:N0} bytes")
@@ -511,6 +540,6 @@ internal sealed class QueryMemory : IDisposable
             : string.Empty;
         return new VortexMemoryException(string.Create(
             CultureInfo.InvariantCulture,
-            $"The {what} {holds} and asks for {asking:N0} more, past its memory budget of {_budget.CeilingBytes:N0} bytes, {_budget.ReservedBytes:N0} of which every query under it holds{shared}; the process leaves its queries {process.CeilingBytes:N0} bytes, the rest of its memory holding {process.RestBytes:N0}. Give its session a larger QueryMemoryBudget, group by fewer keys at once, or lower the degree of parallelism: each lane holds a table of the groups it meets."));
+            $"The {what} {holds} and asks for {asking:N0} more, past its memory budget of {_budget.CeilingBytes:N0} bytes, {_budget.ReservedBytes:N0} of which every query under it holds{shared}; the process leaves its queries {process.CeilingBytes:N0} bytes, the rest of its memory holding {process.RestText()}. Give its session a larger QueryMemoryBudget, group by fewer keys at once, or lower the degree of parallelism: each lane holds a table of the groups it meets."));
     }
 }

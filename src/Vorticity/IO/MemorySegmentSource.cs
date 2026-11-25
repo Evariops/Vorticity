@@ -54,7 +54,10 @@ public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader
 
         try
         {
-            BlockOwner copy = BlockOwner.CopyOf(bytes.Span, VortexLimits.MaxAlignment);
+            // A block apart from the pool, the caller's memory as the bytes it handed: counted nowhere, held until the source
+            // and its views are gone, and refusing a late read once it is let go, where a block of the pool would be another's.
+            BlockOwner copy = BlockOwner.Apart(bytes.Length, VortexLimits.MaxAlignment);
+            bytes.Span.CopyTo(copy.WritableSpan);
             _owner = copy;
             _base = (byte*)Unsafe.AsPointer(ref MemoryMarshal.GetReference(copy.WritableSpan));
         }
@@ -186,7 +189,9 @@ public sealed class MemorySegmentSource : ISegmentSource, ISegmentReader
             _owner.Retain();
             try
             {
-                return BlockOwner.CopyOf(new ReadOnlySpan<byte>(at, length), alignment);
+                BlockOwner copy = BlockOwner.Apart(length, alignment);
+                new ReadOnlySpan<byte>(at, length).CopyTo(copy.WritableSpan);
+                return copy;
             }
             finally
             {

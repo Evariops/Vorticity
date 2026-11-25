@@ -3847,7 +3847,7 @@ internal static class AggregationEngine
             bool roundTrips = source.Cost?.ReadsRoundTrips == true;
             bool readsAhead = ranges is not null || roundTrips;
             long splitBytes = readsAhead ? source.Cost?.ReadAheadBytes(pass) ?? 0 : 0;
-            int lanes = Admit(memory, asked, pass.Options.BatchRows, spilledRow, splitBytes, roundTrips, out int ahead);
+            (int lanes, int ahead) = await AdmitAsync(memory, asked, pass.Options.BatchRows, spilledRow, splitBytes, roundTrips, cancellationToken).ConfigureAwait(false);
 
             // A lane's table reads its slots ahead once past its share of a cache: one lane alone has its
             // cluster's to itself.
@@ -4328,10 +4328,69 @@ internal static class AggregationEngine
     /// </summary>
     internal static int Admit(QueryMemory memory, int lanes, int batchRows, int spilledRow, long splitBytes, bool roundTrips, out int ahead)
     {
+        if (!TryAdmit(memory, ref lanes, batchRows, spilledRow, splitBytes, roundTrips, out ahead, out long laneBytes))
+        {
+            throw memory.Exceeded("group by", 0, laneBytes);
+        }
+
+        return lanes;
+    }
+
+    /// <summary>
+    /// <see cref="Admit(QueryMemory, int, int, int)"/> for a query that waits rather than fail when its budget has no room
+    /// for one lane: holding nothing yet, it takes its turn for the lane's working memory behind the reservations that wait
+    /// already, and starts once the work that holds the room gives it back. A query that holds memory never waits: two
+    /// queries that each held some and waited for the other's would wait for good. It fails as before when the room can
+    /// never come: past the budget's ceiling, or nothing under the budget holding what would make it.
+    /// </summary>
+    /// <exception cref="VortexMemoryException">The budget can never grant one lane.</exception>
+    /// <exception cref="OperationCanceledException">The wait was cancelled.</exception>
+    internal static async ValueTask<int> AdmitAsync(QueryMemory memory, int lanes, int batchRows, CancellationToken cancellationToken)
+    {
+        (int admitted, _) = await AdmitAsync(memory, lanes, batchRows, 0, 0, false, cancellationToken).ConfigureAwait(false);
+        return admitted;
+    }
+
+    /// <summary>
+    /// <see cref="AdmitAsync(QueryMemory, int, int, CancellationToken)"/> with the splits each lane reads ahead, as
+    /// <see cref="Admit(QueryMemory, int, int, int, long, bool, out int)"/> admits them: the lanes, and the splits each reads
+    /// ahead; none for the one lane a wait admits.
+    /// </summary>
+    internal static async ValueTask<(int Lanes, int Ahead)> AdmitAsync(
+        QueryMemory memory, int lanes, int batchRows, int spilledRow, long splitBytes, bool roundTrips, CancellationToken cancellationToken)
+    {
+        if (TryAdmit(memory, ref lanes, batchRows, spilledRow, splitBytes, roundTrips, out int ahead, out long laneBytes))
+        {
+            return (lanes, ahead);
+        }
+
+        await WaitForLaneAsync(memory, laneBytes, cancellationToken).ConfigureAwait(false);
+        return (1, 0);
+    }
+
+    /// <summary>One lane's working memory, waited for by a query that holds nothing, and measured once held.</summary>
+    /// <exception cref="VortexMemoryException">The query holds memory already, or the budget can never grant the lane.</exception>
+    private static async ValueTask WaitForLaneAsync(QueryMemory memory, long laneBytes, CancellationToken cancellationToken)
+    {
+        if (!memory.HoldsNothing || !await memory.WaitToGrowAsync(laneBytes, cancellationToken).ConfigureAwait(false))
+        {
+            throw memory.Exceeded("group by", 0, laneBytes);
+        }
+
+        memory.Measure(laneBytes);
+    }
+
+    /// <summary>
+    /// The admission <see cref="Admit(QueryMemory, int, int, int, long, bool, out int)"/> makes: the lanes and their splits
+    /// ahead reserved and measured, true; false, nothing reserved, when the budget does not grant one lane with no split
+    /// ahead, <paramref name="laneBytes"/> then that lane's working memory.
+    /// </summary>
+    private static bool TryAdmit(QueryMemory memory, ref int lanes, int batchRows, int spilledRow, long splitBytes, bool roundTrips, out int ahead, out long laneBytes)
+    {
         long working = Working(batchRows);
         int total = roundTrips ? TotalAhead(splitBytes) : ReadAheadTotal;
         ahead = AheadOf(lanes, total);
-        long laneBytes = working + (splitBytes * ahead);
+        laneBytes = working + (splitBytes * ahead);
 
         // Their working memory a quarter of the ceiling at most: past it, their tables share the rest so
         // thinly that each one's batch of new groups outgrows its share, and lanes that spill would
@@ -4361,7 +4420,7 @@ internal static class AggregationEngine
 
             if (lanes == 1)
             {
-                throw memory.Exceeded("group by", 0, laneBytes);
+                return false;
             }
 
             lanes = Math.Max(1, lanes / 2);
@@ -4371,7 +4430,7 @@ internal static class AggregationEngine
         }
 
         memory.Measure(lanes * laneBytes);
-        return lanes;
+        return true;
     }
 
     /// <summary>

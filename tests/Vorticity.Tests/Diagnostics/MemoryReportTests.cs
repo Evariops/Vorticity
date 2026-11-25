@@ -62,7 +62,33 @@ public sealed partial class MemoryReportTests
         Assert.False(VortexDiagnostics.GetMemoryReport().RetainedByHolder.ContainsKey("datasets"));
     }
 
-    /// <summary>Each memory gauge's measurements, read once, with the holder each is tagged by.</summary>
+    /// <summary>
+    /// The rest is told by part, the pinned memory the library holds and how fast it takes slabs, the collections it asks
+    /// for and the refusals its work meets: in the report and on the meter, the same parts under the same names.
+    /// </summary>
+    [Fact]
+    public async Task TheRestByPartAndThePinnedMemoryAreReportedAndGauged()
+    {
+        await using MemoryObjectStore store = new MemoryObjectStore();
+        await using VortexDataset dataset = await FilledAsync(store);
+        _ = await dataset.Scan<Call>().GroupBy(r => r.Service).Select(g => (g.Key, g.Count())).As<ServiceCount>().ToRecordsAsync(Ct).ToListAsync(Ct);
+
+        Dictionary<string, List<(long Value, string? Holder)>> gauges = Collect();
+        MemoryReport report = VortexDiagnostics.GetMemoryReport();
+        string[] parts = ["live", "uncertain", "reclaimable", "pinned_free", "pending", "container"];
+        Assert.Equal(parts.Order(), report.RestByPart.Keys.Order());
+        Assert.Equal(parts.Order(), gauges["vortex.memory.rest.part"].Select(g => g.Holder!).Order());
+        Assert.All(report.RestByPart.Values, bytes => Assert.True(bytes >= 0));
+
+        Assert.True(report.PinnedBytes >= Slabs.HeldBytes, $"{report.PinnedBytes:N0} pinned bytes, {Slabs.HeldBytes:N0} of slabs");
+        Assert.True(Single(gauges, "vortex.memory.pinned") > 0, "the question's blocks were cut from slabs");
+        Assert.True(report.SlabsMade >= 1 && Single(gauges, "vortex.memory.slabs_made") >= 1);
+        Assert.True(Single(gauges, "vortex.memory.collections_asked") >= 0);
+        Assert.True(Single(gauges, "vortex.memory.refusals") >= 0);
+        Assert.True(report.CollectionsAsked >= 0 && report.Refusals >= 0);
+    }
+
+    /// <summary>Each memory gauge's measurements, read once, with the holder or the part each is tagged by.</summary>
     private static Dictionary<string, List<(long Value, string? Holder)>> Collect()
     {
         Dictionary<string, List<(long Value, string? Holder)>> seen = new Dictionary<string, List<(long Value, string? Holder)>>(StringComparer.Ordinal);
@@ -88,7 +114,7 @@ public sealed partial class MemoryReportTests
             string? holder = null;
             foreach (KeyValuePair<string, object?> tag in tags)
             {
-                if (tag.Key == "holder")
+                if (tag.Key is "holder" or "part")
                 {
                     holder = (string?)tag.Value;
                 }

@@ -428,7 +428,7 @@ internal sealed class StreamingGroupBatches : IAsyncEnumerator<RecordBatch>
         // On the one lane a budget may admit, the rows stream through one partition, which lets each group
         // go as it closes, where a range holds every group of its rows until it goes out: under twice what
         // one lane holds, the ranges of a distinct count by day, one after another, failed where one stream fit.
-        int lanes = AggregationEngine.Admit(_memory, ranges is null ? 1 : degree, pass.Options.BatchRows);
+        int lanes = await AggregationEngine.AdmitAsync(_memory, ranges is null ? 1 : degree, pass.Options.BatchRows, _cancellationToken).ConfigureAwait(false);
         if (ranges is null || lanes == 1)
         {
             if (settling is not null)

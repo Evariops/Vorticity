@@ -8,10 +8,10 @@ using System.Threading;
 namespace Vorticity.Buffers;
 
 /// <summary>
-/// The pinned memory the pools' blocks are cut from: slabs, pinned arrays of one size, that of a region of the collector's
-/// pinned heap, split in halves down to a page, a block one piece of a slab (a buddy allocator). The collector sees one
-/// size of pinned array only, and a slab whose pieces all came back is let go whole: alone in its region, the region is
-/// free for any generation of the heap; beside other slabs in a larger one, the hole it leaves fits the next slab.
+/// The pinned memory the pools' blocks are cut from: slabs, pinned arrays that each fill a region of the collector's
+/// pinned heap (<see cref="Regions"/>), split in halves down to a page, a block one piece of a slab (a buddy allocator). A
+/// slab whose pieces all came back is let go whole, and its region with it, free for any heap and any generation: the
+/// pinned heap keeps no hole of the library's.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -21,39 +21,32 @@ namespace Vorticity.Buffers;
 /// heap nor lends its free space to the other generations, and a hard limit counts what it keeps committed.
 /// </para>
 /// <para>
-/// A piece of a slab given back joins its free half, and the two their free half, up to half a slab: what a slab holds
-/// free serves a block of any size that fits, where a free array served its own size only. One lock covers the slabs: a
-/// rent reaches them only when its class keeps no block parked, and a block reaches them back only when the pool lets it
-/// go.
+/// A slab of 32 MiB less 64 bytes, the size that came first, took a region of 64 MiB that the next slab shared: a slab
+/// given back left a hole of its size while its neighbour lived, which a small pinned array then cut into, and under the
+/// server collector the next slab went to another heap's region. A host answering for a day kept 2.9 GB of such holes of
+/// 4.2 GB of pinned heap, all counted against its limit (2026-11-24). A slab now fills its region but for its last page.
+/// </para>
+/// <para>
+/// A slab spans a large region of the collector, and gives blocks of half of it at most. A larger block, up to the
+/// largest class of the pools, takes the first half of a slab twice its size, whose second half serves the smaller
+/// blocks: no block of a class is a pinned array of its own. A piece of a slab given back joins its free half, and the
+/// two their free half: what a slab holds free serves a block of any size that fits. One lock covers the slabs: a rent
+/// reaches them only when its class keeps no block parked, and a block reaches them back only when the pool lets it go.
 /// </para>
 /// </remarks>
 internal static class Slabs
 {
-    /// <summary>
-    /// The bytes of a slab's array: a region of the collector's pinned heap, 32 MiB, less the region's header and the
-    /// array's. Measured in fresh processes, with and without a hard limit: an array of this size fills one region, one of
-    /// 32 MiB takes a region of 64 MiB, two of 16 MiB share one. Under load the collector also lays slabs side by side in a
-    /// larger region.
-    /// </summary>
-    internal const int SlabBytes = (32 << 20) - 64;
-
-    /// <summary>The span a slab is cut in, 32 MiB: its last page, past the end of the array, is never handed out.</summary>
-    private const int SpanShift = 25;
-
     /// <summary>The least piece: a page, the pools' least block.</summary>
     internal const int PageShift = 12;
-
-    /// <summary>The sizes of piece, a page to half a slab: the span itself is never whole.</summary>
-    private const int Orders = SpanShift - PageShift;
-
-    /// <summary>The pages of a slab's span.</summary>
-    private const int Pages = 1 << (SpanShift - PageShift);
 
     /// <summary>The least block a slab gives: a page.</summary>
     internal const int LeastBytes = 1 << PageShift;
 
-    /// <summary>The largest block a slab gives: half a slab, 16 MiB. A larger block is a pinned array of its own.</summary>
-    internal const int LargestBytes = 1 << (SpanShift - 1);
+    /// <summary>The largest block a slab gives: 32 MiB, the largest class of the process's pool. A larger block is a pinned array of its own, its region's size.</summary>
+    internal const int LargestBytes = 1 << 25;
+
+    /// <summary>The span of a slab of the common size: a large region of the collector, 32 MiB but under a small heap shared by many.</summary>
+    internal static int SpanBytes { get; } = Regions.LargeBytes;
 
     private static readonly Lock Gate = new Lock();
 
@@ -106,8 +99,14 @@ internal static class Slabs
         }
     }
 
-    /// <summary>Whether a block of <paramref name="capacity"/> bytes is cut from a slab: a power of two from a page to half a slab.</summary>
+    /// <summary>Whether a block of <paramref name="capacity"/> bytes is cut from a slab: a power of two from a page to <see cref="LargestBytes"/>.</summary>
     internal static bool Cuts(int capacity) => capacity is >= LeastBytes and <= LargestBytes && BitOperations.IsPow2(capacity);
+
+    /// <summary>
+    /// The span of the slab a new piece of <paramref name="bytes"/> is cut from: a region for a piece of half a region or
+    /// less; past it, twice the piece, which takes the first half and leaves the second to smaller ones.
+    /// </summary>
+    internal static int SpanFor(int bytes) => bytes <= SpanBytes / 2 ? SpanBytes : bytes * 2;
 
     /// <summary>
     /// A piece of <paramref name="bytes"/> (<see cref="Cuts"/>): the slab it is cut from, its array, and where the piece
@@ -132,7 +131,7 @@ internal static class Slabs
             Slab made;
             try
             {
-                made = new Slab();
+                made = new Slab(SpanFor(bytes));
             }
             catch (OutOfMemoryException)
             {
@@ -140,7 +139,7 @@ internal static class Slabs
             }
 
             s_slabs.Add(made);
-            Interlocked.Add(ref s_heldBytes, SlabBytes);
+            Interlocked.Add(ref s_heldBytes, made.Bytes);
             Interlocked.Add(ref s_pieceBytes, bytes);
             return (made, made.Array, made.Base + (made.TryTake(order) << PageShift), true);
         }
@@ -199,7 +198,7 @@ internal static class Slabs
             if (empty)
             {
                 s_slabs.Remove(slab);
-                Interlocked.Add(ref s_heldBytes, -SlabBytes);
+                Interlocked.Add(ref s_heldBytes, -slab.Bytes);
             }
         }
 
@@ -207,43 +206,62 @@ internal static class Slabs
     }
 
     /// <summary>
-    /// One slab: its pinned array, where its span starts in it, aligned to 64 bytes, and its free pieces, a list of their
-    /// first pages for each size, linked through the pages themselves.
+    /// One slab: its pinned array, which fills a region of the collector's pinned heap but for its last page, where its span
+    /// starts in it, aligned to 64 bytes, and its free pieces, a list of their first pages for each size, linked through the
+    /// pages themselves.
     /// </summary>
     internal sealed class Slab
     {
         private static long s_made;
 
+        // How many sizes of piece the span holds, a page to half the span, and its pages.
+        private readonly int _orders;
+        private readonly int _pages;
+
         // For the first page of a free piece, the piece's order plus one; 0 for any other page.
-        private readonly sbyte[] _free = new sbyte[Pages];
+        private readonly sbyte[] _free;
 
         // The free pieces of each order, a list linked both ways through their first pages; -1 ends a list.
-        private readonly int[] _heads = new int[Orders];
-        private readonly int[] _next = new int[Pages];
-        private readonly int[] _previous = new int[Pages];
+        private readonly int[] _heads;
+        private readonly int[] _next;
+        private readonly int[] _previous;
 
         // The pages handed out, and those past the end of the array, which never are.
         private int _taken;
         private readonly int _past;
 
         // The orders whose list holds a free piece, a bit each: whether a piece fits is one test.
-        private int _orders;
+        private int _held;
 
-        internal unsafe Slab()
+        /// <summary>A slab of the common span, a region.</summary>
+        internal Slab()
+            : this(SpanBytes)
         {
+        }
+
+        /// <summary>A slab whose span is <paramref name="spanBytes"/>, a power of two and a whole number of regions.</summary>
+        internal unsafe Slab(int spanBytes)
+        {
+            int shift = BitOperations.Log2((uint)spanBytes);
+            _orders = shift - PageShift;
+            _pages = 1 << _orders;
+            _free = new sbyte[_pages];
+            _heads = new int[_orders];
+            _next = new int[_pages];
+            _previous = new int[_pages];
             Id = Interlocked.Increment(ref s_made);
-            Array = GC.AllocateUninitializedArray<byte>(SlabBytes, pinned: true);
+            Array = GC.AllocateUninitializedArray<byte>(Regions.ArrayBytes(spanBytes), pinned: true);
             nint address = (nint)Unsafe.AsPointer(ref MemoryMarshal.GetArrayDataReference(Array));
             Base = (int)(Alignment.AlignUp(address, VortexLimits.MaxAlignment) - address);
             _heads.AsSpan().Fill(-1);
 
             // The pages the array holds whole, cut in the largest aligned pieces; the pages past them are never free.
-            int whole = (SlabBytes - Base) >> PageShift;
-            _past = Pages - whole;
+            int whole = (Array.Length - Base) >> PageShift;
+            _past = _pages - whole;
             _taken = _past;
             for (int page = 0; page < whole;)
             {
-                int order = Math.Min(Orders - 1, BitOperations.TrailingZeroCount(page | Pages));
+                int order = Math.Min(_orders - 1, BitOperations.TrailingZeroCount(page | _pages));
                 while (page + (1 << order) > whole)
                 {
                     order--;
@@ -256,6 +274,9 @@ internal static class Slabs
 
         /// <summary>The slab's pinned array.</summary>
         internal byte[] Array { get; }
+
+        /// <summary>The bytes of the slab's array: what the heap holds for it, and gives back with its region once it goes.</summary>
+        internal int Bytes => Array.Length;
 
         /// <summary>Where the slab's span starts in its array: the first byte aligned to 64.</summary>
         internal int Base { get; }
@@ -273,7 +294,7 @@ internal static class Slabs
         internal int TakenPages => _taken - _past;
 
         /// <summary>Whether a free piece of <paramref name="order"/>, or of a larger one to cut it from, is left.</summary>
-        internal bool Holds(int order) => (_orders >> order) != 0;
+        internal bool Holds(int order) => order < _orders && (_held >> order) != 0;
 
         /// <summary>
         /// A census's pages taken, read when the census began (<see cref="Census"/>): with the fields below, written and read
@@ -296,7 +317,12 @@ internal static class Slabs
         /// <summary>The first page of a free piece of <paramref name="order"/>, cut from a larger one when need be; -1 when the slab holds none.</summary>
         internal int TryTake(int order)
         {
-            int above = _orders >> order;
+            if (order >= _orders)
+            {
+                return -1;
+            }
+
+            int above = _held >> order;
             if (above == 0)
             {
                 return -1;
@@ -321,7 +347,7 @@ internal static class Slabs
         internal void Give(int page, int order)
         {
             _taken -= 1 << order;
-            while (order < Orders - 1)
+            while (order < _orders - 1)
             {
                 int buddy = page ^ (1 << order);
                 if (_free[buddy] != order + 1)
@@ -349,7 +375,7 @@ internal static class Slabs
 
             _heads[order] = page;
             _free[page] = (sbyte)(order + 1);
-            _orders |= 1 << order;
+            _held |= 1 << order;
         }
 
         private void Remove(int order, int page)
@@ -365,7 +391,7 @@ internal static class Slabs
                 _heads[order] = next;
                 if (next < 0)
                 {
-                    _orders &= ~(1 << order);
+                    _held &= ~(1 << order);
                 }
             }
 
