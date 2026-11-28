@@ -274,7 +274,7 @@ internal sealed class DistinctBatches : IAsyncEnumerator<RecordBatch>
             // Under a budget that would cut them, batches of new values a sixteenth of its ceiling at most,
             // which the index takes past it before it goes to the scratch.
             spec = AggregationEngine.Batched(spec, _memory, 1, plan.LanesSpill && _streaming < 0 ? AggregationEngine.LaneRowBytes : 0);
-            AggregationEngine.Admit(_memory, 1, spec.Options.BatchRows);
+            await AggregationEngine.AdmitAsync(_memory, 1, spec.Options.BatchRows, _cancellationToken).ConfigureAwait(false);
 
             // The statistics' bounds, as a group by takes them: an integer they bound is numbered by its
             // value, in pages, where without them it was hashed, twice as long at a million values

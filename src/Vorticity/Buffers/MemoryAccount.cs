@@ -171,10 +171,11 @@ internal class BudgetAccount : MemoryAccount
 
     internal override VortexMemoryException Refused(long bytes)
     {
+        QueryMemoryBudget.CountRefusal();
         QueryMemoryBudget process = QueryMemoryBudget.Process;
         return new VortexMemoryException(string.Create(
             CultureInfo.InvariantCulture,
-            $"The {_work} asks for a block of {bytes:N0} bytes, which the process cannot take past its limit: its budget of {Budget.CeilingBytes:N0} bytes holds {Budget.ReservedBytes:N0}, and the process leaves its work {process.CeilingBytes:N0} bytes, the rest of its memory holding {process.RestBytes:N0}. The process's work holds {process.ReservedBytes:N0} bytes in all, and its pool keeps {Pool.ParkedBytes:N0} bytes parked and {Slabs.FreeBytes:N0} free in its slabs."));
+            $"The {_work} asks for a block of {bytes:N0} bytes, which the process cannot take past its limit: its budget of {Budget.CeilingBytes:N0} bytes holds {Budget.ReservedBytes:N0}, and the process leaves its work {process.CeilingBytes:N0} bytes, the rest of its memory holding {process.RestText()}. The process's work holds {process.ReservedBytes:N0} bytes in all, and its pool keeps {Pool.ParkedBytes:N0} bytes parked and {Slabs.FreeBytes:N0} free in its slabs."));
     }
 }
 

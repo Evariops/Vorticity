@@ -23,7 +23,7 @@ namespace Vorticity.Writing;
 /// input's codes by a table (<see cref="Translation"/>) instead of decoding and encoding its text again.
 /// </para>
 /// <para>
-/// The values lie end to end in pinned memory the dictionary owns, text with an offset each, numbers at their width. An
+/// The values lie end to end in a block of the pool the dictionary owns, text with an offset each, numbers at their width. An
 /// open-addressing table over them finds a value's code, built once. A chunk's rows are coded through it, a row whose
 /// view or bits equal the row before's taking that row's code without a probe, which a column sorted by its value pays
 /// for nearly every row.
@@ -44,8 +44,12 @@ internal sealed class ObjectDictionary
     private const int ViewSize = 16;
     private const int InlineBytes = 12;
 
-    // The values end to end, pinned: text's bytes, an offset each in `_offsets`; numbers at `_width`.
-    private readonly byte[] _bytes;
+    // The values end to end, in a block of the pool, which never moves: text's bytes, an offset each in `_offsets`; numbers
+    // at `_width`. Held for as long as the dictionary is, whose arena nodes read the block by its address: dropped with the
+    // dictionary, the block goes back to its slab when the collector finalizes it. Its bytes as a span, read once.
+    private readonly BlockOwner _block;
+    private readonly int _length;
+    private ReadOnlySpan<byte> Bytes => _block.WholeSpan[.._length];
     private readonly int[] _offsets;
     private readonly int _width;
 
@@ -54,11 +58,12 @@ internal sealed class ObjectDictionary
     private readonly int[] _slots;
     private readonly int _mask;
 
-    private ObjectDictionary(DTypeKind kind, PType ptype, byte[] bytes, int[] offsets, ulong[] keys, int count, bool allReferenced)
+    private ObjectDictionary(DTypeKind kind, PType ptype, BlockOwner block, int length, int[] offsets, ulong[] keys, int count, bool allReferenced)
     {
         Kind = kind;
         PType = ptype;
-        _bytes = bytes;
+        _block = block;
+        _length = length;
         _offsets = offsets;
         _width = kind == DTypeKind.Primitive ? ptype.ByteWidth() : 0;
         _keys = keys;
@@ -108,7 +113,7 @@ internal sealed class ObjectDictionary
 
     /// <summary>The bytes of the value of <paramref name="code"/>.</summary>
     internal ReadOnlySpan<byte> Value(int code) =>
-        _width == 0 ? _bytes.AsSpan(_offsets[code], _offsets[code + 1] - _offsets[code]) : _bytes.AsSpan(code * _width, _width);
+        _width == 0 ? Bytes.Slice(_offsets[code], _offsets[code + 1] - _offsets[code]) : Bytes.Slice(code * _width, _width);
 
     /// <summary>
     /// The dictionary of the values the rows of <paramref name="node"/> hold, nulls aside, every one of them some row's;
@@ -179,7 +184,7 @@ internal sealed class ObjectDictionary
             if (_keys[code] == hash)
             {
                 int start = _offsets[code];
-                if (_offsets[code + 1] - start == value.Length && _bytes.AsSpan(start, value.Length).SequenceEqual(value))
+                if (_offsets[code + 1] - start == value.Length && Bytes.Slice(start, value.Length).SequenceEqual(value))
                 {
                     return code;
                 }
@@ -485,8 +490,10 @@ internal sealed class ObjectDictionary
         if (_width != 0)
         {
             return arena.AddPrimitive(
-                dtype, Count, validity, PType, VortexBuffer.FromPinned(_bytes.AsSpan(0, Count * _width), BitOperations.Log2((uint)_width)));
+                dtype, Count, validity, PType, VortexBuffer.FromPinned(Bytes[..(Count * _width)], BitOperations.Log2((uint)_width)));
         }
+
+        ReadOnlySpan<byte> bytes = Bytes;
 
         // A view of twelve bytes or fewer holds them inline, zero past them; a longer one its first four, and where it lies.
         VortexBuffer views = arena.Allocate(Count * ViewSize, ViewSize, out Span<byte> written);
@@ -498,16 +505,16 @@ internal sealed class ObjectDictionary
             BinaryPrimitives.WriteInt32LittleEndian(view, length);
             if (length <= InlineBytes)
             {
-                _bytes.AsSpan(start, length).CopyTo(view[4..]);
+                bytes.Slice(start, length).CopyTo(view[4..]);
                 continue;
             }
 
-            _bytes.AsSpan(start, 4).CopyTo(view[4..]);
+            bytes.Slice(start, 4).CopyTo(view[4..]);
             BinaryPrimitives.WriteInt32LittleEndian(view[8..], 0);
             BinaryPrimitives.WriteInt32LittleEndian(view[12..], start);
         }
 
-        ReadOnlySpan<VortexBuffer> heap = [VortexBuffer.FromPinned(_bytes.AsSpan(0, Math.Max(_offsets[Count], 0)), 0)];
+        ReadOnlySpan<VortexBuffer> heap = [VortexBuffer.FromPinned(bytes[..Math.Max(_offsets[Count], 0)], 0)];
         return arena.AddVarBinView(dtype, Count, validity, views, heap, padded: true);
     }
 
@@ -685,7 +692,8 @@ internal sealed class ObjectDictionary
                 }
 
                 order.Sort(new ByteOrder(_heap, _offsets));
-                byte[] bytes = GC.AllocateUninitializedArray<byte>(Math.Max(_heapUsed, 1), pinned: true);
+                BlockOwner text = MemoryAccount.Kept.Rent(Math.Max(_heapUsed, 1), VortexLimits.MaxAlignment);
+                Span<byte> bytes = text.WholeSpan;
                 int[] offsets = new int[_count + 1];
                 ulong[] hashes = new ulong[_count];
                 int used = 0;
@@ -694,7 +702,7 @@ internal sealed class ObjectDictionary
                     int from = order[code];
                     int start = _offsets[from];
                     int length = _offsets[from + 1] - start;
-                    _heap.AsSpan(start, length).CopyTo(bytes.AsSpan(used));
+                    _heap.AsSpan(start, length).CopyTo(bytes[used..]);
                     offsets[code] = used;
                     hashes[code] = _keys[from];
                     used += length;
@@ -702,7 +710,7 @@ internal sealed class ObjectDictionary
 
                 offsets[_count] = used;
                 Blocks.Return(held);
-                return new ObjectDictionary(_kind, default, bytes, offsets, hashes, _count, allReferenced);
+                return new ObjectDictionary(_kind, default, text, Math.Max(_heapUsed, 1), offsets, hashes, _count, allReferenced);
             }
 
             // Numbers order by their value: a signed one's sign bit flipped makes its bits order as unsigned do.
@@ -714,7 +722,9 @@ internal sealed class ObjectDictionary
             }
 
             sorted.Sort();
-            byte[] values = GC.AllocateUninitializedArray<byte>(Math.Max(_count * _width, 1), pinned: true);
+            int bytesOfValues = Math.Max(_count * _width, 1);
+            BlockOwner block = MemoryAccount.Kept.Rent(bytesOfValues, VortexLimits.MaxAlignment);
+            Span<byte> values = block.WholeSpan;
             ulong[] keys = new ulong[_count];
             for (int code = 0; code < _count; code++)
             {
@@ -722,15 +732,15 @@ internal sealed class ObjectDictionary
                 keys[code] = bits;
                 if (_width == 4)
                 {
-                    BinaryPrimitives.WriteUInt32LittleEndian(values.AsSpan(code * 4), (uint)bits);
+                    BinaryPrimitives.WriteUInt32LittleEndian(values[(code * 4)..], (uint)bits);
                 }
                 else
                 {
-                    BinaryPrimitives.WriteUInt64LittleEndian(values.AsSpan(code * 8), bits);
+                    BinaryPrimitives.WriteUInt64LittleEndian(values[(code * 8)..], bits);
                 }
             }
 
-            return new ObjectDictionary(_kind, _ptype, values, [], keys, _count, allReferenced);
+            return new ObjectDictionary(_kind, _ptype, block, bytesOfValues, [], keys, _count, allReferenced);
         }
 
         /// <summary>Its working blocks back to the pool, once: what it finished holds arrays of its own.</summary>

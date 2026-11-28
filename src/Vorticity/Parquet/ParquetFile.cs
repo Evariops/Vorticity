@@ -394,7 +394,7 @@ public sealed class ParquetFile : IAsyncDisposable
             return null;
         }
 
-        byte[]? key = decryptor.ColumnKey(Footer.ColumnPaths[column], chunk.KeyMetadata.Of(Footer.Bytes), chunk.Crypto == ChunkCrypto.FooterKey);
+        Sealing.SecretBytes? key = decryptor.ColumnKey(Footer.ColumnPaths[column], chunk.KeyMetadata.Of(Footer.Bytes), chunk.Crypto == ChunkCrypto.FooterKey);
         return key is null ? null : decryptor.Decrypt(key, module, type, Footer.Ordinal(rowGroup), column);
     }
 

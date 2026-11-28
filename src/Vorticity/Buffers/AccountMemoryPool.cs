@@ -80,9 +80,11 @@ internal sealed class AccountMemoryPool : MemoryPool<byte>
                 throw new ArgumentOutOfRangeException(nameof(elementIndex));
             }
 
+            // The block never moves; the handle keeps the lease, and so the block, alive for as long as it is held: a reader that
+            // keeps only the handle, as a source over the memory does, never finds the block given back to its slab under it.
             fixed (byte* pointer = GetSpan())
             {
-                return new MemoryHandle(pointer + elementIndex);
+                return new MemoryHandle(pointer + elementIndex, default, this);
             }
         }
 

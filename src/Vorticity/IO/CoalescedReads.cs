@@ -69,7 +69,7 @@ internal static class CoalescedReads
             for (int r = 0; r < runCount; r++)
             {
                 CoalescedRun run = scratch.Runs[r];
-                BlockOwner block = RentBlock(run.Length, options, requests.Account);
+                BlockOwner block = RentBlock(run.Length, requests.Account);
                 try
                 {
                     ReadExact(reader, block.WritableSpan[..run.Length], run.Start);
@@ -160,14 +160,16 @@ internal static class CoalescedReads
     }
 
     /// <summary>
-    /// A block of at least <paramref name="length"/> bytes, pooled up to the options' ceiling, and past
-    /// the shared pool's classes by the one block it keeps beyond them, counted for <paramref name="account"/>:
-    /// the scan whose batch reads it, or the memory a file keeps for its own reads.
+    /// A block of at least <paramref name="length"/> bytes of the pool, counted for <paramref name="account"/>: the scan whose
+    /// batch reads it, or the memory a file keeps for its own reads.
     /// </summary>
-    internal static BlockOwner RentBlock(int length, SegmentReadOptions options, MemoryAccount account) =>
-        length <= options.MaxPooledBytes || length > MemoryAccount.Pool.MaxPooledLength
-            ? account.Rent(length, VortexLimits.MaxAlignment)
-            : BlockOwner.Allocate(length, VortexLimits.MaxAlignment);
+    /// <remarks>
+    /// A block past the read options' ceiling was once a pinned array of its own, of its exact length and counted in no
+    /// account: arrays of every size, made and dropped read after read, left holes in the pinned heap that no other
+    /// allocation could fill. It is a piece of a slab now, or past the pool's classes an array as long as its region.
+    /// </remarks>
+    internal static BlockOwner RentBlock(int length, MemoryAccount account) =>
+        account.Rent(length, VortexLimits.MaxAlignment);
 
     /// <summary>
     /// Whether a run's segments should be published as views into its buffer, or copied out.
@@ -220,7 +222,7 @@ internal static class CoalescedReads
             }
 
             int length = (int)spec.Length;
-            BlockOwner owner = RentBlock(length, options, requests.Account);
+            BlockOwner owner = RentBlock(length, requests.Account);
 
             try
             {

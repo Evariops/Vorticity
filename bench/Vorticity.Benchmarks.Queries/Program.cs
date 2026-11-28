@@ -100,6 +100,12 @@ Dictionary<string, (string Help, Func<Task<int>> Run)> micros = new Dictionary<s
             args.Contains("--sealed"))),
     ["facets"] = ("the worst case of many facets, spans with a dozen repeating columns and a route under them (FacetsBench.cs)", () =>
         FacetsBench.Run((int)Option(args, "--hours", 12), Option(args, "--rate", 20), (int)Option(args, "--latency", 30), rounds, (int)Option(args, "--budget", 100))),
+    ["host"] = ("the library inside a host answering for a while, its pinned heap under the host's own pinned blocks and collections: run by bench/host.sh under each collector (HostScenario.cs)", () =>
+        HostScenario.RunAsync(
+            Text(args, "--store") ?? BenchStores.Of("memory-host"), (int)Option(args, "--datasets", 4), (int)Option(args, "--objects", 6),
+            (int)Option(args, "--object-rows", 100_000), (int)Option(args, "--minutes", 6), (int)Option(args, "--period", 5),
+            args.Contains("--no-pages") ? 0 : (int)Option(args, "--clients", 3),
+            (int)Option(args, "--latency", 5), (int)Option(args, "--garbage", 64), (int)Option(args, "--sample", 30))),
     ["maintainer"] = ("the memory of a maintainer, by sort: sealed datasets appended every flush and compacted in turn (MemoryScenarios.cs)", () =>
         MemoryScenarios.MaintainerAsync(
             Text(args, "--store") ?? BenchStores.Of("memory-maintainer"), (int)Option(args, "--datasets", 7), (int)Option(args, "--minutes", 20),

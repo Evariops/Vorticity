@@ -140,6 +140,38 @@ public sealed class ResidueTests
         Assert.True(moved.Count == 0, "Residues moved; a count only goes down, lowered here as the code goes:\n" + string.Join('\n', moved));
     }
 
+    /// <summary>
+    /// The library pins memory in two places only: a slab, which fills a region of the collector's pinned heap, and a block
+    /// past the pool's classes, as long as its region. Any other pinned array, a key, a tree, a dictionary's bytes, a copy, lay
+    /// beside the slabs in the pinned heap, which is never compacted, and kept their regions alive once they were gone: a host
+    /// kept 2.9 GB of such holes, counted against its limit (2026-11-24). What needs an address that does not move rents a
+    /// block of the pool.
+    /// </summary>
+    [Fact]
+    public void OnlyTheSlabsAndTheOutsizedBlocksPinMemory()
+    {
+        string root = RepositoryRoot();
+        Regex pinned = new Regex(@"GC\.Allocate(?:Uninitialized)?Array<[^>]+>\([^;]*(?:pinned:\s*true|,\s*true\))", RegexOptions.CultureInvariant);
+        string[] allowed = ["src/Vorticity/Buffers/Slabs.cs", "src/Vorticity/Buffers/BlockOwner.cs"];
+        List<string> found = [];
+        foreach (string file in Directory.EnumerateFiles(Path.Combine(root, "src"), "*.cs", SearchOption.AllDirectories))
+        {
+            string relative = Path.GetRelativePath(root, file).Replace('\\', '/');
+            if (relative.Contains("/obj/", StringComparison.Ordinal) || relative.Contains("/bin/", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            int lines = System.IO.File.ReadLines(file).Count(line => pinned.IsMatch(line));
+            if (lines > 0 && (!allowed.Contains(relative) || lines > 1))
+            {
+                found.Add($"{relative}: {lines} pinned allocation(s)");
+            }
+        }
+
+        Assert.True(found.Count == 0, "Memory pinned outside the slabs; rent a block of the pool (MemoryAccount.Rent) instead:\n" + string.Join('\n', found));
+    }
+
     /// <summary>The lines of the file <paramref name="where"/>, or of the files of the directory, that match <paramref name="pattern"/>.</summary>
     private static int Count(string root, string where, Regex pattern)
     {

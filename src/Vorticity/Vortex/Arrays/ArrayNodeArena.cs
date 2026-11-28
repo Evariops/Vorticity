@@ -393,12 +393,16 @@ internal sealed class ArrayNodeArena
     }
 
     /// <summary>
-    /// The FlatBuffer copy lives on the pinned object heap. Two reasons, both structural:
-    /// FlatBufferTable.GetStructVector reinterprets a struct vector in place and tests the address
-    /// of its elements, so the copy's base must really be 8-aligned; and a pinned array cannot be
-    /// moved out from under a span a node view is still holding.
+    /// The FlatBuffer copy, an array the collector may move. Every read of it goes through a span, which the collector
+    /// follows as it moves the array; and a byte array's data lie 16 bytes past an object aligned to 8, where it moves it,
+    /// so the address test of FlatBufferTable.GetStructVector finds the same alignment before and after a move.
     /// </summary>
-    private static byte[] AllocateTree(int capacity) => GC.AllocateArray<byte>(capacity, pinned: true);
+    /// <remarks>
+    /// The copy was pinned, a few hundred bytes for each blob a scan context keeps, up to 256 of them a context: small
+    /// pinned arrays of long life spread over the pinned heap, which kept its regions alive after the large blocks beside
+    /// them were gone, a hole no collection closes (2026-11-24).
+    /// </remarks>
+    private static byte[] AllocateTree(int capacity) => GC.AllocateUninitializedArray<byte>(capacity);
 
     internal void AddGlobalBuffer(VortexBuffer buffer)
     {

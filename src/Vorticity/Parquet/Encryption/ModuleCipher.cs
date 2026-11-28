@@ -60,7 +60,7 @@ internal sealed class ModuleCipher : IDisposable
 
     private readonly AesGcm _gcm;
 
-    // Pinned and wiped at the end: CTR's cipher is made from it the first time a page needs it.
+    // A secret, wiped at the end: CTR's cipher is made from it the first time a page needs it.
     private readonly Sealing.SecretBytes _key;
     private Aes? _aes;
     private byte[]? _counters;
@@ -202,19 +202,10 @@ internal sealed class ModuleCipher : IDisposable
 
     private static Aes Create(Sealing.SecretBytes key)
     {
-        // The setter takes an array, which it copies: this one is pinned and wiped once given.
-        byte[] copy = GC.AllocateArray<byte>(key.Length, pinned: true);
-        try
-        {
-            key.Span.CopyTo(copy);
-            Aes aes = Aes.Create();
-            aes.Key = copy;
-            return aes;
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(copy);
-        }
+        // Given from the secret's memory, which the cipher copies: no array of the key, pinned or not, is made for it.
+        Aes aes = Aes.Create();
+        aes.SetKey(key.Span);
+        return aes;
     }
 
     public void Dispose()

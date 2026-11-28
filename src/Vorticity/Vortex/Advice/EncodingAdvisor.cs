@@ -551,36 +551,30 @@ internal static class EncodingAdvisor
     /// </summary>
     private readonly struct AlignedBytes
     {
-        private readonly byte[] _array;
-        private readonly int _start;
+        private readonly ReadOnlyMemory<byte> _memory;
 
-        private AlignedBytes(byte[] array, int start, int length)
+        private AlignedBytes(ReadOnlyMemory<byte> memory)
         {
-            _array = array;
-            _start = start;
-            Length = length;
+            _memory = memory;
         }
 
-        internal int Length { get; }
+        internal int Length => _memory.Length;
 
-        internal ReadOnlyMemory<byte> Memory => _array.AsMemory(_start, Length);
+        internal ReadOnlyMemory<byte> Memory => _memory;
 
         /// <summary>What <paramref name="stream"/> holds, copied to an aligned place.</summary>
-        internal static unsafe AlignedBytes Of(MemoryStream stream)
+        /// <remarks>
+        /// A block of the pool lies on a 64-byte boundary and never moves, so the boundary found now is the boundary on every
+        /// later read. Its memory, and a file opened over it, keep the block for as long as they are read; the collector gives
+        /// it back to its slab once nothing does.
+        /// </remarks>
+        internal static AlignedBytes Of(MemoryStream stream)
         {
             int length = (int)stream.Length;
-            const int alignment = VortexLimits.MaxAlignment;
-
-            // Pinned, so that the boundary found now is still the boundary on every later read.
-            byte[] array = GC.AllocateUninitializedArray<byte>(length + alignment - 1, pinned: true);
-            int start;
-            fixed (byte* at = array)
-            {
-                start = (int)((alignment - ((nuint)at & (alignment - 1))) & (alignment - 1));
-            }
-
-            stream.GetBuffer().AsSpan(0, length).CopyTo(array.AsSpan(start, length));
-            return new AlignedBytes(array, start, length);
+            System.Buffers.IMemoryOwner<byte> owner = new Buffers.AccountMemoryPool(Buffers.MemoryAccount.Caller).Rent(Math.Max(length, 1));
+            Memory<byte> memory = owner.Memory[..length];
+            stream.GetBuffer().AsSpan(0, length).CopyTo(memory.Span);
+            return new AlignedBytes(memory);
         }
     }
 

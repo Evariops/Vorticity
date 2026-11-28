@@ -23,7 +23,7 @@ namespace Vorticity.Parquet.Encryption;
 internal sealed class PageDecryption : IDisposable
 {
     private readonly ModuleCipher _cipher;
-    private readonly byte[] _key;
+    private readonly Sealing.SecretBytes _key;
     private readonly byte[] _fileAad;
     private readonly byte[] _aad;
     private readonly bool _ctr;
@@ -39,17 +39,17 @@ internal sealed class PageDecryption : IDisposable
     private int _ordinal;
     private int _next;
 
-    internal PageDecryption(byte[] key, FileDecryptor file)
+    internal PageDecryption(Sealing.SecretBytes key, FileDecryptor file)
     {
         _key = key;
-        _cipher = new ModuleCipher(key);
+        _cipher = new ModuleCipher(key.Span);
         _fileAad = file.FileAad;
         _aad = new byte[file.FileAad.Length + ModuleAad.SuffixBytes];
         _ctr = file.Crypto.Ctr;
     }
 
-    /// <summary>Whether this decrypts under <paramref name="key"/>.</summary>
-    internal bool Under(ReadOnlySpan<byte> key) => key.SequenceEqual(_key);
+    /// <summary>Whether this decrypts under <paramref name="key"/>, the file's key of a column, which the file holds once.</summary>
+    internal bool Under(Sealing.SecretBytes key) => ReferenceEquals(key, _key) || key.Span.SequenceEqual(_key.Span);
 
     /// <summary>The bytes a body's module adds to its page's.</summary>
     internal int BodyOverhead => _ctr ? ModuleCipher.CtrOverhead : ModuleCipher.GcmOverhead;

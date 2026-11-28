@@ -709,7 +709,7 @@ internal static class BacklogBench
             if (timeline is not null)
             {
                 _timeline = timeline;
-                _rows.Add("ms\tround\tresident_MiB\tblocks_MiB\tpool_kept_MiB\tslabs_MiB\tslabs_free_MiB\theap_beside_MiB\treserved_MiB\theld_MiB\trest_MiB\trest_live_MiB\trest_uncertain_MiB\trest_reclaimable_MiB\trest_pending_MiB\trest_container_MiB\tmeasured_MiB\tmeasured_low_MiB\tmeasured_at_collection_MiB");
+                _rows.Add("ms\tround\tresident_MiB\tblocks_MiB\tpool_kept_MiB\tslabs_MiB\tslabs_free_MiB\theap_beside_MiB\treserved_MiB\theld_MiB\trest_MiB\trest_live_MiB\trest_uncertain_MiB\trest_reclaimable_MiB\trest_pinned_free_MiB\trest_pending_MiB\trest_container_MiB\tmeasured_MiB\tmeasured_low_MiB\tmeasured_at_collection_MiB");
                 _fine = new Timer(_ => Line(), null, 0, 10);
             }
         }
@@ -720,10 +720,10 @@ internal static class BacklogBench
         /// <summary>One row of the timeline, added under the rows' lock: two callbacks of a late timer may overlap.</summary>
         private void Line()
         {
-            (long live, long uncertain, long reclaimable, long pending, long container, long measured, long measuredLow, long measuredAtCollection) = QueryMemoryBudget.Process.RestParts;
+            (long live, long uncertain, long reclaimable, long pinnedFree, long pending, long container, long measured, long measuredLow, long measuredAtCollection) = QueryMemoryBudget.Process.RestParts;
             string row = string.Create(
                 CultureInfo.InvariantCulture,
-                $"{_since.ElapsedMilliseconds}\t{Round}\t{Mib(MemoryPeaks.Read().Working)}\t{Mib(BlockOwner.LiveBytes)}\t{Mib(MemoryAccount.Pool.ParkedBytes)}\t{Mib(Slabs.HeldBytes)}\t{Mib(Slabs.FreeBytes)}\t{Mib(GC.GetTotalMemory(false) - Pinned())}\t{Mib(QueryMemoryBudget.Process.ReservedBytes)}\t{Mib(HeldMemory.TotalBytes())}\t{Mib(QueryMemoryBudget.Process.RestBytes)}\t{Mib(live)}\t{Mib(uncertain)}\t{Mib(reclaimable)}\t{Mib(pending)}\t{Mib(container)}\t{Mib(measured)}\t{Mib(measuredLow)}\t{Mib(measuredAtCollection)}");
+                $"{_since.ElapsedMilliseconds}\t{Round}\t{Mib(MemoryPeaks.Read().Working)}\t{Mib(BlockOwner.LiveBytes)}\t{Mib(MemoryAccount.Pool.ParkedBytes)}\t{Mib(Slabs.HeldBytes)}\t{Mib(Slabs.FreeBytes)}\t{Mib(GC.GetTotalMemory(false) - Pinned())}\t{Mib(QueryMemoryBudget.Process.ReservedBytes)}\t{Mib(HeldMemory.TotalBytes())}\t{Mib(QueryMemoryBudget.Process.RestBytes)}\t{Mib(live)}\t{Mib(uncertain)}\t{Mib(reclaimable)}\t{Mib(pinnedFree)}\t{Mib(pending)}\t{Mib(container)}\t{Mib(measured)}\t{Mib(measuredLow)}\t{Mib(measuredAtCollection)}");
             lock (_rows)
             {
                 _rows.Add(row);
@@ -745,7 +745,7 @@ internal static class BacklogBench
 
         internal string Peaks() => string.Create(
             CultureInfo.InvariantCulture,
-            $"peaks: resident {Mib(Interlocked.Read(ref _resident))} MiB, blocks {Mib(Interlocked.Read(ref _blocks))}, of which the pool keeps {Mib(Interlocked.Read(ref _parked))} and past 16 MiB are rented {Mib(_large?.Peak ?? 0)}, slabs {Mib(Interlocked.Read(ref _slabs))} of which free {Mib(Interlocked.Read(ref _free))}, heap beside the blocks and slabs {Mib(Interlocked.Read(ref _beside))}, resident past the committed heap {Mib(Interlocked.Read(ref _native))}, resident nothing counts grown in a second {Mib(Interlocked.Read(ref _growth))}");
+            $"peaks: resident {Mib(Interlocked.Read(ref _resident))} MiB, blocks {Mib(Interlocked.Read(ref _blocks))}, of which the pool keeps {Mib(Interlocked.Read(ref _parked))} and past the pool's classes are rented {Mib(_large?.Peak ?? 0)}, slabs {Mib(Interlocked.Read(ref _slabs))} of which free {Mib(Interlocked.Read(ref _free))}, heap beside the blocks and slabs {Mib(Interlocked.Read(ref _beside))}, resident past the committed heap {Mib(Interlocked.Read(ref _native))}, resident nothing counts grown in a second {Mib(Interlocked.Read(ref _growth))}");
 
         /// <summary>The pinned bytes of the blocks: the slabs whole, and the blocks of an array of their own.</summary>
         private static long Pinned() => Slabs.HeldBytes + BlockOwner.LiveBytes - Slabs.PieceBytes;
@@ -780,7 +780,7 @@ internal static class BacklogBench
         }
 
         /// <summary>
-        /// The bytes of the blocks past the slabs' largest piece rented and not given back, each a pinned array of its own,
+        /// The bytes of the blocks past the slabs' largest piece, the pool's classes, rented and not given back, each a pinned array of its own,
         /// and their peak since the last reset: what decides whether they go into slabs too.
         /// </summary>
         private sealed class LargeBlocks : BlockPool.IBlockWatch

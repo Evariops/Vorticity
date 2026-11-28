@@ -686,9 +686,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
     {
         int pad = (int)(frameStart & (VortexLimits.MaxAlignment - 1));
         int plainBytes = checked((int)(frameEnd - frameStart));
-        return plainBytes + pad <= SegmentReadOptions.DefaultMaxPooledBytes
-            ? account.Rent(plainBytes + pad, VortexLimits.MaxAlignment)
-            : BlockOwner.Allocate(plainBytes + pad, VortexLimits.MaxAlignment);
+        return account.Rent(plainBytes + pad, VortexLimits.MaxAlignment);
     }
 
     /// <summary>
@@ -1173,9 +1171,7 @@ internal sealed class SealedSegmentReader : ISegmentReader
                 }
 
                 // A sparse run would pin its whole block for a few segments: each is copied out.
-                BlockOwner owner = spec.Length <= _options.MaxPooledBytes
-                    ? requests.Account.Rent((int)spec.Length, VortexLimits.MaxAlignment)
-                    : BlockOwner.Allocate((int)spec.Length, VortexLimits.MaxAlignment);
+                BlockOwner owner = requests.Account.Rent((int)spec.Length, VortexLimits.MaxAlignment);
                 try
                 {
                     segment.CopyTo(owner.WritableSpan);

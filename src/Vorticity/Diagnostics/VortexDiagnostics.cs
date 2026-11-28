@@ -113,6 +113,22 @@ internal static class VortexTelemetry
     private static readonly ObservableGauge<long> MemoryRest = Meter.CreateObservableGauge(
         "vortex.memory.rest", static () => QueryMemoryBudget.Process.RestBytes, "By", "The rest of the process, as the library measures it.");
 
+    private static readonly ObservableGauge<long> MemoryRestParts = Meter.CreateObservableGauge(
+        "vortex.memory.rest.part", static () => RestParts(), "By",
+        "The parts of the rest, by part: live, uncertain, reclaimable, pinned_free (the free space between the pinned heap's arrays, which no collection gives back), pending, container.");
+
+    private static readonly ObservableGauge<long> MemoryPinned = Meter.CreateObservableGauge(
+        "vortex.memory.pinned", static () => MemoryReport.PinnedNow(), "By", "The pinned memory the library holds: its slabs and its blocks past the pool's classes.");
+
+    private static readonly ObservableCounter<long> SlabsMade = Meter.CreateObservableCounter(
+        "vortex.memory.slabs_made", static () => Buffers.Slabs.Slab.Made, "{slab}", "Slabs the library took from the collector since the process started.");
+
+    private static readonly ObservableCounter<long> CollectionsAsked = Meter.CreateObservableCounter(
+        "vortex.memory.collections_asked", static () => QueryMemoryBudget.CollectionsAsked, "{collection}", "Full collections the library asked for to give its work room.");
+
+    private static readonly ObservableCounter<long> Refusals = Meter.CreateObservableCounter(
+        "vortex.memory.refusals", static () => QueryMemoryBudget.Refusals, "{reservation}", "Reservations refused to the work: a query failed, or a job's step gave way.");
+
     private static readonly ObservableGauge<int> DatasetHandles = Meter.CreateObservableGauge(
         "vortex.dataset.handles", static () => Buffers.HeldMemory.ByHolder().GetValueOrDefault("datasets").Holders, "{handle}", "The dataset handles open.");
 
@@ -125,8 +141,18 @@ internal static class VortexTelemetry
         }
     }
 
+    /// <summary>The parts of the rest, a measurement tagged by its part.</summary>
+    private static IEnumerable<Measurement<long>> RestParts()
+    {
+        foreach ((string part, long bytes) in MemoryReport.RestParts())
+        {
+            yield return new Measurement<long>(bytes, new KeyValuePair<string, object?>("part", part));
+        }
+    }
+
     /// <summary>Makes the memory gauges, which a static field initializer would leave to the first counter's use.</summary>
-    internal static void EnsureMemoryGauges() => _ = (MemoryLimit, MemoryCeiling, MemoryReserved, MemoryRented, MemoryRetained, MemoryRest, DatasetHandles);
+    internal static void EnsureMemoryGauges() =>
+        _ = (MemoryLimit, MemoryCeiling, MemoryReserved, MemoryRented, MemoryRetained, MemoryRest, MemoryRestParts, MemoryPinned, SlabsMade, CollectionsAsked, Refusals, DatasetHandles);
 
     /// <summary>Starts the activity of one scan, or returns null when nothing listens.</summary>
     /// <remarks>

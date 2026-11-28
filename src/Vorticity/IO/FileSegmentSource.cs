@@ -139,7 +139,7 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
 
         // A single segment starts at the buffer base, so no rounding is needed: a 64-aligned base
         // satisfies every legal exponent outright. A segment read alone is a file's metadata: memory it keeps.
-        BlockOwner owner = CoalescedReads.RentBlock(length, _options, MemoryAccount.Kept);
+        BlockOwner owner = CoalescedReads.RentBlock(length, MemoryAccount.Kept);
         try
         {
             await ReadExactAsync(owner, length, offset, cancellationToken).ConfigureAwait(false);
@@ -202,7 +202,7 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
                 cancellationToken.ThrowIfCancellationRequested();
 
                 CoalescedRun run = scratch.Runs[r];
-                BlockOwner block = CoalescedReads.RentBlock(run.Length, _options, requests.Account);
+                BlockOwner block = CoalescedReads.RentBlock(run.Length, requests.Account);
 
                 try
                 {
@@ -250,7 +250,7 @@ public sealed class FileSegmentSource : ISegmentSource, ISegmentReader
             return new EmptySegmentOwner();
         }
 
-        BlockOwner owner = CoalescedReads.RentBlock(actual, _options, MemoryAccount.Kept);
+        BlockOwner owner = CoalescedReads.RentBlock(actual, MemoryAccount.Kept);
         try
         {
             await ReadExactAsync(owner, actual, offset, cancellationToken).ConfigureAwait(false);

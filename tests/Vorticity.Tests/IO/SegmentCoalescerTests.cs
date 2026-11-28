@@ -326,11 +326,8 @@ public sealed class SegmentCoalescerTests
             () => new SegmentReadOptions { CoalesceGapBytes = -1 });
         Assert.Throws<ArgumentOutOfRangeException>(
             () => new SegmentReadOptions { MaxCoalescedReadBytes = 63 });
-        Assert.Throws<ArgumentOutOfRangeException>(
-            () => new SegmentReadOptions { MaxPooledBytes = -1 });
 
         Assert.Equal(1 << 20, SegmentReadOptions.Default.CoalesceGapBytes);
         Assert.Equal(16 << 20, SegmentReadOptions.Default.MaxCoalescedReadBytes);
-        Assert.Equal(32 << 20, SegmentReadOptions.Default.MaxPooledBytes);
     }
 }

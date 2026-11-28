@@ -534,7 +534,8 @@ public sealed partial class VortexFile : IAsyncDisposable
 
     private static SegmentOwner Concatenate(SegmentOwner prefix, SegmentOwner suffix, int alignment)
     {
-        BlockOwner combined = BlockOwner.Allocate(prefix.Length + suffix.Length, alignment);
+        // The file's own memory, as the tail it read: a block of the pool, kept for as long as the file is open.
+        BlockOwner combined = MemoryAccount.Kept.Rent(prefix.Length + suffix.Length, alignment);
         try
         {
             Span<byte> destination = combined.WritableSpan;

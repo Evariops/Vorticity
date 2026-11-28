@@ -39,11 +39,7 @@ Every exception the library throws on purpose derives from `VortexException`:
 | `VortexSchemaException` | a record, a builder, a column request or a literal does not fit the schema | yours, and the message says what to change |
 | `VortexMemoryException` | a query needs more memory than its `QueryMemoryBudget` grants and nothing it holds can spill, or more scratch than its `ScratchBudget` or the disk allows | the workload's: raise the budget, lower the degree, or narrow the query |
 
-A `VortexMemoryException` names the operator, its groups and the bytes it asked for, and the query
-has already given back everything it held, scratch files included ([threads.md](threads.md)
-covers the budgets). A writer whose policy requires an index that could not be built throws a plain
-`VortexException` naming the index and the reason, before the file is completed
-([indexes.md](indexes.md)).
+A `VortexMemoryException` names the operator, its groups and the bytes it asked for, and the rest of the process by part: what lives, what grew since the last full collection, what the collector keeps committed and free, the free space between the arrays of the pinned heap, which no collection gives back, and what was let go and not yet collected. The query has already given back everything it held, scratch files included ([threads.md](threads.md) covers the budgets). A group by, a distinct or a streaming group by whose budget has no room for its first lane, holding nothing yet, waits for the room the work under its budget gives back instead of failing, and fails only when the room can never come: a lane past the budget's ceiling, or nothing under the budget holding what would make it. A writer whose policy requires an index that could not be built throws a plain `VortexException` naming the index and the reason, before the file is completed ([indexes.md](indexes.md)).
 
 Everything else is plain .NET. An argument out of range is an `ArgumentException`, misuse is an
 `InvalidOperationException` and a missing file is a `FileNotFoundException`.
